@@ -3,9 +3,14 @@
 <link rel="canonical" href="{{ item.link }}">
 {% endblock %}
 {% block content %}
-<article class="item" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}">
+<article class="item" data-pagefind-body data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}">
   <header class="itemhead">
-    <h1><a href="{{ item.link }}" rel="noopener noreferrer">{{ item.title }}</a></h1>
+    <h1 data-pagefind-meta="title, date:{{ item.date }}" data-pagefind-sort="date:{{ item.date }}"><a href="{{ item.link }}" rel="noopener noreferrer">{{ item.title }}</a></h1>
+    <span class="sr-only" data-pagefind-meta="domain" data-pagefind-filter="source">{{ item.domain }}</span>
+    <span class="sr-only" data-pagefind-meta="original">{{ item.link }}</span>
+    <span class="sr-only" data-pagefind-meta="source_slug">{{ item.source }}</span>
+    {% if item.category %}<span class="sr-only" data-pagefind-filter="category">{{ item.category }}</span>{% endif %}
+    {% for label in item.labels %}<span class="sr-only" data-pagefind-filter="tag">{{ label }}</span>{% endfor %}
     <div class="meta">
       {% if item.domain %}<a href="{{ ('sources/' ~ item.source ~ '/') | url_for }}">{{ item.domain }}</a>{% endif %}
       {% if item.published %}<span>· published <time datetime="{{ item.published }}">{{ item.published | date('%Y-%m-%d %H:%M') }}</time></span>{% endif %}

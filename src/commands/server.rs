@@ -1,5 +1,4 @@
-//! `aggr serve`: build, then serve the output directory over plain HTTP/1.1 on localhost.
-//! Just enough of a server to click through the site; nothing here is meant to face the internet.
+//! The private live-reload HTTP server used by `aggr dev`; not intended for production traffic.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -11,42 +10,35 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::{Duration, sleep};
 
 use super::{Project, build};
-use crate::cli::ServeArgs;
+use crate::cli::DevArgs;
 
-pub async fn run(project: &Project, args: &ServeArgs) -> Result<()> {
-    if !args.no_build {
-        build::run(project, &args.build)?;
-    }
+pub async fn run_with_reload(project: &Project, args: &DevArgs) -> Result<()> {
     let root = build::out_dir(project, &args.build);
-    if !root.is_dir() {
-        anyhow::bail!(
-            "{} does not exist; run without --no-build first",
-            root.display()
-        );
-    }
     let base = crate::site::base_path(build::base_url(project, &args.build)?.as_deref());
-    let listener = TcpListener::bind(("127.0.0.1", args.port))
+    let (reload, _) = broadcast::channel(16);
+    let _watcher = watch(project, args, root.clone(), reload.clone())?;
+    host(&root, &base, args.port, reload).await
+}
+
+async fn host(root: &Path, base: &str, port: u16, reload: broadcast::Sender<()>) -> Result<()> {
+    let root = root.to_path_buf();
+    let base = base.to_string();
+    let listener = TcpListener::bind(("127.0.0.1", port))
         .await
-        .with_context(|| format!("binding 127.0.0.1:{}", args.port))?;
+        .with_context(|| format!("binding 127.0.0.1:{port}"))?;
     println!(
-        "serving {} at http://127.0.0.1:{}{base} (watching for changes; ctrl-c to stop)",
+        "serving {} at http://127.0.0.1:{}{base} (live reload; ctrl-c to stop)",
         root.display(),
         listener.local_addr()?.port()
     );
-    let (reload, _) = broadcast::channel(16);
-    let _watcher = if args.no_build {
-        None
-    } else {
-        Some(watch(project, args, root.clone(), reload.clone())?)
-    };
     loop {
         let (stream, _) = listener.accept().await?;
         let root = root.clone();
         let base = base.clone();
         let reload = reload.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle(stream, &root, &base, reload).await {
-                log::debug!("serve: {err:#}");
+            if let Err(err) = handle(stream, &root, &base, &reload).await {
+                log::debug!("dev server: {err:#}");
             }
         });
     }
@@ -54,7 +46,7 @@ pub async fn run(project: &Project, args: &ServeArgs) -> Result<()> {
 
 fn watch(
     project: &Project,
-    args: &ServeArgs,
+    args: &DevArgs,
     out: PathBuf,
     reload: broadcast::Sender<()>,
 ) -> Result<notify::RecommendedWatcher> {
@@ -62,7 +54,22 @@ fn watch(
     let mut watcher = notify::recommended_watcher(move |event| {
         let _ = events.send(event);
     })?;
-    watcher.watch(&project.root, RecursiveMode::Recursive)?;
+    let mut roots = vec![project.root.clone()];
+    roots.extend(crate::site::theme_layers(&project.config, &project.root)?.dirs);
+    roots.sort();
+    roots.dedup();
+    let mut watched_roots: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        if !watched_roots.iter().any(|parent| root.starts_with(parent)) {
+            watched_roots.push(root);
+        }
+    }
+    for root in &watched_roots {
+        watcher
+            .watch(root, RecursiveMode::Recursive)
+            .with_context(|| format!("watching {}", root.display()))?;
+        log::info!("watching {}", root.display());
+    }
 
     let config_path = project.config_path.clone();
     let build_args = crate::cli::BuildArgs {
@@ -104,7 +111,7 @@ async fn handle(
     stream: TcpStream,
     root: &Path,
     base: &str,
-    reload: broadcast::Sender<()>,
+    reload: &broadcast::Sender<()>,
 ) -> Result<()> {
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();

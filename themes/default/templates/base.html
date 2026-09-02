@@ -4,25 +4,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<base id="aggr-base" href="{{ page.root }}">
 <title>{% block title %}{{ page.title }} · {{ site.title }}{% endblock %}</title>
 {% if site.description %}<meta name="description" content="{{ site.description }}">{% endif %}
 <meta name="theme-color" content="#8ea1ff">
 <script>try{document.documentElement.dataset.theme=localStorage.getItem('aggr:theme')||'auto'}catch(e){}</script>
 <link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
-<link rel="alternate" type="application/atom+xml" title="{{ site.title }}" href="{{ 'feed.xml' | url_for }}">
-<link rel="icon" type="image/png" sizes="192x192" href="{{ 'assets/icon-192.png' | url_for }}">
+{% set feed_path = page.path if page.kind in ['category', 'tag'] else '' %}
+<link rel="alternate" type="application/atom+xml" title="{{ page.title }}" href="{{ (feed_path ~ 'atom.xml') | url_for }}">
+<link rel="alternate" type="application/rss+xml" title="{{ page.title }}" href="{{ (feed_path ~ 'rss.xml') | url_for }}">
+<link rel="alternate" type="application/feed+json" title="{{ page.title }}" href="{{ (feed_path ~ 'feed.json') | url_for }}">
+<link rel="icon" type="image/png" sizes="32x32" href="{{ 'assets/favicon-32.png' | url_for }}">
 <link rel="apple-touch-icon" href="{{ 'assets/apple-touch-icon.png' | url_for }}">
 {% if site.pwa %}
 <link rel="manifest" href="{{ 'manifest.webmanifest' | url_for }}">
 {% endif %}
-<script>window.AGGR = {base: {{ site.base_path | json }}, kind: {{ page.kind | json }}, pwa: {{ site.pwa | json }}};</script>
+<script>window.AGGR = {base: {{ page.root | json }}, kind: {{ page.kind | json }}, pwa: {{ site.pwa | json }}};</script>
 {% block head %}{% endblock %}
 </head>
 <body data-kind="{{ page.kind }}">
 <div id="swup">
+<span id="aggr-page" data-root="{{ page.root }}" hidden></span>
 <header class="top">
   <nav class="nav">
-    <a class="brand" href="{{ '' | url_for }}">{{ site.title }}</a>
+    <a class="brand" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/logo.png' | url_for }}" alt="">{{ site.title }}</a>
     <a href="{{ '' | url_for }}"{% if page.kind == 'river' %} aria-current="page"{% endif %}>feed</a>
     <a href="{{ 'search/' | url_for }}"{% if page.kind == 'search' %} aria-current="page"{% endif %}>search</a>
     <a href="{{ 'categories/' | url_for }}"{% if page.kind in ['categories', 'category'] %} aria-current="page"{% endif %}>categories</a>

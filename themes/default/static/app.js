@@ -2,7 +2,7 @@
 (function () {
   "use strict";
   var script = document.querySelector("script[src$='assets/app.js']");
-  var BASE = (window.AGGR && window.AGGR.base) || (script && script.getAttribute("src").slice(0, -"assets/app.js".length)) || "/";
+  var BASE = (window.AGGR && window.AGGR.base) || (script && script.getAttribute("src").slice(0, -"assets/app.js".length)) || "./";
   var KIND = (window.AGGR && window.AGGR.kind) || document.body.getAttribute("data-kind") || "";
   var PWA = window.AGGR ? window.AGGR.pwa !== false : true;
 
@@ -11,7 +11,9 @@
   function el(tag, attrs, children) {
     var node = document.createElement(tag);
     Object.keys(attrs || {}).forEach(function (key) {
-      if (key === "text") node.textContent = attrs[key]; else node.setAttribute(key, attrs[key]);
+      if (key === "text") node.textContent = attrs[key];
+      else if (key === "html") node.innerHTML = attrs[key];
+      else node.setAttribute(key, attrs[key]);
     });
     (children || []).forEach(function (child) { if (child) node.appendChild(child); });
     return node;
@@ -79,45 +81,75 @@
     });
   }
 
-  function renderRow(entry, rank) {
-    var meta = [el("time", { datetime: entry.date, text: entry.date.slice(0, 10) }), document.createTextNode(" · "), el("a", { href: BASE + entry.url, text: "read" })];
-    (entry.discussions || []).forEach(function (discussion) {
-      meta.push(document.createTextNode(" · "));
-      meta.push(el("a", { href: discussion.url, rel: "noopener noreferrer", text: discussion.name }));
-    });
-    return el("li", { "class": "row", "data-url": BASE + entry.url, "data-link": entry.link }, [
+  function renderResult(entry, rank) {
+    var page = BASE + entry.url.replace(/^\/+/, "");
+    var original = entry.meta.original || page;
+    var date = entry.meta.date || "";
+    var meta = [date ? el("time", { datetime: date, text: date.slice(0, 10) }) : null, document.createTextNode(" · "), el("a", { href: page, text: "read" })];
+    return el("li", { "class": "row", "data-url": page, "data-link": original }, [
       el("span", { "class": "rank", text: rank + "." }),
       el("div", { "class": "cell" }, [
-        el("a", { "class": "title", href: entry.link, rel: "noopener noreferrer", text: entry.title }),
-        entry.domain ? el("a", { "class": "domain", href: BASE + "sources/" + entry.source + "/", text: "(" + entry.domain + ")" }) : null,
-        el("div", { "class": "meta" }, meta)
+        el("a", { "class": "title", href: original, rel: "noopener noreferrer", text: entry.meta.title }),
+        entry.meta.domain ? el("a", { "class": "domain", href: BASE + "sources/" + entry.meta.source_slug + "/", text: "(" + entry.meta.domain + ")" }) : null,
+        el("div", { "class": "search-excerpt", html: entry.excerpt }),
+        el("div", { "class": "meta" }, meta.filter(Boolean))
       ])
     ]);
   }
 
-  var index;
-  function normalize(value) { return (value || "").toLocaleLowerCase().normalize("NFKD"); }
-  function terms(query) { return normalize(query).split(/\s+/).filter(Boolean); }
+  var pagefind;
+  function loadPagefind() {
+    if (!pagefind) {
+      pagefind = import(new URL("pagefind/pagefind.js", document.baseURI).href).then(async function (api) {
+        await api.options({ baseUrl: new URL(".", document.baseURI).pathname });
+        await api.init();
+        return api;
+      });
+    }
+    return pagefind;
+  }
   function fillSearch() {
     var list = $("#list");
     var input = $("#q");
     if (!list || !input) return;
-    function render() {
-      var query = terms(input.value);
-      var rows = query.length ? index.filter(function (entry) {
-        return query.every(function (term) { return entry.search.indexOf(term) !== -1; });
-      }).slice(0, 500) : [];
+    var category = $("#category-filter");
+    var tag = $("#tag-filter");
+    var sort = $("#search-sort");
+    var generation = 0;
+    function show(rows) {
       list.textContent = "";
-      rows.forEach(function (entry, i) { list.appendChild(renderRow(entry, i + 1)); });
+      rows.forEach(function (entry, i) { list.appendChild(renderResult(entry, i + 1)); });
       $("#empty").hidden = rows.length > 0;
-      $("#count").textContent = rows.length ? rows.length + (rows.length === 500 ? "+" : "") : "";
+      $("#count").textContent = rows.length ? rows.length + (rows.length === 100 ? "+" : "") : "";
       relativeTimes(list);
     }
-    fetch(BASE + "search.json", { credentials: "same-origin" })
-      .then(function (response) { return response.json(); })
-      .then(function (entries) { index = entries; render(); })
-      .catch(function () { index = []; render(); });
+    async function render() {
+      var current = ++generation;
+      var query = input.value.trim();
+      var filters = {};
+      if (category.value) filters.category = category.value;
+      if (tag.value) filters.tag = tag.value;
+      if (!query && !Object.keys(filters).length) { show([]); return; }
+      var api = await loadPagefind();
+      var options = { filters: filters };
+      if (sort.value === "newest") options.sort = { date: "desc" };
+      var found = await api.search(query || null, options);
+      var rows = await Promise.all(found.results.slice(0, 100).map(function (result) { return result.data(); }));
+      if (current === generation) show(rows);
+    }
+    function addOptions(select, values) {
+      Object.keys(values || {}).sort().forEach(function (value) {
+        select.appendChild(el("option", { value: value, text: value + " (" + values[value] + ")" }));
+      });
+    }
+    loadPagefind().then(function (api) { return api.filters(); }).then(function (filters) {
+      addOptions(category, filters.category);
+      addOptions(tag, filters.tag);
+    });
     input.addEventListener("input", render);
+    category.addEventListener("change", render);
+    tag.addEventListener("change", render);
+    sort.addEventListener("change", render);
   }
 
   var selected = -1;
@@ -162,6 +194,11 @@
 
   var copy;
   function bootPage() {
+    var page = $("#aggr-page");
+    if (page) {
+      BASE = page.dataset.root;
+      $("#aggr-base").setAttribute("href", BASE);
+    }
     var picker = $("#theme-mode");
     if (picker) picker.addEventListener("change", function () { setTheme(picker.value); });
     copy = $("#copy-state");

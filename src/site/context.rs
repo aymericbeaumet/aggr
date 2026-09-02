@@ -48,6 +48,8 @@ pub struct PageCtx {
     pub title: String,
     /// Site path of this page, e.g. `sources/rust-blog/`.
     pub path: String,
+    /// Relative path from this page back to the output root (`../../`).
+    pub root: String,
     pub number: usize,
     pub total: usize,
     /// Rank of the first item on this page, 0-based.
@@ -77,7 +79,6 @@ pub struct ItemCtx {
     pub discussions: Vec<DiscussionLinkCtx>,
     pub summary: Option<String>,
     pub excerpt: String,
-    pub search_text: String,
     pub content: ContentKind,
     pub has_html: bool,
     pub extra: BTreeMap<String, serde_yaml_ng::Value>,
@@ -219,7 +220,6 @@ impl ItemCtx {
                 .collect(),
             summary: item.front.summary.clone(),
             excerpt,
-            search_text: item.body.clone(),
             content: item.front.content,
             has_html: item.front.html.is_some(),
             extra: item.front.extra.clone(),

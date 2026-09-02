@@ -7,11 +7,10 @@ var VERSION = {{ version | json }};
 var PRECACHE = "aggr-precache-" + VERSION;
 var RUNTIME = "aggr-runtime";
 var RUNTIME_MAX = 500;
-var BASE = {{ site.base_path | json }};
+var BASE = new URL("./", self.registration.scope).pathname;
 var OFFLINE = BASE + "offline.html";
-var SEARCH = BASE + "search.json";
 var NETWORK_TIMEOUT = 4000;
-var URLS = {{ precache | json }};
+var URLS = {{ precache | json }}.map(function (path) { return new URL(path, self.registration.scope).pathname; });
 
 // Fetch past the HTTP cache so a new build never precaches the previous build's pages. One
 // missing file must not fail the install, hence one request at a time per chunk with a catch.
@@ -61,7 +60,7 @@ function remember(request, response) {
   return response;
 }
 
-// Pages and the search index: the network when it answers quickly, the cache otherwise, and
+// Pages: the network when it answers quickly, the cache otherwise, and
 // the offline page for a navigation nobody has cached.
 function networkFirst(request) {
   return Promise.race([fetch(request), timeout(NETWORK_TIMEOUT)])
@@ -88,7 +87,7 @@ self.addEventListener("fetch", function (event) {
   if (request.method !== "GET") return;
   var url = new URL(request.url);
   if (url.origin !== self.location.origin || url.pathname.indexOf(BASE) !== 0) return;
-  if (request.mode === "navigate" || url.pathname === SEARCH) {
+  if (request.mode === "navigate") {
     event.respondWith(networkFirst(request));
   } else {
     event.respondWith(cacheFirst(request));

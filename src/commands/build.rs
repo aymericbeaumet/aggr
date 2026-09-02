@@ -8,6 +8,12 @@ use chrono::Utc;
 
 use super::Project;
 use crate::cli::BuildArgs;
+
+/// Public `aggr build`: rendered output always follows a completed sync.
+pub async fn sync_and_run(project: &Project, args: &BuildArgs) -> Result<()> {
+    super::sync::run(project, &crate::cli::FetchArgs::default()).await?;
+    run(project, args).map(|_| ())
+}
 use crate::site::{self, BuildInfo, Summary};
 use crate::store::Store;
 

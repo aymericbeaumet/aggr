@@ -80,7 +80,6 @@ pipeline (deploy `_site/` somewhere else, add steps), use the install action dir
 
 ```yaml
 - uses: aymericbeaumet/aggr@v1
-- run: aggr sync
 - run: aggr build --release --base-url https://reads.example.com/
 ```
 
@@ -98,15 +97,15 @@ Release archives for Linux, macOS and Windows (amd64, arm64) with `SHA256SUMS` a
 | Command | What it does |
 |---|---|
 | `aggr init [--github] [--defaults]` | Write a commented `aggr.toml` (every option with `--defaults`), plus the workflow with `--github`. |
-| `aggr sync [--source slug…] [--dry-run]` | Fetch every source, write new items into the data worktree, commit, push, update `refs/aggr/last-good`. What CI runs. |
+| `aggr sync [--source slug…] [--dry-run]` | Fetch every source, write new items into the data worktree, commit, push, update `refs/aggr/last-good`. `build` and `dev` invoke this first. |
 | `aggr fetch` | `sync` without the commit and push. |
-| `aggr build [--release] [--out dir] [--base-url url] [--data-ref ref]` | Render the site. Plain builds are served from `/`; `--release` builds for `[site] url` (or `--base-url`) and writes `CNAME` for custom domains. `--data-ref` renders any commit of the data branch. |
-| `aggr serve [--port 8080] [--release] [--no-build]` | Build, then serve the output directory locally. |
+| `aggr build [--release] [--out dir] [--base-url url] [--data-ref ref]` | Sync, then render the site. `--release` builds for `[site] url` (or `--base-url`) and writes `CNAME`; `--data-ref` renders any data commit after syncing. |
+| `aggr dev [--port 7319]` | Sync, build, serve, then rebuild and live-reload as config or theme files change. |
 | `aggr digest [--dry-run] [--force]` | Post today's digest issue when it is due. |
 | `aggr check` | Validate the configuration and probe every source. |
 | `aggr completions <shell>` | Shell completions. |
 
-Locally, `aggr sync && aggr serve` is the whole loop. The data branch lives in a worktree at
+Locally, `aggr dev` is the whole loop. The data branch lives in a worktree at
 `.aggr/data` and the site in `_site/`; both are added to `.git/info/exclude`, so `main` stays
 clean without touching your `.gitignore`.
 
@@ -173,9 +172,16 @@ Hacker News density, a periwinkle (`#8ea1ff`) palette, responsive layout, and li
 automatic color mode. The feed is paginated and sorted by the source's creation date, newest
 first. Every source, category and tag has a generated collection page under `/sources/`,
 `/categories/` and `/tags/`. An item has one category and any number of labels. Full-text search
-runs instantly in the browser over titles, article text, categories and labels in `search.json`;
-`feed.xml` re-syndicates the feed. Keyboard: `j`/`k` move, `o` opens the original, and `Enter`
+is precomputed at build time by [Pagefind](https://pagefind.app/) and runs instantly over titles,
+article text, categories and labels without downloading the whole archive;
+Atom (`atom.xml` and the compatibility `feed.xml`), RSS 2.0 (`rss.xml`) and JSON Feed 1.1
+(`feed.json`) re-syndicate the aggregate. Every category and tag page emits the same three
+formats from its own directory. Keyboard: `j`/`k` move, `o` opens the original, and `Enter`
 opens the item page.
+
+Immutable CSS, JavaScript and image assets carry content hashes. Every internal HTML link is
+relative to the generated page, so the same self-contained output can be mounted at `/`,
+`/a/b/c/`, or any other HTTP path without rebuilding.
 
 All browseable routes are rendered ahead of time. The vendored, MIT-licensed
 [Swup](https://swup.js.org/) navigation layer swaps those server-rendered pages, preserves browser
@@ -234,12 +240,12 @@ status.toml                                           failing sources, present o
 
 ```sh
 make check          # fmt-check, clippy -D warnings, tests (hermetic: no network)
-make run ARGS="serve"
+make run ARGS="dev"
 ```
 
-`aggr serve` builds once, watches the config, includes, templates and static files, and reloads
-open browsers after each successful rebuild. It listens on port 4000 by default; use `--port`
-to choose another. `--no-build` serves an existing output without watching.
+`aggr dev` syncs and builds once, watches the config, includes, templates and static files, and
+reloads open browsers after each successful rebuild. It listens on port 7319 by default; use
+`--port` to choose another. `aggr build` performs the same required sync but exits after rendering.
 
 Releases: bump `version` in `Cargo.toml` and `VERSION`, commit, tag `vX.Y.Z`, push the tag.
 

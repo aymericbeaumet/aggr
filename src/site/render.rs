@@ -2,6 +2,7 @@
 //! embedded default.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -83,10 +84,17 @@ impl Layers {
 pub struct Renderer {
     env: Environment<'static>,
     layers: Layers,
+    assets: BTreeMap<String, Asset>,
+}
+
+#[derive(Clone)]
+struct Asset {
+    source: String,
+    output: String,
 }
 
 impl Renderer {
-    pub fn new(layers: Layers, base_path: &str) -> Result<Self> {
+    pub fn new(layers: Layers, _base_path: &str) -> Result<Self> {
         let mut env = Environment::new();
         env.set_trim_blocks(true);
         env.set_lstrip_blocks(true);
@@ -100,10 +108,17 @@ impl Renderer {
                 .transpose()
         });
 
-        let prefix = base_path.to_string();
+        let assets = asset_map(&layers)?;
+        let filter_assets = assets.clone();
         // Paths are ours (slugified ASCII), so `/` must not come out as `&#x2f;`.
         env.add_filter("url_for", move |path: String| {
-            Value::from_safe_string(format!("{prefix}{}", path.trim_start_matches('/')))
+            let path = path.trim_start_matches('/');
+            let resolved = path
+                .strip_prefix("assets/")
+                .and_then(|name| filter_assets.get(name))
+                .map(|asset| format!("assets/{}", asset.output))
+                .unwrap_or_else(|| path.to_string());
+            Value::from_safe_string(resolved)
         });
         env.add_filter("domain", super::context::domain_of);
         env.add_filter("slug", |value: String| slug::slugify(value));
@@ -117,7 +132,11 @@ impl Renderer {
             Value::from_safe_string(json.replace('<', "\\u003c"))
         });
 
-        Ok(Self { env, layers })
+        Ok(Self {
+            env,
+            layers,
+            assets,
+        })
     }
 
     pub fn render<S: Serialize>(&self, template: &str, ctx: S) -> Result<String> {
@@ -132,24 +151,68 @@ impl Renderer {
 
     /// Copy every static file into `<out>/assets/`.
     pub fn write_static(&self, out: &Path) -> Result<Vec<String>> {
-        let names = self.layers.static_names()?;
-        for name in &names {
+        for asset in self.assets.values() {
             let Some(bytes) = self
                 .layers
-                .read("static", name)
+                .read("static", &asset.source)
                 .map_err(|err| anyhow::anyhow!("{err}"))?
             else {
-                bail!("static file {name} vanished during build");
+                bail!("static file {} vanished during build", asset.source);
             };
-            let dest = out.join("assets").join(name);
+            let dest = out.join("assets").join(&asset.output);
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("creating {}", parent.display()))?;
             }
             std::fs::write(&dest, bytes).with_context(|| format!("writing {}", dest.display()))?;
         }
-        Ok(names)
+        Ok(self
+            .assets
+            .values()
+            .map(|asset| asset.output.clone())
+            .collect())
     }
+}
+
+fn asset_map(layers: &Layers) -> Result<BTreeMap<String, Asset>> {
+    layers
+        .static_names()?
+        .into_iter()
+        .map(|name| {
+            let bytes = layers
+                .read("static", &name)
+                .map_err(|err| anyhow::anyhow!("{err}"))?
+                .with_context(|| format!("static file {name} vanished during build"))?;
+            let hash = crate::model::sha1_hex(&bytes);
+            let path = Path::new(&name);
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("asset");
+            let file = match path.extension().and_then(|extension| extension.to_str()) {
+                Some(extension) => format!("{stem}-{}.{}", &hash[..12], extension),
+                None => format!("{stem}-{}", &hash[..12]),
+            };
+            let hashed = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(|parent| parent.join(&file))
+                .unwrap_or_else(|| PathBuf::from(file))
+                .to_string_lossy()
+                .replace('\\', "/");
+            let exposed = name.strip_prefix("assets/").unwrap_or(&name).to_string();
+            Ok((
+                exposed,
+                Asset {
+                    source: name,
+                    output: hashed
+                        .strip_prefix("assets/")
+                        .unwrap_or(&hashed)
+                        .to_string(),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// minijinja's HTML escaper also rewrites `/` as `&#x2f;`, which turns every URL on the page
@@ -251,7 +314,7 @@ mod tests {
                  {{ '2026-09-02T10:00:00Z' | date }} {{ none | date }} {{ '2026-09-02T10:00:00Z' | date('%Y') }}",
             )
             .unwrap();
-        assert_eq!(out, "/repo/sources/ a.b 2026-09-02  2026");
+        assert_eq!(out, "sources/ a.b 2026-09-02  2026");
     }
 
     #[test]

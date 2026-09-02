@@ -11,8 +11,8 @@ Markdown file (plus its raw HTML) on an append-only git branch, and renders a st
 Typical loop:
 
     aggr init --github   # write aggr.toml and the GitHub workflow
-    aggr sync            # fetch, commit to the data branch, push
-    aggr build           # render the site into _site/
+    aggr build           # sync, then render the site into _site/
+    aggr dev             # sync + build + live-reloading server
 
 Everything the site shows comes from the data branch, so every item has a permanent URL on
 GitHub and a run that finds nothing new leaves no trace.";
@@ -40,10 +40,10 @@ pub enum Command {
     Fetch(FetchArgs),
     /// Fetch, commit to the data branch, and push. This is what CI runs.
     Sync(FetchArgs),
-    /// Render the static site from the data branch into the output directory.
+    /// Sync, then render the static site into the output directory.
     Build(BuildArgs),
-    /// Build, then serve the output directory locally.
-    Serve(ServeArgs),
+    /// Sync, build, then serve with fast rebuilds and live reload.
+    Dev(DevArgs),
     /// Post the daily digest issue on GitHub when one is due.
     Digest(DigestArgs),
     /// Validate the configuration and probe every source.
@@ -99,15 +99,14 @@ pub struct BuildArgs {
 }
 
 #[derive(Debug, Args, Default)]
-pub struct ServeArgs {
+pub struct DevArgs {
     #[command(flatten)]
     pub build: BuildArgs,
+    #[command(flatten)]
+    pub fetch: FetchArgs,
     /// Port to listen on.
-    #[arg(long, short, default_value_t = 4000)]
+    #[arg(long, short, default_value_t = 7319)]
     pub port: u16,
-    /// Serve without rebuilding first.
-    #[arg(long)]
-    pub no_build: bool,
 }
 
 #[derive(Debug, Args, Default)]
@@ -121,4 +120,20 @@ pub struct DigestArgs {
     /// Post even if today's digest exists or the scheduled time has not come.
     #[arg(long)]
     pub force: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_has_local_defaults() {
+        let dev = Cli::try_parse_from(["aggr", "dev", "--source", "rust", "--release"]).unwrap();
+        let Command::Dev(dev) = dev.command else {
+            panic!("expected dev");
+        };
+        assert_eq!(dev.port, 7319);
+        assert_eq!(dev.fetch.sources, ["rust"]);
+        assert!(dev.build.release);
+    }
 }

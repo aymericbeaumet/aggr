@@ -392,14 +392,14 @@ fn build_renders_the_site_and_release_needs_a_url() {
     let site = repo.clone.join("_site");
     let index = std::fs::read_to_string(site.join("index.html")).unwrap();
     assert!(
-        index.contains("href=\"/items/demo/2026/09/2026-09-01-hello-there/\""),
+        index.contains("href=\"items/demo/2026/09/2026-09-01-hello-there/\""),
         "{index}"
     );
     assert!(index.contains("Hello there"));
     assert!(index.contains(">aggr.toml</a>"));
     assert!(index.contains("built <time"));
     assert!(index.contains("id=\"swup\""));
-    assert!(index.contains("assets/swup.js"));
+    assert!(index.contains("assets/swup-"));
     assert!(!index.contains("config@"));
     assert!(!index.contains("data@"));
     assert!(!index.contains("starred"));
@@ -413,25 +413,31 @@ fn build_renders_the_site_and_release_needs_a_url() {
     let view = std::fs::read_to_string(item.join("html.html")).unwrap();
     assert!(view.contains("Content-Security-Policy"));
     assert!(!view.contains("onerror"), "{view}");
-    assert!(site.join("search.json").exists());
+    assert!(site.join("pagefind/pagefind.js").exists());
     assert!(site.join("feed.xml").exists());
+    assert!(site.join("atom.xml").exists());
+    assert!(site.join("rss.xml").exists());
+    assert!(site.join("feed.json").exists());
     assert!(site.join(".nojekyll").exists());
     assert!(site.join("sources/demo/index.html").exists());
     assert!(site.join("categories/demo/index.html").exists());
+    assert!(site.join("categories/demo/atom.xml").exists());
+    assert!(site.join("categories/demo/rss.xml").exists());
+    assert!(site.join("categories/demo/feed.json").exists());
     assert!(site.join("categories/index.html").exists());
     assert!(site.join("tags/index.html").exists());
     assert!(site.join("tags/example/index.html").exists());
-    let search = std::fs::read_to_string(site.join("search.json")).unwrap();
-    assert!(search.contains("Body one"), "{search}");
-    assert!(search.contains("example"), "{search}");
+    assert!(site.join("tags/example/atom.xml").exists());
+    assert!(site.join("tags/example/rss.xml").exists());
+    assert!(site.join("tags/example/feed.json").exists());
     assert!(!site.join("CNAME").exists());
     // Installable and readable offline: manifest, worker precaching the newest pages, fallback.
     assert!(index.contains("rel=\"manifest\""), "{index}");
     let sw = std::fs::read_to_string(site.join("sw.js")).unwrap();
-    assert!(sw.contains("\"/assets/style.css\""), "{sw}");
-    assert!(sw.contains("\"/assets/swup.js\""), "{sw}");
+    assert!(sw.contains("\"assets/style-"), "{sw}");
+    assert!(sw.contains("\"assets/swup-"), "{sw}");
     assert!(
-        sw.contains("\"/items/demo/2026/09/2026-09-01-hello-there/\""),
+        sw.contains("\"items/demo/2026/09/2026-09-01-hello-there/\""),
         "{sw}"
     );
     assert!(site.join("manifest.webmanifest").exists());
@@ -454,13 +460,13 @@ fn build_renders_the_site_and_release_needs_a_url() {
         .assert()
         .success();
     let index = std::fs::read_to_string(site.join("index.html")).unwrap();
-    assert!(index.contains("href=\"/r/items/demo/"), "{index}");
+    assert!(index.contains("href=\"items/demo/"), "{index}");
     assert!(
         !site.join("CNAME").exists(),
         "github.io hosts need no CNAME"
     );
     let manifest = std::fs::read_to_string(site.join("manifest.webmanifest")).unwrap();
-    assert!(manifest.contains("\"start_url\": \"/r/\""), "{manifest}");
+    assert!(manifest.contains("\"start_url\": \"./\""), "{manifest}");
 
     repo.write_config(
         &server.url("/feed.xml"),

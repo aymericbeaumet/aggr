@@ -68,11 +68,8 @@ jobs:
         with:
           enablement: true
 
-      # Fetch, commit to the data branch, push. No commit when nothing changed; a failing source
-      # is recorded on the branch and shown on the site, it does not fail the run.
-      - run: aggr sync
-
-      # The Pages URL wins over `[site] url`; without Pages the config must name the host.
+      # Build starts with a sync. The Pages URL wins over `[site] url`; without Pages the config
+      # must name the host.
       - run: aggr build --release --out "$GITHUB_WORKSPACE/_site"
         env:
           AGGR_BASE_URL: ${{ steps.pages.outputs.base_url }}

@@ -51,7 +51,7 @@ docs/git-model.md              the branch/ref contract; readme.md is user-facing
 ```sh
 make check                                   # fmt-check, clippy -D warnings, cargo test
 cargo test --test cli                        # end-to-end only
-make run ARGS="serve --port 3000"            # dogfood examples/aggr.toml
+make run ARGS="dev --port 3000"              # dogfood examples/aggr.toml
 cargo run -- sync --dry-run -vv              # fetch without writing, with debug logs
 ```
 

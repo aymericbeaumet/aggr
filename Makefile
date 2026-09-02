@@ -33,7 +33,7 @@ clean:
 install:
 	cargo install --path . --locked
 
-# Render and serve the demo config: make run ARGS="serve --port 3000"
+# Sync, render and live-reload the demo config: make run ARGS="dev --port 3000"
 run:
 	cargo run -- --config examples/aggr.toml $(ARGS)
 

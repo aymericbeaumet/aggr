@@ -1,57 +1,8 @@
-//! Non-template outputs: the search index, the Atom re-syndication feed, redirect stubs.
+//! Non-template outputs: syndicated feeds and redirect stubs.
 
 use anyhow::Result;
-use serde::Serialize;
 
 use super::context::{BuildCtx, ItemCtx, SiteCtx};
-
-#[derive(Serialize)]
-struct SearchEntry<'a> {
-    path: &'a str,
-    url: &'a str,
-    title: &'a str,
-    source: &'a str,
-    source_name: &'a str,
-    category: Option<&'a str>,
-    date: &'a chrono::DateTime<chrono::Utc>,
-    link: &'a str,
-    domain: &'a str,
-    excerpt: &'a str,
-    labels: &'a [String],
-    discussions: &'a [super::context::DiscussionLinkCtx],
-    search: String,
-}
-
-pub fn search_json(items: &[ItemCtx]) -> Result<String> {
-    let entries: Vec<SearchEntry<'_>> = items
-        .iter()
-        .map(|item| SearchEntry {
-            path: &item.path,
-            url: &item.url,
-            title: &item.title,
-            source: &item.source,
-            source_name: &item.source_name,
-            category: item.category.as_deref(),
-            date: &item.date,
-            link: &item.link,
-            domain: &item.domain,
-            excerpt: &item.excerpt,
-            labels: &item.labels,
-            discussions: &item.discussions,
-            search: format!(
-                "{} {} {} {} {} {}",
-                item.title,
-                item.domain,
-                item.category.as_deref().unwrap_or_default(),
-                item.labels.join(" "),
-                item.excerpt,
-                item.search_text
-            )
-            .to_lowercase(),
-        })
-        .collect();
-    Ok(serde_json::to_string(&entries)?)
-}
 
 /// A ~200 byte page that sends old URLs to the item's GitHub permalink.
 pub fn redirect_stub(target: &str) -> String {
@@ -64,28 +15,39 @@ pub fn redirect_stub(target: &str) -> String {
 
 /// Atom feed of the river's first page, so the site itself can be followed.
 pub fn atom_feed(site: &SiteCtx, build: &BuildCtx, items: &[ItemCtx]) -> String {
+    atom_collection(site, build, &site.title, "", items)
+}
+
+pub fn atom_collection(
+    site: &SiteCtx,
+    build: &BuildCtx,
+    title: &str,
+    path: &str,
+    items: &[ItemCtx],
+) -> String {
     let root = site
         .base_url
         .clone()
         .unwrap_or_else(|| site.base_path.clone());
+    let collection = format!("{root}{path}");
     let mut out = String::with_capacity(4096);
     out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
     out.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
-    out.push_str(&format!("  <title>{}</title>\n", escape(&site.title)));
+    out.push_str(&format!("  <title>{}</title>\n", escape(title)));
     if !site.description.is_empty() {
         out.push_str(&format!(
             "  <subtitle>{}</subtitle>\n",
             escape(&site.description)
         ));
     }
-    out.push_str(&format!("  <id>{}</id>\n", escape(&root)));
+    out.push_str(&format!("  <id>{}</id>\n", escape(&collection)));
     out.push_str(&format!(
         "  <link rel=\"alternate\" href=\"{}\"/>\n",
-        escape(&root)
+        escape(&collection)
     ));
     out.push_str(&format!(
-        "  <link rel=\"self\" href=\"{}feed.xml\"/>\n",
-        escape(&root)
+        "  <link rel=\"self\" href=\"{}atom.xml\"/>\n",
+        escape(&collection)
     ));
     out.push_str(&format!(
         "  <updated>{}</updated>\n",
@@ -138,6 +100,97 @@ pub fn atom_feed(site: &SiteCtx, build: &BuildCtx, items: &[ItemCtx]) -> String 
     }
     out.push_str("</feed>\n");
     out
+}
+
+pub fn rss_collection(
+    site: &SiteCtx,
+    build: &BuildCtx,
+    title: &str,
+    path: &str,
+    items: &[ItemCtx],
+) -> String {
+    let root = site
+        .base_url
+        .clone()
+        .unwrap_or_else(|| site.base_path.clone());
+    let collection = format!("{root}{path}");
+    let mut out = String::from(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<rss version=\"2.0\"><channel>\n",
+    );
+    out.push_str(&format!("  <title>{}</title>\n", escape(title)));
+    out.push_str(&format!("  <link>{}</link>\n", escape(&collection)));
+    out.push_str(&format!(
+        "  <description>{}</description>\n",
+        escape(&site.description)
+    ));
+    out.push_str(&format!(
+        "  <lastBuildDate>{}</lastBuildDate>\n",
+        build.time.to_rfc2822()
+    ));
+    out.push_str("  <generator>aggr</generator>\n");
+    for item in items {
+        out.push_str("  <item>\n");
+        out.push_str(&format!("    <title>{}</title>\n", escape(&item.title)));
+        out.push_str(&format!("    <link>{}</link>\n", escape(&item.link)));
+        out.push_str(&format!(
+            "    <guid isPermaLink=\"false\">{}{}</guid>\n",
+            escape(&root),
+            escape(&item.url)
+        ));
+        out.push_str(&format!(
+            "    <pubDate>{}</pubDate>\n",
+            item.date.to_rfc2822()
+        ));
+        if !item.excerpt.is_empty() {
+            out.push_str(&format!(
+                "    <description>{}</description>\n",
+                escape(&item.excerpt)
+            ));
+        }
+        for label in &item.labels {
+            out.push_str(&format!("    <category>{}</category>\n", escape(label)));
+        }
+        out.push_str("  </item>\n");
+    }
+    out.push_str("</channel></rss>\n");
+    out
+}
+
+pub fn json_collection(
+    site: &SiteCtx,
+    title: &str,
+    path: &str,
+    items: &[ItemCtx],
+) -> Result<String> {
+    let root = site
+        .base_url
+        .clone()
+        .unwrap_or_else(|| site.base_path.clone());
+    let collection = format!("{root}{path}");
+    let entries: Vec<_> = items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "id": format!("{root}{}", item.url),
+                "url": item.link,
+                "external_url": item.link,
+                "title": item.title,
+                "summary": item.excerpt,
+                "date_published": item.date.to_rfc3339(),
+                "date_modified": item.updated.map(|date| date.to_rfc3339()),
+                "authors": item.authors.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
+                "tags": item.labels,
+            })
+        })
+        .collect();
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "version": "https://jsonfeed.org/version/1.1",
+        "title": title,
+        "home_page_url": collection,
+        "feed_url": format!("{root}{path}feed.json"),
+        "description": site.description,
+        "items": entries,
+    }))?)
 }
 
 fn escape(text: &str) -> String {

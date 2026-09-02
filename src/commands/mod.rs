@@ -3,10 +3,11 @@
 
 pub mod build;
 pub mod check;
+pub mod dev;
 pub mod digest;
 pub mod fetch;
 pub mod init;
-pub mod serve;
+pub mod server;
 pub mod sync;
 
 use std::path::{Path, PathBuf};
@@ -32,8 +33,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             fetch::run(&project, &worktree, &args).await.map(|_| ())
         }
         Command::Sync(args) => sync::run(&Project::load(&cli.config)?, &args).await,
-        Command::Build(args) => build::run(&Project::load(&cli.config)?, &args).map(|_| ()),
-        Command::Serve(args) => serve::run(&Project::load(&cli.config)?, &args).await,
+        Command::Build(args) => build::sync_and_run(&Project::load(&cli.config)?, &args).await,
+        Command::Dev(args) => dev::run(&Project::load(&cli.config)?, &args).await,
         Command::Digest(args) => digest::run(&Project::load(&cli.config)?, &args).await,
         Command::Check => check::run(&Project::load(&cli.config)?).await,
     }

@@ -3,6 +3,7 @@
 
 pub mod context;
 pub mod outputs;
+mod pagefind;
 pub mod render;
 
 use std::collections::BTreeMap;
@@ -22,7 +23,6 @@ use context::{
 use render::{Layers, Renderer};
 
 const EXCERPT_CHARS: usize = 240;
-const SEARCH_MAX_ITEMS: usize = 2000;
 const MARKER: &str = ".aggr-site";
 
 /// Facts about the build that do not come from the data tree.
@@ -94,11 +94,10 @@ pub fn precache_paths(
     item_urls: impl IntoIterator<Item = String>,
     offline_items: usize,
 ) -> Vec<String> {
-    const SHELLS: [&str; 7] = [
+    const SHELLS: [&str; 6] = [
         "",
         "sources/",
         "search/",
-        "search.json",
         "404.html",
         "offline.html",
         "manifest.webmanifest",
@@ -138,6 +137,22 @@ pub fn base_path(base_url: Option<&str>) -> String {
         "/".into()
     } else {
         format!("/{trimmed}/")
+    }
+}
+
+/// Relative reference from a generated page back to the output root. Directory routes end in
+/// `/`; standalone root files such as `offline.html` do not add a level.
+pub fn relative_root(path: &str) -> String {
+    let depth = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .count()
+        .saturating_sub(usize::from(!path.is_empty() && !path.ends_with('/')));
+    if depth == 0 {
+        "./".into()
+    } else {
+        "../".repeat(depth)
     }
 }
 
@@ -295,6 +310,7 @@ pub fn build(
                 kind: kind.to_string(),
                 title: title.to_string(),
                 path: path.clone(),
+                root: relative_root(path),
                 number: *number,
                 total,
                 offset: range.start,
@@ -353,6 +369,14 @@ pub fn build(
             None,
             Some(category),
         )?;
+        write_collection_feeds(
+            out,
+            &site,
+            &build_ctx,
+            &category.name,
+            &category.page,
+            &list[..list.len().min(per_page)],
+        )?;
     }
     for tag in &tags {
         let list: Vec<ItemCtx> = items
@@ -365,6 +389,14 @@ pub fn build(
             .cloned()
             .collect();
         write_list("tag", &tag.name, &tag.page, &list, None, Some(tag))?;
+        write_collection_feeds(
+            out,
+            &site,
+            &build_ctx,
+            &tag.name,
+            &tag.page,
+            &list[..list.len().min(per_page)],
+        )?;
     }
 
     let simple = |kind: &str,
@@ -378,6 +410,7 @@ pub fn build(
             kind: kind.to_string(),
             title: title.to_string(),
             path: path.to_string(),
+            root: relative_root(path),
             number: 1,
             total: 1,
             offset: 0,
@@ -473,13 +506,17 @@ pub fn build(
         }
     }
 
+    let feed_items = &items[..items.len().min(per_page)];
+    let atom = outputs::atom_feed(&site, &build_ctx, feed_items);
+    write(&out.join("feed.xml"), atom.as_bytes())?;
+    write(&out.join("atom.xml"), atom.as_bytes())?;
     write(
-        &out.join("search.json"),
-        outputs::search_json(&items[..items.len().min(SEARCH_MAX_ITEMS)])?.as_bytes(),
+        &out.join("rss.xml"),
+        outputs::rss_collection(&site, &build_ctx, &site.title, "", feed_items).as_bytes(),
     )?;
     write(
-        &out.join("feed.xml"),
-        outputs::atom_feed(&site, &build_ctx, &items[..items.len().min(per_page)]).as_bytes(),
+        &out.join("feed.json"),
+        outputs::json_collection(&site, &site.title, "", feed_items)?.as_bytes(),
     )?;
     write(&out.join(".nojekyll"), b"")?;
     write(&out.join(MARKER), env!("CARGO_PKG_VERSION").as_bytes())?;
@@ -526,7 +563,7 @@ pub fn build(
                 build: &build_ctx,
                 version: cache_version(&build_ctx),
                 precache: precache_paths(
-                    &base,
+                    "",
                     lists,
                     &assets,
                     items.iter().map(|i| i.url.clone()),
@@ -537,6 +574,8 @@ pub fn build(
         write(&out.join("sw.js"), sw.as_bytes())?;
         pages += 1;
     }
+
+    pagefind::build(out)?;
 
     Ok(Summary {
         pages,
@@ -553,7 +592,18 @@ pub fn theme_layers(config: &Config, project_root: &Path) -> Result<Layers> {
         layers.dirs.push(project_root.to_path_buf());
     }
     match config.site.theme.as_str() {
-        "default" => {}
+        "default" => {
+            // A development binary reads the shipped theme from its source tree so `aggr dev`
+            // can rebuild template/CSS/JS edits without recompiling Rust. Release binaries stay
+            // fully embedded and have no dependency on the build machine.
+            #[cfg(debug_assertions)]
+            {
+                let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes/default");
+                if source.is_dir() && !source.starts_with(project_root) {
+                    layers.dirs.push(source);
+                }
+            }
+        }
         theme => {
             let dir = project_root.join(theme);
             if !dir.is_dir() {
@@ -655,6 +705,29 @@ fn tag_contexts(items: &[ItemCtx]) -> Vec<CategoryCtx> {
         .collect()
 }
 
+fn write_collection_feeds(
+    out: &Path,
+    site: &SiteCtx,
+    build: &BuildCtx,
+    title: &str,
+    path: &str,
+    items: &[ItemCtx],
+) -> Result<()> {
+    let dir = out.join(path);
+    write(
+        &dir.join("atom.xml"),
+        outputs::atom_collection(site, build, title, path, items).as_bytes(),
+    )?;
+    write(
+        &dir.join("rss.xml"),
+        outputs::rss_collection(site, build, title, path, items).as_bytes(),
+    )?;
+    write(
+        &dir.join("feed.json"),
+        outputs::json_collection(site, title, path, items)?.as_bytes(),
+    )
+}
+
 /// Wipe a previous build, refusing to touch a directory we did not create.
 fn prepare_out_dir(out: &Path) -> Result<()> {
     if out.exists() {
@@ -745,6 +818,15 @@ mod tests {
         assert_eq!(base_path(Some("https://u.github.io/")), "/");
         assert_eq!(base_path(Some("https://u.github.io/repo")), "/repo/");
         assert_eq!(base_path(Some("https://u.github.io/a/b/")), "/a/b/");
+    }
+
+    #[test]
+    fn relative_roots_cover_files_and_nested_routes() {
+        assert_eq!(relative_root(""), "./");
+        assert_eq!(relative_root("404.html"), "./");
+        assert_eq!(relative_root("search/"), "../");
+        assert_eq!(relative_root("categories/rust/"), "../../");
+        assert_eq!(relative_root("sources/rust/page/2/"), "../../../../");
     }
 
     #[test]
@@ -855,41 +937,57 @@ mod tests {
             serde_json::from_slice(&std::fs::read(out.join("manifest.webmanifest")).unwrap())
                 .unwrap();
         assert_eq!(manifest["name"], "Demo <site>");
-        assert_eq!(manifest["start_url"], "/repo/");
-        assert_eq!(manifest["scope"], "/repo/");
+        assert_eq!(manifest["start_url"], "./");
+        assert_eq!(manifest["scope"], "./");
         assert_eq!(manifest["display"], "standalone");
         assert_eq!(manifest["icons"].as_array().unwrap().len(), 4);
-        assert_eq!(manifest["icons"][0]["src"], "/repo/assets/icon-192.png");
+        assert!(
+            manifest["icons"][0]["src"]
+                .as_str()
+                .unwrap()
+                .starts_with("assets/icon-192-")
+        );
         for icon in [
-            "icon-192.png",
-            "icon-512.png",
-            "icon-maskable-512.png",
-            "apple-touch-icon.png",
+            "icon-192-",
+            "icon-512-",
+            "icon-maskable-512-",
+            "apple-touch-icon-",
         ] {
-            let png = std::fs::read(out.join("assets").join(icon)).unwrap();
+            let path = std::fs::read_dir(out.join("assets"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(icon)
+                })
+                .unwrap();
+            let png = std::fs::read(path).unwrap();
             assert!(png.starts_with(b"\x89PNG"), "{icon} is not a PNG");
         }
 
         let sw = std::fs::read_to_string(out.join("sw.js")).unwrap();
         let version = format!("{}-{}-20260920000000", "d".repeat(12), "c".repeat(12));
         assert!(sw.contains(&format!("var VERSION = {version:?};")), "{sw}");
-        assert!(sw.contains("var BASE = \"/repo/\";"));
-        assert!(sw.contains("\"/repo/assets/style.css\""));
-        assert!(sw.contains("\"/repo/offline.html\""));
-        assert!(sw.contains("\"/repo/sources/blog/\""));
+        assert!(sw.contains("new URL(\"./\", self.registration.scope)"));
+        assert!(sw.contains("\"assets/style-"));
+        assert!(sw.contains("\"offline.html\""));
+        assert!(sw.contains("\"sources/blog/\""));
         // Newest two of three: posts 2 and 1, not 0.
-        assert!(sw.contains("\"/repo/items/blog/2026/09/2026-09-03-post-2/\""));
-        assert!(sw.contains("\"/repo/items/blog/2026/09/2026-09-02-post-1/\""));
+        assert!(sw.contains("\"items/blog/2026/09/2026-09-03-post-2/\""));
+        assert!(sw.contains("\"items/blog/2026/09/2026-09-02-post-1/\""));
         assert!(!sw.contains("post-0/\""));
-        assert_eq!(sw.matches("/repo/items/").count(), 2);
+        assert_eq!(sw.matches("\"items/").count(), 2);
 
         let offline = std::fs::read_to_string(out.join("offline.html")).unwrap();
         assert!(offline.contains("data-shell=\"offline\""));
-        assert!(offline.contains("<link rel=\"manifest\" href=\"/repo/manifest.webmanifest\">"));
+        assert!(offline.contains("<link rel=\"manifest\" href=\"manifest.webmanifest\">"));
         assert!(offline.contains("pwa: true"));
         let river = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(river.contains("rel=\"apple-touch-icon\""));
         assert!(river.contains("name=\"theme-color\""));
+        assert!(out.join("pagefind/pagefind.js").is_file());
     }
 
     #[test]

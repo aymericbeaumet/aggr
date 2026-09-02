@@ -1,10 +1,13 @@
 {% extends "base.html" %}
-{# Client-side full-text search: app.js fills #list from search.json. #}
+{# Pagefind full-text search: the static index and UI are both loaded by app.js. #}
 {% block content %}
 <div class="listhead">
   <h1>{{ page.title }}</h1>
   <div class="listtools">
     <input id="q" type="search" placeholder="Search titles and full text…" autofocus autocomplete="off">
+    <select id="category-filter" aria-label="Category"><option value="">all categories</option></select>
+    <select id="tag-filter" aria-label="Tag"><option value="">all tags</option></select>
+    <select id="search-sort" aria-label="Sort"><option value="relevance">relevance</option><option value="newest">newest</option></select>
     <span id="count" class="muted"></span>
   </div>
 </div>
