@@ -122,6 +122,8 @@ impl Repo {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("creating {}", parent.display()))?;
             }
+            // A hand-deleted `.aggr/` leaves a registration `worktree add` would refuse.
+            git(&self.root, &["worktree", "prune"])?;
             let dir_str = dir.to_string_lossy();
             if has_local_branch {
                 git(&self.root, &["worktree", "add", &dir_str, branch])?;
@@ -754,6 +756,31 @@ mod tests {
         assert_eq!(again.dir(), wt.dir());
         assert_eq!(count(&fs::read_to_string(&exclude).unwrap()), 1);
         assert_eq!(sh(repo.root(), &["status", "--porcelain"]), "");
+    }
+
+    #[test]
+    fn hand_deleted_worktree_is_recreated() {
+        let (_tmp, repo) = fixture();
+        let dir = Path::new(".aggr/data");
+
+        // Deleted while the branch is still unborn: bootstrapped again from scratch.
+        repo.ensure_worktree("aggr", dir).unwrap();
+        fs::remove_dir_all(repo.root().join(".aggr")).unwrap();
+        let wt = repo.ensure_worktree("aggr", dir).unwrap();
+        assert_eq!(wt.head_sha().unwrap(), None);
+
+        // Deleted after a commit: checked out again from the local branch, history intact.
+        fs::write(wt.dir().join("README.md"), "data\n").unwrap();
+        let msg = CommitMessage {
+            subject: "aggr: init".into(),
+            ..Default::default()
+        };
+        let sha = wt.commit(&msg).unwrap();
+        assert!(sha.is_some());
+        fs::remove_dir_all(repo.root().join(".aggr")).unwrap();
+        let wt = repo.ensure_worktree("aggr", dir).unwrap();
+        assert_eq!(wt.head_sha().unwrap(), sha);
+        assert!(wt.dir().join("README.md").exists());
     }
 
     #[test]
