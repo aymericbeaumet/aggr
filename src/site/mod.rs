@@ -185,6 +185,7 @@ struct SwCtx<'a> {
     precache: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Summary {
     pub pages: usize,
     pub items: usize,
@@ -710,6 +711,7 @@ fn category_contexts(sources: &[SourceCtx], items: &[ItemCtx]) -> Vec<CategoryCt
     }
     categories
         .into_iter()
+        .filter(|(_, count)| *count > 0)
         .map(|(name, count)| {
             let slug = context::category_slug(name);
             CategoryCtx {
@@ -765,7 +767,7 @@ fn write_collection_feeds(
 }
 
 /// Wipe a previous build, refusing to touch a directory we did not create.
-fn prepare_out_dir(out: &Path) -> Result<()> {
+pub(crate) fn prepare_out_dir(out: &Path) -> Result<()> {
     if out.exists() {
         let ours = out.join(MARKER).exists() || std::fs::read_dir(out)?.next().is_none();
         if !ours {
@@ -846,6 +848,23 @@ mod tests {
             ["sources/x/", "sources/x/page/2/", "sources/x/page/3/"]
         );
         assert_eq!(pages[2].2, 20..25);
+    }
+
+    #[test]
+    fn categories_without_rendered_items_are_omitted() {
+        let source = SourceCtx {
+            slug: "empty".into(),
+            name: "Empty".into(),
+            url: None,
+            site_url: None,
+            category: Some("unused".into()),
+            engine: "web".into(),
+            count: 0,
+            latest: None,
+            error: None,
+            page: "sources/empty/".into(),
+        };
+        assert!(category_contexts(&[source], &[]).is_empty());
     }
 
     #[test]

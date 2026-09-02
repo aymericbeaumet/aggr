@@ -1,5 +1,7 @@
 //! `aggr sync`: fetch, commit with trailers, push, move `refs/aggr/last-good`. What CI runs.
 
+use std::path::Path;
+
 use anyhow::{Result, bail};
 
 use super::Project;
@@ -46,6 +48,21 @@ pub async fn run(project: &Project, args: &FetchArgs) -> Result<()> {
         println!("{head}");
     }
     finish(&report)
+}
+
+/// The same required synchronization stage for dev, redirected to its private cache and stopped
+/// before git commit/push. Keeping this here prevents build and dev from growing different fetch
+/// semantics over time.
+pub async fn run_dev(
+    project: &Project,
+    worktree: &crate::git::Worktree,
+    args: &FetchArgs,
+    cache: &Path,
+) -> Result<Report> {
+    let report =
+        fetch::run_with_cache(project, worktree, args, cache, fetch::StatePolicy::DevCache).await?;
+    finish(&report)?;
+    Ok(report)
 }
 
 fn finish(report: &Report) -> Result<()> {

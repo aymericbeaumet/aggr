@@ -35,7 +35,7 @@ src/commands/*.rs              one file per subcommand; Project = config + sourc
 src/config.rs                  aggr.toml types, defaults, `include` files, ${ENV} expansion, validation
 src/git.rs                     worktree/orphan bootstrap, commit with trailers, push+rebase, refs
 src/http.rs                    reqwest client: UA, timeouts, size cap, conditional GET, retries
-src/sources/{mod,feed,html,aggr}.rs engines; `sources::fetch` dispatches on `type`
+src/sources/{mod,feed,html,aggr}.rs source dispatch, automatic feed/HTML discovery, aggr engine
 src/content.rs                 strip → sanitize → Markdown; html_to_text, excerpt
 src/model.rs                   front matter, dedupe keys, link normalization, file names, blob sha
 src/store/                     the branch tree: items, state, seen, status, retention, front matter
@@ -69,3 +69,7 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   than block tags on their own line.
 - `themes/default/static/swup.js` is the vendored Swup 4 UMD build; keep `swup.LICENSE` beside it
   and keep navigation progressively functional without JavaScript.
+- A normal source URL is intentionally enough: keep HTML heuristics internal and remember the
+  discovered feed endpoint. `type = "html"` and site-specific selectors are not public config.
+- `sync` persists to git; `build` runs that same sync first; `dev` runs it against a namespaced
+  OS cache and serves an atomic in-memory snapshot without committing or pushing.

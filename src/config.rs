@@ -7,8 +7,6 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use url::Url;
 
-use crate::sources::html;
-
 pub const DEFAULT_FILE: &str = "aggr.toml";
 
 /// Every option with its default value, commented. Shipped as `config.default.toml` and written
@@ -26,6 +24,9 @@ pub struct Config {
     /// Present → a daily digest is posted as a GitHub issue.
     pub digest: Option<DigestConfig>,
     pub sources: Vec<SourceConfig>,
+    /// Root and included TOML files that produced this config; used for exact build-cache keys.
+    #[serde(skip)]
+    pub(crate) loaded_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,8 +35,6 @@ pub struct SiteConfig {
     pub title: String,
     pub description: String,
     pub theme: String,
-    /// IANA name; used for the digest schedule and date display.
-    pub timezone: chrono_tz::Tz,
     pub items_per_page: usize,
     /// Items rendered in full; older ones become redirect stubs to their GitHub permalink.
     pub max_items: usize,
@@ -62,7 +61,6 @@ impl Default for SiteConfig {
             title: "aggr".into(),
             description: String::new(),
             theme: "default".into(),
-            timezone: chrono_tz::UTC,
             items_per_page: 60,
             max_items: 5000,
             max_age_days: 365,
@@ -121,6 +119,8 @@ pub struct FetchConfig {
     pub concurrency: usize,
     /// Concurrent original-article downloads within each source in `heavy` mode.
     pub article_concurrency: usize,
+    /// Newest entries considered from one source per sync; avoids an unbounded first import.
+    pub max_items_per_source: usize,
     pub timeout_secs: u64,
     /// `{version}` expands to the aggr version.
     pub user_agent: String,
@@ -135,6 +135,7 @@ impl Default for FetchConfig {
         Self {
             concurrency: 16,
             article_concurrency: 4,
+            max_items_per_source: 100,
             timeout_secs: 20,
             user_agent: "aggr/{version} (+https://github.com/aymericbeaumet/aggr)".into(),
             max_body_bytes: 10_000_000,
@@ -163,8 +164,10 @@ impl FetchConfig {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct DigestConfig {
-    /// Local time of day (`HH:MM`, in `[site] timezone`) after which the first run posts the digest.
+    /// Local time of day (`HH:MM`) after which the first run posts the digest.
     pub at: chrono::NaiveTime,
+    /// IANA timezone used only for the digest schedule.
+    pub timezone: chrono_tz::Tz,
     /// Issue title, with `{number}`, `{date}`, `{count}` and `{title}` placeholders.
     pub title: String,
     /// Label put on every digest issue (created on first use).
@@ -183,6 +186,7 @@ impl Default for DigestConfig {
     fn default() -> Self {
         Self {
             at: chrono::NaiveTime::from_hms_opt(8, 0, 0).expect("valid time"),
+            timezone: chrono_tz::UTC,
             title: "Digest #{number} · {date} · {count} new".into(),
             label: "digest".into(),
             assignees: Vec::new(),
@@ -221,15 +225,6 @@ pub struct SourceConfig {
     pub sources: Vec<String>,
     /// `type = "aggr"`: newest items considered per run.
     pub limit: Option<usize>,
-    /// `type = "html"`: CSS selector for the item elements.
-    pub items: Option<String>,
-    /// `type = "html"`: field selectors, `css`, `css@attr` or `@attr` (item's own attribute).
-    pub title: Option<String>,
-    pub link: Option<String>,
-    pub date: Option<String>,
-    /// `type = "html"`: chrono format for `date` (e.g. `%m.%d.%y`); common shapes parse without.
-    pub date_format: Option<String>,
-    pub summary: Option<String>,
 }
 
 /// A source after defaults, presets, and `${ENV}` expansion have been applied.
@@ -258,22 +253,6 @@ pub enum Engine {
         sources: Vec<String>,
         limit: usize,
     },
-    /// A listing page scraped with CSS selectors.
-    Html {
-        url: Url,
-        fields: HtmlFields,
-    },
-}
-
-/// `type = "html"` selectors, checked for syntax at load time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HtmlFields {
-    pub items: String,
-    pub title: Option<String>,
-    pub link: Option<String>,
-    pub date: Option<String>,
-    pub date_format: Option<String>,
-    pub summary: Option<String>,
 }
 
 pub const AGGR_SOURCE_LIMIT: usize = 200;
@@ -281,16 +260,15 @@ pub const AGGR_SOURCE_LIMIT: usize = 200;
 impl Engine {
     pub fn name(&self) -> &'static str {
         match self {
-            Engine::Feed { .. } => "feed",
+            Engine::Feed { .. } => "web",
             Engine::Aggr { .. } => "aggr",
-            Engine::Html { .. } => "html",
         }
     }
 
     /// The URL a human would associate with the source, for status output and `site_url` fallback.
     pub fn url(&self) -> Option<&Url> {
         match self {
-            Engine::Feed { url } | Engine::Aggr { url, .. } | Engine::Html { url, .. } => Some(url),
+            Engine::Feed { url } | Engine::Aggr { url, .. } => Some(url),
         }
     }
 }
@@ -311,6 +289,10 @@ impl Config {
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut config =
             Self::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
+        config.loaded_files.push(
+            path.canonicalize()
+                .with_context(|| format!("resolving {}", path.display()))?,
+        );
         let dir = path.parent().unwrap_or(Path::new("."));
         for pattern in std::mem::take(&mut config.include) {
             for file in include_paths(dir, &pattern)? {
@@ -326,6 +308,10 @@ impl Config {
                         }
                         source
                     }));
+                config.loaded_files.push(
+                    file.canonicalize()
+                        .with_context(|| format!("resolving {}", file.display()))?,
+                );
             }
         }
         Ok(config)
@@ -346,6 +332,9 @@ impl Config {
         }
         if self.fetch.article_concurrency == 0 {
             bail!("[fetch] article_concurrency must be at least 1");
+        }
+        if self.fetch.max_items_per_source == 0 {
+            bail!("[fetch] max_items_per_source must be at least 1");
         }
         if self.store.branch.is_empty() || self.store.branch.contains(char::is_whitespace) {
             bail!(
@@ -450,14 +439,6 @@ fn resolve_source(
         ("sources", !raw.sources.is_empty()),
         ("limit", raw.limit.is_some()),
     ];
-    let html_keys = [
-        ("items", raw.items.is_some()),
-        ("title", raw.title.is_some()),
-        ("link", raw.link.is_some()),
-        ("date", raw.date.is_some()),
-        ("date_format", raw.date_format.is_some()),
-        ("summary", raw.summary.is_some()),
-    ];
     let only = |owner: &str, keys: &[(&str, bool)]| -> Result<()> {
         for (key, set) in keys {
             if *set {
@@ -469,44 +450,11 @@ fn resolve_source(
     let engine = match kind {
         "feed" => {
             only("aggr", &aggr_keys)?;
-            only("html", &html_keys)?;
             Engine::Feed {
                 url: http_url(raw, env)?,
             }
         }
-        "html" => {
-            only("aggr", &aggr_keys)?;
-            let items = raw
-                .items
-                .as_deref()
-                .map(str::trim)
-                .filter(|items| !items.is_empty())
-                .context("`items` (a CSS selector for the entries) is required")?;
-            html::selector(items).context("`items`")?;
-            for (key, spec) in [
-                ("title", &raw.title),
-                ("link", &raw.link),
-                ("date", &raw.date),
-                ("summary", &raw.summary),
-            ] {
-                if let Some(spec) = spec {
-                    html::Field::parse(spec).with_context(|| format!("`{key}`"))?;
-                }
-            }
-            Engine::Html {
-                url: http_url(raw, env)?,
-                fields: HtmlFields {
-                    items: items.to_string(),
-                    title: raw.title.clone(),
-                    link: raw.link.clone(),
-                    date: raw.date.clone(),
-                    date_format: raw.date_format.clone(),
-                    summary: raw.summary.clone(),
-                },
-            }
-        }
         "aggr" => {
-            only("html", &html_keys)?;
             let url = match (&raw.repo, &raw.url) {
                 (Some(repo), None) => {
                     let repo = expand_env(repo, env)?;
@@ -536,7 +484,7 @@ fn resolve_source(
                 limit,
             }
         }
-        other => bail!("unknown source type {other:?}; known types: feed, html, aggr"),
+        other => bail!("unknown source type {other:?}; known types: feed, aggr"),
     };
 
     let slug = match &raw.slug {
@@ -697,7 +645,7 @@ mod tests {
         let sources = config.resolve_sources(&no_env).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].slug, "example-com");
-        assert_eq!(sources[0].engine.name(), "feed");
+        assert_eq!(sources[0].engine.name(), "web");
         assert!(sources[0].html);
     }
 
@@ -721,40 +669,16 @@ mod tests {
     }
 
     #[test]
-    fn resolves_html_sources_and_checks_their_selectors() {
-        let config = Config::parse(
-            "[[sources]]\ntype = \"html\"\nname = \"Cog\"\nurl = \"https://a.b/blog\"\n\
-             items = \"li > a\"\ntitle = \"h2\"\nlink = \"@href\"\ndate_format = \"%m.%d.%y\"\n",
-        )
-        .unwrap();
-        let sources = config.resolve_sources(&no_env).unwrap();
-        assert_eq!(sources[0].slug, "cog");
-        assert_eq!(sources[0].engine.name(), "html");
-        match &sources[0].engine {
-            Engine::Html { fields, .. } => {
-                assert_eq!(fields.items, "li > a");
-                assert_eq!(fields.date, None);
-                assert_eq!(fields.date_format.as_deref(), Some("%m.%d.%y"));
-            }
-            other => panic!("{other:?}"),
-        }
+    fn configured_html_engine_is_no_longer_needed() {
+        let err =
+            Config::parse("[[sources]]\ntype = \"html\"\nurl = \"https://a.b/\"\nitems = \"li\"\n")
+                .unwrap_err();
+        assert!(err.to_string().contains("items"), "{err:#}");
 
-        let missing =
+        let config =
             Config::parse("[[sources]]\ntype = \"html\"\nurl = \"https://a.b/\"\n").unwrap();
-        let err = missing.resolve_sources(&no_env).unwrap_err();
-        assert!(format!("{err:#}").contains("`items`"), "{err:#}");
-        let bad = Config::parse(
-            "[[sources]]\ntype = \"html\"\nurl = \"https://a.b/\"\nitems = \"li\"\ntitle = \"h2 >\"\n",
-        )
-        .unwrap();
-        let err = bad.resolve_sources(&no_env).unwrap_err();
-        assert!(format!("{err:#}").contains("invalid selector"), "{err:#}");
-        let feed = Config::parse("[[sources]]\nurl = \"https://a.b/\"\nitems = \"li\"\n").unwrap();
-        let err = feed.resolve_sources(&no_env).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("`items` only applies to `type = \"html\"`"),
-            "{err:#}"
-        );
+        let err = config.resolve_sources(&no_env).unwrap_err();
+        assert!(format!("{err:#}").contains("known types: feed, aggr"));
     }
 
     #[test]
@@ -859,7 +783,6 @@ mod tests {
         let compiled = Config::default();
         assert_eq!(config.site.title, compiled.site.title);
         assert_eq!(config.site.theme, compiled.site.theme);
-        assert_eq!(config.site.timezone, compiled.site.timezone);
         assert_eq!(config.site.items_per_page, compiled.site.items_per_page);
         assert_eq!(config.site.max_items, compiled.site.max_items);
         assert_eq!(config.site.max_age_days, compiled.site.max_age_days);
@@ -887,14 +810,17 @@ mod tests {
     #[test]
     fn parses_digest_time_and_timezone() {
         let config =
-            Config::parse("[site]\ntimezone = \"Europe/Paris\"\n[digest]\nat = \"07:30\"\n")
-                .unwrap();
-        assert_eq!(config.site.timezone, chrono_tz::Europe::Paris);
+            Config::parse("[digest]\nat = \"07:30\"\ntimezone = \"Europe/Paris\"\n").unwrap();
         assert_eq!(
-            config.digest.unwrap().at,
+            config.digest.as_ref().unwrap().timezone,
+            chrono_tz::Europe::Paris
+        );
+        assert_eq!(
+            config.digest.as_ref().unwrap().at,
             chrono::NaiveTime::from_hms_opt(7, 30, 0).unwrap()
         );
-        assert!(Config::parse("[site]\ntimezone = \"Mars/Olympus\"\n").is_err());
+        assert!(Config::parse("[site]\ntimezone = \"UTC\"\n").is_err());
+        assert!(Config::parse("[digest]\ntimezone = \"Mars/Olympus\"\n").is_err());
         assert!(Config::parse("[digest]\nat = \"25:00\"\n").is_err());
         assert!(Config::parse("").unwrap().digest.is_none());
     }

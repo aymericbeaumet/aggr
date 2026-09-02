@@ -1,14 +1,27 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="settings">
-  <h1>Settings</h1>
-  <label class="setting">
-    <span>Theme</span>
-    <select id="theme-mode"><option value="auto">auto</option><option value="light">light</option><option value="dark">dark</option></select>
-  </label>
-  <div class="setting">
-    <div><strong>Copy state</strong><p class="muted">Copy every local setting into a shareable URL. Opening it on another device imports the state once without keeping it in the address.</p></div>
-    <button id="copy-state" type="button">copy state URL</button>
+<section class="page settings" aria-labelledby="page-title">
+  <header class="page-header"><h1 id="page-title">{{ page.title }}</h1></header>
+  <div class="page-body settings-body">
+    <section class="settings-group" aria-labelledby="appearance-heading">
+      <h2 id="appearance-heading">Appearance</h2>
+      <label class="setting" for="theme-mode">
+        <span><strong>Theme</strong><small>Follow this device or choose a fixed colour scheme.</small></span>
+        <select id="theme-mode"><option value="auto">auto</option><option value="light">light</option><option value="dark">dark</option></select>
+      </label>
+      <label class="setting" for="date-format">
+        <span><strong>Date format</strong><small>Choose how publication dates appear throughout the site.</small></span>
+        <select id="date-format"><option value="relative">relative</option><option value="iso">YYYY-MM-DD</option><option value="local">local date</option><option value="local-time">local date + time</option></select>
+      </label>
+    </section>
+    <section class="settings-group copy-settings" aria-labelledby="copy-state-heading">
+      <h2 id="copy-state-heading">Copy state</h2>
+      <p class="muted">Copy every local setting into a shareable URL. Opening it on another device imports the state once without keeping it in the address.</p>
+      <div class="copy-action">
+        <button id="copy-state" type="button">copy state URL</button>
+        <span id="copy-state-status" class="muted" role="status" aria-live="polite"></span>
+      </div>
+    </section>
   </div>
 </section>
 {% endblock %}

@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
 
 use super::Project;
@@ -36,11 +36,30 @@ pub fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
         ),
         None => (worktree.dir().to_path_buf(), worktree.head_sha()?),
     };
+    let config_sha = project.config_sha();
+    let cache_dir = project.build_cache_dir()?;
+    let fingerprint = crate::cache::render_fingerprint(
+        &project.config,
+        &project.root,
+        config_sha.as_deref(),
+        data_sha.as_deref(),
+        base_url.as_deref(),
+        args.release,
+    )?;
+    if let Some(summary) = crate::cache::restore_render(&cache_dir, &fingerprint, &out)? {
+        print_summary(summary, &out, base_url.as_deref(), true);
+        return Ok(summary);
+    }
 
+    let scratch = tempfile::Builder::new()
+        .prefix("aggr-build-")
+        .tempdir_in(&cache_dir)
+        .context("creating render cache staging directory")?;
+    let rendered = scratch.path().join("site");
     let info = BuildInfo {
-        out: out.clone(),
-        base_url,
-        config_sha: project.config_sha(),
+        out: rendered.clone(),
+        base_url: base_url.clone(),
+        config_sha,
         config_path: project.config_repo_path(),
         data_sha,
         now: Utc::now(),
@@ -53,21 +72,28 @@ pub fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
         &project.root,
         &info,
     )?;
-    println!(
-        "built {} page(s), {} item(s), {} stub(s) into {}{}",
-        summary.pages,
-        summary.items,
-        summary.stubs,
-        out.display(),
-        info.base_url
-            .as_deref()
-            .map(|url| format!(" for {url}"))
-            .unwrap_or_default()
-    );
+    crate::cache::store_render(&cache_dir, &fingerprint, &rendered, summary)?;
+    crate::cache::restore_render(&cache_dir, &fingerprint, &out)?
+        .context("the rendered site disappeared from its cache")?;
+    print_summary(summary, &out, base_url.as_deref(), false);
     Ok(summary)
 }
 
-/// Render a transient store into an explicit directory without touching git or configured paths.
+fn print_summary(summary: Summary, out: &Path, base_url: Option<&str>, cached: bool) {
+    println!(
+        "built {} page(s), {} item(s), {} stub(s) {} {}{}",
+        summary.pages,
+        summary.items,
+        summary.stubs,
+        if cached { "from cache into" } else { "into" },
+        out.display(),
+        base_url
+            .map(|url| format!(" for {url}"))
+            .unwrap_or_default()
+    );
+}
+
+/// Render dev's isolated store into staging before the server swaps its in-memory snapshot.
 pub fn run_ephemeral(
     project: &Project,
     args: &BuildArgs,
@@ -91,7 +117,7 @@ pub fn run_ephemeral(
         &info,
     )?;
     println!(
-        "built {} page(s), {} item(s), {} stub(s) in the transient dev site",
+        "built {} page(s), {} item(s), {} stub(s) for the in-memory dev snapshot",
         summary.pages, summary.items, summary.stubs
     );
     Ok(summary)

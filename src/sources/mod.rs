@@ -27,6 +27,8 @@ pub struct Validators {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub body_hash: Option<String>,
+    /// Actual endpoint used after feed discovery or redirects.
+    pub resolved_url: Option<String>,
 }
 
 /// What the upstream says about itself.
@@ -55,7 +57,6 @@ pub async fn fetch(source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
             sources,
             limit,
         } => aggr::fetch(url, branch, sources, *limit, source, ctx).await,
-        Engine::Html { url, fields } => html::fetch(url, fields, source, ctx).await,
     }
 }
 
@@ -65,6 +66,7 @@ impl Validators {
             etag: state.etag.clone(),
             last_modified: state.last_modified.clone(),
             body_hash: state.body_hash.clone(),
+            resolved_url: state.resolved_url.clone(),
         }
     }
 
@@ -72,5 +74,6 @@ impl Validators {
         state.etag = self.etag.clone();
         state.last_modified = self.last_modified.clone();
         state.body_hash = self.body_hash.clone();
+        state.resolved_url = self.resolved_url.clone();
     }
 }

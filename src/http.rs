@@ -29,6 +29,7 @@ pub struct Request<'a> {
 }
 
 impl<'a> Request<'a> {
+    #[cfg(test)]
     pub fn get(url: &'a Url) -> Self {
         Self {
             url,
@@ -184,6 +185,11 @@ impl std::fmt::Display for HttpStatus {
 }
 
 impl std::error::Error for HttpStatus {}
+
+/// HTTP status carried by an error from this client, if the request reached the server.
+pub fn status_code(err: &anyhow::Error) -> Option<u16> {
+    err.downcast_ref::<HttpStatus>().map(|status| status.0)
+}
 
 /// Worth another attempt: 5xx, 429, or a connection/timeout failure.
 fn is_transient(err: &anyhow::Error) -> bool {
@@ -342,7 +348,8 @@ mod tests {
             })
             .await;
         let url = Url::parse(&server.url("/gone")).unwrap();
-        assert!(client().get(Request::get(&url)).await.is_err());
+        let err = client().get(Request::get(&url)).await.unwrap_err();
+        assert_eq!(status_code(&err), Some(404));
         assert_eq!(mock.calls_async().await, 1);
     }
 

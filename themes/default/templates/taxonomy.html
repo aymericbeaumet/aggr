@@ -1,9 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>{{ page.title }}</h1>
-<ul class="taxonomy-list">
-{% for term in (categories if page.kind == 'categories' else tags) %}
-  <li><a href="{{ term.page | url_for }}">{{ term.name }}</a> <span class="muted">{{ term.count }}</span></li>
-{% endfor %}
-</ul>
+<section class="page" aria-labelledby="page-title">
+  <header class="page-header"><h1 id="page-title">{{ page.title }}</h1></header>
+  <div class="page-body">
+    <ul class="taxonomy-list" aria-label="{{ page.title }}">
+    {% for term in (categories if page.kind == 'categories' else tags) %}
+      {% if term.count > 0 %}<li><a href="{{ term.page | url_for }}">{{ term.name }}</a> <span class="muted" aria-label="{{ term.count }} items">{{ term.count }}</span></li>{% endif %}
+    {% endfor %}
+    </ul>
+  </div>
+</section>
 {% endblock %}

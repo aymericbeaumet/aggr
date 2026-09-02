@@ -15,7 +15,7 @@ anywhere but GitHub.
 
 See it live at <https://aggr.aymericbeaumet.com>. Its complete setup is the deliberately small
 [aggr starter repository](https://github.com/aymericbeaumet/aggr.aymericbeaumet.com): one config
-and one workflow, with real RSS, Atom and HTML-scraped sources.
+and one workflow, with real websites, RSS and Atom sources.
 
 ## Install: two files
 
@@ -40,6 +40,7 @@ title = "My reads"
 
 [digest]
 at = "08:00"
+timezone = "Europe/Paris"
 
 [[sources]]
 url = "https://blog.rust-lang.org/feed.xml"
@@ -102,15 +103,19 @@ Release archives for Linux, macOS and Windows (amd64, arm64) with `SHA256SUMS` a
 | `aggr sync [--dry-run]` | Fetch every source, write new items into the data worktree, commit, push, update `refs/aggr/last-good`. `build` invokes this first. |
 | `aggr fetch` | `sync` without the commit and push. |
 | `aggr build [--release] [--out dir] [--base-url url] [--data-ref ref]` | Sync, then render the site. `--release` builds for `[site] url` (or `--base-url`) and writes `CNAME`; `--data-ref` renders any data commit after syncing. |
-| `aggr dev [--port 7319]` | Sync, build, serve, and live-reload from an ephemeral workspace; it never commits, pushes, or writes data/build output into the repository. |
+| `aggr dev [--port 7319]` | Sync, build, serve, and live-reload from an isolated OS cache; it never commits, pushes, or writes data/build output into the repository. |
 | `aggr digest [--dry-run] [--force]` | Post today's digest issue when it is due. |
 | `aggr check` | Validate the configuration and probe every source. |
 | `aggr completions <shell>` | Shell completions. |
 
-Locally, `aggr dev` is the whole loop. It serves an atomic in-memory site snapshot; private build,
-store, and cache staging lives in an OS temporary directory that is removed on exit. Iterating from
-`aggr.toml` therefore leaves the repository untouched. `aggr sync` and `aggr build` use the
-persistent data worktree by design.
+Locally, `aggr dev` is the whole loop. It immediately serves the last atomic in-memory snapshot,
+then refreshes in the background and live-reloads. Its private data, origin responses and last site
+live in the operating system's standard cache directory, isolated by canonical config path;
+`AGGR_CACHE_DIR` can override the cache root. Iterating from `aggr.toml` therefore leaves the
+repository untouched. `aggr sync` is also available on its own. `aggr build` always invokes it,
+uses the repository-local `.aggr/cache/build-v1`, and reuses an exact rendered result when the data,
+effective config, theme and target URL are unchanged. The reusable workflow carries that sanitized
+render cache between CI runs; private original-page responses are deliberately never uploaded.
 
 ## Configuration
 
@@ -122,34 +127,26 @@ include = ["aggr-*.toml"]          # topic files: sources only, optionally one `
 
 [site]
 title = "My reads"
-timezone = "Europe/Paris"          # digest schedule, date display
 theme = "themes/mine"              # a directory with templates/ and static/; "default" otherwise
 # url = "https://reads.example.com"  # custom domain: build target and CNAME
 
 [fetch]
 content = "heavy"                  # default: fetch + clean original pages; "light" trusts feeds
+max_items_per_source = 100          # bounds unusually deep first imports
 
 [digest]
 at = "08:00"                       # one GitHub issue a day, when something is new
+timezone = "Europe/Paris"
 
 [[sources]]
-url = "https://blog.rust-lang.org/feed.xml"
+url = "https://blog.rust-lang.org/" # a normal website URL is preferred
 name = "Rust Blog"                 # display name; the feed's title when unset
 category = "rust"
+labels = ["rust", "language"]
 
 [[sources]]
 url = "https://api.example.com/feed"
 headers = { Authorization = "Bearer ${API_TOKEN}" }   # ${VAR} expands from the environment
-
-[[sources]]
-type = "html"                      # no feed? scrape the listing page with CSS selectors
-url = "https://cognition.com/blog"
-items = "li > a[href^='/blog/']"   # one match per entry
-title = "h2"                       # `css` = text, `css@attr` = attribute, `@attr` = the entry's own
-link = "@href"
-date = "span"
-date_format = "%m.%d.%y"           # only needed when the date is ambiguous
-summary = "p"
 
 [[sources]]
 type = "aggr"                      # another aggr repository is a source too
@@ -166,11 +163,16 @@ url = "https://simonwillison.net/atom/everything/"
 name = "Simon Willison"
 ```
 
-Any RSS, Atom or JSON Feed URL is a source. Sites that speak feeds already: YouTube channels,
-GitHub releases (`…/releases.atom`), Reddit (`…/.rss`), Mastodon (`https://<instance>/@user.rss`),
-Bluesky (`https://bsky.app/profile/<handle>/rss`), Hacker News through [hnrss.org](https://hnrss.org),
-Lobsters (`https://lobste.rs/rss`), arXiv, Substack, Medium. For the rest there is `type = "html"`;
-`aggr check` prints how many entries the selectors find and how many carry a date.
+Any normal website, RSS, Atom or JSON Feed URL is a source. For a website aggr first tries the URL
+as a feed, follows advertised feed metadata and recognizable feed links, then probes conventional
+endpoints. If the site publishes no feed, conservative article-card and JSON-LD discovery takes
+over automatically—there are no CSS selectors in your config. `aggr check` shows the endpoint it
+resolved and remembers that endpoint for conditional requests on later runs.
+
+Feed parsing uses [feed-rs](https://github.com/feed-rs/feed-rs). Full-article extraction in heavy
+mode uses [dom_smoothie](https://github.com/niklak/dom_smoothie), a maintained Rust implementation
+of Mozilla Readability. Original response bodies and extraction results are versioned in the
+private cache; only sanitized HTML and Markdown enter the data branch or generated site.
 
 ## The site
 
@@ -228,7 +230,7 @@ default. Templates are [minijinja](https://github.com/mitsuhiko/minijinja); the 
 
 ## The digest
 
-With a `[digest]` section, the first workflow run after `at` (in `[site] timezone`) opens one
+With a `[digest]` section, the first workflow run after `at` (in `[digest] timezone`) opens one
 issue titled `Digest #12 · 2026-09-02 · 8 new` listing what arrived since the previous digest,
 grouped by source, with links to the site and to the Markdown files. Issues are assigned to the
 repository owner by default, so GitHub emails them; the previous digest is closed; days with
@@ -255,10 +257,12 @@ make check          # fmt-check, clippy -D warnings, tests (hermetic: no network
 make run ARGS="dev"
 ```
 
-`aggr dev` syncs and builds in a disposable workspace, watches the config, includes, templates and
-static files, then resyncs/rebuilds and reloads open browsers after each successful change. It
-prefers port 7319 and automatically picks a free localhost port when that is busy; use `--port` to
-choose one. `aggr build` performs the same required sync persistently and exits after rendering.
+`aggr dev` restores its cached site before doing network work, watches the config, includes,
+templates and static files, then resyncs only when source inputs changed, rebuilds atomically and
+reloads open browsers after each successful change. It prefers port 7319 and automatically picks a
+free localhost port when that is busy; use `--port` to choose one. Ctrl-C cleanly stops the watcher,
+server and in-flight refresh. `aggr build` performs the same required sync persistently and exits
+after rendering; an unchanged second build is an O(1) cache hit.
 
 Releases: bump `version` in `Cargo.toml` and `VERSION`, commit, tag `vX.Y.Z`, push the tag.
 

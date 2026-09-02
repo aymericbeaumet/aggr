@@ -2,7 +2,9 @@
 //! real binary. Nothing here touches the network or the user's git configuration.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use assert_cmd::prelude::*;
 use httpmock::prelude::*;
@@ -83,6 +85,7 @@ impl TestRepo {
             "GH_TOKEN",
             "AGGR_BASE_URL",
             "AGGR_CONFIG",
+            "AGGR_CACHE_DIR",
         ] {
             cmd.env_remove(key);
         }
@@ -135,6 +138,52 @@ impl TestRepo {
     }
 }
 
+#[cfg(unix)]
+fn wait_for_dev(port: u16, timeout: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("aggr dev did not listen on 127.0.0.1:{port}");
+}
+
+#[cfg(unix)]
+fn stop_dev(mut child: std::process::Child) -> std::process::Output {
+    let status = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let _ = child.kill();
+    panic!("aggr dev did not stop after SIGINT");
+}
+
+#[cfg(unix)]
+fn wait_for_cached_site(root: &Path, timeout: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name() == ".aggr-site")
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("aggr dev did not populate its persistent cache");
+}
+
 fn git_env() -> Vec<(&'static str, String)> {
     vec![
         ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
@@ -176,6 +225,67 @@ fn init_writes_config_and_workflow() {
         .success();
     let text = std::fs::read_to_string(repo.clone.join("aggr.toml")).unwrap();
     assert!(text.contains("[digest]"));
+}
+
+#[cfg(unix)]
+#[test]
+fn dev_uses_an_external_persistent_cache_and_stops_on_ctrl_c() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200).body(FEED);
+    });
+    let repo = TestRepo::new();
+    repo.write_config(&server.url("/feed.xml"), "");
+    let cache = tempfile::tempdir().unwrap();
+
+    let run = |port: u16| {
+        let mut command = repo.aggr();
+        command
+            .env("AGGR_CACHE_DIR", cache.path())
+            .args(["dev", "--port", &port.to_string()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command.spawn().unwrap()
+    };
+
+    let available = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = available.local_addr().unwrap().port();
+    drop(available);
+    let first = run(port);
+    wait_for_dev(port, Duration::from_secs(10));
+    wait_for_cached_site(cache.path(), Duration::from_secs(20));
+    let first = stop_dev(first);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let second = run(port);
+    wait_for_dev(port, Duration::from_secs(10));
+    let second = stop_dev(second);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&second.stdout)
+            .contains("restored the previous dev build from cache")
+    );
+
+    assert!(!repo.clone.join(".aggr").exists());
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&repo.clone)
+        .output()
+        .unwrap();
+    assert!(
+        status.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
 }
 
 #[test]
@@ -298,6 +408,7 @@ fn sync_bootstraps_appends_and_leaves_no_trace_when_nothing_changed() {
     std::fs::remove_file(doomed.with_extension("html")).unwrap();
     git(&repo.data_dir(), &["commit", "-qam", "delete third"]);
     git(&repo.data_dir(), &["push", "-q", "origin", "aggr"]);
+    let deleted_tip = repo.origin_rev("refs/heads/aggr").unwrap();
     // A different body (so the hash guard does not short-circuit) listing the same entries.
     third.delete();
     server.mock(|when, then| {
@@ -310,7 +421,13 @@ fn sync_bootstraps_appends_and_leaves_no_trace_when_nothing_changed() {
         .arg("sync")
         .assert()
         .success()
-        .stdout(predicate::str::contains("demo: +0"));
+        .stdout(predicate::str::contains("demo: unchanged"))
+        .stdout(predicate::str::contains("nothing new"));
+    assert_eq!(
+        repo.origin_rev("refs/heads/aggr").as_deref(),
+        Some(deleted_tip.as_str()),
+        "validator changes alone must leave no commit"
+    );
     assert!(
         !repo
             .origin_files("aggr")
@@ -382,12 +499,12 @@ fn build_renders_the_site_and_release_needs_a_url() {
     });
     let repo = TestRepo::new();
     repo.write_config(&server.url("/feed.xml"), "");
-    repo.aggr().arg("sync").assert().success();
 
     repo.aggr()
         .arg("build")
         .assert()
         .success()
+        .stdout(predicate::str::contains("demo: +2"))
         .stdout(predicate::str::contains("2 item(s)"));
     let site = repo.clone.join("_site");
     let index = std::fs::read_to_string(site.join("index.html")).unwrap();
@@ -479,6 +596,14 @@ fn build_renders_the_site_and_release_needs_a_url() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&status.stdout).trim(), "");
 
+    // Build owns its required sync, and an unchanged second run reuses rendered output.
+    repo.aggr()
+        .arg("build")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo: unchanged"))
+        .stdout(predicate::str::contains("from cache"));
+
     repo.aggr()
         .args(["build", "--release"])
         .assert()
@@ -545,7 +670,7 @@ fn check_and_digest_dry_run() {
         .assert()
         .success()
         .stdout(predicate::str::contains("ok     demo"))
-        .stdout(predicate::str::contains("2 entries"));
+        .stdout(predicate::str::contains("2 item(s)"));
 
     repo.aggr().arg("sync").assert().success();
     repo.aggr()
@@ -606,7 +731,8 @@ fn store_retention_prunes_the_tree_but_keeps_seen_keys() {
         .arg("sync")
         .assert()
         .success()
-        .stdout(predicate::str::contains("demo: +0"));
+        .stdout(predicate::str::contains("demo: unchanged"))
+        .stdout(predicate::str::contains("nothing new"));
 }
 
 const LISTING: &str = r#"<!doctype html><html><head><title>Blog | Scraped</title></head><body><ul>
@@ -615,7 +741,7 @@ const LISTING: &str = r#"<!doctype html><html><head><title>Blog | Scraped</title
 </ul></body></html>"#;
 
 #[test]
-fn included_topic_files_and_html_sources_work_end_to_end() {
+fn included_topic_files_and_automatic_html_fallback_work_end_to_end() {
     let server = MockServer::start();
     server.mock(|when, then| {
         when.method(GET).path("/feed.xml");
@@ -631,9 +757,7 @@ fn included_topic_files_and_html_sources_work_end_to_end() {
     std::fs::write(
         repo.clone.join("aggr-ai.toml"),
         format!(
-            "category = \"ai\"\n[[sources]]\ntype = \"html\"\nname = \"Scraped\"\nurl = \"{}\"\n\
-             items = \"li > a.card\"\ntitle = \"h2\"\nlink = \"@href\"\ndate = \"span.mono\"\n\
-             date_format = \"%m.%d.%y\"\nsummary = \"p\"\n",
+            "category = \"ai\"\n[[sources]]\nname = \"Scraped\"\nurl = \"{}\"\n",
             server.url("/blog")
         ),
     )
@@ -649,10 +773,8 @@ fn included_topic_files_and_html_sources_work_end_to_end() {
         .assert()
         .success()
         .stdout(predicate::str::contains("ok     demo"))
-        .stdout(predicate::str::contains("ok     scraped  html"))
-        .stdout(predicate::str::contains(
-            "2 item(s), 2 dated  \"Blog | Scraped\"",
-        ));
+        .stdout(predicate::str::contains("ok     scraped  web"))
+        .stdout(predicate::str::contains("2 item(s)  \"Blog | Scraped\""));
 
     repo.aggr()
         .arg("sync")

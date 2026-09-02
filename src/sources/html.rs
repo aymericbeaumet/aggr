@@ -1,184 +1,191 @@
-//! Generic scraper for sites without a feed: one CSS selector picks the item elements, a few
-//! more pick fields inside each. A field is `css`, `css@attr` or `@attr` (the item element's own
-//! attribute); plain `css` reads the element's text.
+//! Automatic discovery from HTML: advertised RSS/Atom/JSON feeds first, then conservative
+//! article-card and JSON-LD extraction for sites that publish no feed at all.
+
+use std::collections::BTreeSet;
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use scraper::{ElementRef, Html, Selector};
+use serde_json::Value;
 use url::Url;
 
-use super::{Context, Fetch, SourceMeta, Validators};
-use crate::config::{HtmlFields, Source};
-use crate::http::{Request, Response};
-use crate::model::{RawItem, sha1_hex};
+use super::SourceMeta;
+use crate::model::{RawItem, normalize_link};
 
-pub async fn fetch(
-    url: &Url,
-    fields: &HtmlFields,
-    source: &Source,
-    ctx: &Context<'_>,
-) -> Result<Fetch> {
-    let previous = Validators::from_state(ctx.state);
-    let response = ctx
-        .client
-        .get(Request {
-            url,
-            headers: &source.headers,
-            etag: previous.etag.as_deref(),
-            last_modified: previous.last_modified.as_deref(),
-        })
-        .await?;
-    let body = match response {
-        Response::NotModified => {
-            return Ok(Fetch::Unchanged {
-                validators: previous,
-            });
-        }
-        Response::Ok(body) => body,
+/// Feed endpoints advertised in metadata or recognizable body links, in document order. The
+/// candidates are still fetched and parsed before aggr trusts them.
+pub fn feed_links(page: &str, page_url: &Url) -> Vec<Url> {
+    let document = Html::parse_document(page);
+    let Ok(links) = Selector::parse("link[href]") else {
+        return Vec::new();
     };
-
-    let validators = Validators {
-        etag: body.etag.clone(),
-        last_modified: body.last_modified.clone(),
-        body_hash: Some(sha1_hex(&body.bytes)),
-    };
-    if validators.body_hash == previous.body_hash {
-        return Ok(Fetch::Unchanged { validators });
-    }
-
-    let (meta, items) = extract(
-        &String::from_utf8_lossy(&body.bytes),
-        &body.final_url,
-        fields,
-    )?;
-    Ok(Fetch::Changed {
-        validators,
-        meta,
-        items,
-    })
-}
-
-/// One field spec, parsed. `css` empty means "the item element itself".
-#[derive(Debug, Clone)]
-pub struct Field {
-    css: Option<Selector>,
-    attr: Option<String>,
-}
-
-impl Field {
-    /// `h2 a@href`, `@href`, `time@datetime`, `p.summary`.
-    pub fn parse(spec: &str) -> Result<Self> {
-        let (css, attr) = match spec.rsplit_once('@') {
-            Some((css, attr)) => (css.trim(), Some(attr.trim())),
-            None => (spec.trim(), None),
+    let base = Selector::parse("base[href]")
+        .ok()
+        .and_then(|selector| document.select(&selector).next())
+        .and_then(|element| page_url.join(element.value().attr("href")?).ok())
+        .unwrap_or_else(|| page_url.clone());
+    let mut seen = BTreeSet::new();
+    let mut feeds = Vec::new();
+    for link in document.select(&links) {
+        let advertised = {
+            let rel = link.value().attr("rel").unwrap_or_default();
+            let media = link
+                .value()
+                .attr("type")
+                .unwrap_or_default()
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            rel.split_ascii_whitespace().any(|part| {
+                part.eq_ignore_ascii_case("alternate") || part.eq_ignore_ascii_case("feed")
+            }) && matches!(
+                media.as_str(),
+                "application/rss+xml"
+                    | "application/atom+xml"
+                    | "application/feed+json"
+                    | "application/json"
+            )
         };
-        if let Some(attr) = attr
-            && attr.is_empty()
+        if advertised
+            && let Some(url) = link
+                .value()
+                .attr("href")
+                .and_then(|href| base.join(href).ok())
+            && matches!(url.scheme(), "http" | "https")
+            && seen.insert(url.as_str().to_string())
         {
-            bail!("{spec:?}: empty attribute name after `@`");
+            feeds.push(url);
         }
-        if css.is_empty() && attr.is_none() {
-            bail!("empty selector");
+    }
+
+    let Ok(anchors) = Selector::parse("a[href]") else {
+        return feeds;
+    };
+    for anchor in document.select(&anchors) {
+        if let Some(url) = anchor
+            .value()
+            .attr("href")
+            .and_then(|href| base.join(href).ok())
+            .filter(feedish)
+            && seen.insert(url.as_str().to_string())
+        {
+            feeds.push(url);
         }
-        let css = (!css.is_empty()).then(|| selector(css)).transpose()?;
-        Ok(Self {
-            css,
-            attr: attr.map(str::to_string),
+    }
+    feeds
+}
+
+fn feedish(url: &Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let last = url
+        .path_segments()
+        .and_then(Iterator::last)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        last.as_str(),
+        "feed"
+            | "rss"
+            | "atom"
+            | "feed.xml"
+            | "rss.xml"
+            | "atom.xml"
+            | "index.xml"
+            | "feed.atom"
+            | "feed.json"
+    ) || last.ends_with(".rss")
+        || last.ends_with(".atom")
+        || url.query_pairs().any(|(key, value)| {
+            matches!(key.as_ref(), "format" | "output")
+                && matches!(value.to_ascii_lowercase().as_str(), "rss" | "atom" | "feed")
         })
-    }
-
-    fn read(&self, item: &ElementRef<'_>) -> Option<String> {
-        let element = match &self.css {
-            Some(css) => item.select(css).next()?,
-            None => *item,
-        };
-        let value = match &self.attr {
-            Some(attr) => element.attr(attr)?.to_string(),
-            None => text(&element),
-        };
-        (!value.is_empty()).then_some(value)
-    }
 }
 
-pub fn selector(css: &str) -> Result<Selector> {
-    Selector::parse(css).map_err(|err| anyhow::anyhow!("invalid selector {css:?}: {err}"))
-}
-
-/// Pure mapping from a listing page to raw items. The page is parsed here and dropped before
-/// returning: scraper's tree is not `Send`, so it must never live across an `await`.
-pub fn extract(
-    page: &str,
-    page_url: &Url,
-    fields: &HtmlFields,
-) -> Result<(SourceMeta, Vec<RawItem>)> {
-    let items = selector(&fields.items)?;
-    let field = |spec: &Option<String>| spec.as_deref().map(Field::parse).transpose();
-    let (title, link, date, summary) = (
-        field(&fields.title)?,
-        field(&fields.link)?,
-        field(&fields.date)?,
-        field(&fields.summary)?,
-    );
-    let (self_href, any_href, time_attr, time_text) = (
-        Field::parse("@href")?,
-        Field::parse("a@href")?,
-        Field::parse("time@datetime")?,
-        Field::parse("time")?,
-    );
-
+/// Extract likely article entries without per-site selectors. False positives are avoided by
+/// requiring a heading-associated link, or a dated link with a title-like child (or structured
+/// Article JSON-LD), and a distinct HTTP URL.
+pub fn extract(page: &str, page_url: &Url) -> Result<(SourceMeta, Vec<RawItem>)> {
     let document = Html::parse_document(page);
     let meta = SourceMeta {
-        title: document
-            .select(&selector("title")?)
-            .next()
-            .map(|element| text(&element))
-            .filter(|title| !title.is_empty()),
+        title: select_text(&document, "title"),
         site_url: Some(page_url.origin().ascii_serialization() + "/"),
     };
+    let mut items = json_ld_items(&document, page_url);
+    items.extend(card_items(&document, page_url)?);
 
-    let elements: Vec<ElementRef<'_>> = document.select(&items).collect();
-    if elements.is_empty() {
-        bail!("`items` selector {:?} matched nothing", fields.items);
+    let mut seen = BTreeSet::new();
+    items.retain(|item| seen.insert(normalize_link(&item.link)));
+    if items.is_empty() {
+        bail!("no advertised feed or article entries found at {page_url}");
     }
-    let mut out = Vec::with_capacity(elements.len());
-    for element in &elements {
-        let Some(href) = link
-            .as_ref()
-            .and_then(|field| field.read(element))
-            .or_else(|| self_href.read(element))
-            .or_else(|| any_href.read(element))
+    Ok((meta, items))
+}
+
+fn card_items(document: &Html, page_url: &Url) -> Result<Vec<RawItem>> {
+    let anchors = selector("a[href]")?;
+    let headings = selector("h1,h2,h3,h4,h5,h6")?;
+    let classed = selector("[class]")?;
+    let times = selector("time")?;
+    let paragraphs = selector("p")?;
+    let mut out = Vec::new();
+    for anchor in document.select(&anchors) {
+        let nested_heading = anchor.select(&headings).next();
+        let parent_heading = anchor.parent().and_then(ElementRef::wrap).filter(|parent| {
+            matches!(
+                parent.value().name(),
+                "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+            )
+        });
+        let titled_child = anchor.select(&classed).find(|element| {
+            element
+                .value()
+                .attr("class")
+                .is_some_and(|classes| classes.to_ascii_lowercase().contains("title"))
+        });
+        let title_element = nested_heading
+            .or(parent_heading)
+            .or_else(|| anchor.select(&times).next().and(titled_child));
+        let Some(title_element) = title_element else {
+            continue;
+        };
+        let title = text(&title_element);
+        if title.len() < 3 {
+            continue;
+        }
+        let Some(link) = article_url(page_url, anchor.value().attr("href").unwrap_or_default())
         else {
             continue;
         };
-        let Ok(link) = page_url.join(href.trim()) else {
-            continue;
-        };
-        if !matches!(link.scheme(), "http" | "https") {
+        if normalize_link(link.as_str()) == normalize_link(page_url.as_str()) {
             continue;
         }
-        let link = link.to_string();
-        let title = title
-            .as_ref()
-            .and_then(|field| field.read(element))
-            .unwrap_or_else(|| text(element))
-            .trim()
-            .to_string();
-        let title = if title.is_empty() {
-            super::feed::untitled(&link)
-        } else {
-            title
-        };
-        let published = date
-            .as_ref()
-            .and_then(|field| field.read(element))
-            .or_else(|| time_attr.read(element))
-            .or_else(|| time_text.read(element))
-            .and_then(|raw| parse_date(&raw, fields.date_format.as_deref()));
-        let summary = summary.as_ref().and_then(|field| field.read(element));
+        let block = anchor
+            .ancestors()
+            .skip(1)
+            .filter_map(ElementRef::wrap)
+            .find(|element| matches!(element.value().name(), "article" | "li"))
+            .unwrap_or(anchor);
+        let published = block
+            .select(&times)
+            .find_map(|time| {
+                time.value()
+                    .attr("datetime")
+                    .and_then(|date| parse_date(date, None))
+                    .or_else(|| parse_date(&text(&time), None))
+            })
+            .or_else(|| find_date(&text(&block)));
+        let summary = block
+            .select(&paragraphs)
+            .map(|paragraph| text(&paragraph))
+            .find(|summary| !summary.is_empty());
         out.push(RawItem {
-            id: None,
+            id: Some(link.to_string()),
             title,
-            link,
+            link: link.to_string(),
             published,
             updated: None,
             authors: vec![],
@@ -188,10 +195,111 @@ pub fn extract(
             extra: Default::default(),
         });
     }
-    Ok((meta, out))
+    Ok(out)
 }
 
-/// Text of an element with whitespace collapsed, the way a browser would show it.
+fn json_ld_items(document: &Html, page_url: &Url) -> Vec<RawItem> {
+    let Ok(scripts) = Selector::parse("script[type='application/ld+json']") else {
+        return Vec::new();
+    };
+    let mut values = Vec::new();
+    for script in document.select(&scripts) {
+        let body = script.text().collect::<String>();
+        if let Ok(value) = serde_json::from_str::<Value>(&body) {
+            collect_articles(&value, page_url, &mut values);
+        }
+    }
+    values
+}
+
+fn collect_articles(value: &Value, page_url: &Url, out: &mut Vec<RawItem>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_articles(value, page_url, out);
+            }
+        }
+        Value::Object(object) => {
+            if article_type(object.get("@type")) {
+                let title = string(object.get("headline"))
+                    .or_else(|| string(object.get("name")))
+                    .unwrap_or_default();
+                let href = string(object.get("url"))
+                    .or_else(|| entity_url(object.get("mainEntityOfPage")));
+                if !title.is_empty()
+                    && let Some(link) = href.and_then(|href| article_url(page_url, href))
+                {
+                    let published =
+                        string(object.get("datePublished")).and_then(|date| parse_date(date, None));
+                    let updated =
+                        string(object.get("dateModified")).and_then(|date| parse_date(date, None));
+                    let summary = string(object.get("description")).map(str::to_string);
+                    out.push(RawItem {
+                        id: Some(link.to_string()),
+                        title: title.to_string(),
+                        link: link.to_string(),
+                        published,
+                        updated,
+                        authors: vec![],
+                        labels: vec![],
+                        summary,
+                        content_html: None,
+                        extra: Default::default(),
+                    });
+                }
+            }
+            for nested in object.values() {
+                if nested.is_array() || nested.is_object() {
+                    collect_articles(nested, page_url, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn article_type(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::String(kind)) => {
+            matches!(kind.as_str(), "Article" | "BlogPosting" | "NewsArticle")
+        }
+        Some(Value::Array(kinds)) => kinds.iter().any(|kind| article_type(Some(kind))),
+        _ => false,
+    }
+}
+
+fn entity_url(value: Option<&Value>) -> Option<&str> {
+    match value? {
+        Value::String(value) => Some(value),
+        Value::Object(value) => string(value.get("@id")).or_else(|| string(value.get("url"))),
+        _ => None,
+    }
+}
+
+fn string(value: Option<&Value>) -> Option<&str> {
+    value?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn article_url(base: &Url, href: &str) -> Option<Url> {
+    let url = base.join(href.trim()).ok()?;
+    matches!(url.scheme(), "http" | "https").then_some(url)
+}
+
+fn select_text(document: &Html, css: &str) -> Option<String> {
+    document
+        .select(&Selector::parse(css).ok()?)
+        .next()
+        .map(|element| text(&element))
+        .filter(|value| !value.is_empty())
+}
+
+fn selector(css: &str) -> Result<Selector> {
+    Selector::parse(css).map_err(|err| anyhow::anyhow!("invalid selector {css:?}: {err}"))
+}
+
 fn text(element: &ElementRef<'_>) -> String {
     element
         .text()
@@ -200,8 +308,19 @@ fn text(element: &ElementRef<'_>) -> String {
         .join(" ")
 }
 
-/// With `format`, chrono's syntax decides; without it, only unambiguous shapes are accepted
-/// (`06.23.25` could be June 23 or 6 Nov, so it needs `date_format = "%m.%d.%y"`).
+fn find_date(text: &str) -> Option<DateTime<Utc>> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    for start in 0..words.len() {
+        for length in 1..=4.min(words.len() - start) {
+            let candidate = words[start..start + length].join(" ");
+            if let Some(date) = parse_date(candidate.trim_matches(['(', ')', '·', '|']), None) {
+                return Some(date);
+            }
+        }
+    }
+    None
+}
+
 pub fn parse_date(raw: &str, format: Option<&str>) -> Option<DateTime<Utc>> {
     let raw = raw.trim();
     let formats: Vec<&str> = match format {
@@ -219,6 +338,7 @@ pub fn parse_date(raw: &str, format: Option<&str>) -> Option<DateTime<Utc>> {
                 "%Y-%m-%d %H:%M",
                 "%Y-%m-%d",
                 "%Y/%m/%d",
+                "%m.%d.%y",
                 "%B %d, %Y",
                 "%b %d, %Y",
                 "%d %B %Y",
@@ -250,108 +370,64 @@ pub fn parse_date(raw: &str, format: Option<&str>) -> Option<DateTime<Utc>> {
 mod tests {
     use super::*;
 
-    const PAGE: &str = r#"<!doctype html><html><head><title>Blog | Example</title></head><body>
-<ul>
-  <li><a class="card" href="/blog/newest"><h2>Newest &amp; best</h2><span>06.23.25</span><p>A summary</p></a></li>
-  <li><a class="card" href="https://other.example/x"><h2>Absolute</h2><span>05.22.25</span></a></li>
-  <li><a class="card" href="javascript:void(0)"><h2>Skipped</h2></a></li>
-  <li><a class="card" href="/blog/untitled"><span>garbage</span></a></li>
-</ul>
-<article><h3><a href="/posts/1">Article</a></h3><time datetime="2026-09-01T10:00:00Z">Sep 1</time></article>
+    const PAGE: &str = r#"<!doctype html><html><head><title>News</title>
+<link rel="alternate" type="application/atom+xml" href="/atom.xml"></head><body>
+<ul><li><a href="/news/one"><h2>First article</h2><span>08.23.26</span><p>Summary</p></a></li></ul>
+<article><h3><a href="/news/two">Second article</a></h3><time datetime="2026-08-22T12:00:00Z">today</time></article>
+<ul><li><a href="/news/three"><time>Aug 21, 2026</time><span class="card-title">Third article</span></a></li></ul>
 </body></html>"#;
 
-    fn fields(items: &str) -> HtmlFields {
-        HtmlFields {
-            items: items.into(),
-            title: None,
-            link: None,
-            date: None,
-            date_format: None,
-            summary: None,
-        }
-    }
-
     #[test]
-    fn extracts_with_explicit_fields() {
-        let url = Url::parse("https://example.com/blog").unwrap();
-        let fields = HtmlFields {
-            title: Some("h2".into()),
-            link: Some("@href".into()),
-            date: Some("span".into()),
-            date_format: Some("%m.%d.%y".into()),
-            summary: Some("p".into()),
-            ..fields("li > a.card")
-        };
-        let (meta, items) = extract(PAGE, &url, &fields).unwrap();
-        assert_eq!(meta.title.as_deref(), Some("Blog | Example"));
-        assert_eq!(meta.site_url.as_deref(), Some("https://example.com/"));
-        assert_eq!(items.len(), 3, "javascript: link dropped");
-
-        assert_eq!(items[0].title, "Newest & best");
-        assert_eq!(items[0].link, "https://example.com/blog/newest");
+    fn discovers_advertised_feeds() {
+        let base = Url::parse("https://example.com/news/").unwrap();
         assert_eq!(
-            items[0].published.unwrap().to_rfc3339(),
-            "2025-06-23T00:00:00+00:00"
+            feed_links(PAGE, &base),
+            [Url::parse("https://example.com/atom.xml").unwrap()]
         );
-        assert_eq!(items[0].summary.as_deref(), Some("A summary"));
-        assert_eq!(items[1].link, "https://other.example/x");
-        assert_eq!(items[1].summary, None);
-        assert_eq!(items[2].title, "garbage", "no h2: the element's text");
-        assert_eq!(items[2].published, None, "garbage date is ignored");
     }
 
     #[test]
-    fn defaults_find_links_and_time_elements() {
-        let url = Url::parse("https://example.com/").unwrap();
-        let (_, items) = extract(PAGE, &url, &fields("article")).unwrap();
+    fn discovers_body_feed_links_and_honours_html_base() {
+        let page = r#"<base href="https://cdn.example/blog/"><a href="feed.atom">Atom</a><a href="sitemap.xml">Map</a>"#;
+        let base = Url::parse("https://example.com/news/").unwrap();
+        assert_eq!(
+            feed_links(page, &base),
+            [Url::parse("https://cdn.example/blog/feed.atom").unwrap()]
+        );
+    }
+
+    #[test]
+    fn extracts_heading_cards_without_configuration() {
+        let base = Url::parse("https://example.com/news/").unwrap();
+        let (meta, items) = extract(PAGE, &base).unwrap();
+        assert_eq!(meta.title.as_deref(), Some("News"));
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].link, "https://example.com/news/one");
+        assert_eq!(items[0].summary.as_deref(), Some("Summary"));
+        assert_eq!(
+            items[0].published.unwrap().format("%Y-%m-%d").to_string(),
+            "2026-08-23"
+        );
+        assert_eq!(items[1].title, "Second article");
+        assert_eq!(items[2].title, "Third article");
+    }
+
+    #[test]
+    fn extracts_article_json_ld() {
+        let page = r#"<script type="application/ld+json">{"@type":"NewsArticle","headline":"Structured","url":"/story","datePublished":"2026-09-01"}</script>"#;
+        let (_, items) = extract(page, &Url::parse("https://example.com/").unwrap()).unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].title, "Article Sep 1", "whole element text");
-        assert_eq!(items[0].link, "https://example.com/posts/1");
-        assert_eq!(
-            items[0].published.unwrap().to_rfc3339(),
-            "2026-09-01T10:00:00+00:00"
-        );
+        assert_eq!(items[0].title, "Structured");
+        assert_eq!(items[0].link, "https://example.com/story");
     }
 
     #[test]
-    fn rejects_bad_selectors_and_empty_matches() {
-        let url = Url::parse("https://example.com/").unwrap();
-        let err = extract(PAGE, &url, &fields("li >")).unwrap_err();
-        assert!(format!("{err:#}").contains("invalid selector"), "{err:#}");
-        let err = extract(PAGE, &url, &fields("section.none")).unwrap_err();
-        assert!(format!("{err:#}").contains("matched nothing"), "{err:#}");
-        assert!(Field::parse("h2@").is_err());
-        assert!(Field::parse("").is_err());
-        assert!(Field::parse("@href").is_ok());
-    }
-
-    #[test]
-    fn parses_common_dates_without_a_format() {
-        let day = |raw: &str| parse_date(raw, None).map(|d| d.to_rfc3339());
-        assert_eq!(
-            day("2026-09-01T10:00:00+02:00").as_deref(),
-            Some("2026-09-01T08:00:00+00:00")
-        );
-        assert_eq!(
-            day("Tue, 01 Sep 2026 10:00:00 GMT").as_deref(),
-            Some("2026-09-01T10:00:00+00:00")
-        );
-        assert_eq!(
-            day("2026-09-01").as_deref(),
-            Some("2026-09-01T00:00:00+00:00")
-        );
-        assert_eq!(
-            day("September 1, 2026").as_deref(),
-            Some("2026-09-01T00:00:00+00:00")
-        );
-        assert_eq!(
-            day("1 Sep 2026").as_deref(),
-            Some("2026-09-01T00:00:00+00:00")
-        );
-        assert_eq!(day("06.23.25"), None, "ambiguous without a format");
-        assert_eq!(
-            parse_date("06.23.25", Some("%m.%d.%y")).map(|d| d.to_rfc3339()),
-            Some("2025-06-23T00:00:00+00:00".into())
-        );
+    fn empty_pages_are_not_silently_accepted() {
+        let err = extract(
+            "<title>Nothing</title>",
+            &Url::parse("https://example.com/").unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no advertised feed or article"));
     }
 }

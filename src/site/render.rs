@@ -14,6 +14,24 @@ use serde::Serialize;
 #[folder = "themes/default/"]
 struct DefaultTheme;
 
+/// Content hash of the embedded fallback theme. This makes build-cache invalidation exact even
+/// while developing theme changes without bumping the package version.
+pub fn default_theme_hash() -> String {
+    let mut names: Vec<_> = DefaultTheme::iter().map(|name| name.into_owned()).collect();
+    names.sort();
+    let mut bytes = Vec::new();
+    for name in names {
+        let Some(file) = DefaultTheme::get(&name) else {
+            continue;
+        };
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(file.data.as_ref());
+        bytes.push(0xff);
+    }
+    crate::model::sha1_hex(&bytes)
+}
+
 /// Directories consulted before the embedded theme, most specific first. Each may contain
 /// `templates/` and `static/`.
 #[derive(Debug, Clone, Default)]

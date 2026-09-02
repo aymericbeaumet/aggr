@@ -17,7 +17,7 @@
       {% if item.updated and item.updated != item.published %}<span>· updated <time datetime="{{ item.updated }}" title="{{ item.updated }}">{{ item.updated | date }}</time></span>{% endif %}
       <span>· seen <time datetime="{{ item.first_seen }}" title="{{ item.first_seen }}">{{ item.first_seen | date }}</time></span>
       {% if item.authors %}<span>· {{ item.authors | join(', ') }}</span>{% endif %}
-      {% if item.category %}<span>· {{ item.category }}</span>{% endif %}
+      {% if item.category %}<span>· <a href="{{ ('categories/' ~ (item.category | slug) ~ '/') | url_for }}">{{ item.category }}</a></span>{% endif %}
       {% for label in item.labels %}<a class="tag" href="{{ ('tags/' ~ (label | slug) ~ '/') | url_for }}">{{ label }}</a>{% endfor %}
       <span>· <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer">original</a></span>
       {% for discussion in item.discussions %}<span>· <a href="{{ discussion.url }}" target="_blank" rel="noopener noreferrer">{{ discussion.name }}</a></span>{% endfor %}

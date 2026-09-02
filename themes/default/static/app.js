@@ -5,6 +5,7 @@
   var BASE = (window.AGGR && window.AGGR.base) || (script && script.getAttribute("src").slice(0, -"assets/app.js".length)) || "./";
   var KIND = (window.AGGR && window.AGGR.kind) || document.body.getAttribute("data-kind") || "";
   var PWA = window.AGGR ? window.AGGR.pwa !== false : true;
+  var darkPreference = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)");
 
   function $(selector, root) { return (root || document).querySelector(selector); }
   function $$(selector, root) { return Array.prototype.slice.call((root || document).querySelectorAll(selector)); }
@@ -33,11 +34,45 @@
     if (months < 18) return months + "mo ago";
     return Math.round(days / 365) + "y ago";
   }
-  function relativeTimes(root) {
+  function dateFormat() {
+    var stored;
+    try { stored = localStorage.getItem("aggr:date-format"); } catch (error) { /* private mode */ }
+    return /^(relative|iso|local|local-time)$/.test(stored || "") ? stored : "relative";
+  }
+  function dateText(iso, format) {
+    var timestamp = Date.parse(iso);
+    if (isNaN(timestamp)) return null;
+    var date = new Date(timestamp);
+    if (format === "iso") return date.toISOString().slice(0, 10);
+    if (format === "local") return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date);
+    if (format === "local-time") return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
+    return ago(iso);
+  }
+  function formatTimes(root) {
+    var format = dateFormat();
     $$("time[datetime]", root).forEach(function (time) {
       var exact = time.getAttribute("datetime");
-      var text = ago(exact);
+      var text = dateText(exact, format);
       if (text) { time.title = exact; time.textContent = text; }
+    });
+  }
+  function setDateFormat(format) {
+    var value = /^(relative|iso|local|local-time)$/.test(format || "") ? format : "relative";
+    try { localStorage.setItem("aggr:date-format", value); } catch (error) { /* private mode */ }
+    var picker = $("#date-format");
+    if (picker) picker.value = value;
+    formatTimes($("#swup") || document);
+  }
+
+  function externalLinks(root) {
+    $$('a[href]', root).forEach(function (link) {
+      try {
+        var url = new URL(link.getAttribute('href'), document.baseURI);
+        if (/^https?:$/.test(url.protocol) && url.origin !== location.origin) {
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+        }
+      } catch (error) { /* an incomplete local link */ }
     });
   }
 
@@ -46,6 +81,9 @@
     try { localStorage.setItem("aggr:theme", mode); } catch (error) { /* private mode */ }
     var picker = $("#theme-mode");
     if (picker) picker.value = mode;
+    var dark = mode === "dark" || (mode === "auto" && darkPreference && darkPreference.matches);
+    var meta = $("#theme-color");
+    if (meta) meta.setAttribute("content", dark ? "#180f0e" : "#2b1a17");
   }
   function themeMode() {
     var stored;
@@ -75,10 +113,12 @@
     var encoded = btoa(unescape(encodeURIComponent(JSON.stringify(state)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     var url = new URL(location.href);
     url.searchParams.set("aggr-state", encoded);
+    var status = $("#copy-state-status");
     navigator.clipboard.writeText(url.toString()).then(function () {
-      var label = copy.textContent;
-      copy.textContent = "copied";
-      setTimeout(function () { copy.textContent = label; }, 1200);
+      if (status) status.textContent = "copied";
+      setTimeout(function () { if (status) status.textContent = ""; }, 1600);
+    }).catch(function () {
+      if (status) status.textContent = "could not access the clipboard";
     });
   }
 
@@ -118,16 +158,23 @@
     var list = $("#list");
     var input = $("#q");
     if (!list || !input) return;
+    var form = $("#search-form");
     var category = $("#category-filter");
     var tag = $("#tag-filter");
     var sort = $("#search-sort");
+    var count = $("#count");
+    var empty = $("#empty");
     var generation = 0;
-    function show(rows) {
+    function show(rows, searched) {
       list.textContent = "";
       rows.forEach(function (entry, i) { list.appendChild(renderResult(entry, i + 1)); });
-      $("#empty").hidden = rows.length > 0;
-      $("#count").textContent = rows.length ? rows.length + (rows.length === 100 ? "+" : "") : "";
-      relativeTimes(list);
+      list.setAttribute("aria-busy", "false");
+      empty.hidden = rows.length > 0;
+      empty.textContent = searched ? "No matching items." : "Type to search the most recent items.";
+      var label = rows.length === 100 ? "100 or more results" : rows.length + (rows.length === 1 ? " result" : " results");
+      count.textContent = rows.length === 100 ? "100+" : String(rows.length);
+      count.setAttribute("aria-label", label);
+      formatTimes(list);
     }
     async function render() {
       var current = ++generation;
@@ -135,17 +182,27 @@
       var filters = {};
       if (category.value) filters.category = category.value;
       if (tag.value) filters.tag = tag.value;
-      if (!query && !Object.keys(filters).length) { show([]); return; }
-      var api = await loadPagefind();
-      var options = { filters: filters };
-      if (sort.value === "newest") options.sort = { date: "desc" };
-      var found = await api.search(query || null, options);
-      var rows = await Promise.all(found.results.slice(0, 100).map(function (result) { return result.data(); }));
-      if (current === generation) show(rows);
+      var searched = !!query || !!Object.keys(filters).length;
+      if (!searched) { show([], false); return; }
+      list.setAttribute("aria-busy", "true");
+      try {
+        var api = await loadPagefind();
+        var options = { filters: filters };
+        if (sort.value === "newest") options.sort = { date: "desc" };
+        var found = await api.search(query || null, options);
+        var rows = await Promise.all(found.results.slice(0, 100).map(function (result) { return result.data(); }));
+        if (current === generation) show(rows, true);
+      } catch (error) {
+        if (current === generation) {
+          show([], true);
+          empty.textContent = "Search is unavailable right now.";
+        }
+      }
     }
     function addOptions(select, values) {
       Object.keys(values || {}).sort().forEach(function (value) {
-        select.appendChild(el("option", { value: value, text: value + " (" + values[value] + ")" }));
+        var total = Number(values[value]) || 0;
+        if (total > 0) select.appendChild(el("option", { value: value, text: value + " (" + total + ")" }));
       });
     }
     loadPagefind().then(function (api) { return api.filters(); }).then(function (filters) {
@@ -156,6 +213,7 @@
     category.addEventListener("change", render);
     tag.addEventListener("change", render);
     sort.addEventListener("change", render);
+    if (form) form.addEventListener("submit", function (event) { event.preventDefault(); render(); });
   }
 
   var selected = -1;
@@ -173,7 +231,10 @@
     if (event.key === "j") select(selected + 1);
     else if (event.key === "k") select(selected - 1);
     else if (event.key === "o" && row) window.open(row.dataset.link, "_blank", "noopener");
-    else if (event.key === "Enter" && row) location.href = row.dataset.url;
+    else if (event.key === "Enter" && row) {
+      if (window.swup) window.swup.navigate(row.dataset.url);
+      else location.href = row.dataset.url;
+    }
     else return;
     event.preventDefault();
   });
@@ -198,7 +259,6 @@
     navigator.serviceWorker.register(BASE + "sw.js").catch(function () { /* insecure context */ });
   }
 
-  var copy;
   function bootPage() {
     var page = $("#aggr-page");
     if (page) {
@@ -217,10 +277,13 @@
     }
     var picker = $("#theme-mode");
     if (picker) picker.addEventListener("change", function () { setTheme(picker.value); });
-    copy = $("#copy-state");
+    var datePicker = $("#date-format");
+    if (datePicker) datePicker.addEventListener("change", function () { setDateFormat(datePicker.value); });
+    var copy = $("#copy-state");
     if (copy) copy.addEventListener("click", copyState);
     themeMode();
-    relativeTimes($("#swup") || document);
+    setDateFormat(dateFormat());
+    externalLinks($("#swup") || document);
     fillSearch();
   }
 
@@ -229,7 +292,19 @@
   if (window.Swup) {
     window.swup = new window.Swup({ containers: ["#swup"], cache: true, animationSelector: false });
     window.swup.hooks.on("history:popstate", function () { selected = -1; });
-    window.swup.hooks.on("page:view", bootPage);
+    window.swup.hooks.on("page:view", function () {
+      selected = -1;
+      bootPage();
+      var main = $("#swup");
+      if (main) main.focus({ preventScroll: true });
+    });
+  }
+  if (darkPreference) {
+    var syncAutoTheme = function () {
+      if (document.documentElement.dataset.theme === "auto") setTheme("auto");
+    };
+    if (darkPreference.addEventListener) darkPreference.addEventListener("change", syncAutoTheme);
+    else if (darkPreference.addListener) darkPreference.addListener(syncAutoTheme);
   }
   serviceWorker();
 })();

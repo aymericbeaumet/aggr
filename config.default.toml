@@ -14,8 +14,6 @@ title = "aggr"
 description = ""
 # "default", or a directory relative to the repository (e.g. "themes/mine").
 theme = "default"
-# IANA name, used for the digest schedule and date display.
-timezone = "UTC"
 items_per_page = 60
 # Items rendered in full; older ones become redirect stubs to their GitHub permalink.
 max_items = 5000
@@ -65,6 +63,9 @@ html_max_bytes = 262144
 concurrency = 16
 # Concurrent original-page downloads within each source in `heavy` mode.
 article_concurrency = 4
+# Only consider this many newest entries from one source per run. This bounds first imports from
+# unusually deep feeds; everything discovered from then on remains additive.
+max_items_per_source = 100
 timeout_secs = 20
 # `{version}` expands to the aggr version.
 user_agent = "aggr/{version} (+https://github.com/aymericbeaumet/aggr)"
@@ -74,9 +75,10 @@ retries = 2
 content = "heavy"
 
 # Daily digest posted as a GitHub issue (GitHub emails the assignees). Remove the section to
-# disable. The first workflow run after `at` (in `site.timezone`) posts the day's issue.
+# disable. The first workflow run after `at` in this timezone posts the day's issue.
 [digest]
 at = "08:00"
+timezone = "UTC"
 # Placeholders: {number} {date} {count} {title}
 title = "Digest #{number} · {date} · {count} new"
 label = "digest"
@@ -86,10 +88,10 @@ close_previous = true
 skip_empty = true
 max_items = 200
 
-# One table per source. Only `url` is required; `type` defaults to "feed".
+# One table per source. Only `url` is required: aggr discovers RSS, Atom or JSON Feed from a
+# normal website URL and conservatively discovers article cards when a site has no feed.
 # [[sources]]
-# type = "feed"
-# url = "https://blog.rust-lang.org/feed.xml"
+# url = "https://blog.rust-lang.org"
 # name = "Rust Blog"          # display name; the feed title when unset
 # slug = "rust-blog"          # directory under items/; derived from name or url when unset
 # category = "rust"
@@ -97,20 +99,6 @@ max_items = 200
 # labels = ["programming", "rust"]
 # headers = { Authorization = "Bearer ${TOKEN}" }
 # html = true
-
-# A site without a feed: CSS selectors pick the entries on a listing page. A field is `css`
-# (text of the first match), `css@attr` (an attribute) or `@attr` (the entry element's own
-# attribute). Defaults: `link` = the entry's `href` or its first `a`, `date` = `time@datetime`,
-# `title` = the entry's text. Relative links resolve against the page.
-# [[sources]]
-# type = "html"
-# url = "https://cognition.com/blog"
-# items = "li > a[href^='/blog/']"
-# title = "h2"
-# link = "@href"
-# date = "span"
-# date_format = "%m.%d.%y"      # chrono syntax; needed when the date is ambiguous (06.23.25)
-# summary = "p"
 
 # Another aggr repository: its data branch is mirrored and its items flow into this site.
 # [[sources]]

@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <base id="aggr-base" href="{{ page.root }}">
-<title>{% block title %}{{ page.title }} · {{ site.title }}{% endblock %}</title>
+<title>{% block title %}{{ site.title if page.kind == 'river' else page.title ~ ' · ' ~ site.title }}{% endblock %}</title>
 {% if site.description %}<meta name="description" content="{{ site.description }}">{% endif %}
-<meta name="theme-color" content="#2b1a17">
-<script>try{document.documentElement.dataset.theme=localStorage.getItem('aggr:theme')||'auto'}catch(e){}</script>
+<meta id="theme-color" name="theme-color" content="#2b1a17">
+<script>try{var t=localStorage.getItem('aggr:theme')||'auto';document.documentElement.dataset.theme=/^(auto|light|dark)$/.test(t)?t:'auto'}catch(e){document.documentElement.dataset.theme='auto'}</script>
 <link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
 {% set feed_path = page.path if page.kind in ['categories', 'category', 'tags', 'tag'] else '' %}
 <link rel="alternate" type="application/atom+xml" title="{{ page.title }}" href="{{ (feed_path ~ 'atom.xml') | url_for }}">
@@ -23,23 +23,26 @@
 {% block head %}{% endblock %}
 </head>
 <body data-kind="{{ page.kind }}">
+<a class="skip-link" href="#swup">skip to content</a>
 <header class="top">
-  <nav class="nav">
-    <a class="brand" data-route="" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/logo.png' | url_for }}" alt="">{{ site.title }}</a>
-    <a data-route="search/" data-kinds="search" href="{{ 'search/' | url_for }}"{% if page.kind == 'search' %} aria-current="page"{% endif %}>search</a>
-    <span class="nav-sep" aria-hidden="true">|</span>
-    <a data-route="categories/" data-kinds="categories category" href="{{ 'categories/' | url_for }}"{% if page.kind in ['categories', 'category'] %} aria-current="page"{% endif %}>categories</a>
-    <span class="nav-sep" aria-hidden="true">|</span>
-    <a data-route="tags/" data-kinds="tags tag" href="{{ 'tags/' | url_for }}"{% if page.kind in ['tags', 'tag'] %} aria-current="page"{% endif %}>tags</a>
-    <span class="nav-sep" aria-hidden="true">|</span>
-    <a data-route="sources/" data-kinds="sources source" href="{{ 'sources/' | url_for }}"{% if page.kind in ['sources', 'source'] %} aria-current="page"{% endif %}>sources</a>
-    <span class="nav-sep" aria-hidden="true">|</span>
-    <a data-route="settings/" data-kinds="settings" href="{{ 'settings/' | url_for }}"{% if page.kind == 'settings' %} aria-current="page"{% endif %}>settings</a>
+  <nav class="nav" aria-label="Primary navigation">
+    <a class="brand" data-route="" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/logo.png' | url_for }}" alt="" width="20" height="20"><span class="brand-title">{{ site.title | lower }}</span></a>
+    <span class="nav-menu">
+      <a class="menu-link" data-route="search/" data-kinds="search" href="{{ 'search/' | url_for }}"{% if page.kind == 'search' %} aria-current="page"{% endif %}><span class="menu-label">search</span></a>
+      <span class="nav-sep" aria-hidden="true">|</span>
+      <a class="menu-link" data-route="categories/" data-kinds="categories category" href="{{ 'categories/' | url_for }}"{% if page.kind in ['categories', 'category'] %} aria-current="page"{% endif %}><span class="menu-label">categories</span></a>
+      <span class="nav-sep" aria-hidden="true">|</span>
+      <a class="menu-link" data-route="tags/" data-kinds="tags tag" href="{{ 'tags/' | url_for }}"{% if page.kind in ['tags', 'tag'] %} aria-current="page"{% endif %}><span class="menu-label">tags</span></a>
+      <span class="nav-sep" aria-hidden="true">|</span>
+      <a class="menu-link" data-route="sources/" data-kinds="sources source" href="{{ 'sources/' | url_for }}"{% if page.kind in ['sources', 'source'] %} aria-current="page"{% endif %}><span class="menu-label">sources</span></a>
+      <span class="nav-sep" aria-hidden="true">|</span>
+      <a class="menu-link" data-route="settings/" data-kinds="settings" href="{{ 'settings/' | url_for }}"{% if page.kind == 'settings' %} aria-current="page"{% endif %}><span class="menu-label">settings</span></a>
+    </span>
     <span class="nav-spacer"></span>
-    <a{% if not site.config_url %} data-route="aggr.toml"{% endif %} href="{{ site.config_url or ('aggr.toml' | url_for) }}" target="_blank" rel="noopener noreferrer">aggr.toml ↗</a>
+    <a class="config-link"{% if not site.config_url %} data-route="aggr.toml"{% endif %} href="{{ site.config_url or ('aggr.toml' | url_for) }}" target="_blank" rel="noopener noreferrer">aggr.toml ↗</a>
   </nav>
 </header>
-<main id="swup" class="main">
+<main id="swup" class="main" tabindex="-1">
 <span id="aggr-page" data-root="{{ page.root }}" data-kind="{{ page.kind }}" hidden></span>
 {% block content %}{% endblock %}
 </main>

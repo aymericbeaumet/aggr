@@ -32,7 +32,7 @@ pub async fn run(project: &Project, args: &DigestArgs) -> Result<()> {
         bail!("the data branch has no commits yet; run `aggr sync` first");
     };
     let now = Utc::now();
-    let tz = project.config.site.timezone;
+    let tz = config.timezone;
 
     let posted: BTreeMap<NaiveDate, String> = worktree
         .list_refs(&format!("{}*", digest::REF_PREFIX))?

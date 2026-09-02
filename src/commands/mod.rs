@@ -79,11 +79,18 @@ impl Project {
         Ok(worktree)
     }
 
-    /// Scratch space next to the data worktree, never committed anywhere.
-    pub fn cache_dir(&self) -> Result<PathBuf> {
-        let dir = self.repo.root().join(".aggr").join("cache");
+    /// Repository-local cache for build/sync. It is never shared with `aggr dev`.
+    pub fn build_cache_dir(&self) -> Result<PathBuf> {
+        let dir = crate::cache::build(self.repo.root());
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         self.repo.exclude(&dir)?;
+        Ok(dir)
+    }
+
+    /// OS-standard, project-isolated cache for dev. It never touches this repository's worktree.
+    pub fn dev_cache_dir(&self) -> Result<PathBuf> {
+        let dir = crate::cache::dev(&self.config_path)?;
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         Ok(dir)
     }
 
