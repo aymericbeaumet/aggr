@@ -776,8 +776,14 @@ mod tests {
             ],
         );
         assert_eq!(trailers, "0.1.0");
+        // The fallback identity depends on where the test runs: CI is the bot.
         let author = sh(wt.dir(), &["log", "-1", "--format=%an <%ae>"]);
-        assert_eq!(author, "aggr <aggr@localhost>");
+        let expected = if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            format!("{} <{}>", ACTIONS_BOT.0, ACTIONS_BOT.1)
+        } else {
+            format!("{} <{}>", LOCAL_FALLBACK.0, LOCAL_FALLBACK.1)
+        };
+        assert_eq!(author, expected);
     }
 
     #[test]
