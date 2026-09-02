@@ -76,7 +76,7 @@ rust-blog: +3
 hn: +9
 lobsters: error: 503 Service Unavailable
 
-Aggr-Version: 0.1.0
+Aggr-Version: 1.0.0
 Aggr-Config: 4f9c1a2…            # the main commit aggr.toml was read from
 Aggr-Sources: 2 ok, 1 error
 ```
