@@ -2,8 +2,12 @@
 //! real binary. Nothing here touches the network or the user's git configuration.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Stdio;
+#[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use assert_cmd::prelude::*;
