@@ -346,7 +346,8 @@ mod tests {
         assert_eq!(mock.calls_async().await, 1);
     }
 
-    #[tokio::test]
+    // Paused time: the clock only moves when the limiter sleeps, so no runner is too slow.
+    #[tokio::test(start_paused = true)]
     async fn host_limiter_spaces_requests() {
         let limiter = HostLimiter::new(Duration::from_millis(30));
         let url = Url::parse("https://example.com/a").unwrap();

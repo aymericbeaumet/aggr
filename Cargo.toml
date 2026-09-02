@@ -53,6 +53,7 @@ assert_cmd = "2"
 httpmock = "0.8"
 insta = "1"
 predicates = "3"
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.dev]
 opt-level = 0

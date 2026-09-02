@@ -150,7 +150,7 @@ impl Repo {
     /// Append the worktree directory to `.git/info/exclude` so it never shows up in `git status`
     /// on the main checkout, without touching the user's `.gitignore`.
     pub fn exclude(&self, dir: &Path) -> Result<()> {
-        let Ok(rel) = dir.strip_prefix(&self.root) else {
+        let Some(rel) = self.relative(dir) else {
             return Ok(());
         };
         let rel = rel.to_string_lossy().replace('\\', "/");
@@ -179,6 +179,17 @@ impl Repo {
         text.push_str(&pattern);
         text.push('\n');
         fs::write(&exclude, text).with_context(|| format!("writing {}", exclude.display()))
+    }
+
+    /// `dir` relative to the root, or `None` when it lies outside the repository. The root
+    /// comes from `git rev-parse` (`C:/…`, `/private/tmp/…`) while callers hand over paths
+    /// built from `canonicalize()` (`\\?\C:\…`), so the canonical root is tried as well.
+    fn relative(&self, dir: &Path) -> Option<PathBuf> {
+        if let Ok(rel) = dir.strip_prefix(&self.root) {
+            return Some(rel.to_path_buf());
+        }
+        let root = self.root.canonicalize().ok()?;
+        dir.strip_prefix(&root).ok().map(Path::to_path_buf)
     }
 }
 
@@ -743,6 +754,32 @@ mod tests {
         assert_eq!(again.dir(), wt.dir());
         assert_eq!(count(&fs::read_to_string(&exclude).unwrap()), 1);
         assert_eq!(sh(repo.root(), &["status", "--porcelain"]), "");
+    }
+
+    #[test]
+    fn exclude_accepts_canonical_paths_under_a_plain_root() {
+        let (tmp, _) = fixture();
+        // The plain temp path (`/var/folders/…`, `C:\Users\…`) versus its canonical form
+        // (`/private/var/…`, `\\?\C:\…`): the mismatch `Project::load` produces.
+        let repo = Repo {
+            root: tmp.path().join("clone"),
+        };
+        let canonical = repo.root().canonicalize().unwrap();
+        assert!(
+            canonical.join("_site").strip_prefix(repo.root()).is_err() || cfg!(target_os = "linux"),
+            "the fixture should not be canonical already"
+        );
+        repo.exclude(&canonical.join("_site")).unwrap();
+        repo.exclude(Path::new("/elsewhere/_site")).unwrap();
+
+        let exclude = fs::read_to_string(repo.root().join(".git/info/exclude")).unwrap();
+        assert_eq!(
+            exclude
+                .lines()
+                .filter(|l| l.contains("_site"))
+                .collect::<Vec<_>>(),
+            ["/_site/"]
+        );
     }
 
     #[test]
