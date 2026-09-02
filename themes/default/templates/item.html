@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block head %}
+<link rel="canonical" href="{{ item.link }}">
+{% endblock %}
+{% block content %}
+<article class="item" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}">
+  <header class="itemhead">
+    <h1><a href="{{ item.link }}" rel="noopener noreferrer">{{ item.title }}</a></h1>
+    <div class="meta">
+      <a href="{{ ('sources/' ~ item.source ~ '/') | url_for }}">{{ item.source_name }}</a>
+      {% if item.domain %}<span>· {{ item.domain }}</span>{% endif %}
+      {% if item.published %}<span>· published <time datetime="{{ item.published }}">{{ item.published | date('%Y-%m-%d %H:%M') }}</time></span>{% endif %}
+      {% if item.updated and item.updated != item.published %}<span>· updated <time datetime="{{ item.updated }}">{{ item.updated | date }}</time></span>{% endif %}
+      <span>· seen <time datetime="{{ item.first_seen }}">{{ item.first_seen | date }}</time></span>
+      {% if item.authors %}<span>· {{ item.authors | join(', ') }}</span>{% endif %}
+      {% if item.category %}<span>· {{ item.category }}</span>{% endif %}
+      {% for tag in item.tags %}<span class="tag">{{ tag }}</span>{% endfor %}
+      <button class="star" type="button" aria-label="Star" title="Star (s)">☆</button>
+    </div>
+    <nav class="views" aria-label="Views">
+      <span aria-current="page">rendered</span>
+      <a href="{{ (item.url ~ 'index.md') | url_for }}">markdown</a>
+      {% if item.has_html %}<a href="{{ (item.url ~ 'html.html') | url_for }}">html</a>{% endif %}
+      <a href="{{ item.link }}" rel="noopener noreferrer">original ↗</a>
+    </nav>
+  </header>
+  {% if item.content == 'none' and not item.body_html %}
+  <p class="empty">This source publishes titles only — <a href="{{ item.link }}" rel="noopener noreferrer">open the original</a>.</p>
+  {% endif %}
+  <div class="body">{{ item.body_html | safe }}</div>
+  <footer class="permalinks">
+    <span class="sha" title="git hash-object of the Markdown file">blob {{ item.blob_sha[:12] }}</span>
+    {% if item.permalink %}
+    <a href="{{ item.permalink }}">permalink</a>
+    <a href="{{ item.raw_url }}">raw</a>
+    <a href="{{ item.history_url }}">history</a>
+    <a href="{{ item.edit_url }}">edit</a>
+    {% endif %}
+  </footer>
+</article>
+{% endblock %}

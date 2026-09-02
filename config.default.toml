@@ -1,0 +1,103 @@
+# aggr.toml — every option with its default value.
+#
+# Copy this file as `aggr.toml` (`aggr init --defaults` does exactly that), or start from the
+# minimal file `aggr init` writes and only add what you change. Unknown keys are errors.
+# `${VAR}` in `url` and `headers` values expands from the environment (secrets in CI).
+
+# Other files whose [[sources]] are appended to this one, to organise sources by topic.
+# Paths and globs are relative to this file; an included file may set `category` for all of
+# its sources. Example: include = ["aggr-ai.toml", "sources/*.toml"]
+include = []
+
+[site]
+title = "aggr"
+description = ""
+# "default", or a directory relative to the repository (e.g. "themes/mine").
+theme = "default"
+# IANA name, used for the digest schedule and date display.
+timezone = "UTC"
+items_per_page = 60
+# Items rendered in full; older ones become redirect stubs to their GitHub permalink.
+max_items = 5000
+max_age_days = 365
+max_stubs = 20000
+# "owner/repo" for permalinks; auto-detected from $GITHUB_REPOSITORY in Actions.
+# repository = "owner/repo"
+# Public URL used by `aggr build --release` (the workflow passes it automatically for
+# *.github.io). A custom domain here also writes the CNAME file GitHub Pages needs.
+# url = "https://reads.example.com"
+# Output directory of `aggr build`.
+out = "_site"
+# Web app manifest + service worker: the site installs like an app and works offline.
+pwa = true
+# Newest item pages cached ahead of time for offline reading (the river and assets always are).
+offline_items = 100
+
+# Free-form values available to templates as `site.params`.
+[site.params]
+
+[store]
+# Orphan, append-only branch holding every item. Never force-push it.
+branch = "aggr"
+# Worktree of that branch, relative to the repository root (ignored via .git/info/exclude).
+dir = ".aggr/data"
+# Keep the raw .html next to each .md (per-source `html = false` overrides).
+html = true
+html_max_bytes = 262144
+# Optional tree retention; history stays in git either way.
+# max_age_days = 730
+# max_items = 20000
+
+[fetch]
+concurrency = 16
+timeout_secs = 20
+# `{version}` expands to the aggr version.
+user_agent = "aggr/{version} (+https://github.com/aymericbeaumet/aggr)"
+max_body_bytes = 10000000
+retries = 2
+
+# Daily digest posted as a GitHub issue (GitHub emails the assignees). Remove the section to
+# disable. The first workflow run after `at` (in `site.timezone`) posts the day's issue.
+[digest]
+at = "08:00"
+# Placeholders: {number} {date} {count} {title}
+title = "Digest #{number} · {date} · {count} new"
+label = "digest"
+# GitHub logins to assign; defaults to the repository owner.
+assignees = []
+close_previous = true
+skip_empty = true
+max_items = 200
+
+# One table per source. Only `url` is required; `type` defaults to "feed".
+# [[sources]]
+# type = "feed"
+# url = "https://blog.rust-lang.org/feed.xml"
+# name = "Rust Blog"          # display name; the feed title when unset
+# slug = "rust-blog"          # directory under items/; derived from name or url when unset
+# category = "rust"
+# headers = { Authorization = "Bearer ${TOKEN}" }
+# html = true
+
+# A site without a feed: CSS selectors pick the entries on a listing page. A field is `css`
+# (text of the first match), `css@attr` (an attribute) or `@attr` (the entry element's own
+# attribute). Defaults: `link` = the entry's `href` or its first `a`, `date` = `time@datetime`,
+# `title` = the entry's text. Relative links resolve against the page.
+# [[sources]]
+# type = "html"
+# url = "https://cognition.com/blog"
+# items = "li > a[href^='/blog/']"
+# title = "h2"
+# link = "@href"
+# date = "span"
+# date_format = "%m.%d.%y"      # chrono syntax; needed when the date is ambiguous (06.23.25)
+# summary = "p"
+
+# Another aggr repository: its data branch is mirrored and its items flow into this site.
+# [[sources]]
+# type = "aggr"
+# repo = "friend/reads"       # GitHub shorthand, or `url = "https://host/x/reads.git"`
+# branch = "aggr"             # its data branch
+# sources = []                # only these of its source slugs; all when empty
+# limit = 200                 # newest items considered per run
+# category = "friends"

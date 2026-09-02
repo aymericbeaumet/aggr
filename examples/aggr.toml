@@ -1,0 +1,42 @@
+# The configuration behind https://aymericbeaumet.github.io/aggr/ — a realistic starting point.
+# Every option and its default: ../config.default.toml
+
+[site]
+title = "aggr demo"
+description = "A few feeds, rendered by aggr from an append-only git branch."
+timezone = "Europe/Paris"
+# Custom domain: the URL to build for, and the CNAME file GitHub Pages reads.
+# url = "https://reads.example.com"
+
+[digest]
+at = "08:00"
+
+[[sources]]
+url = "https://blog.rust-lang.org/feed.xml"
+name = "Rust Blog"
+category = "rust"
+
+[[sources]]
+url = "https://this-week-in-rust.org/atom.xml"
+name = "This Week in Rust"
+category = "rust"
+
+[[sources]]
+url = "https://hnrss.org/frontpage?points=150"
+name = "Hacker News"
+category = "news"
+
+[[sources]]
+url = "https://lobste.rs/rss"
+name = "Lobsters"
+category = "news"
+
+[[sources]]
+url = "https://github.blog/changelog/feed/"
+name = "GitHub Changelog"
+category = "tools"
+
+[[sources]]
+url = "https://xkcd.com/atom.xml"
+name = "xkcd"
+category = "fun"

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block head %}
+{# The stored HTML is sanitized at build time; this CSP is the second fence. #}
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src * data:; media-src *; style-src 'self'; script-src 'self'; font-src *; base-uri 'none'; form-action 'none'">
+<link rel="canonical" href="{{ item.link }}">
+{% endblock %}
+{% block content %}
+<article class="item" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}">
+  <header class="itemhead">
+    <h1><a href="{{ item.link }}" rel="noopener noreferrer">{{ item.title }}</a></h1>
+    <div class="meta">
+      <a href="{{ ('sources/' ~ item.source ~ '/') | url_for }}">{{ item.source_name }}</a>
+      {% if item.domain %}<span>· {{ item.domain }}</span>{% endif %}
+      <span>· <time datetime="{{ item.date }}">{{ item.date | date }}</time></span>
+    </div>
+    <nav class="views" aria-label="Views">
+      <a href="{{ item.url | url_for }}">rendered</a>
+      <a href="{{ (item.url ~ 'index.md') | url_for }}">markdown</a>
+      <span aria-current="page">html</span>
+      <a href="{{ item.link }}" rel="noopener noreferrer">original ↗</a>
+    </nav>
+  </header>
+  <div class="body html-view">{{ html | safe }}</div>
+</article>
+{% endblock %}

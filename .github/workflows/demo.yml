@@ -1,0 +1,17 @@
+name: demo
+
+# Dogfood: run the reusable workflow on examples/aggr.toml and publish it as this repository's
+# own Pages site. The data branch it appends to is this repository's `aggr` branch.
+
+on:
+  schedule: [{ cron: "0 * * * *" }]
+  push: { branches: [main], paths: [examples/**, themes/**] }
+  workflow_dispatch:
+
+permissions: { contents: write, pages: write, id-token: write, issues: write }
+
+jobs:
+  aggr:
+    uses: ./.github/workflows/aggr.yml
+    with:
+      config: examples/aggr.toml

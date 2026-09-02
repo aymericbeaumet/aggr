@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="listhead">
+  <h1>
+    {% if page.kind == 'source' and source %}
+      {{ source.name }}
+      {% if source.site_url %}<a class="muted" href="{{ source.site_url }}" rel="noopener noreferrer">({{ source.site_url | domain }})</a>{% endif %}
+    {% elif page.kind == 'category' and category %}
+      {{ category.name }}
+    {% else %}
+      {{ page.title }}
+    {% endif %}
+  </h1>
+  <div class="listtools">
+    {% if source and source.error %}
+    <span class="error" title="since {{ source.error.since | date('%Y-%m-%d %H:%M UTC') }}">⚠ {{ source.error.message }}</span>
+    {% endif %}
+    <button type="button" class="linkish" data-action="mark-all-read">mark all read</button>
+    <label class="toggle"><input type="checkbox" data-action="hide-read"> hide read</label>
+  </div>
+</div>
+{% if items %}
+<ol class="rows" start="{{ page.offset + 1 }}">
+  {% for item in items %}
+    {% set rank = loop.index + page.offset %}
+    {% include "_item.html" %}
+  {% endfor %}
+</ol>
+{% else %}
+<p class="empty">Nothing here yet.</p>
+{% endif %}
+{% if page.total > 1 %}
+<nav class="pager">
+  {% if page.prev %}<a href="{{ page.prev | url_for }}">← newer</a>{% else %}<span></span>{% endif %}
+  <span>page {{ page.number }} / {{ page.total }}</span>
+  {% if page.next %}<a href="{{ page.next | url_for }}">older →</a>{% else %}<span></span>{% endif %}
+</nav>
+{% endif %}
+{% endblock %}

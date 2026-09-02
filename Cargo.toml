@@ -1,0 +1,65 @@
+[package]
+name = "aggr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+description = "Git-native feed reader: aggr.toml in, static site out, history on a branch"
+authors = ["Aymeric Beaumet <hi@aymericbeaumet.com>"]
+repository = "https://github.com/aymericbeaumet/aggr"
+readme = "readme.md"
+keywords = ["rss", "atom", "feed", "reader", "static-site"]
+categories = ["command-line-utilities", "web-programming"]
+
+[dependencies]
+ammonia = "4"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = { version = "0.10", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+comrak = { version = "0.54", default-features = false }
+env_logger = "0.11"
+feed-rs = "2"
+glob = "0.3"
+hex = "0.4"
+htmd = "0.5"
+log = "0.4"
+minijinja = { version = "2", features = ["loader", "json"] }
+reqwest = { version = "0.13", default-features = false, features = [
+  "rustls-no-provider",
+  "gzip",
+  "brotli",
+  "json",
+  "charset",
+  "http2",
+] }
+rust-embed = { version = "8", features = ["debug-embed"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+scraper = "0.27"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+sha1 = "0.11"
+slug = "0.1"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+toml = "1"
+url = { version = "2", features = ["serde"] }
+walkdir = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+httpmock = "0.8"
+insta = "1"
+predicates = "3"
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+panic = "abort"
+strip = true

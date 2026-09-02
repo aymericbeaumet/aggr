@@ -1,0 +1,20 @@
+{# One river row. Expects `item` and `rank`. Keep the structure in sync with renderRow() in app.js. #}
+<li class="row" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}">
+  <span class="rank">{{ rank }}.</span>
+  <button class="star" type="button" aria-label="Star" title="Star (s)">☆</button>
+  <div class="cell">
+    <a class="title" href="{{ item.link }}" rel="noopener noreferrer">{{ item.title }}</a>
+    {% if item.domain %}<span class="domain">({{ item.domain }})</span>{% endif %}
+    {% if site.params.excerpts and item.excerpt %}<p class="excerpt">{{ item.excerpt }}</p>{% endif %}
+    <div class="meta">
+      <a href="{{ ('sources/' ~ item.source ~ '/') | url_for }}">{{ item.source_name }}</a>
+      <span>· <time datetime="{{ item.date }}">{{ item.date | date }}</time></span>
+      {% if item.authors %}<span>· {{ item.authors | join(', ') }}</span>{% endif %}
+      {% if item.extra.points is defined %}<span>· {{ item.extra.points }} points</span>{% endif %}
+      {% if item.extra.comments_url is defined %}
+      <span>· <a href="{{ item.extra.comments_url }}">{% if item.extra.num_comments is defined %}{{ item.extra.num_comments }} comments{% else %}comments{% endif %}</a></span>
+      {% endif %}
+      <span>· <a class="read" href="{{ item.url | url_for }}">read</a></span>
+    </div>
+  </div>
+</li>

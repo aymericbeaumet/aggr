@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{# Served by the service worker for any page that is neither online nor cached. app.js fills
+   #list with the item pages the cache does hold. #}
+{% block content %}
+<div class="listhead">
+  <h1>Offline</h1>
+  <div class="listtools"><span id="count" class="muted"></span></div>
+</div>
+<p class="empty">
+  You are offline and this page is not cached. Head back to the <a href="{{ '' | url_for }}">river</a>,
+  or read what is already on this device:
+</p>
+<ol class="rows" id="list" data-shell="offline"></ol>
+<p class="empty" id="empty" hidden>Nothing cached yet — pages you open while online stay readable offline.</p>
+<noscript><p class="empty">This page needs JavaScript to list the cached items.</p></noscript>
+{% endblock %}

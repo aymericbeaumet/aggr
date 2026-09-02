@@ -1,0 +1,23 @@
+{# Rendered to <site>/manifest.webmanifest; colours match style.css. #}
+{
+  "name": {{ site.title | json }},
+  "short_name": {{ site.title | json }},
+  "description": {{ site.description | json }},
+  "id": {{ site.base_path | json }},
+  "start_url": {{ site.base_path | json }},
+  "scope": {{ site.base_path | json }},
+  "display": "standalone",
+  "background_color": "#f4f6f7",
+  "theme_color": "#0f766e",
+  "icons": [
+    { "src": "{{ 'assets/icon-192.png' | url_for }}", "sizes": "192x192", "type": "image/png" },
+    { "src": "{{ 'assets/icon-512.png' | url_for }}", "sizes": "512x512", "type": "image/png" },
+    { "src": "{{ 'assets/icon-maskable-512.png' | url_for }}", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "{{ 'assets/apple-touch-icon.png' | url_for }}", "sizes": "180x180", "type": "image/png" }
+  ],
+  "shortcuts": [
+    { "name": "Unread", "url": "{{ 'unread/' | url_for }}" },
+    { "name": "Starred", "url": "{{ 'starred/' | url_for }}" },
+    { "name": "Search", "url": "{{ 'search/' | url_for }}" }
+  ]
+}

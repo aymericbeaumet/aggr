@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="listhead"><h1>Not found</h1></div>
+<p class="empty">
+  No page here. Items older than the site window live on in git:
+  {% if site.repository %}<a href="https://github.com/{{ site.repository }}/tree/{{ site.data_branch }}/items">browse the <code>{{ site.data_branch }}</code> branch</a>{% else %}see the <code>{{ site.data_branch }}</code> branch{% endif %}
+  or go back to the <a href="{{ '' | url_for }}">river</a>.
+</p>
+{% endblock %}

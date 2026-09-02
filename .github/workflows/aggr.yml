@@ -1,0 +1,99 @@
+name: aggr
+
+# Reusable workflow: the one line a reader repository needs.
+#
+#   jobs:
+#     aggr:
+#       uses: aymericbeaumet/aggr/.github/workflows/aggr.yml@v1
+#
+# Fetches every source, appends new items to the data branch, renders the site, deploys it to
+# GitHub Pages and posts the daily digest issue. The caller must grant
+# `contents: write, pages: write, id-token: write, issues: write`.
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: Path to aggr.toml, relative to the repository root.
+        type: string
+        default: aggr.toml
+      version:
+        description: aggr release to install. Defaults to the one this workflow was tagged with.
+        type: string
+        default: ""
+      pages:
+        description: Deploy the site to GitHub Pages. Off, the site is only kept as a run artifact.
+        type: boolean
+        default: true
+      digest:
+        description: Post the daily digest issue when `[digest]` is configured and one is due.
+        type: boolean
+        default: true
+    outputs:
+      url:
+        description: Where the site was deployed.
+        value: ${{ jobs.aggr.outputs.url }}
+
+jobs:
+  aggr:
+    runs-on: ubuntu-latest
+    # Cron, config pushes and manual runs queue instead of racing on the data branch.
+    concurrency:
+      group: aggr-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+      issues: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    outputs:
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      AGGR_CONFIG: ${{ inputs.config }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aymericbeaumet/aggr@v1
+        with:
+          version: ${{ inputs.version }}
+
+      # Switches Pages to "GitHub Actions" on first run and reports the URL the site will live at
+      # (the custom domain when one is configured in the repository settings).
+      - id: pages
+        if: inputs.pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      # Fetch, commit to the data branch, push. No commit when nothing changed; a failing source
+      # is recorded on the branch and shown on the site, it does not fail the run.
+      - run: aggr sync
+
+      # The Pages URL wins over `[site] url`; without Pages the config must name the host.
+      - run: aggr build --release --out "$GITHUB_WORKSPACE/_site"
+        env:
+          AGGR_BASE_URL: ${{ steps.pages.outputs.base_url }}
+
+      - if: inputs.pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - if: ${{ !inputs.pages }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: _site
+
+      - id: deploy
+        if: inputs.pages
+        uses: actions/deploy-pages@v4
+
+      - if: inputs.digest
+        run: aggr digest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AGGR_BASE_URL: ${{ steps.pages.outputs.base_url }}

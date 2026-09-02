@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{% block title %}{{ page.title }} · {{ site.title }}{% endblock %}</title>
+{% if site.description %}<meta name="description" content="{{ site.description }}">{% endif %}
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#0f766e">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#14b8a6">
+<link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
+<link rel="alternate" type="application/atom+xml" title="{{ site.title }}" href="{{ 'feed.xml' | url_for }}">
+<link rel="icon" type="image/png" sizes="192x192" href="{{ 'assets/icon-192.png' | url_for }}">
+<link rel="apple-touch-icon" href="{{ 'assets/apple-touch-icon.png' | url_for }}">
+{% if site.pwa %}
+<link rel="manifest" href="{{ 'manifest.webmanifest' | url_for }}">
+{% endif %}
+<script>window.AGGR = {base: {{ site.base_path | json }}, kind: {{ page.kind | json }}, pwa: {{ site.pwa | json }}};</script>
+{% block head %}{% endblock %}
+</head>
+<body data-kind="{{ page.kind }}">
+<header class="top">
+  <nav class="nav">
+    <a class="brand" href="{{ '' | url_for }}">{{ site.title }}</a>
+    <a href="{{ '' | url_for }}"{% if page.kind == 'river' %} aria-current="page"{% endif %}>river</a>
+    <a href="{{ 'unread/' | url_for }}"{% if page.kind == 'unread' %} aria-current="page"{% endif %}>unread</a>
+    <a href="{{ 'starred/' | url_for }}"{% if page.kind == 'starred' %} aria-current="page"{% endif %}>starred</a>
+    <a href="{{ 'sources/' | url_for }}"{% if page.kind == 'sources' %} aria-current="page"{% endif %}>sources</a>
+    <a href="{{ 'search/' | url_for }}"{% if page.kind == 'search' %} aria-current="page"{% endif %}>search</a>
+    {% for category in categories %}
+    <a href="{{ category.page | url_for }}"{% if page.kind == 'category' and page.path == category.page %} aria-current="page"{% endif %}>{{ category.name }}</a>
+    {% endfor %}
+  </nav>
+</header>
+<main class="main">
+{% block content %}{% endblock %}
+</main>
+<footer class="foot">
+  {% if site.repository %}<a href="https://github.com/{{ site.repository }}">{{ site.repository }}</a> · {% endif %}
+  config@{{ build.config_sha[:7] if build.config_sha else '—' }} ·
+  data@{% if site.repository and build.data_sha %}<a href="https://github.com/{{ site.repository }}/tree/{{ build.data_sha }}">{{ build.data_sha[:7] }}</a>{% else %}{{ build.data_sha[:7] if build.data_sha else '—' }}{% endif %} ·
+  <a href="https://github.com/aymericbeaumet/aggr">aggr</a> v{{ build.version }} ·
+  built <time datetime="{{ build.time }}">{{ build.time | date('%Y-%m-%d %H:%M UTC') }}</time> ·
+  <a href="{{ 'feed.xml' | url_for }}">feed</a>
+</footer>
+<script src="{{ 'assets/app.js' | url_for }}" defer></script>
+</body>
+</html>

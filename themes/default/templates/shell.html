@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{# Client-side pages: app.js fills #list from search.json + localStorage. #}
+{% block content %}
+<div class="listhead">
+  <h1>{{ page.title }}</h1>
+  <div class="listtools">
+    {% if page.kind == 'search' %}
+    <input id="q" type="search" placeholder="title, source, domain…" autofocus autocomplete="off">
+    {% elif page.kind == 'unread' %}
+    <button type="button" class="linkish" data-action="mark-all-read">mark all read</button>
+    {% endif %}
+    <span id="count" class="muted"></span>
+  </div>
+</div>
+<ol class="rows" id="list" data-shell="{{ page.kind }}"></ol>
+<p class="empty" id="empty" hidden>
+  {% if page.kind == 'search' %}Type to search the {{ 'most recent items' }}.
+  {% elif page.kind == 'unread' %}All caught up.
+  {% else %}Nothing starred yet — press <kbd>s</kbd> on a row or click ☆.{% endif %}
+</p>
+<noscript><p class="empty">This page needs JavaScript; read/star state lives in your browser only.</p></noscript>
+{% endblock %}
