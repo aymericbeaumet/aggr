@@ -59,7 +59,7 @@ impl TestRepo {
 
     fn write_config(&self, feed_url: &str, extra: &str) {
         self.write_raw_config(&format!(
-            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n{extra}\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\n"
+            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n{extra}\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\nlabels = [\"example\", \"news\"]\n"
         ));
     }
 
@@ -396,8 +396,14 @@ fn build_renders_the_site_and_release_needs_a_url() {
         "{index}"
     );
     assert!(index.contains("Hello there"));
-    assert!(index.contains("config@"));
-    assert!(index.contains("data@"));
+    assert!(index.contains(">aggr.toml</a>"));
+    assert!(index.contains("built <time"));
+    assert!(index.contains("id=\"swup\""));
+    assert!(index.contains("assets/swup.js"));
+    assert!(!index.contains("config@"));
+    assert!(!index.contains("data@"));
+    assert!(!index.contains("starred"));
+    assert!(!index.contains("unread"));
     assert!(!index.contains("&#x2f;"));
     let item = site.join("items/demo/2026/09/2026-09-01-hello-there");
     let page = std::fs::read_to_string(item.join("index.html")).unwrap();
@@ -412,11 +418,18 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(site.join(".nojekyll").exists());
     assert!(site.join("sources/demo/index.html").exists());
     assert!(site.join("categories/demo/index.html").exists());
+    assert!(site.join("categories/index.html").exists());
+    assert!(site.join("tags/index.html").exists());
+    assert!(site.join("tags/example/index.html").exists());
+    let search = std::fs::read_to_string(site.join("search.json")).unwrap();
+    assert!(search.contains("Body one"), "{search}");
+    assert!(search.contains("example"), "{search}");
     assert!(!site.join("CNAME").exists());
     // Installable and readable offline: manifest, worker precaching the newest pages, fallback.
     assert!(index.contains("rel=\"manifest\""), "{index}");
     let sw = std::fs::read_to_string(site.join("sw.js")).unwrap();
     assert!(sw.contains("\"/assets/style.css\""), "{sw}");
+    assert!(sw.contains("\"/assets/swup.js\""), "{sw}");
     assert!(
         sw.contains("\"/items/demo/2026/09/2026-09-01-hello-there/\""),
         "{sw}"

@@ -17,6 +17,9 @@ struct SearchEntry<'a> {
     link: &'a str,
     domain: &'a str,
     excerpt: &'a str,
+    labels: &'a [String],
+    discussions: &'a [super::context::DiscussionLinkCtx],
+    search: String,
 }
 
 pub fn search_json(items: &[ItemCtx]) -> Result<String> {
@@ -33,6 +36,18 @@ pub fn search_json(items: &[ItemCtx]) -> Result<String> {
             link: &item.link,
             domain: &item.domain,
             excerpt: &item.excerpt,
+            labels: &item.labels,
+            discussions: &item.discussions,
+            search: format!(
+                "{} {} {} {} {} {}",
+                item.title,
+                item.domain,
+                item.category.as_deref().unwrap_or_default(),
+                item.labels.join(" "),
+                item.excerpt,
+                item.search_text
+            )
+            .to_lowercase(),
         })
         .collect();
     Ok(serde_json::to_string(&entries)?)

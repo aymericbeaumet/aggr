@@ -182,7 +182,7 @@ pub fn extract(
             published,
             updated: None,
             authors: vec![],
-            tags: vec![],
+            labels: vec![],
             summary,
             content_html: None,
             extra: Default::default(),

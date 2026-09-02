@@ -30,6 +30,8 @@ pub struct BuildInfo {
     pub out: PathBuf,
     pub base_url: Option<String>,
     pub config_sha: Option<String>,
+    /// Repository-relative path of the root config file.
+    pub config_path: Option<String>,
     pub data_sha: Option<String>,
     pub now: DateTime<Utc>,
     /// Production build: absolute URLs from `base_url`, CNAME for custom domains.
@@ -92,11 +94,9 @@ pub fn precache_paths(
     item_urls: impl IntoIterator<Item = String>,
     offline_items: usize,
 ) -> Vec<String> {
-    const SHELLS: [&str; 9] = [
+    const SHELLS: [&str; 7] = [
         "",
         "sources/",
-        "unread/",
-        "starred/",
         "search/",
         "search.json",
         "404.html",
@@ -149,6 +149,7 @@ struct Ctx<'a> {
     items: &'a [ItemCtx],
     sources: &'a [SourceCtx],
     categories: &'a [CategoryCtx],
+    tags: &'a [CategoryCtx],
     #[serde(skip_serializing_if = "Option::is_none")]
     item: Option<&'a ItemCtx>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,6 +195,23 @@ pub fn build(
         repository: repository.clone(),
         data_branch: config.store.branch.clone(),
         pwa: config.site.pwa,
+        config_url: repository.as_deref().and_then(|repository| {
+            info.config_sha.as_deref().map(|sha| {
+                format!(
+                    "https://github.com/{repository}/blob/{sha}/{}",
+                    info.config_path.as_deref().unwrap_or("aggr.toml")
+                )
+            })
+        }),
+        discussions: config
+            .site
+            .discussions
+            .iter()
+            .map(|d| context::DiscussionLinkCtx {
+                name: d.name.clone(),
+                url: d.url.clone(),
+            })
+            .collect(),
         params: config.site.params.clone(),
     };
     let build_ctx = BuildCtx {
@@ -216,15 +234,15 @@ pub fn build(
     let mut all_items = store.items()?;
     all_items.retain(|item| !item.front.hidden);
     all_items.sort_by(|a, b| {
-        b.sort_date()
-            .cmp(&a.sort_date())
+        b.created_at()
+            .cmp(&a.created_at())
             .then_with(|| b.path.cmp(&a.path))
     });
     let source_ctxs = source_contexts(sources, store, &status, &all_items)?;
     let source_by_slug: BTreeMap<&str, &SourceCtx> =
         source_ctxs.iter().map(|s| (s.slug.as_str(), s)).collect();
 
-    let dates: Vec<_> = all_items.iter().map(Item::sort_date).collect();
+    let dates: Vec<_> = all_items.iter().map(Item::created_at).collect();
     let window = window(
         &dates,
         info.now,
@@ -255,10 +273,12 @@ pub fn build(
             links.as_ref(),
             git_blob_sha(&bytes),
             excerpt,
+            &config.site.discussions,
         ));
     }
 
     let categories = category_contexts(&source_ctxs, &items);
+    let tags = tag_contexts(&items);
     let mut pages = 0;
     let per_page = config.site.items_per_page;
     let mut write_list = |kind: &str,
@@ -290,6 +310,7 @@ pub fn build(
                     items: &list[range.clone()],
                     sources: &source_ctxs,
                     categories: &categories,
+                    tags: &tags,
                     item: None,
                     source,
                     category,
@@ -333,6 +354,18 @@ pub fn build(
             Some(category),
         )?;
     }
+    for tag in &tags {
+        let list: Vec<ItemCtx> = items
+            .iter()
+            .filter(|item| {
+                item.labels
+                    .iter()
+                    .any(|label| context::category_slug(label) == tag.slug)
+            })
+            .cloned()
+            .collect();
+        write_list("tag", &tag.name, &tag.page, &list, None, Some(tag))?;
+    }
 
     let simple = |kind: &str,
                   title: &str,
@@ -360,6 +393,7 @@ pub fn build(
                 items: &items,
                 sources: &source_ctxs,
                 categories: &categories,
+                tags: &tags,
                 item,
                 source: None,
                 category: None,
@@ -372,17 +406,26 @@ pub fn build(
         &out.join("sources/index.html"),
         simple("sources", "Sources", "sources/", "sources.html", None, None)?.as_bytes(),
     )?;
-    for (kind, title) in [
-        ("starred", "Starred"),
-        ("unread", "Unread"),
-        ("search", "Search"),
-    ] {
-        let path = format!("{kind}/");
-        write(
-            &out.join(&path).join("index.html"),
-            simple(kind, title, &path, "shell.html", None, None)?.as_bytes(),
-        )?;
-    }
+    write(
+        &out.join("categories/index.html"),
+        simple(
+            "categories",
+            "Categories",
+            "categories/",
+            "taxonomy.html",
+            None,
+            None,
+        )?
+        .as_bytes(),
+    )?;
+    write(
+        &out.join("tags/index.html"),
+        simple("tags", "Tags", "tags/", "taxonomy.html", None, None)?.as_bytes(),
+    )?;
+    write(
+        &out.join("search/index.html"),
+        simple("search", "Search", "search/", "shell.html", None, None)?.as_bytes(),
+    )?;
     write(
         &out.join("404.html"),
         simple("404", "Not found", "", "404.html", None, None)?.as_bytes(),
@@ -473,7 +516,9 @@ pub fn build(
         let lists = source_ctxs
             .iter()
             .map(|s| s.page.clone())
-            .chain(categories.iter().map(|c| c.page.clone()));
+            .chain(categories.iter().map(|c| c.page.clone()))
+            .chain(tags.iter().map(|tag| tag.page.clone()))
+            .chain(["categories/".to_string(), "tags/".to_string()]);
         let sw = renderer.render(
             "sw.js",
             SwCtx {
@@ -530,7 +575,7 @@ fn source_contexts(
     for item in items {
         let entry = counts.entry(item.front.source.as_str()).or_default();
         entry.0 += 1;
-        entry.1 = entry.1.max(Some(item.sort_date()));
+        entry.1 = entry.1.max(Some(item.created_at()));
     }
     sources
         .iter()
@@ -587,6 +632,25 @@ fn category_contexts(sources: &[SourceCtx], items: &[ItemCtx]) -> Vec<CategoryCt
                 slug,
                 count,
             }
+        })
+        .collect()
+}
+
+fn tag_contexts(items: &[ItemCtx]) -> Vec<CategoryCtx> {
+    let mut tags: BTreeMap<String, (String, usize)> = BTreeMap::new();
+    for item in items {
+        for name in &item.labels {
+            let slug = context::category_slug(name);
+            let entry = tags.entry(slug).or_insert_with(|| (name.clone(), 0));
+            entry.1 += 1;
+        }
+    }
+    tags.into_iter()
+        .map(|(slug, (name, count))| CategoryCtx {
+            page: format!("tags/{slug}/"),
+            name,
+            slug,
+            count,
         })
         .collect()
 }
@@ -770,6 +834,7 @@ mod tests {
             out,
             base_url: Some("https://u.github.io/repo/".into()),
             config_sha: Some("c".repeat(40)),
+            config_path: Some("aggr.toml".into()),
             data_sha: Some("d".repeat(40)),
             now: day(20),
             release: false,

@@ -52,8 +52,8 @@ pub fn select(
             }
     });
     items.sort_by(|a, b| {
-        b.sort_date()
-            .cmp(&a.sort_date())
+        b.created_at()
+            .cmp(&a.created_at())
             .then_with(|| b.path.cmp(&a.path))
     });
     items
@@ -126,7 +126,7 @@ pub fn group(
             title: item.front.title.clone(),
             link: item.front.link.clone(),
             domain: domain_of(&item.front.link),
-            date: item.sort_date(),
+            date: item.created_at(),
             page: site_url.map(|root| format!("{root}{}", item_url(&item.path))),
             permalink: links.map(|l| l.permalink(&item.md_path())),
         });
@@ -241,6 +241,7 @@ mod tests {
                 slug: "a".into(),
                 name: None,
                 category: None,
+                labels: vec![],
                 headers: vec![],
                 html: true,
                 engine: crate::config::Engine::Feed {
@@ -251,6 +252,7 @@ mod tests {
                 slug: "b".into(),
                 name: None,
                 category: None,
+                labels: vec![],
                 headers: vec![],
                 html: true,
                 engine: crate::config::Engine::Feed {

@@ -16,7 +16,7 @@ pub struct RawItem {
     pub published: Option<DateTime<Utc>>,
     pub updated: Option<DateTime<Utc>>,
     pub authors: Vec<String>,
-    pub tags: Vec<String>,
+    pub labels: Vec<String>,
     /// Plain text.
     pub summary: Option<String>,
     /// HTML as delivered by the source.
@@ -50,7 +50,8 @@ pub struct FrontMatter {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
+    #[serde(alias = "tags")]
+    pub labels: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "is_default")]
@@ -62,9 +63,6 @@ pub struct FrontMatter {
     pub html_truncated: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_yaml_ng::Value>,
-    /// User-owned flags, only ever set by editing the file.
-    #[serde(skip_serializing_if = "is_default")]
-    pub starred: bool,
     #[serde(skip_serializing_if = "is_default")]
     pub hidden: bool,
 }
@@ -84,7 +82,8 @@ pub struct Item {
 }
 
 impl Item {
-    pub fn sort_date(&self) -> DateTime<Utc> {
+    /// Creation time supplied by the source, falling back to when aggr first saw the item.
+    pub fn created_at(&self) -> DateTime<Utc> {
         self.front.published.unwrap_or(self.front.first_seen)
     }
 

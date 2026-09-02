@@ -106,4 +106,11 @@ impl Project {
     pub fn config_sha(&self) -> Option<String> {
         self.repo.head_sha().ok().flatten()
     }
+
+    pub fn config_repo_path(&self) -> Option<String> {
+        self.config_path
+            .strip_prefix(self.repo.root())
+            .ok()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+    }
 }

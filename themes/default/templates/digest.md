@@ -1,7 +1,7 @@
 {# Body of the daily digest issue. Markdown, rendered by GitHub. #}
 **{{ digest.count }} new item{{ 's' if digest.count != 1 }}** since {{ digest.since | date('%Y-%m-%d %H:%M UTC') }}.
 {% if digest.site_url %}
-[river]({{ digest.site_url }}) · [unread]({{ digest.site_url }}unread/) · [starred]({{ digest.site_url }}starred/)
+[feed]({{ digest.site_url }}) · [search]({{ digest.site_url }}search/) · [categories]({{ digest.site_url }}categories/) · [tags]({{ digest.site_url }}tags/)
 {% endif %}
 
 {% for group in groups %}
@@ -13,7 +13,7 @@
 
 {% endfor %}
 {% if digest.omitted %}
-_…and {{ digest.omitted }} more{% if digest.site_url %} on the [river]({{ digest.site_url }}){% endif %}._
+_…and {{ digest.omitted }} more{% if digest.site_url %} on the [feed]({{ digest.site_url }}){% endif %}._
 
 {% endif %}
 ---

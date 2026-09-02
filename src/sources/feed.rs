@@ -135,7 +135,7 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<RawItem> {
         published: entry.published.or(entry.updated),
         updated: entry.updated,
         authors: entry.authors.iter().filter_map(person_name).collect(),
-        tags: entry
+        labels: entry
             .categories
             .iter()
             .map(|category| {
@@ -283,7 +283,7 @@ line two</content>
             "2026-09-01T10:00:00+00:00"
         );
         assert_eq!(first.authors, vec!["Alice"]);
-        assert_eq!(first.tags, vec!["rust"]);
+        assert_eq!(first.labels, vec!["rust"]);
         assert_eq!(first.summary.as_deref(), Some("Hello world"));
         assert_eq!(
             first.content_html.as_deref(),

@@ -35,6 +35,7 @@ pub fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
         out: out.clone(),
         base_url,
         config_sha: project.config_sha(),
+        config_path: project.config_repo_path(),
         data_sha,
         now: Utc::now(),
         release: args.release,

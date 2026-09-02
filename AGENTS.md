@@ -67,3 +67,5 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - minijinja: `trim_blocks`/`lstrip_blocks` are on, autoescape follows the `.html` extension, the
   custom formatter escapes `& < > " '` only; use inline `{{ x if cond }}` in `digest.md` rather
   than block tags on their own line.
+- `themes/default/static/swup.js` is the vendored Swup 4 UMD build; keep `swup.LICENSE` beside it
+  and keep navigation progressively functional without JavaScript.

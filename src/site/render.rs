@@ -106,6 +106,7 @@ impl Renderer {
             Value::from_safe_string(format!("{prefix}{}", path.trim_start_matches('/')))
         });
         env.add_filter("domain", super::context::domain_of);
+        env.add_filter("slug", |value: String| slug::slugify(value));
         env.add_filter("date", date_filter);
         env.add_filter("excerpt", |text: String, max: Option<usize>| {
             crate::content::excerpt(&text, max.unwrap_or(200))

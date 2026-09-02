@@ -169,21 +169,32 @@ Lobsters (`https://lobste.rs/rss`), arXiv, Substack, Medium. For the rest there 
 
 ## The site
 
-Hacker News density, a teal palette, dark mode, responsive. The river is paginated; every
-source and category has its own page; **read/unread** and **star** are kept in the browser
-(`localStorage`, keyed by the item path, so they survive rebuilds); **search** runs client-side
-over `search.json`; `feed.xml` re-syndicates the river. Keyboard: `j`/`k` move, `o` opens the
-original, `Enter` opens the item page, `s` stars, `r` toggles read.
+Hacker News density, a periwinkle (`#8ea1ff`) palette, responsive layout, and light, dark or
+automatic color mode. The feed is paginated and sorted by the source's creation date, newest
+first. Every source, category and tag has a generated collection page under `/sources/`,
+`/categories/` and `/tags/`. An item has one category and any number of labels. Full-text search
+runs instantly in the browser over titles, article text, categories and labels in `search.json`;
+`feed.xml` re-syndicates the feed. Keyboard: `j`/`k` move, `o` opens the original, and `Enter`
+opens the item page.
+
+All browseable routes are rendered ahead of time. The vendored, MIT-licensed
+[Swup](https://swup.js.org/) navigation layer swaps those server-rendered pages, preserves browser
+history, and caches visits; it progressively falls back to ordinary links without JavaScript.
+
+Theme state stays in `localStorage` without changing normal URLs. **copy state** in the top bar
+copies a one-time URL containing every local key/value; opening it imports the state and cleans
+the payload from the address bar. Discussion links such as Hacker News and X are configured with
+`[[site.discussions]]` URL templates using `{url}` and `{title}`.
 
 It is a **PWA**: "Install" it from the browser menu and it opens as an app with its own icon
-and shortcuts (unread, starred, search). A service worker precaches the river, the lists and
+and a search shortcut. A service worker precaches the feed, the lists and
 the newest `[site] offline_items` item pages at every build, and remembers whatever you open,
 so the reader works on the train; an "Updated — reload" toast appears when a new build is
 live. `pwa = false` turns it off (an installed worker unregisters itself on the next visit).
 
 Each item page renders the Markdown and links to the raw `.md`, a sanitized view of the original
 HTML, the original article, and the GitHub permalink pinned to the commit that introduced it,
-plus the file's history and an edit link (set `starred: true` or `hidden: true` in the front
+plus the file's history and an edit link (set `hidden: true` in the front
 matter from GitHub's editor; fetches never overwrite an existing file). Items outside the site
 window (`[site] max_items`, `max_age_days`) become 200-byte redirect stubs to their permalink,
 so old URLs keep working.
@@ -225,6 +236,10 @@ status.toml                                           failing sources, present o
 make check          # fmt-check, clippy -D warnings, tests (hermetic: no network)
 make run ARGS="serve"
 ```
+
+`aggr serve` builds once, watches the config, includes, templates and static files, and reloads
+open browsers after each successful rebuild. It listens on port 4000 by default; use `--port`
+to choose another. `--no-build` serves an existing output without watching.
 
 Releases: bump `version` in `Cargo.toml` and `VERSION`, commit, tag `vX.Y.Z`, push the tag.
 

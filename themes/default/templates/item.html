@@ -7,15 +7,14 @@
   <header class="itemhead">
     <h1><a href="{{ item.link }}" rel="noopener noreferrer">{{ item.title }}</a></h1>
     <div class="meta">
-      <a href="{{ ('sources/' ~ item.source ~ '/') | url_for }}">{{ item.source_name }}</a>
-      {% if item.domain %}<span>· {{ item.domain }}</span>{% endif %}
+      {% if item.domain %}<a href="{{ ('sources/' ~ item.source ~ '/') | url_for }}">{{ item.domain }}</a>{% endif %}
       {% if item.published %}<span>· published <time datetime="{{ item.published }}">{{ item.published | date('%Y-%m-%d %H:%M') }}</time></span>{% endif %}
       {% if item.updated and item.updated != item.published %}<span>· updated <time datetime="{{ item.updated }}">{{ item.updated | date }}</time></span>{% endif %}
       <span>· seen <time datetime="{{ item.first_seen }}">{{ item.first_seen | date }}</time></span>
       {% if item.authors %}<span>· {{ item.authors | join(', ') }}</span>{% endif %}
       {% if item.category %}<span>· {{ item.category }}</span>{% endif %}
-      {% for tag in item.tags %}<span class="tag">{{ tag }}</span>{% endfor %}
-      <button class="star" type="button" aria-label="Star" title="Star (s)">☆</button>
+      {% for label in item.labels %}<a class="tag" href="{{ ('tags/' ~ (label | slug) ~ '/') | url_for }}">{{ label }}</a>{% endfor %}
+      {% for discussion in item.discussions %}<span>· <a href="{{ discussion.url }}" rel="noopener noreferrer">{{ discussion.name }}</a></span>{% endfor %}
     </div>
     <nav class="views" aria-label="Views">
       <span aria-current="page">rendered</span>

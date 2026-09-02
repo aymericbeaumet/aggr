@@ -4,8 +4,11 @@
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, Result};
+use notify::{RecursiveMode, Watcher as _};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{broadcast, mpsc};
+use tokio::time::{Duration, sleep};
 
 use super::{Project, build};
 use crate::cli::ServeArgs;
@@ -26,23 +29,83 @@ pub async fn run(project: &Project, args: &ServeArgs) -> Result<()> {
         .await
         .with_context(|| format!("binding 127.0.0.1:{}", args.port))?;
     println!(
-        "serving {} at http://127.0.0.1:{}{base} (ctrl-c to stop)",
+        "serving {} at http://127.0.0.1:{}{base} (watching for changes; ctrl-c to stop)",
         root.display(),
         listener.local_addr()?.port()
     );
+    let (reload, _) = broadcast::channel(16);
+    let _watcher = if args.no_build {
+        None
+    } else {
+        Some(watch(project, args, root.clone(), reload.clone())?)
+    };
     loop {
         let (stream, _) = listener.accept().await?;
         let root = root.clone();
         let base = base.clone();
+        let reload = reload.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle(stream, &root, &base).await {
+            if let Err(err) = handle(stream, &root, &base, reload).await {
                 log::debug!("serve: {err:#}");
             }
         });
     }
 }
 
-async fn handle(stream: TcpStream, root: &Path, base: &str) -> Result<()> {
+fn watch(
+    project: &Project,
+    args: &ServeArgs,
+    out: PathBuf,
+    reload: broadcast::Sender<()>,
+) -> Result<notify::RecommendedWatcher> {
+    let (events, mut changes) = mpsc::unbounded_channel();
+    let mut watcher = notify::recommended_watcher(move |event| {
+        let _ = events.send(event);
+    })?;
+    watcher.watch(&project.root, RecursiveMode::Recursive)?;
+
+    let config_path = project.config_path.clone();
+    let build_args = crate::cli::BuildArgs {
+        out: args.build.out.clone(),
+        base_url: args.build.base_url.clone(),
+        data_ref: args.build.data_ref.clone(),
+        release: args.build.release,
+    };
+    tokio::spawn(async move {
+        while let Some(event) = changes.recv().await {
+            let Ok(event) = event else { continue };
+            if !event.paths.iter().any(|path| watched(path, &out)) {
+                continue;
+            }
+            sleep(Duration::from_millis(150)).await;
+            while changes.try_recv().is_ok() {}
+            let result =
+                Project::load(&config_path).and_then(|project| build::run(&project, &build_args));
+            match result {
+                Ok(_) => {
+                    println!("reloaded");
+                    let _ = reload.send(());
+                }
+                Err(err) => eprintln!("build failed: {err:#}"),
+            }
+        }
+    });
+    Ok(watcher)
+}
+
+fn watched(path: &Path, out: &Path) -> bool {
+    !path.starts_with(out)
+        && !path
+            .components()
+            .any(|part| matches!(part.as_os_str().to_str(), Some(".git" | ".aggr" | "target")))
+}
+
+async fn handle(
+    stream: TcpStream,
+    root: &Path,
+    base: &str,
+    reload: broadcast::Sender<()>,
+) -> Result<()> {
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
     reader.read_line(&mut request_line).await?;
@@ -56,11 +119,29 @@ async fn handle(stream: TcpStream, root: &Path, base: &str) -> Result<()> {
     let method = parts.next().unwrap_or_default();
     let target = parts.next().unwrap_or("/");
     let path = target.split(['?', '#']).next().unwrap_or("/");
+    if path == format!("{base}__aggr/reload") {
+        let stream = reader.get_mut();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\n")
+            .await?;
+        let mut updates = reload.subscribe();
+        while updates.recv().await.is_ok() {
+            stream.write_all(b"data: reload\n\n").await?;
+            stream.flush().await?;
+        }
+        return Ok(());
+    }
     let (status, file) = match resolve(root, base, path) {
         Some(file) => ("200 OK", file),
         None => ("404 Not Found", root.join("404.html")),
     };
-    let body = std::fs::read(&file).unwrap_or_else(|_| b"not found".to_vec());
+    let mut body = std::fs::read(&file).unwrap_or_else(|_| b"not found".to_vec());
+    if file
+        .extension()
+        .is_some_and(|extension| extension == "html")
+    {
+        body = inject_reload(&body, base);
+    }
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         content_type(&file),
@@ -73,6 +154,19 @@ async fn handle(stream: TcpStream, root: &Path, base: &str) -> Result<()> {
     }
     stream.shutdown().await?;
     Ok(())
+}
+
+fn inject_reload(body: &[u8], base: &str) -> Vec<u8> {
+    let script = format!(
+        "<script>if('serviceWorker'in navigator)navigator.serviceWorker.getRegistrations().then(function(r){{r.forEach(function(x){{x.unregister()}})}});new EventSource('{}__aggr/reload').onmessage=function(){{location.reload()}}</script>",
+        base
+    );
+    let html = String::from_utf8_lossy(body);
+    if let Some(at) = html.rfind("</body>") {
+        format!("{}{}{}", &html[..at], script, &html[at..]).into_bytes()
+    } else {
+        format!("{html}{script}").into_bytes()
+    }
 }
 
 /// Map a request path to a file under `root`, honoring the base path a release build was made
@@ -189,5 +283,24 @@ mod tests {
             "application/manifest+json"
         );
         assert_eq!(content_type(Path::new("CNAME")), "application/octet-stream");
+    }
+
+    #[test]
+    fn injects_reload_client_without_touching_the_build() {
+        let html = inject_reload(b"<body>Hello</body>", "/repo/");
+        let html = String::from_utf8(html).unwrap();
+        assert!(html.contains("new EventSource('/repo/__aggr/reload')"));
+        assert!(html.ends_with("</body>"));
+    }
+
+    #[test]
+    fn ignores_generated_and_internal_changes() {
+        let root = Path::new("/project");
+        let out = root.join("_site");
+        assert!(watched(&root.join("aggr.toml"), &out));
+        assert!(watched(&root.join("templates/base.html"), &out));
+        assert!(!watched(&out.join("index.html"), &out));
+        assert!(!watched(&root.join(".aggr/data/item.md"), &out));
+        assert!(!watched(&root.join("target/debug/aggr"), &out));
     }
 }

@@ -14,7 +14,7 @@ status.toml                                           sources currently failing 
 
 ## Editing by hand
 
-- **Star or hide an item**: edit its `.md` and set `starred: true` or `hidden: true` in the front
+- **Hide an item**: edit its `.md` and set `hidden: true` in the front
   matter. Fetches never overwrite an existing file.
 - **Delete an item**: delete the `.md` (and `.html`). Its keys stay in `seen.txt`, so it will not
   come back.

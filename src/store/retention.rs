@@ -1,5 +1,5 @@
 //! `[store] max_age_days` / `max_items`: which items to drop from the tree. History keeps
-//! them, so this only bounds the checkout; starred items are never dropped.
+//! them, so this only bounds the checkout.
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -23,8 +23,8 @@ pub fn plan(items: &[Item], limits: Limits, now: DateTime<Utc>) -> Vec<String> {
     if limits.is_unbounded() {
         return Vec::new();
     }
-    let mut candidates: Vec<&Item> = items.iter().filter(|item| !item.front.starred).collect();
-    candidates.sort_by_key(|item| std::cmp::Reverse(item.sort_date()));
+    let mut candidates: Vec<&Item> = items.iter().collect();
+    candidates.sort_by_key(|item| std::cmp::Reverse(item.created_at()));
 
     let cutoff = limits
         .max_age_days
@@ -33,7 +33,7 @@ pub fn plan(items: &[Item], limits: Limits, now: DateTime<Utc>) -> Vec<String> {
         .iter()
         .enumerate()
         .filter(|(index, item)| {
-            let too_old = cutoff.is_some_and(|cutoff| item.sort_date() < cutoff);
+            let too_old = cutoff.is_some_and(|cutoff| item.created_at() < cutoff);
             let too_many = limits.max_items.is_some_and(|max| *index >= max);
             too_old || too_many
         })
@@ -49,14 +49,13 @@ mod tests {
     use crate::model::FrontMatter;
     use chrono::TimeZone;
 
-    fn item(path: &str, days_ago: i64, starred: bool) -> Item {
+    fn item(path: &str, days_ago: i64) -> Item {
         let now = Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap();
         Item {
             path: path.to_string(),
             front: FrontMatter {
                 published: Some(now - Duration::days(days_ago)),
                 first_seen: now,
-                starred,
                 ..FrontMatter::default()
             },
             body: String::new(),
@@ -65,20 +64,20 @@ mod tests {
 
     #[test]
     fn unbounded_keeps_everything() {
-        let items = vec![item("a", 1000, false)];
+        let items = vec![item("a", 1000)];
         let now = Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap();
         assert!(plan(&items, Limits::default(), now).is_empty());
     }
 
     #[test]
-    fn drops_old_and_excess_but_never_starred() {
+    fn drops_old_and_excess() {
         let now = Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap();
         let items = vec![
-            item("new", 1, false),
-            item("mid", 10, false),
-            item("old", 400, false),
-            item("old-star", 500, true),
-            item("older", 401, false),
+            item("new", 1),
+            item("mid", 10),
+            item("old", 400),
+            item("oldest", 500),
+            item("older", 401),
         ];
         let by_age = plan(
             &items,
@@ -88,7 +87,7 @@ mod tests {
             },
             now,
         );
-        assert_eq!(by_age, vec!["old", "older"]);
+        assert_eq!(by_age, vec!["old", "older", "oldest"]);
 
         let by_count = plan(
             &items,
@@ -98,7 +97,7 @@ mod tests {
             },
             now,
         );
-        assert_eq!(by_count, vec!["old", "older"]);
+        assert_eq!(by_count, vec!["old", "older", "oldest"]);
 
         let both = plan(
             &items,
@@ -108,6 +107,6 @@ mod tests {
             },
             now,
         );
-        assert_eq!(both, vec!["mid", "old", "older"]);
+        assert_eq!(both, vec!["mid", "old", "older", "oldest"]);
     }
 }

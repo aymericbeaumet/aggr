@@ -6,8 +6,8 @@
 <meta name="color-scheme" content="light dark">
 <title>{% block title %}{{ page.title }} · {{ site.title }}{% endblock %}</title>
 {% if site.description %}<meta name="description" content="{{ site.description }}">{% endif %}
-<meta name="theme-color" media="(prefers-color-scheme: light)" content="#0f766e">
-<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#14b8a6">
+<meta name="theme-color" content="#8ea1ff">
+<script>try{document.documentElement.dataset.theme=localStorage.getItem('aggr:theme')||'auto'}catch(e){}</script>
 <link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
 <link rel="alternate" type="application/atom+xml" title="{{ site.title }}" href="{{ 'feed.xml' | url_for }}">
 <link rel="icon" type="image/png" sizes="192x192" href="{{ 'assets/icon-192.png' | url_for }}">
@@ -19,30 +19,28 @@
 {% block head %}{% endblock %}
 </head>
 <body data-kind="{{ page.kind }}">
+<div id="swup">
 <header class="top">
   <nav class="nav">
     <a class="brand" href="{{ '' | url_for }}">{{ site.title }}</a>
-    <a href="{{ '' | url_for }}"{% if page.kind == 'river' %} aria-current="page"{% endif %}>river</a>
-    <a href="{{ 'unread/' | url_for }}"{% if page.kind == 'unread' %} aria-current="page"{% endif %}>unread</a>
-    <a href="{{ 'starred/' | url_for }}"{% if page.kind == 'starred' %} aria-current="page"{% endif %}>starred</a>
-    <a href="{{ 'sources/' | url_for }}"{% if page.kind == 'sources' %} aria-current="page"{% endif %}>sources</a>
+    <a href="{{ '' | url_for }}"{% if page.kind == 'river' %} aria-current="page"{% endif %}>feed</a>
     <a href="{{ 'search/' | url_for }}"{% if page.kind == 'search' %} aria-current="page"{% endif %}>search</a>
-    {% for category in categories %}
-    <a href="{{ category.page | url_for }}"{% if page.kind == 'category' and page.path == category.page %} aria-current="page"{% endif %}>{{ category.name }}</a>
-    {% endfor %}
+    <a href="{{ 'categories/' | url_for }}"{% if page.kind in ['categories', 'category'] %} aria-current="page"{% endif %}>categories</a>
+    <a href="{{ 'tags/' | url_for }}"{% if page.kind in ['tags', 'tag'] %} aria-current="page"{% endif %}>tags</a>
+    <span class="nav-spacer"></span>
+    <label class="theme-picker">theme <select id="theme-mode"><option value="auto">auto</option><option value="light">light</option><option value="dark">dark</option></select></label>
+    <button class="nav-action" id="copy-state" type="button">copy state</button>
+    <a href="{{ site.config_url or ('sources/' | url_for) }}">aggr.toml</a>
   </nav>
 </header>
 <main class="main">
 {% block content %}{% endblock %}
 </main>
+</div>
 <footer class="foot">
-  {% if site.repository %}<a href="https://github.com/{{ site.repository }}">{{ site.repository }}</a> · {% endif %}
-  config@{{ build.config_sha[:7] if build.config_sha else '—' }} ·
-  data@{% if site.repository and build.data_sha %}<a href="https://github.com/{{ site.repository }}/tree/{{ build.data_sha }}">{{ build.data_sha[:7] }}</a>{% else %}{{ build.data_sha[:7] if build.data_sha else '—' }}{% endif %} ·
-  <a href="https://github.com/aymericbeaumet/aggr">aggr</a> v{{ build.version }} ·
-  built <time datetime="{{ build.time }}">{{ build.time | date('%Y-%m-%d %H:%M UTC') }}</time> ·
-  <a href="{{ 'feed.xml' | url_for }}">feed</a>
+  built <time datetime="{{ build.time }}">{{ build.time | date('%Y-%m-%d %H:%M UTC') }}</time> with <a href="https://github.com/aymericbeaumet/aggr">aggr</a>
 </footer>
+<script src="{{ 'assets/swup.js' | url_for }}"></script>
 <script src="{{ 'assets/app.js' | url_for }}" defer></script>
 </body>
 </html>

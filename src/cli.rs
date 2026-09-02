@@ -103,7 +103,7 @@ pub struct ServeArgs {
     #[command(flatten)]
     pub build: BuildArgs,
     /// Port to listen on.
-    #[arg(long, short, default_value_t = 8080)]
+    #[arg(long, short, default_value_t = 4000)]
     pub port: u16,
     /// Serve without rebuilding first.
     #[arg(long)]

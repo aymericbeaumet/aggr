@@ -50,6 +50,8 @@ pub struct SiteConfig {
     pub pwa: bool,
     /// Newest item pages the service worker caches ahead of time for offline reading.
     pub offline_items: usize,
+    /// Links that search for conversations about an item. `{url}` and `{title}` are replaced.
+    pub discussions: Vec<DiscussionLinkConfig>,
     /// Free-form values exposed to templates as `site.params`.
     pub params: toml::Table,
 }
@@ -70,9 +72,26 @@ impl Default for SiteConfig {
             out: PathBuf::from("_site"),
             pwa: true,
             offline_items: 100,
+            discussions: vec![
+                DiscussionLinkConfig {
+                    name: "Hacker News".into(),
+                    url: "https://hn.algolia.com/?q={url}".into(),
+                },
+                DiscussionLinkConfig {
+                    name: "X".into(),
+                    url: "https://x.com/search?q={url}".into(),
+                },
+            ],
             params: toml::Table::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiscussionLinkConfig {
+    pub name: String,
+    pub url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,6 +198,8 @@ pub struct SourceConfig {
     /// Directory name under `items/`; derived from `name` or `url` when unset.
     pub slug: Option<String>,
     pub category: Option<String>,
+    /// Labels applied to every item from this source. Feed-provided labels are appended.
+    pub labels: Vec<String>,
     /// Extra request headers; values support `${ENV}` expansion.
     pub headers: BTreeMap<String, String>,
     pub html: Option<bool>,
@@ -207,6 +228,7 @@ pub struct Source {
     pub slug: String,
     pub name: Option<String>,
     pub category: Option<String>,
+    pub labels: Vec<String>,
     pub headers: Vec<(String, String)>,
     pub html: bool,
     pub engine: Engine,
@@ -527,6 +549,7 @@ fn resolve_source(raw: &SourceConfig, env: &dyn Fn(&str) -> Option<String>) -> R
         slug,
         name: raw.name.clone().filter(|name| !name.is_empty()),
         category: raw.category.clone().filter(|category| !category.is_empty()),
+        labels: raw.labels.clone(),
         headers,
         html: raw.html.unwrap_or(true),
         engine,

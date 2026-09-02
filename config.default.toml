@@ -30,8 +30,17 @@ max_stubs = 20000
 out = "_site"
 # Web app manifest + service worker: the site installs like an app and works offline.
 pwa = true
-# Newest item pages cached ahead of time for offline reading (the river and assets always are).
+# Newest item pages cached ahead of time for offline reading (the feed and assets always are).
 offline_items = 100
+
+# Per-item links that search for conversations. `{url}` and `{title}` are URL-encoded.
+[[site.discussions]]
+name = "Hacker News"
+url = "https://hn.algolia.com/?q={url}"
+
+[[site.discussions]]
+name = "X"
+url = "https://x.com/search?q={url}"
 
 # Free-form values available to templates as `site.params`.
 [site.params]
@@ -76,6 +85,8 @@ max_items = 200
 # name = "Rust Blog"          # display name; the feed title when unset
 # slug = "rust-blog"          # directory under items/; derived from name or url when unset
 # category = "rust"
+# An item has one category and any number of labels. Source labels are merged with feed labels.
+# labels = ["programming", "rust"]
 # headers = { Authorization = "Bearer ${TOKEN}" }
 # html = true
 

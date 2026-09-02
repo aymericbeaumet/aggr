@@ -20,7 +20,15 @@ pub struct SiteCtx {
     pub data_branch: String,
     /// Whether `manifest.webmanifest` and `sw.js` are built (`[site] pwa`).
     pub pwa: bool,
+    pub config_url: Option<String>,
+    pub discussions: Vec<DiscussionLinkCtx>,
     pub params: toml::Table,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscussionLinkCtx {
+    pub name: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,8 +42,8 @@ pub struct BuildCtx {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PageCtx {
-    /// `river`, `source`, `category`, `item`, `sources`, `starred`, `unread`, `search`, `404`,
-    /// `offline`.
+    /// `river`, `source`, `category`, `tag`, taxonomy indexes, `item`, `sources`, `search`,
+    /// `404`, or `offline`.
     pub kind: String,
     pub title: String,
     /// Site path of this page, e.g. `sources/rust-blog/`.
@@ -65,12 +73,13 @@ pub struct ItemCtx {
     pub updated: Option<DateTime<Utc>>,
     pub first_seen: DateTime<Utc>,
     pub authors: Vec<String>,
-    pub tags: Vec<String>,
+    pub labels: Vec<String>,
+    pub discussions: Vec<DiscussionLinkCtx>,
     pub summary: Option<String>,
     pub excerpt: String,
+    pub search_text: String,
     pub content: ContentKind,
     pub has_html: bool,
-    pub starred: bool,
     pub extra: BTreeMap<String, serde_yaml_ng::Value>,
     /// GitHub URLs pinned to the data commit; `None` when the repository is unknown.
     pub permalink: Option<String>,
@@ -180,6 +189,7 @@ impl ItemCtx {
         links: Option<&GitHubLinks<'_>>,
         blob_sha: String,
         excerpt: String,
+        discussions: &[crate::config::DiscussionLinkConfig],
     ) -> Self {
         let md = item.md_path();
         Self {
@@ -191,17 +201,27 @@ impl ItemCtx {
             source: item.front.source.clone(),
             source_name: source_name.to_string(),
             category: category.map(str::to_string),
-            date: item.sort_date(),
+            date: item.created_at(),
             published: item.front.published,
             updated: item.front.updated,
             first_seen: item.front.first_seen,
             authors: item.front.authors.clone(),
-            tags: item.front.tags.clone(),
+            labels: item.front.labels.clone(),
+            discussions: discussions
+                .iter()
+                .map(|discussion| DiscussionLinkCtx {
+                    name: discussion.name.clone(),
+                    url: discussion
+                        .url
+                        .replace("{url}", &encode_query(&item.front.link))
+                        .replace("{title}", &encode_query(&item.front.title)),
+                })
+                .collect(),
             summary: item.front.summary.clone(),
             excerpt,
+            search_text: item.body.clone(),
             content: item.front.content,
             has_html: item.front.html.is_some(),
-            starred: item.front.starred,
             extra: item.front.extra.clone(),
             permalink: links.map(|l| l.permalink(&md)),
             raw_url: links.map(|l| l.raw(&md)),
@@ -211,6 +231,10 @@ impl ItemCtx {
             body_html: None,
         }
     }
+}
+
+fn encode_query(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 #[cfg(test)]

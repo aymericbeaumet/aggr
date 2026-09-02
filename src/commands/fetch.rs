@@ -303,7 +303,14 @@ fn plan(raw: &RawItem, source: &Source, options: &Options) -> Planned {
         updated: raw.updated.map(|date| date.min(options.now)),
         first_seen: options.now,
         authors: raw.authors.clone(),
-        tags: raw.tags.clone(),
+        labels: source
+            .labels
+            .iter()
+            .chain(&raw.labels)
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         summary: raw.summary.clone().filter(|s| !s.trim().is_empty()),
         content: if raw.content_html.is_some() {
             ContentKind::Feed
@@ -313,7 +320,6 @@ fn plan(raw: &RawItem, source: &Source, options: &Options) -> Planned {
         html: None,
         html_truncated: truncated,
         extra: raw.extra.clone(),
-        starred: false,
         hidden: false,
     };
     Planned {
@@ -336,6 +342,7 @@ mod tests {
             slug: "blog".into(),
             name: None,
             category: None,
+            labels: vec![],
             headers: vec![],
             html: true,
             engine: crate::config::Engine::Feed {

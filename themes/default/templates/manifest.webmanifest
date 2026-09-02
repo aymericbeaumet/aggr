@@ -16,8 +16,6 @@
     { "src": "{{ 'assets/apple-touch-icon.png' | url_for }}", "sizes": "180x180", "type": "image/png" }
   ],
   "shortcuts": [
-    { "name": "Unread", "url": "{{ 'unread/' | url_for }}" },
-    { "name": "Starred", "url": "{{ 'starred/' | url_for }}" },
     { "name": "Search", "url": "{{ 'search/' | url_for }}" }
   ]
 }

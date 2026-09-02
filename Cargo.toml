@@ -1,6 +1,6 @@
 [package]
 name = "aggr"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
@@ -26,6 +26,7 @@ hex = "0.4"
 htmd = "0.5"
 log = "0.4"
 minijinja = { version = "2", features = ["loader", "json"] }
+notify = "8"
 reqwest = { version = "0.13", default-features = false, features = [
   "rustls-no-provider",
   "gzip",

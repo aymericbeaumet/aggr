@@ -81,8 +81,8 @@ pub fn read_items(store: &Store, via: &str, only: &[String], limit: usize) -> Re
         !item.front.hidden && (only.is_empty() || only.contains(&item.front.source))
     });
     items.sort_by(|a, b| {
-        b.sort_date()
-            .cmp(&a.sort_date())
+        b.created_at()
+            .cmp(&a.created_at())
             .then_with(|| b.path.cmp(&a.path))
     });
     items.truncate(limit);
@@ -113,7 +113,7 @@ pub fn convert(item: &Item, html: Option<String>, via: &str) -> RawItem {
         published: front.published.or(Some(front.first_seen)),
         updated: front.updated,
         authors: front.authors.clone(),
-        tags: front.tags.clone(),
+        labels: front.labels.clone(),
         summary: front.summary.clone(),
         content_html,
         extra,
