@@ -397,7 +397,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     );
     assert!(index.contains("Hello there"));
     assert!(index.contains(">aggr.toml</a>"));
-    assert!(index.contains("built <time"));
+    assert!(!index.contains("built <time"));
     assert!(index.contains("id=\"swup\""));
     assert!(index.contains("assets/swup-"));
     assert!(!index.contains("config@"));

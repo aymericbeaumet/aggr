@@ -42,9 +42,6 @@
 {% block content %}{% endblock %}
 </main>
 </div>
-<footer class="foot">
-  built <time datetime="{{ build.time }}">{{ build.time | date('%Y-%m-%d %H:%M UTC') }}</time> with <a href="https://github.com/aymericbeaumet/aggr">aggr</a>
-</footer>
 <script src="{{ 'assets/swup.js' | url_for }}"></script>
 <script src="{{ 'assets/app.js' | url_for }}" defer></script>
 </body>

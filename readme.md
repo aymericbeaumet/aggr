@@ -2,6 +2,10 @@
 
 Git-native feed reader. `aggr.toml` in, static site out, history on a branch.
 
+Created and maintained by [Aymeric Beaumet](https://github.com/aymericbeaumet). If aggr earns a
+place in your reading workflow, [star it on GitHub](https://github.com/aymericbeaumet/aggr) and
+share your reader—each public reader is also a ready-to-fork starting point for the next one.
+
 A GitHub repository with two files becomes a reader: a workflow fetches your feeds every half
 hour, appends every new item as a Markdown file to an append-only branch, renders a static site
 from that branch, and publishes it on free GitHub Pages. Every item has a permanent
@@ -9,18 +13,16 @@ from that branch, and publishes it on free GitHub Pages. Every item has a perman
 digest arrives as a GitHub issue (GitHub emails it to you). No server, no database, no account
 anywhere but GitHub.
 
-Live example: <https://aggr.aymericbeaumet.com> — built from
-[aymericbeaumet/aggr.aymericbeaumet.com](https://github.com/aymericbeaumet/aggr.aymericbeaumet.com),
-a repository holding nothing but `aggr.toml`, a few topic files and the workflow below. The demo
-at <https://aymericbeaumet.github.io/aggr/> is built from [`examples/aggr.toml`](examples/aggr.toml).
+See it live at <https://aggr.aymericbeaumet.com>. Its complete setup is the deliberately small
+[aggr starter repository](https://github.com/aymericbeaumet/aggr.aymericbeaumet.com): one config
+and one workflow, with real RSS, Atom and HTML-scraped sources.
 
 ## Install: two files
 
-The quickest start is to **fork
-[aymericbeaumet/aggr.aymericbeaumet.com](https://github.com/aymericbeaumet/aggr.aymericbeaumet.com)**:
-edit `aggr.toml` (drop `[site] url`, or point it at your own domain), enable workflows in the
-fork's Actions tab, run the `aggr` workflow once, and your reader is live at
-`https://<you>.github.io/<repo>/`. Delete the topic files you do not want and add your own.
+The quickest start is to **[fork the working starter](https://github.com/aymericbeaumet/aggr.aymericbeaumet.com/fork)**.
+Edit its single `aggr.toml`, enable workflows in the fork's Actions tab, run `aggr` once, and your
+reader is live at `https://<you>.github.io/<repo>/`. No build tooling or local installation is
+required. Keep your fork public and its own visitors can fork it in turn.
 
 From scratch, in any repository:
 
@@ -97,10 +99,10 @@ Release archives for Linux, macOS and Windows (amd64, arm64) with `SHA256SUMS` a
 | Command | What it does |
 |---|---|
 | `aggr init [--github] [--defaults]` | Write a commented `aggr.toml` (every option with `--defaults`), plus the workflow with `--github`. |
-| `aggr sync [--source slug…] [--dry-run]` | Fetch every source, write new items into the data worktree, commit, push, update `refs/aggr/last-good`. `build` and `dev` invoke this first. |
+| `aggr sync [--source slug…] [--dry-run]` | Fetch every source, write new items into the data worktree, commit, push, update `refs/aggr/last-good`. `build` invokes this first. |
 | `aggr fetch` | `sync` without the commit and push. |
 | `aggr build [--release] [--out dir] [--base-url url] [--data-ref ref]` | Sync, then render the site. `--release` builds for `[site] url` (or `--base-url`) and writes `CNAME`; `--data-ref` renders any data commit after syncing. |
-| `aggr dev [--port 7319]` | Sync, build, serve, then rebuild and live-reload as config or theme files change. |
+| `aggr dev [--port 7319]` | Refresh the local data worktree without committing, build, serve, then rebuild/live-reload config or theme changes. |
 | `aggr digest [--dry-run] [--force]` | Post today's digest issue when it is due. |
 | `aggr check` | Validate the configuration and probe every source. |
 | `aggr completions <shell>` | Shell completions. |
@@ -243,7 +245,8 @@ make check          # fmt-check, clippy -D warnings, tests (hermetic: no network
 make run ARGS="dev"
 ```
 
-`aggr dev` syncs and builds once, watches the config, includes, templates and static files, and
+`aggr dev` refreshes locally without committing, builds once, watches the config, includes,
+templates and static files, and
 reloads open browsers after each successful rebuild. It listens on port 7319 by default; use
 `--port` to choose another. `aggr build` performs the same required sync but exits after rendering.
 

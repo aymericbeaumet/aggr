@@ -12,7 +12,7 @@ Typical loop:
 
     aggr init --github   # write aggr.toml and the GitHub workflow
     aggr build           # sync, then render the site into _site/
-    aggr dev             # sync + build + live-reloading server
+    aggr dev             # local resync + build + live-reloading server
 
 Everything the site shows comes from the data branch, so every item has a permanent URL on
 GitHub and a run that finds nothing new leaves no trace.";
@@ -42,7 +42,7 @@ pub enum Command {
     Sync(FetchArgs),
     /// Sync, then render the static site into the output directory.
     Build(BuildArgs),
-    /// Sync, build, then serve with fast rebuilds and live reload.
+    /// Refresh locally without committing, build, then serve with live reload.
     Dev(DevArgs),
     /// Post the daily digest issue on GitHub when one is due.
     Digest(DigestArgs),
