@@ -99,17 +99,18 @@ Release archives for Linux, macOS and Windows (amd64, arm64) with `SHA256SUMS` a
 | Command | What it does |
 |---|---|
 | `aggr init [--github] [--defaults]` | Write a commented `aggr.toml` (every option with `--defaults`), plus the workflow with `--github`. |
-| `aggr sync [--source slug…] [--dry-run]` | Fetch every source, write new items into the data worktree, commit, push, update `refs/aggr/last-good`. `build` invokes this first. |
+| `aggr sync [--dry-run]` | Fetch every source, write new items into the data worktree, commit, push, update `refs/aggr/last-good`. `build` invokes this first. |
 | `aggr fetch` | `sync` without the commit and push. |
 | `aggr build [--release] [--out dir] [--base-url url] [--data-ref ref]` | Sync, then render the site. `--release` builds for `[site] url` (or `--base-url`) and writes `CNAME`; `--data-ref` renders any data commit after syncing. |
-| `aggr dev [--port 7319]` | Refresh the local data worktree without committing, build, serve, then rebuild/live-reload config or theme changes. |
+| `aggr dev [--port 7319]` | Sync, build, serve, and live-reload from an ephemeral workspace; it never commits, pushes, or writes data/build output into the repository. |
 | `aggr digest [--dry-run] [--force]` | Post today's digest issue when it is due. |
 | `aggr check` | Validate the configuration and probe every source. |
 | `aggr completions <shell>` | Shell completions. |
 
-Locally, `aggr dev` is the whole loop. The data branch lives in a worktree at
-`.aggr/data` and the site in `_site/`; both are added to `.git/info/exclude`, so `main` stays
-clean without touching your `.gitignore`.
+Locally, `aggr dev` is the whole loop. It serves an atomic in-memory site snapshot; private build,
+store, and cache staging lives in an OS temporary directory that is removed on exit. Iterating from
+`aggr.toml` therefore leaves the repository untouched. `aggr sync` and `aggr build` use the
+persistent data worktree by design.
 
 ## Configuration
 
@@ -124,6 +125,9 @@ title = "My reads"
 timezone = "Europe/Paris"          # digest schedule, date display
 theme = "themes/mine"              # a directory with templates/ and static/; "default" otherwise
 # url = "https://reads.example.com"  # custom domain: build target and CNAME
+
+[fetch]
+content = "heavy"                  # default: fetch + clean original pages; "light" trusts feeds
 
 [digest]
 at = "08:00"                       # one GitHub issue a day, when something is new
@@ -189,10 +193,11 @@ All browseable routes are rendered ahead of time. The vendored, MIT-licensed
 [Swup](https://swup.js.org/) navigation layer swaps those server-rendered pages, preserves browser
 history, and caches visits; it progressively falls back to ordinary links without JavaScript.
 
-Theme state stays in `localStorage` without changing normal URLs. **copy state** in the top bar
+Theme state stays in `localStorage` without changing normal URLs. **copy state** under `/settings/`
 copies a one-time URL containing every local key/value; opening it imports the state and cleans
-the payload from the address bar. Discussion links such as Hacker News and X are configured with
-`[[site.discussions]]` URL templates using `{url}` and `{title}`.
+the payload from the address bar. Hacker News discussion search is on by default; Reddit, X, or
+any other service can be added with `[[site.discussions]]` URL templates using `{url}` and
+`{title}`.
 
 It is a **PWA**: "Install" it from the browser menu and it opens as an app with its own icon
 and a search shortcut. A service worker precaches the feed, the lists and
@@ -200,9 +205,14 @@ the newest `[site] offline_items` item pages at every build, and remembers whate
 so the reader works on the train; an "Updated — reload" toast appears when a new build is
 live. `pwa = false` turns it off (an installed worker unregisters itself on the next visit).
 
-Each item page renders the Markdown and links to the raw `.md`, a sanitized view of the original
-HTML, the original article, and the GitHub permalink pinned to the commit that introduced it,
-plus the file's history and an edit link (set `hidden: true` in the front
+In the default `heavy` mode, each new item downloads the original page, extracts its main article
+with a Readability-style parser, then runs the result through aggr's sanitizer and Markdown
+pipeline. Extraction failures safely fall back to the feed. Set `[fetch] content = "light"` or
+`content = "light"` on one source to avoid the extra request and reuse feed content.
+
+Each item has a clean `/items/<source>/<slug>/` page, an `original` link, and sibling `.md`,
+`.txt`, `.rst`, and `.json` representations. The page also links to the GitHub permalink pinned to
+the commit that introduced it, plus the file's history and an edit link (set `hidden: true` in the front
 matter from GitHub's editor; fetches never overwrite an existing file). Items outside the site
 window (`[site] max_items`, `max_age_days`) become 200-byte redirect stubs to their permalink,
 so old URLs keep working.
@@ -245,10 +255,10 @@ make check          # fmt-check, clippy -D warnings, tests (hermetic: no network
 make run ARGS="dev"
 ```
 
-`aggr dev` refreshes locally without committing, builds once, watches the config, includes,
-templates and static files, and
-reloads open browsers after each successful rebuild. It listens on port 7319 by default; use
-`--port` to choose another. `aggr build` performs the same required sync but exits after rendering.
+`aggr dev` syncs and builds in a disposable workspace, watches the config, includes, templates and
+static files, then resyncs/rebuilds and reloads open browsers after each successful change. It
+prefers port 7319 and automatically picks a free localhost port when that is busy; use `--port` to
+choose one. `aggr build` performs the same required sync persistently and exits after rendering.
 
 Releases: bump `version` in `Cargo.toml` and `VERSION`, commit, tag `vX.Y.Z`, push the tag.
 

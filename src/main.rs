@@ -24,6 +24,7 @@ fn main() -> ExitCode {
         _ => "trace",
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level))
+        .filter_module("html5ever::serialize", log::LevelFilter::Error)
         .format_timestamp(None)
         .init();
 

@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::config::{Config, Source};
 use crate::content;
-use crate::model::{Item, git_blob_sha};
+use crate::model::Item;
 use crate::store::{Status, Store};
 use context::{
     BuildCtx, CategoryCtx, GitHubLinks, ItemCtx, PageCtx, SiteCtx, SourceCtx, SourceErrorCtx,
@@ -94,10 +94,11 @@ pub fn precache_paths(
     item_urls: impl IntoIterator<Item = String>,
     offline_items: usize,
 ) -> Vec<String> {
-    const SHELLS: [&str; 6] = [
+    const SHELLS: [&str; 7] = [
         "",
         "sources/",
         "search/",
+        "settings/",
         "404.html",
         "offline.html",
         "manifest.webmanifest",
@@ -199,6 +200,15 @@ pub fn build(
 ) -> Result<Summary> {
     let out = &info.out;
     prepare_out_dir(out)?;
+    let config_name = info
+        .config_path
+        .as_deref()
+        .and_then(|path| Path::new(path).file_name())
+        .unwrap_or_else(|| std::ffi::OsStr::new("aggr.toml"));
+    let config_source = project_root.join(config_name);
+    if config_source.is_file() {
+        write(&out.join("aggr.toml"), &std::fs::read(&config_source)?)?;
+    }
 
     let base = base_path(info.base_url.as_deref());
     let repository = config.repository();
@@ -213,7 +223,7 @@ pub fn build(
         config_url: repository.as_deref().and_then(|repository| {
             info.config_sha.as_deref().map(|sha| {
                 format!(
-                    "https://github.com/{repository}/blob/{sha}/{}",
+                    "https://raw.githubusercontent.com/{repository}/{sha}/{}",
                     info.config_path.as_deref().unwrap_or("aggr.toml")
                 )
             })
@@ -223,7 +233,7 @@ pub fn build(
             .discussions
             .iter()
             .map(|d| context::DiscussionLinkCtx {
-                name: d.name.clone(),
+                name: context::compact_name(&d.name),
                 url: d.url.clone(),
             })
             .collect(),
@@ -273,7 +283,6 @@ pub fn build(
             .get(item.front.source.as_str())
             .map(|s| (s.name.as_str(), s.category.as_deref()))
             .unwrap_or((item.front.source.as_str(), None));
-        let bytes = store.item_bytes(&item.path)?;
         let excerpt = item
             .front
             .summary
@@ -286,7 +295,6 @@ pub fn build(
             source_name,
             category,
             links.as_ref(),
-            git_blob_sha(&bytes),
             excerpt,
             &config.site.discussions,
         ));
@@ -460,37 +468,49 @@ pub fn build(
         simple("search", "Search", "search/", "shell.html", None, None)?.as_bytes(),
     )?;
     write(
+        &out.join("settings/index.html"),
+        simple(
+            "settings",
+            "Settings",
+            "settings/",
+            "settings.html",
+            None,
+            None,
+        )?
+        .as_bytes(),
+    )?;
+    write(
         &out.join("404.html"),
         simple("404", "Not found", "", "404.html", None, None)?.as_bytes(),
     )?;
-    pages += 5;
+    pages += 6;
 
     for (ctx, &index) in items.iter().zip(&window.rendered) {
         let item = &all_items[index];
         let mut ctx = ctx.clone();
         ctx.body_html = Some(content::render_markdown(&item.body));
         let dir = out.join(&ctx.url);
+        let representation = out.join(ctx.url.trim_end_matches('/'));
         write(
             &dir.join("index.html"),
             simple("item", &ctx.title, &ctx.url, "item.html", Some(&ctx), None)?.as_bytes(),
         )?;
-        write(&dir.join("index.md"), &store.item_bytes(&item.path)?)?;
-        if let Some(raw) = store.read_html(&item.path)? {
-            let base = url::Url::parse(&item.front.link).ok();
-            let sanitized = content::sanitize(&raw, base.as_ref());
-            write(
-                &dir.join("html.html"),
-                simple(
-                    "html",
-                    &ctx.title,
-                    &ctx.url,
-                    "html.html",
-                    Some(&ctx),
-                    Some(&sanitized),
-                )?
-                .as_bytes(),
-            )?;
-        }
+        write(
+            &representation.with_extension("md"),
+            &store.item_bytes(&item.path)?,
+        )?;
+        write(
+            &representation.with_extension("txt"),
+            outputs::text_item(&ctx).as_bytes(),
+        )?;
+        write(
+            &representation.with_extension("rst"),
+            outputs::rst_item(&ctx).as_bytes(),
+        )?;
+        write(
+            &representation.with_extension("json"),
+            outputs::item_json(&site, &ctx, &item.body)?.as_bytes(),
+        )?;
     }
 
     let mut stubs = 0;
@@ -517,6 +537,22 @@ pub fn build(
     write(
         &out.join("feed.json"),
         outputs::json_collection(&site, &site.title, "", feed_items)?.as_bytes(),
+    )?;
+    write_collection_feeds(
+        out,
+        &site,
+        &build_ctx,
+        &format!("{} categories", site.title),
+        "categories/",
+        feed_items,
+    )?;
+    write_collection_feeds(
+        out,
+        &site,
+        &build_ctx,
+        &format!("{} tags", site.title),
+        "tags/",
+        feed_items,
     )?;
     write(&out.join(".nojekyll"), b"")?;
     write(&out.join(MARKER), env!("CARGO_PKG_VERSION").as_bytes())?;
@@ -850,6 +886,7 @@ mod tests {
         );
         assert_eq!(paths[0], "/repo/");
         assert!(paths.contains(&"/repo/offline.html".to_string()));
+        assert!(paths.contains(&"/repo/settings/".to_string()));
         assert!(paths.contains(&"/repo/sources/a/".to_string()));
         assert!(paths.contains(&"/repo/assets/style.css".to_string()));
         assert!(paths.contains(&"/repo/items/a/1/".to_string()));
@@ -930,8 +967,8 @@ mod tests {
         let out = dir.path().join("out");
         let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
         assert_eq!(summary.items, 3);
-        // River, the source page, the five fixed pages, the offline page.
-        assert_eq!(summary.pages, 1 + 1 + 5 + 1);
+        // River, the source page, the six fixed pages, the offline page.
+        assert_eq!(summary.pages, 1 + 1 + 6 + 1);
 
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(out.join("manifest.webmanifest")).unwrap())
@@ -975,8 +1012,8 @@ mod tests {
         assert!(sw.contains("\"offline.html\""));
         assert!(sw.contains("\"sources/blog/\""));
         // Newest two of three: posts 2 and 1, not 0.
-        assert!(sw.contains("\"items/blog/2026/09/2026-09-03-post-2/\""));
-        assert!(sw.contains("\"items/blog/2026/09/2026-09-02-post-1/\""));
+        assert!(sw.contains("\"items/blog/2026-09-03-post-2/\""));
+        assert!(sw.contains("\"items/blog/2026-09-02-post-1/\""));
         assert!(!sw.contains("post-0/\""));
         assert_eq!(sw.matches("\"items/").count(), 2);
 
@@ -987,6 +1024,10 @@ mod tests {
         let river = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(river.contains("rel=\"apple-touch-icon\""));
         assert!(river.contains("name=\"theme-color\""));
+        assert!(river.contains("href=\"sources/\""), "{river}");
+        assert!(river.contains("href=\"settings/\""), "{river}");
+        assert!(river.contains("aggr.toml ↗</a>"), "{river}");
+        assert!(out.join("settings/index.html").is_file());
         assert!(out.join("pagefind/pagefind.js").is_file());
     }
 
@@ -996,7 +1037,7 @@ mod tests {
         let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
         let out = dir.path().join("out");
         let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
-        assert_eq!(summary.pages, 1 + 1 + 5);
+        assert_eq!(summary.pages, 1 + 1 + 6);
         for name in ["manifest.webmanifest", "sw.js", "offline.html"] {
             assert!(!out.join(name).exists(), "{name} was written");
         }

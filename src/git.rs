@@ -28,6 +28,16 @@ pub struct Worktree {
     branch: String,
 }
 
+impl Worktree {
+    /// A non-git store used by `aggr dev`; its owner controls the temporary directory lifetime.
+    pub fn ephemeral(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            branch: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushOutcome {
     Pushed,

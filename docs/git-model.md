@@ -31,7 +31,8 @@ sources/<source>/seen.txt                              "<key> <yyyy-mm-dd>" per 
 status.toml                                            sources currently failing; absent when all is well
 ```
 
-- **Item paths are identities.** The site URL `/items/<source>/<yyyy>/<mm>/<stem>/`, the search
+- **Item paths are identities.** Storage stays date-partitioned, while the public site uses
+  `/items/<source>/<stem>/` plus `.md`, `.txt`, `.rst`, and `.json` representations. Search
   index and the browser's read/star state all key on the path. The date is `published` (or the
   time of first sight) at write time and is never moved. File names are lowercase ASCII slugs,
   ≤ 60 characters, safe on every OS; collisions in a directory get `-2`, `-3`.

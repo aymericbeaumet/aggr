@@ -72,16 +72,10 @@ impl Default for SiteConfig {
             out: PathBuf::from("_site"),
             pwa: true,
             offline_items: 100,
-            discussions: vec![
-                DiscussionLinkConfig {
-                    name: "Hacker News".into(),
-                    url: "https://hn.algolia.com/?q={url}".into(),
-                },
-                DiscussionLinkConfig {
-                    name: "X".into(),
-                    url: "https://x.com/search?q={url}".into(),
-                },
-            ],
+            discussions: vec![DiscussionLinkConfig {
+                name: "Hacker News".into(),
+                url: "https://hn.algolia.com/?q={url}".into(),
+            }],
             params: toml::Table::new(),
         }
     }
@@ -125,23 +119,37 @@ impl Default for StoreConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct FetchConfig {
     pub concurrency: usize,
+    /// Concurrent original-article downloads within each source in `heavy` mode.
+    pub article_concurrency: usize,
     pub timeout_secs: u64,
     /// `{version}` expands to the aggr version.
     pub user_agent: String,
     pub max_body_bytes: usize,
     pub retries: u32,
+    /// `heavy` downloads and extracts original article pages; `light` trusts feed content.
+    pub content: ContentMode,
 }
 
 impl Default for FetchConfig {
     fn default() -> Self {
         Self {
             concurrency: 16,
+            article_concurrency: 4,
             timeout_secs: 20,
             user_agent: "aggr/{version} (+https://github.com/aymericbeaumet/aggr)".into(),
             max_body_bytes: 10_000_000,
             retries: 2,
+            content: ContentMode::Heavy,
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ContentMode {
+    #[default]
+    Heavy,
+    Light,
 }
 
 impl FetchConfig {
@@ -203,6 +211,8 @@ pub struct SourceConfig {
     /// Extra request headers; values support `${ENV}` expansion.
     pub headers: BTreeMap<String, String>,
     pub html: Option<bool>,
+    /// Override `[fetch] content` for this source.
+    pub content: Option<ContentMode>,
     /// `type = "aggr"`: `owner/repo` on GitHub (alternative to a full git `url`).
     pub repo: Option<String>,
     /// `type = "aggr"`: data branch of that repository.
@@ -231,6 +241,7 @@ pub struct Source {
     pub labels: Vec<String>,
     pub headers: Vec<(String, String)>,
     pub html: bool,
+    pub content: ContentMode,
     pub engine: Engine,
 }
 
@@ -333,6 +344,9 @@ impl Config {
         if self.fetch.concurrency == 0 {
             bail!("[fetch] concurrency must be at least 1");
         }
+        if self.fetch.article_concurrency == 0 {
+            bail!("[fetch] article_concurrency must be at least 1");
+        }
         if self.store.branch.is_empty() || self.store.branch.contains(char::is_whitespace) {
             bail!(
                 "[store] branch {:?} is not a valid branch name",
@@ -365,7 +379,7 @@ impl Config {
         let mut seen = BTreeSet::new();
         let mut sources = Vec::with_capacity(self.sources.len());
         for (index, raw) in self.sources.iter().enumerate() {
-            let source = resolve_source(raw, env)
+            let source = resolve_source(raw, self.fetch.content, env)
                 .with_context(|| format!("[[sources]] #{}: {}", index + 1, describe(raw)))?;
             if !seen.insert(source.slug.clone()) {
                 bail!(
@@ -424,7 +438,11 @@ fn describe(raw: &SourceConfig) -> String {
         .unwrap_or_else(|| "<empty>".into())
 }
 
-fn resolve_source(raw: &SourceConfig, env: &dyn Fn(&str) -> Option<String>) -> Result<Source> {
+fn resolve_source(
+    raw: &SourceConfig,
+    default_content: ContentMode,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Source> {
     let kind = raw.kind.as_deref().unwrap_or("feed");
     let aggr_keys = [
         ("repo", raw.repo.is_some()),
@@ -552,6 +570,7 @@ fn resolve_source(raw: &SourceConfig, env: &dyn Fn(&str) -> Option<String>) -> R
         labels: raw.labels.clone(),
         headers,
         html: raw.html.unwrap_or(true),
+        content: raw.content.unwrap_or(default_content),
         engine,
     })
 }
@@ -851,10 +870,16 @@ mod tests {
         assert_eq!(config.store.html, compiled.store.html);
         assert_eq!(config.store.html_max_bytes, compiled.store.html_max_bytes);
         assert_eq!(config.fetch.concurrency, compiled.fetch.concurrency);
+        assert_eq!(
+            config.fetch.article_concurrency,
+            compiled.fetch.article_concurrency
+        );
         assert_eq!(config.fetch.timeout_secs, compiled.fetch.timeout_secs);
         assert_eq!(config.fetch.user_agent, compiled.fetch.user_agent);
         assert_eq!(config.fetch.max_body_bytes, compiled.fetch.max_body_bytes);
         assert_eq!(config.fetch.retries, compiled.fetch.retries);
+        assert_eq!(config.fetch.content, compiled.fetch.content);
+        assert_eq!(config.site.discussions, compiled.site.discussions);
         assert_eq!(config.digest, Some(DigestConfig::default()));
         assert!(config.sources.is_empty());
     }
@@ -872,6 +897,19 @@ mod tests {
         assert!(Config::parse("[site]\ntimezone = \"Mars/Olympus\"\n").is_err());
         assert!(Config::parse("[digest]\nat = \"25:00\"\n").is_err());
         assert!(Config::parse("").unwrap().digest.is_none());
+    }
+
+    #[test]
+    fn heavy_content_is_default_and_sources_can_choose_light() {
+        let config = Config::parse(
+            "[[sources]]\nurl = \"https://heavy.example/feed\"\n\
+             [[sources]]\nurl = \"https://light.example/feed\"\ncontent = \"light\"\n",
+        )
+        .unwrap();
+        let sources = config.sources().unwrap();
+        assert_eq!(sources[0].content, ContentMode::Heavy);
+        assert_eq!(sources[1].content, ContentMode::Light);
+        assert!(Config::parse("[fetch]\ncontent = \"medium\"\n").is_err());
     }
 
     #[test]

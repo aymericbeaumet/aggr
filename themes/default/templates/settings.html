@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="settings">
+  <h1>Settings</h1>
+  <label class="setting">
+    <span>Theme</span>
+    <select id="theme-mode"><option value="auto">auto</option><option value="light">light</option><option value="dark">dark</option></select>
+  </label>
+  <div class="setting">
+    <div><strong>Copy state</strong><p class="muted">Copy every local setting into a shareable URL. Opening it on another device imports the state once without keeping it in the address.</p></div>
+    <button id="copy-state" type="button">copy state URL</button>
+  </div>
+</section>
+{% endblock %}

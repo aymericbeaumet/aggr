@@ -59,7 +59,7 @@ impl TestRepo {
 
     fn write_config(&self, feed_url: &str, extra: &str) {
         self.write_raw_config(&format!(
-            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n{extra}\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\nlabels = [\"example\", \"news\"]\n"
+            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n{extra}\n[fetch]\ncontent = \"light\"\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\nlabels = [\"example\", \"news\"]\n"
         ));
     }
 
@@ -331,7 +331,7 @@ fn source_errors_are_recorded_on_transition_only_and_all_failed_is_fatal() {
     });
     let repo = TestRepo::new();
     let config = format!(
-        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\n[[sources]]\nurl = \"{}\"\nname = \"ok\"\n[[sources]]\nurl = \"{}\"\nname = \"broken\"\n",
+        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\ncontent = \"light\"\n[[sources]]\nurl = \"{}\"\nname = \"ok\"\n[[sources]]\nurl = \"{}\"\nname = \"broken\"\n",
         server.url("/ok.xml"),
         server.url("/broken.xml")
     );
@@ -362,7 +362,7 @@ fn source_errors_are_recorded_on_transition_only_and_all_failed_is_fatal() {
 
     // Every source failing is the one fetch condition that fails the run.
     let config = format!(
-        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\n[[sources]]\nurl = \"{}\"\nname = \"broken\"\n",
+        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\ncontent = \"light\"\n[[sources]]\nurl = \"{}\"\nname = \"broken\"\n",
         server.url("/broken.xml")
     );
     std::fs::write(repo.clone.join("aggr.toml"), config).unwrap();
@@ -392,27 +392,48 @@ fn build_renders_the_site_and_release_needs_a_url() {
     let site = repo.clone.join("_site");
     let index = std::fs::read_to_string(site.join("index.html")).unwrap();
     assert!(
-        index.contains("href=\"items/demo/2026/09/2026-09-01-hello-there/\""),
+        index.contains("href=\"items/demo/2026-09-01-hello-there/\""),
         "{index}"
     );
     assert!(index.contains("Hello there"));
-    assert!(index.contains(">aggr.toml</a>"));
+    assert!(index.contains(">aggr.toml ↗</a>"));
+    assert!(index.contains("href=\"sources/\""), "{index}");
+    assert!(index.contains("href=\"settings/\""), "{index}");
+    assert!(index.contains("target=\"_blank\""), "{index}");
     assert!(!index.contains("built <time"));
     assert!(index.contains("id=\"swup\""));
+    assert!(
+        index.find("<header class=\"top\">").unwrap() < index.find("<main id=\"swup\"").unwrap(),
+        "the persistent menubar must stay outside Swup's replacement container"
+    );
     assert!(index.contains("assets/swup-"));
     assert!(!index.contains("config@"));
     assert!(!index.contains("data@"));
     assert!(!index.contains("starred"));
     assert!(!index.contains("unread"));
     assert!(!index.contains("&#x2f;"));
-    let item = site.join("items/demo/2026/09/2026-09-01-hello-there");
+    let item = site.join("items/demo/2026-09-01-hello-there");
     let page = std::fs::read_to_string(item.join("index.html")).unwrap();
     assert!(page.contains("https://github.com/o/r/blob/"), "{page}");
     assert!(!page.contains("alert("), "{page}");
-    assert!(item.join("index.md").exists());
-    let view = std::fs::read_to_string(item.join("html.html")).unwrap();
-    assert!(view.contains("Content-Security-Policy"));
-    assert!(!view.contains("onerror"), "{view}");
+    let representation = site.join("items/demo/2026-09-01-hello-there");
+    assert!(representation.with_extension("md").exists());
+    assert!(representation.with_extension("txt").exists());
+    assert!(representation.with_extension("rst").exists());
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(representation.with_extension("json")).unwrap())
+            .unwrap();
+    assert_eq!(json["title"], "Hello there");
+    assert_eq!(json["source"], "demo");
+    assert!(!item.join("html.html").exists());
+    assert!(page.contains(">original</a>"), "{page}");
+    assert!(
+        page.find(">original</a>").unwrap() < page.find(">hackernews</a>").unwrap(),
+        "{page}"
+    );
+    assert!(page.contains("<time datetime=\"2026-09-01T"), "{page}");
+    assert!(page.contains("title=\"2026-09-01T"), "{page}");
+    assert!(!page.contains("blob "), "{page}");
     assert!(site.join("pagefind/pagefind.js").exists());
     assert!(site.join("feed.xml").exists());
     assert!(site.join("atom.xml").exists());
@@ -420,12 +441,20 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(site.join("feed.json").exists());
     assert!(site.join(".nojekyll").exists());
     assert!(site.join("sources/demo/index.html").exists());
+    assert!(site.join("settings/index.html").exists());
+    assert!(site.join("aggr.toml").exists());
     assert!(site.join("categories/demo/index.html").exists());
     assert!(site.join("categories/demo/atom.xml").exists());
     assert!(site.join("categories/demo/rss.xml").exists());
     assert!(site.join("categories/demo/feed.json").exists());
     assert!(site.join("categories/index.html").exists());
+    assert!(site.join("categories/atom.xml").exists());
+    assert!(site.join("categories/rss.xml").exists());
+    assert!(site.join("categories/feed.json").exists());
     assert!(site.join("tags/index.html").exists());
+    assert!(site.join("tags/atom.xml").exists());
+    assert!(site.join("tags/rss.xml").exists());
+    assert!(site.join("tags/feed.json").exists());
     assert!(site.join("tags/example/index.html").exists());
     assert!(site.join("tags/example/atom.xml").exists());
     assert!(site.join("tags/example/rss.xml").exists());
@@ -437,7 +466,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(sw.contains("\"assets/style-"), "{sw}");
     assert!(sw.contains("\"assets/swup-"), "{sw}");
     assert!(
-        sw.contains("\"items/demo/2026/09/2026-09-01-hello-there/\""),
+        sw.contains("\"items/demo/2026-09-01-hello-there/\""),
         "{sw}"
     );
     assert!(site.join("manifest.webmanifest").exists());
@@ -525,7 +554,7 @@ fn check_and_digest_dry_run() {
         .success()
         .stdout(predicate::str::contains("Digest #1 · "))
         .stdout(predicate::str::contains("· 2 new"))
-        .stdout(predicate::str::contains("- [Hello there](https://demo.example/hello) · [read](https://reads.example.com/items/demo/2026/09/2026-09-01-hello-there/) · [md](https://github.com/o/r/blob/"));
+        .stdout(predicate::str::contains("- [Hello there](https://demo.example/hello) · [source](https://reads.example.com/items/demo/2026-09-01-hello-there/) · [md](https://github.com/o/r/blob/"));
     // Posting needs a token; without one the command fails loudly instead of silently skipping.
     repo.aggr()
         .args(["digest", "--force"])

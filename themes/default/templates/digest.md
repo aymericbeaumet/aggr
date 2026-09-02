@@ -8,7 +8,7 @@
 ### {{ group.name }} ({{ group.items | length }})
 
 {% for item in group.items %}
-- [{{ item.title }}]({{ item.link }}){{ " · [read](" ~ item.page ~ ")" if item.page }}{{ " · [md](" ~ item.permalink ~ ")" if item.permalink }}
+- [{{ item.title }}]({{ item.link }}){{ " · [source](" ~ item.page ~ ")" if item.page }}{{ " · [md](" ~ item.permalink ~ ")" if item.permalink }}
 {% endfor %}
 
 {% endfor %}

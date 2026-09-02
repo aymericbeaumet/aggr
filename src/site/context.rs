@@ -43,7 +43,7 @@ pub struct BuildCtx {
 #[derive(Debug, Clone, Serialize)]
 pub struct PageCtx {
     /// `river`, `source`, `category`, `tag`, taxonomy indexes, `item`, `sources`, `search`,
-    /// `404`, or `offline`.
+    /// `settings`, `404`, or `offline`.
     pub kind: String,
     pub title: String,
     /// Site path of this page, e.g. `sources/rust-blog/`.
@@ -62,7 +62,7 @@ pub struct PageCtx {
 pub struct ItemCtx {
     /// `items/<source>/<yyyy>/<mm>/<stem>` — the identity used by localStorage and search.
     pub path: String,
-    /// Site path of the item page, e.g. `items/rust-blog/2026/09/2026-09-02-hello/`.
+    /// Flat site path of the item page, e.g. `items/rust-blog/2026-09-02-hello/`.
     pub url: String,
     pub title: String,
     pub link: String,
@@ -80,15 +80,12 @@ pub struct ItemCtx {
     pub summary: Option<String>,
     pub excerpt: String,
     pub content: ContentKind,
-    pub has_html: bool,
     pub extra: BTreeMap<String, serde_yaml_ng::Value>,
     /// GitHub URLs pinned to the data commit; `None` when the repository is unknown.
     pub permalink: Option<String>,
     pub raw_url: Option<String>,
     pub history_url: Option<String>,
     pub edit_url: Option<String>,
-    /// What `git hash-object` gives for the `.md` file.
-    pub blob_sha: String,
     /// Rendered Markdown; only filled on the item's own page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_html: Option<String>,
@@ -160,7 +157,11 @@ impl GitHubLinks<'_> {
 }
 
 pub fn item_url(path: &str) -> String {
-    format!("{path}/")
+    let mut parts = path.split('/');
+    let _items = parts.next();
+    let source = parts.next().unwrap_or("unknown");
+    let slug = path.rsplit('/').next().unwrap_or("item");
+    format!("items/{source}/{slug}/")
 }
 
 pub fn domain_of(link: &str) -> String {
@@ -188,7 +189,6 @@ impl ItemCtx {
         source_name: &str,
         category: Option<&str>,
         links: Option<&GitHubLinks<'_>>,
-        blob_sha: String,
         excerpt: String,
         discussions: &[crate::config::DiscussionLinkConfig],
     ) -> Self {
@@ -211,7 +211,7 @@ impl ItemCtx {
             discussions: discussions
                 .iter()
                 .map(|discussion| DiscussionLinkCtx {
-                    name: discussion.name.clone(),
+                    name: compact_name(&discussion.name),
                     url: discussion
                         .url
                         .replace("{url}", &encode_query(&item.front.link))
@@ -221,16 +221,21 @@ impl ItemCtx {
             summary: item.front.summary.clone(),
             excerpt,
             content: item.front.content,
-            has_html: item.front.html.is_some(),
             extra: item.front.extra.clone(),
             permalink: links.map(|l| l.permalink(&md)),
             raw_url: links.map(|l| l.raw(&md)),
             history_url: links.map(|l| l.history(&md)),
             edit_url: links.map(|l| l.edit(&md)),
-            blob_sha,
             body_html: None,
         }
     }
+}
+
+pub fn compact_name(name: &str) -> String {
+    name.chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn encode_query(value: &str) -> String {
@@ -280,5 +285,13 @@ mod tests {
         assert_eq!(domain_of("nope"), "");
         assert_eq!(category_slug("Rust & Friends"), "rust-friends");
         assert_eq!(category_slug("???"), "other");
+    }
+
+    #[test]
+    fn item_urls_are_flat_while_storage_remains_date_partitioned() {
+        assert_eq!(
+            item_url("items/techmeme/2026/09/2026-09-02-a-story"),
+            "items/techmeme/2026-09-02-a-story/"
+        );
     }
 }

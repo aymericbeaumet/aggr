@@ -1,7 +1,7 @@
 //! `aggr build`: render the site from the data worktree (or any ref of the data branch).
 //! Plain builds are served from `/`; `--release` builds for the public URL and writes the CNAME.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use chrono::Utc;
@@ -63,6 +63,36 @@ pub fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
             .as_deref()
             .map(|url| format!(" for {url}"))
             .unwrap_or_default()
+    );
+    Ok(summary)
+}
+
+/// Render a transient store into an explicit directory without touching git or configured paths.
+pub fn run_ephemeral(
+    project: &Project,
+    args: &BuildArgs,
+    data_dir: &Path,
+    out: &Path,
+) -> Result<Summary> {
+    let info = BuildInfo {
+        out: out.to_path_buf(),
+        base_url: base_url(project, args)?,
+        config_sha: project.config_sha(),
+        config_path: project.config_repo_path(),
+        data_sha: None,
+        now: Utc::now(),
+        release: args.release,
+    };
+    let summary = site::build(
+        &project.config,
+        &project.sources,
+        &Store::open(data_dir),
+        &project.root,
+        &info,
+    )?;
+    println!(
+        "built {} page(s), {} item(s), {} stub(s) in the transient dev site",
+        summary.pages, summary.items, summary.stubs
     );
     Ok(summary)
 }

@@ -42,7 +42,7 @@ pub enum Command {
     Sync(FetchArgs),
     /// Sync, then render the static site into the output directory.
     Build(BuildArgs),
-    /// Refresh locally without committing, build, then serve with live reload.
+    /// Sync and build in a disposable workspace, then serve with live reload.
     Dev(DevArgs),
     /// Post the daily digest issue on GitHub when one is due.
     Digest(DigestArgs),
@@ -70,9 +70,6 @@ pub struct InitArgs {
 
 #[derive(Debug, Args, Default, Clone)]
 pub struct FetchArgs {
-    /// Only fetch these sources (slugs). Repeatable.
-    #[arg(long = "source", value_name = "SLUG")]
-    pub sources: Vec<String>,
     /// Fetch and report, but do not write anything.
     #[arg(long)]
     pub dry_run: bool,
@@ -111,7 +108,7 @@ pub struct DevArgs {
 
 #[derive(Debug, Args, Default)]
 pub struct DigestArgs {
-    /// Absolute URL of the site, for the "read" links (defaults to [site] url).
+    /// Absolute URL of the site, for the local source links (defaults to [site] url).
     #[arg(long, value_name = "URL", env = "AGGR_BASE_URL")]
     pub base_url: Option<String>,
     /// Print the issue instead of posting it.
@@ -128,12 +125,18 @@ mod tests {
 
     #[test]
     fn dev_has_local_defaults() {
-        let dev = Cli::try_parse_from(["aggr", "dev", "--source", "rust", "--release"]).unwrap();
+        let dev = Cli::try_parse_from(["aggr", "dev", "--release"]).unwrap();
         let Command::Dev(dev) = dev.command else {
             panic!("expected dev");
         };
         assert_eq!(dev.port, 7319);
-        assert_eq!(dev.fetch.sources, ["rust"]);
         assert!(dev.build.release);
+
+        let after_subcommand =
+            Cli::try_parse_from(["aggr", "dev", "--config", "/tmp/reader/aggr.toml"]).unwrap();
+        assert_eq!(
+            after_subcommand.config,
+            PathBuf::from("/tmp/reader/aggr.toml")
+        );
     }
 }

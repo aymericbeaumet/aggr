@@ -7,10 +7,10 @@
 <base id="aggr-base" href="{{ page.root }}">
 <title>{% block title %}{{ page.title }} · {{ site.title }}{% endblock %}</title>
 {% if site.description %}<meta name="description" content="{{ site.description }}">{% endif %}
-<meta name="theme-color" content="#8ea1ff">
+<meta name="theme-color" content="#2b1a17">
 <script>try{document.documentElement.dataset.theme=localStorage.getItem('aggr:theme')||'auto'}catch(e){}</script>
 <link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
-{% set feed_path = page.path if page.kind in ['category', 'tag'] else '' %}
+{% set feed_path = page.path if page.kind in ['categories', 'category', 'tags', 'tag'] else '' %}
 <link rel="alternate" type="application/atom+xml" title="{{ page.title }}" href="{{ (feed_path ~ 'atom.xml') | url_for }}">
 <link rel="alternate" type="application/rss+xml" title="{{ page.title }}" href="{{ (feed_path ~ 'rss.xml') | url_for }}">
 <link rel="alternate" type="application/feed+json" title="{{ page.title }}" href="{{ (feed_path ~ 'feed.json') | url_for }}">
@@ -19,29 +19,30 @@
 {% if site.pwa %}
 <link rel="manifest" href="{{ 'manifest.webmanifest' | url_for }}">
 {% endif %}
-<script>window.AGGR = {base: {{ page.root | json }}, kind: {{ page.kind | json }}, pwa: {{ site.pwa | json }}};</script>
+<script>window.AGGR = {base: {{ page.root | json }}, kind: {{ page.kind | json }}, pwa: {{ site.pwa | json }}, discussions: {{ site.discussions | json }}};</script>
 {% block head %}{% endblock %}
 </head>
 <body data-kind="{{ page.kind }}">
-<div id="swup">
-<span id="aggr-page" data-root="{{ page.root }}" hidden></span>
 <header class="top">
   <nav class="nav">
-    <a class="brand" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/logo.png' | url_for }}" alt="">{{ site.title }}</a>
-    <a href="{{ '' | url_for }}"{% if page.kind == 'river' %} aria-current="page"{% endif %}>feed</a>
-    <a href="{{ 'search/' | url_for }}"{% if page.kind == 'search' %} aria-current="page"{% endif %}>search</a>
-    <a href="{{ 'categories/' | url_for }}"{% if page.kind in ['categories', 'category'] %} aria-current="page"{% endif %}>categories</a>
-    <a href="{{ 'tags/' | url_for }}"{% if page.kind in ['tags', 'tag'] %} aria-current="page"{% endif %}>tags</a>
+    <a class="brand" data-route="" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/logo.png' | url_for }}" alt="">{{ site.title }}</a>
+    <a data-route="search/" data-kinds="search" href="{{ 'search/' | url_for }}"{% if page.kind == 'search' %} aria-current="page"{% endif %}>search</a>
+    <span class="nav-sep" aria-hidden="true">|</span>
+    <a data-route="categories/" data-kinds="categories category" href="{{ 'categories/' | url_for }}"{% if page.kind in ['categories', 'category'] %} aria-current="page"{% endif %}>categories</a>
+    <span class="nav-sep" aria-hidden="true">|</span>
+    <a data-route="tags/" data-kinds="tags tag" href="{{ 'tags/' | url_for }}"{% if page.kind in ['tags', 'tag'] %} aria-current="page"{% endif %}>tags</a>
+    <span class="nav-sep" aria-hidden="true">|</span>
+    <a data-route="sources/" data-kinds="sources source" href="{{ 'sources/' | url_for }}"{% if page.kind in ['sources', 'source'] %} aria-current="page"{% endif %}>sources</a>
+    <span class="nav-sep" aria-hidden="true">|</span>
+    <a data-route="settings/" data-kinds="settings" href="{{ 'settings/' | url_for }}"{% if page.kind == 'settings' %} aria-current="page"{% endif %}>settings</a>
     <span class="nav-spacer"></span>
-    <label class="theme-picker">theme <select id="theme-mode"><option value="auto">auto</option><option value="light">light</option><option value="dark">dark</option></select></label>
-    <button class="nav-action" id="copy-state" type="button">copy state</button>
-    <a href="{{ site.config_url or ('sources/' | url_for) }}">aggr.toml</a>
+    <a{% if not site.config_url %} data-route="aggr.toml"{% endif %} href="{{ site.config_url or ('aggr.toml' | url_for) }}" target="_blank" rel="noopener noreferrer">aggr.toml ↗</a>
   </nav>
 </header>
-<main class="main">
+<main id="swup" class="main">
+<span id="aggr-page" data-root="{{ page.root }}" data-kind="{{ page.kind }}" hidden></span>
 {% block content %}{% endblock %}
 </main>
-</div>
 <script src="{{ 'assets/swup.js' | url_for }}"></script>
 <script src="{{ 'assets/app.js' | url_for }}" defer></script>
 </body>

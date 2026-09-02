@@ -203,14 +203,6 @@ pub fn item_dir(source_slug: &str, date: DateTime<Utc>) -> String {
     format!("items/{source_slug}/{:04}/{:02}", date.year(), date.month())
 }
 
-/// What `git hash-object` prints for these bytes.
-pub fn git_blob_sha(bytes: &[u8]) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(format!("blob {}\0", bytes.len()).as_bytes());
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
-}
-
 pub fn sha1_hex(input: impl AsRef<[u8]>) -> String {
     hex::encode(Sha1::digest(input.as_ref()))
 }
@@ -306,18 +298,5 @@ mod tests {
     #[test]
     fn item_dir_uses_year_and_month() {
         assert_eq!(item_dir("rust", date(2026, 9, 2)), "items/rust/2026/09");
-    }
-
-    #[test]
-    fn git_blob_sha_matches_git() {
-        // `printf 'hello\n' | git hash-object --stdin`
-        assert_eq!(
-            git_blob_sha(b"hello\n"),
-            "ce013625030ba8dba906f756967f9e9ca394464a"
-        );
-        assert_eq!(
-            git_blob_sha(b""),
-            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
-        );
     }
 }

@@ -4,14 +4,14 @@
   <h1>
     {% if page.kind == 'source' and source %}
       {{ source.name }}
-      {% if source.site_url %}<a class="muted" href="{{ source.site_url }}" rel="noopener noreferrer">({{ source.site_url | domain }})</a>{% endif %}
+      {% if source.site_url %}<a class="muted" href="{{ source.site_url }}" target="_blank" rel="noopener noreferrer">({{ source.site_url | domain }})</a>{% endif %}
     {% elif page.kind in ['category', 'tag'] and category %}
       {{ category.name }}
     {% endif %}
   </h1>
   <div class="listtools">
     {% if source and source.error %}
-    <span class="error" title="since {{ source.error.since | date('%Y-%m-%d %H:%M UTC') }}">⚠ {{ source.error.message }}</span>
+    <span class="error" title="{{ source.error.message }}">⚠ {{ source.error.message }} · since <time datetime="{{ source.error.since }}" title="{{ source.error.since }}">{{ source.error.since | date }}</time></span>
     {% endif %}
   </div>
 </div>

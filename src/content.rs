@@ -5,6 +5,8 @@
 use std::collections::HashSet;
 
 use ammonia::UrlRelative;
+use anyhow::{Context, Result, bail};
+use dom_smoothie::Readability;
 use url::Url;
 
 /// Elements whose content is executable, styled, or embedded: dropped whole.
@@ -62,6 +64,22 @@ const URL_ATTRIBUTES: &[&str] = &[
     "background",
     "xlink:href",
 ];
+
+/// Extract the primary article from a complete origin page. Readability intentionally does not
+/// sanitize its output, so callers must still pass this HTML through the normal storage and
+/// Markdown safety pipeline.
+pub fn extract_article(page: &str, url: &Url) -> Result<String> {
+    let mut readability = Readability::new(page, Some(url.as_str()), None)
+        .context("parsing the original article page")?;
+    let article = readability
+        .parse()
+        .context("extracting readable article content")?;
+    let html = article.content.to_string();
+    if html_to_text(&html).trim().is_empty() {
+        bail!("extracted article is empty");
+    }
+    Ok(html)
+}
 
 /// HTML prepared for storage as the `.html` sibling: `<script>`, `<style>`, inline `<svg>`,
 /// `<iframe>`/`<object>`/`<embed>`, HTML comments removed; `on*` handlers and `data:` /
@@ -320,6 +338,7 @@ pub fn sanitize(html: &str, base: Option<&Url>) -> String {
         .url_schemes(HashSet::from(["http", "https", "mailto"]))
         .url_relative(url_relative)
         .link_rel(Some("noopener noreferrer"))
+        .set_tag_attribute_value("a", "target", "_blank")
         .set_tag_attribute_value("img", "loading", "lazy")
         .set_tag_attribute_value("img", "referrerpolicy", "no-referrer")
         .clean(html)
@@ -379,7 +398,10 @@ pub fn render_markdown(markdown: &str) -> String {
     options.extension.footnotes = true;
     options.render.r#unsafe = false;
     options.render.escape = true;
-    comrak::markdown_to_html(markdown, &options)
+    comrak::markdown_to_html(markdown, &options).replace(
+        "<a href=\"",
+        "<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"",
+    )
 }
 
 /// Plain text of an HTML fragment: tags stripped, entities decoded, whitespace collapsed.
@@ -610,6 +632,7 @@ mod tests {
             "{out}"
         );
         assert!(out.contains(r#"rel="noopener noreferrer""#), "{out}");
+        assert!(out.contains(r#"target="_blank""#), "{out}");
         assert!(
             out.contains(r#"src="https://example.com/blog/post/pic.png""#),
             "{out}"
@@ -654,6 +677,10 @@ mod tests {
         assert!(!html.contains("<script"), "{html}");
         assert!(!html.contains("javascript:"), "{html}");
         assert!(html.contains("Vec&lt;T&gt;"), "{html}");
+
+        let html = render_markdown("[external](https://example.com)");
+        assert!(html.contains(r#"target="_blank""#), "{html}");
+        assert!(html.contains(r#"rel="noopener noreferrer""#), "{html}");
     }
 
     #[test]
@@ -680,5 +707,17 @@ mod tests {
             excerpt("# Head\n\n[link](https://x.y) and `code`\n", 100),
             "Head link and code"
         );
+    }
+
+    #[test]
+    fn readability_keeps_the_article_and_drops_page_chrome() {
+        let page = r#"<!doctype html><title>Post</title><nav>Home Products About Contact</nav>
+<main><article><h1>A useful post</h1><p>This is the complete article body with enough useful prose for extraction.</p><p>It has a second paragraph, unlike the short feed summary.</p></article></main>
+<footer>Copyright and navigation</footer>"#;
+        let extracted = extract_article(page, &base()).unwrap();
+        let text = html_to_text(&extracted);
+        assert!(text.contains("complete article body"), "{text}");
+        assert!(text.contains("second paragraph"), "{text}");
+        assert!(!text.contains("Products About Contact"), "{text}");
     }
 }

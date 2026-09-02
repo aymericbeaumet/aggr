@@ -267,7 +267,7 @@ mod tests {
             "index.html",
             "item.html",
             "sources.html",
-            "html.html",
+            "settings.html",
             "404.html",
             "offline.html",
             "manifest.webmanifest",

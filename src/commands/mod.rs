@@ -87,22 +87,6 @@ impl Project {
         Ok(dir)
     }
 
-    /// Sources selected on the command line, or all of them.
-    pub fn select<'a>(&'a self, slugs: &[String]) -> Result<Vec<&'a Source>> {
-        if slugs.is_empty() {
-            return Ok(self.sources.iter().collect());
-        }
-        slugs
-            .iter()
-            .map(|slug| {
-                self.sources
-                    .iter()
-                    .find(|source| source.slug == *slug)
-                    .with_context(|| format!("no source with slug {slug:?}"))
-            })
-            .collect()
-    }
-
     /// The `main` commit the config was read from, for the `Aggr-Config` trailer and the footer.
     pub fn config_sha(&self) -> Option<String> {
         self.repo.head_sha().ok().flatten()

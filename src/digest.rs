@@ -244,6 +244,7 @@ mod tests {
                 labels: vec![],
                 headers: vec![],
                 html: true,
+                content: crate::config::ContentMode::Heavy,
                 engine: crate::config::Engine::Feed {
                     url: url::Url::parse("https://a/").unwrap(),
                 },
@@ -255,6 +256,7 @@ mod tests {
                 labels: vec![],
                 headers: vec![],
                 html: true,
+                content: crate::config::ContentMode::Heavy,
                 engine: crate::config::Engine::Feed {
                     url: url::Url::parse("https://b/").unwrap(),
                 },
@@ -281,7 +283,7 @@ mod tests {
         );
         assert_eq!(
             groups[0].items[0].page.as_deref(),
-            Some("https://s.io/items/a/2026/09/z/")
+            Some("https://s.io/items/a/z/")
         );
         assert_eq!(
             groups[0].items[0].permalink.as_deref(),

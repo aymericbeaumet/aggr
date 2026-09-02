@@ -193,6 +193,49 @@ pub fn json_collection(
     }))?)
 }
 
+pub fn item_json(site: &SiteCtx, item: &ItemCtx, markdown: &str) -> Result<String> {
+    let root = site
+        .base_url
+        .clone()
+        .unwrap_or_else(|| site.base_path.clone());
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "id": item.path,
+        "url": format!("{root}{}", item.url),
+        "external_url": item.link,
+        "title": item.title,
+        "source": item.source,
+        "source_name": item.source_name,
+        "category": item.category,
+        "tags": item.labels,
+        "date_created": item.date.to_rfc3339(),
+        "date_published": item.published.map(|date| date.to_rfc3339()),
+        "date_modified": item.updated.map(|date| date.to_rfc3339()),
+        "authors": item.authors,
+        "summary": item.summary,
+        "content_markdown": markdown,
+    }))?)
+}
+
+pub fn text_item(item: &ItemCtx) -> String {
+    let body = item
+        .body_html
+        .as_deref()
+        .map(crate::content::html_to_text)
+        .unwrap_or_default();
+    format!("{}\n\n{}\n", item.title, body.trim())
+}
+
+pub fn rst_item(item: &ItemCtx) -> String {
+    let title = &item.title;
+    let underline = "=".repeat(title.chars().count().max(1));
+    format!(
+        "{title}\n{underline}\n\n{}",
+        text_item(item)
+            .split_once("\n\n")
+            .map_or("", |(_, body)| body)
+    )
+}
+
 fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {

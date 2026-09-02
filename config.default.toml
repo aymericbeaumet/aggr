@@ -38,9 +38,13 @@ offline_items = 100
 name = "Hacker News"
 url = "https://hn.algolia.com/?q={url}"
 
-[[site.discussions]]
-name = "X"
-url = "https://x.com/search?q={url}"
+# Add any others you want:
+# [[site.discussions]]
+# name = "Reddit"
+# url = "https://www.reddit.com/search/?q=url%3A{url}"
+# [[site.discussions]]
+# name = "X"
+# url = "https://x.com/search?q={url}"
 
 # Free-form values available to templates as `site.params`.
 [site.params]
@@ -59,11 +63,15 @@ html_max_bytes = 262144
 
 [fetch]
 concurrency = 16
+# Concurrent original-page downloads within each source in `heavy` mode.
+article_concurrency = 4
 timeout_secs = 20
 # `{version}` expands to the aggr version.
 user_agent = "aggr/{version} (+https://github.com/aymericbeaumet/aggr)"
 max_body_bytes = 10000000
 retries = 2
+# `heavy` downloads the original page and extracts its article; `light` reuses feed content.
+content = "heavy"
 
 # Daily digest posted as a GitHub issue (GitHub emails the assignees). Remove the section to
 # disable. The first workflow run after `at` (in `site.timezone`) posts the day's issue.

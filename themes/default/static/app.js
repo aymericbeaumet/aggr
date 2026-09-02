@@ -35,8 +35,9 @@
   }
   function relativeTimes(root) {
     $$("time[datetime]", root).forEach(function (time) {
-      var text = ago(time.getAttribute("datetime"));
-      if (text) { time.title = time.textContent; time.textContent = text; }
+      var exact = time.getAttribute("datetime");
+      var text = ago(exact);
+      if (text) { time.title = exact; time.textContent = text; }
     });
   }
 
@@ -85,11 +86,16 @@
     var page = BASE + entry.url.replace(/^\/+/, "");
     var original = entry.meta.original || page;
     var date = entry.meta.date || "";
-    var meta = [date ? el("time", { datetime: date, text: date.slice(0, 10) }) : null, document.createTextNode(" · "), el("a", { href: page, text: "read" })];
+    var meta = [date ? el("time", { datetime: date, title: date, text: date.slice(0, 10) }) : null, document.createTextNode(" · "), el("a", { href: original, target: "_blank", rel: "noopener noreferrer", text: "original" })];
+    ((window.AGGR && window.AGGR.discussions) || []).forEach(function (discussion) {
+      var url = discussion.url.replace("{url}", encodeURIComponent(original)).replace("{title}", encodeURIComponent(entry.meta.title || ""));
+      meta.push(document.createTextNode(" · "));
+      meta.push(el("a", { href: url, target: "_blank", rel: "noopener noreferrer", text: discussion.name.toLowerCase().replace(/\s+/g, "") }));
+    });
     return el("li", { "class": "row", "data-url": page, "data-link": original }, [
       el("span", { "class": "rank", text: rank + "." }),
       el("div", { "class": "cell" }, [
-        el("a", { "class": "title", href: original, rel: "noopener noreferrer", text: entry.meta.title }),
+        el("a", { "class": "title", href: page, text: entry.meta.title }),
         entry.meta.domain ? el("a", { "class": "domain", href: BASE + "sources/" + entry.meta.source_slug + "/", text: "(" + entry.meta.domain + ")" }) : null,
         el("div", { "class": "search-excerpt", html: entry.excerpt }),
         el("div", { "class": "meta" }, meta.filter(Boolean))
@@ -197,7 +203,17 @@
     var page = $("#aggr-page");
     if (page) {
       BASE = page.dataset.root;
+      KIND = page.dataset.kind;
       $("#aggr-base").setAttribute("href", BASE);
+      document.body.dataset.kind = KIND;
+      $$(".nav [data-route]").forEach(function (link) {
+        link.setAttribute("href", new URL(link.dataset.route, document.baseURI).pathname);
+      });
+      $$(".nav [data-kinds]").forEach(function (link) {
+        var active = link.dataset.kinds.split(/\s+/).indexOf(KIND) !== -1;
+        if (active) link.setAttribute("aria-current", "page");
+        else link.removeAttribute("aria-current");
+      });
     }
     var picker = $("#theme-mode");
     if (picker) picker.addEventListener("change", function () { setTheme(picker.value); });
@@ -211,7 +227,8 @@
   importState();
   bootPage();
   if (window.Swup) {
-    window.swup = new window.Swup({ containers: ["#swup"], cache: true });
+    window.swup = new window.Swup({ containers: ["#swup"], cache: true, animationSelector: false });
+    window.swup.hooks.on("history:popstate", function () { selected = -1; });
     window.swup.hooks.on("page:view", bootPage);
   }
   serviceWorker();

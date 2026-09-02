@@ -7,12 +7,13 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
+use futures_util::{StreamExt as _, stream};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use super::Project;
 use crate::cli::FetchArgs;
-use crate::config::{Source, StoreConfig};
+use crate::config::{ContentMode, Source, StoreConfig};
 use crate::content;
 use crate::git::Worktree;
 use crate::http;
@@ -63,23 +64,30 @@ struct Options {
     refresh: bool,
     html: bool,
     html_max_bytes: usize,
+    article_concurrency: usize,
     now: DateTime<Utc>,
 }
 
 pub async fn run(project: &Project, worktree: &Worktree, args: &FetchArgs) -> Result<Report> {
-    let selected: Vec<Source> = project
-        .select(&args.sources)?
-        .into_iter()
-        .cloned()
-        .collect();
+    let cache_dir = project.cache_dir()?;
+    run_with_cache(project, worktree, args, &cache_dir).await
+}
+
+pub async fn run_with_cache(
+    project: &Project,
+    worktree: &Worktree,
+    args: &FetchArgs,
+    cache_dir: &Path,
+) -> Result<Report> {
+    let selected: Vec<Source> = project.sources.clone();
     let store = Arc::new(Store::open(worktree.dir()));
     let client = Arc::new(http::Client::new(&project.config.fetch)?);
-    let cache_dir = project.cache_dir()?;
     let options = Options {
         dry_run: args.dry_run,
         refresh: args.refresh,
         html: project.config.store.html,
         html_max_bytes: project.config.store.html_max_bytes,
+        article_concurrency: project.config.fetch.article_concurrency,
         now: Utc::now(),
     };
     let limit = Arc::new(Semaphore::new(project.config.fetch.concurrency));
@@ -89,7 +97,7 @@ pub async fn run(project: &Project, worktree: &Worktree, args: &FetchArgs) -> Re
         let (store, client, cache_dir, options, limit) = (
             store.clone(),
             client.clone(),
-            cache_dir.clone(),
+            cache_dir.to_path_buf(),
             options.clone(),
             limit.clone(),
         );
@@ -216,18 +224,33 @@ async fn fetch_one(
 
             let seen = store.seen(slug)?;
             let mut new_keys: Vec<String> = Vec::new();
+            let mut prospective = seen.clone();
             let mut taken: HashSet<(String, String)> = HashSet::new();
             let mut added = 0;
-            // Feeds list newest first; writing oldest first keeps `-2` suffixes chronological.
+            // Feeds list newest first; preserve oldest-first writes while original pages download
+            // concurrently. This keeps deterministic suffixes without making heavy mode serial.
+            let mut candidates = Vec::new();
             for raw in items.iter().rev() {
                 let keys = dedupe_keys(raw);
-                let known = keys
-                    .iter()
-                    .any(|key| seen.contains(key) || new_keys.contains(key));
+                let known = keys.iter().any(|key| prospective.contains(key));
                 if known && !options.refresh {
                     continue;
                 }
-                let mut planned = plan(raw, source, options);
+                if !known {
+                    prospective.extend(keys.iter().cloned());
+                }
+                candidates.push((raw.clone(), keys, known));
+            }
+            let enriched = stream::iter(candidates)
+                .map(|(raw, keys, known)| async move {
+                    let (raw, kind) = heavy_content(&raw, source, client).await;
+                    (raw, kind, keys, known)
+                })
+                .buffered(options.article_concurrency)
+                .collect::<Vec<_>>()
+                .await;
+            for (raw, content_kind, keys, known) in enriched {
+                let mut planned = plan(&raw, source, options, content_kind);
                 if !options.refresh {
                     let dir = planned.dir.clone();
                     planned.stem = unique_stem(&planned.stem, |stem| {
@@ -270,6 +293,55 @@ async fn fetch_one(
     Ok(report)
 }
 
+async fn heavy_content(
+    raw: &RawItem,
+    source: &Source,
+    client: &http::Client,
+) -> (RawItem, ContentKind) {
+    let fallback = if raw.content_html.is_some() {
+        ContentKind::Feed
+    } else {
+        ContentKind::None
+    };
+    if source.content == ContentMode::Light {
+        return (raw.clone(), fallback);
+    }
+    let Ok(url) = url::Url::parse(&raw.link) else {
+        return (raw.clone(), fallback);
+    };
+    let result = async {
+        let response = client
+            .get(http::Request {
+                url: &url,
+                headers: &source.headers,
+                etag: None,
+                last_modified: None,
+            })
+            .await?;
+        let http::Response::Ok(body) = response else {
+            anyhow::bail!("original page unexpectedly returned not modified");
+        };
+        let page = String::from_utf8_lossy(&body.bytes);
+        content::extract_article(&page, &body.final_url)
+    }
+    .await;
+    match result {
+        Ok(html) => {
+            let mut enriched = raw.clone();
+            enriched.content_html = Some(html);
+            (enriched, ContentKind::Extracted)
+        }
+        Err(err) => {
+            log::warn!(
+                "{}: heavy content fallback for {}: {err:#}",
+                source.slug,
+                raw.link
+            );
+            (raw.clone(), fallback)
+        }
+    }
+}
+
 /// An item's files, decided before anything is written.
 struct Planned {
     dir: String,
@@ -279,7 +351,7 @@ struct Planned {
     html: Option<String>,
 }
 
-fn plan(raw: &RawItem, source: &Source, options: &Options) -> Planned {
+fn plan(raw: &RawItem, source: &Source, options: &Options, content_kind: ContentKind) -> Planned {
     // A future-dated entry would otherwise land in a directory that does not exist yet.
     let published = raw.published.map(|date| date.min(options.now));
     let date = published.unwrap_or(options.now);
@@ -312,11 +384,7 @@ fn plan(raw: &RawItem, source: &Source, options: &Options) -> Planned {
             .into_iter()
             .collect(),
         summary: raw.summary.clone().filter(|s| !s.trim().is_empty()),
-        content: if raw.content_html.is_some() {
-            ContentKind::Feed
-        } else {
-            ContentKind::None
-        },
+        content: content_kind,
         html: None,
         html_truncated: truncated,
         extra: raw.extra.clone(),
@@ -335,6 +403,7 @@ fn plan(raw: &RawItem, source: &Source, options: &Options) -> Planned {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use httpmock::prelude::*;
     use url::Url;
 
     fn source() -> Source {
@@ -345,6 +414,7 @@ mod tests {
             labels: vec![],
             headers: vec![],
             html: true,
+            content: ContentMode::Heavy,
             engine: crate::config::Engine::Feed {
                 url: Url::parse("https://blog.example/feed").unwrap(),
             },
@@ -357,6 +427,7 @@ mod tests {
             refresh: false,
             html: true,
             html_max_bytes: 1000,
+            article_concurrency: 4,
             now: Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap(),
         }
     }
@@ -370,7 +441,7 @@ mod tests {
             content_html: Some("<p>Hi <script>x()</script><b>there</b></p>".into()),
             ..Default::default()
         };
-        let planned = plan(&raw, &source(), &options());
+        let planned = plan(&raw, &source(), &options(), ContentKind::Feed);
         assert_eq!(planned.dir, "items/blog/2026/08");
         assert_eq!(planned.stem, "2026-08-30-hello-world");
         assert_eq!(planned.front.content, ContentKind::Feed);
@@ -384,7 +455,7 @@ mod tests {
             published: Some(Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap()),
             ..raw
         };
-        let planned = plan(&future, &source(), &options());
+        let planned = plan(&future, &source(), &options(), ContentKind::None);
         assert_eq!(planned.dir, "items/blog/2026/09");
         assert_eq!(planned.front.published, Some(options().now));
     }
@@ -397,7 +468,7 @@ mod tests {
             summary: Some("Just a summary".into()),
             ..Default::default()
         };
-        let planned = plan(&raw, &source(), &options());
+        let planned = plan(&raw, &source(), &options(), ContentKind::None);
         assert_eq!(planned.body, "Just a summary");
         assert_eq!(planned.front.content, ContentKind::None);
         assert!(planned.html.is_none());
@@ -411,6 +482,53 @@ mod tests {
             content_html: Some("<p>x</p>".into()),
             ..raw
         };
-        assert!(plan(&with_content, &no_html, &options()).html.is_none());
+        assert!(
+            plan(&with_content, &no_html, &options(), ContentKind::Feed)
+                .html
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn heavy_downloads_the_article_while_light_keeps_feed_content() {
+        let server = MockServer::start_async().await;
+        let article = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/post");
+                then.status(200).body(
+                    "<html><title>Post</title><article><h1>Post</h1><p>The complete original article has substantially more useful text than its feed excerpt.</p><p>This second paragraph makes it readable.</p></article></html>",
+                );
+            })
+            .await;
+        let raw = RawItem {
+            title: "Post".into(),
+            link: server.url("/post"),
+            content_html: Some("<p>short feed excerpt</p>".into()),
+            ..Default::default()
+        };
+        let client = http::Client::new(&crate::config::FetchConfig {
+            retries: 0,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let (heavy, kind) = heavy_content(&raw, &source(), &client).await;
+        assert_eq!(kind, ContentKind::Extracted);
+        assert!(
+            heavy
+                .content_html
+                .unwrap()
+                .contains("complete original article")
+        );
+        article.assert_calls_async(1).await;
+
+        let light = Source {
+            content: ContentMode::Light,
+            ..source()
+        };
+        let (unchanged, kind) = heavy_content(&raw, &light, &client).await;
+        assert_eq!(kind, ContentKind::Feed);
+        assert_eq!(unchanged.content_html, raw.content_html);
+        article.assert_calls_async(1).await;
     }
 }

@@ -1,53 +1,231 @@
 //! The private live-reload HTTP server used by `aggr dev`; not intended for production traffic.
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use notify::{RecursiveMode, Watcher as _};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::time::{Duration, sleep};
 
-use super::{Project, build};
-use crate::cli::DevArgs;
+use super::{Project, build, fetch};
+use crate::cli::{BuildArgs, DevArgs, FetchArgs};
+use crate::git::Worktree;
 
-pub async fn run_with_reload(project: &Project, args: &DevArgs) -> Result<()> {
-    let root = build::out_dir(project, &args.build);
-    let base = crate::site::base_path(build::base_url(project, &args.build)?.as_deref());
-    let (reload, _) = broadcast::channel(16);
-    let _watcher = watch(project, args, root.clone(), reload.clone())?;
-    host(&root, &base, args.port, reload).await
+#[derive(Clone)]
+struct MemorySite {
+    files: Arc<RwLock<BTreeMap<String, Vec<u8>>>>,
 }
 
-async fn host(root: &Path, base: &str, port: u16, reload: broadcast::Sender<()>) -> Result<()> {
-    let root = root.to_path_buf();
-    let base = base.to_string();
-    let listener = TcpListener::bind(("127.0.0.1", port))
-        .await
-        .with_context(|| format!("binding 127.0.0.1:{port}"))?;
+impl MemorySite {
+    fn loading() -> Self {
+        let page = b"<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>aggr dev</title><style>body{font:16px system-ui;margin:3rem;max-width:40rem}body:before{content:'';display:inline-block;width:.75rem;height:.75rem;margin-right:.6rem;border:2px solid #8ea1ff;border-top-color:transparent;border-radius:50%;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style><p>Syncing sources and building the in-memory site&hellip;</p>".to_vec();
+        Self {
+            files: Arc::new(RwLock::new(BTreeMap::from([
+                ("index.html".to_string(), page.clone()),
+                ("404.html".to_string(), page),
+            ]))),
+        }
+    }
+
+    #[cfg(test)]
+    async fn load(staging: &Path) -> Result<Self> {
+        let files = read_site(staging)?;
+        remove_build(staging)?;
+        Ok(Self {
+            files: Arc::new(RwLock::new(files)),
+        })
+    }
+
+    async fn replace_from(&self, staging: &Path) -> Result<()> {
+        let files = read_site(staging)?;
+        remove_build(staging)?;
+        *self.files.write().await = files;
+        Ok(())
+    }
+
+    async fn response(&self, base: &str, path: &str) -> Option<(String, Vec<u8>)> {
+        let key = resolve_key(base, path)?;
+        self.files
+            .read()
+            .await
+            .get(&key)
+            .cloned()
+            .map(|body| (key, body))
+    }
+
+    async fn not_found(&self) -> (String, Vec<u8>) {
+        let key = "404.html".to_string();
+        let body = self
+            .files
+            .read()
+            .await
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| b"not found".to_vec());
+        (key, body)
+    }
+}
+
+fn read_site(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut files = BTreeMap::new();
+    for entry in walkdir::WalkDir::new(root) {
+        let entry = entry.with_context(|| format!("reading {}", root.display()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(root)?;
+        let key = relative
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        files.insert(
+            key,
+            std::fs::read(entry.path())
+                .with_context(|| format!("reading {}", entry.path().display()))?,
+        );
+    }
+    Ok(files)
+}
+
+fn remove_build(root: &Path) -> Result<()> {
+    if root.exists() {
+        std::fs::remove_dir_all(root)
+            .with_context(|| format!("removing transient build {}", root.display()))?;
+    }
+    Ok(())
+}
+
+pub async fn run_with_reload(
+    project: &Project,
+    args: &DevArgs,
+    data: PathBuf,
+    cache: PathBuf,
+    root: PathBuf,
+    scratch: PathBuf,
+) -> Result<()> {
+    let base = crate::site::base_path(build::base_url(project, &args.build)?.as_deref());
+    let listener = bind(args.port).await?;
+    let url = format!("http://127.0.0.1:{}{base}", listener.local_addr()?.port());
+    println!("aggr dev: {url}");
     println!(
-        "serving {} at http://127.0.0.1:{}{base} (live reload; ctrl-c to stop)",
-        root.display(),
-        listener.local_addr()?.port()
+        "syncing {} source(s) in the background…",
+        project.sources.len()
     );
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let root = root.clone();
-        let base = base.clone();
-        let reload = reload.clone();
-        tokio::spawn(async move {
-            if let Err(err) = handle(stream, &root, &base, &reload).await {
-                log::debug!("dev server: {err:#}");
+    let site = MemorySite::loading();
+    let (reload, _) = broadcast::channel(16);
+    let serving = host(listener, site.clone(), &base, reload.clone(), &scratch);
+    let initializing = async {
+        match refresh(
+            project,
+            &args.fetch,
+            &args.build,
+            &data,
+            &cache,
+            &root,
+            &site,
+        )
+        .await
+        {
+            Ok(()) => {
+                println!("ready: {url}");
+                let _ = reload.send(());
             }
-        });
+            Err(err) => eprintln!("initial build failed: {err:#}"),
+        }
+        let _watcher = watch(project, args, data, cache, root, site, reload)?;
+        std::future::pending::<Result<()>>().await
+    };
+    tokio::try_join!(serving, initializing)?;
+    Ok(())
+}
+
+async fn refresh(
+    project: &Project,
+    fetch_args: &FetchArgs,
+    build_args: &BuildArgs,
+    data: &Path,
+    cache: &Path,
+    out: &Path,
+    site: &MemorySite,
+) -> Result<()> {
+    let worktree = Worktree::ephemeral(data.to_path_buf());
+    let report = fetch::run_with_cache(project, &worktree, fetch_args, cache).await?;
+    if report.all_failed() {
+        anyhow::bail!("every source failed");
+    }
+    println!(
+        "dev data: {} new item(s) in an ephemeral store (never committed or pushed)",
+        report.added()
+    );
+    build::run_ephemeral(project, build_args, data, out)?;
+    site.replace_from(out).await
+}
+
+async fn host(
+    listener: TcpListener,
+    site: MemorySite,
+    base: &str,
+    reload: broadcast::Sender<()>,
+    scratch: &Path,
+) -> Result<()> {
+    let base = base.to_string();
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .to_string();
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let site = site.clone();
+                let base = base.clone();
+                let run = run.clone();
+                let reload = reload.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = handle(stream, &site, &base, &run, &reload).await {
+                        log::debug!("dev server: {err:#}");
+                    }
+                });
+            }
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("listening for ctrl-c")?;
+                std::fs::remove_dir_all(scratch)
+                    .context("removing the transient dev workspace")?;
+                println!("stopping");
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Prefer the stable dev port, but never make iteration fail because another project owns it.
+async fn bind(port: u16) -> Result<TcpListener> {
+    match TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(listener) => Ok(listener),
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+            log::warn!("127.0.0.1:{port} is busy; choosing a free port");
+            TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .context("binding an available localhost port")
+        }
+        Err(err) => Err(err).with_context(|| format!("binding 127.0.0.1:{port}")),
     }
 }
 
 fn watch(
     project: &Project,
     args: &DevArgs,
+    data: PathBuf,
+    cache: PathBuf,
     out: PathBuf,
+    site: MemorySite,
     reload: broadcast::Sender<()>,
 ) -> Result<notify::RecommendedWatcher> {
     let (events, mut changes) = mpsc::unbounded_channel();
@@ -78,6 +256,7 @@ fn watch(
         data_ref: args.build.data_ref.clone(),
         release: args.build.release,
     };
+    let fetch_args = args.fetch.clone();
     tokio::spawn(async move {
         while let Some(event) = changes.recv().await {
             let Ok(event) = event else { continue };
@@ -86,8 +265,21 @@ fn watch(
             }
             sleep(Duration::from_millis(150)).await;
             while changes.try_recv().is_ok() {}
-            let result =
-                Project::load(&config_path).and_then(|project| build::run(&project, &build_args));
+            let result = match Project::load(&config_path) {
+                Ok(project) => {
+                    refresh(
+                        &project,
+                        &fetch_args,
+                        &build_args,
+                        &data,
+                        &cache,
+                        &out,
+                        &site,
+                    )
+                    .await
+                }
+                Err(err) => Err(err),
+            };
             match result {
                 Ok(_) => {
                     println!("reloaded");
@@ -109,8 +301,9 @@ fn watched(path: &Path, out: &Path) -> bool {
 
 async fn handle(
     stream: TcpStream,
-    root: &Path,
+    site: &MemorySite,
     base: &str,
+    run: &str,
     reload: &broadcast::Sender<()>,
 ) -> Result<()> {
     let mut reader = BufReader::new(stream);
@@ -138,20 +331,31 @@ async fn handle(
         }
         return Ok(());
     }
-    let (status, file) = match resolve(root, base, path) {
-        Some(file) => ("200 OK", file),
-        None => ("404 Not Found", root.join("404.html")),
+    let (status, file, mut body) = match site.response(base, path).await {
+        Some((file, body)) => ("200 OK", file, body),
+        None => {
+            let (file, body) = site.not_found().await;
+            ("404 Not Found", file, body)
+        }
     };
-    let mut body = std::fs::read(&file).unwrap_or_else(|_| b"not found".to_vec());
+    let file = Path::new(&file);
     if file
         .extension()
         .is_some_and(|extension| extension == "html")
     {
-        body = inject_reload(&body, base);
+        body = inject_reload(&body, base, run);
     }
+    let cache_headers = if file
+        .extension()
+        .is_some_and(|extension| extension == "html")
+    {
+        "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\nPragma: no-cache\r\nExpires: 0\r\nClear-Site-Data: \"cache\"\r\n"
+    } else {
+        "Cache-Control: no-store\r\n"
+    };
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-        content_type(&file),
+        "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{cache_headers}Connection: close\r\n\r\n",
+        content_type(file),
         body.len()
     );
     let stream = reader.get_mut();
@@ -163,10 +367,10 @@ async fn handle(
     Ok(())
 }
 
-fn inject_reload(body: &[u8], base: &str) -> Vec<u8> {
+fn inject_reload(body: &[u8], base: &str, run: &str) -> Vec<u8> {
     let script = format!(
-        "<script>if('serviceWorker'in navigator)navigator.serviceWorker.getRegistrations().then(function(r){{r.forEach(function(x){{x.unregister()}})}});new EventSource('{}__aggr/reload').onmessage=function(){{location.reload()}}</script>",
-        base
+        "<script>(function(){{if(window.AGGR)window.AGGR.pwa=false;var u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistrations().then(function(r){{r.forEach(function(x){{x.unregister()}})}});if('caches'in window)caches.keys().then(function(k){{k.forEach(function(x){{caches.delete(x)}})}});new EventSource('{}__aggr/reload?run={}').onmessage=function(){{var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();</script>",
+        base, run
     );
     let html = String::from_utf8_lossy(body);
     if let Some(at) = html.rfind("</body>") {
@@ -178,23 +382,25 @@ fn inject_reload(body: &[u8], base: &str) -> Vec<u8> {
 
 /// Map a request path to a file under `root`, honoring the base path a release build was made
 /// for, serving `index.html` for directories, and refusing anything that escapes the root.
-pub fn resolve(root: &Path, base: &str, path: &str) -> Option<PathBuf> {
+fn resolve_key(base: &str, path: &str) -> Option<String> {
     let decoded = percent_decode(path);
     let rest = decoded.strip_prefix(base.trim_end_matches('/'))?;
-    let mut file = root.to_path_buf();
+    let mut parts = Vec::new();
     for segment in rest.split('/').filter(|s| !s.is_empty()) {
         match Path::new(segment).components().next() {
-            Some(Component::Normal(_)) => file.push(segment),
+            Some(Component::Normal(_)) => parts.push(segment),
             _ => return None,
         }
     }
-    if file.is_dir() {
-        if !rest.is_empty() && !rest.ends_with('/') {
-            // Directory pages are only ever linked with a trailing slash.
-            return None;
-        }
-        file.push("index.html");
+    if rest.is_empty() || rest.ends_with('/') {
+        parts.push("index.html");
     }
+    Some(parts.join("/"))
+}
+
+#[cfg(test)]
+pub fn resolve(root: &Path, base: &str, path: &str) -> Option<PathBuf> {
+    let file = root.join(resolve_key(base, path)?);
     file.is_file().then_some(file)
 }
 
@@ -227,7 +433,9 @@ pub fn content_type(path: &Path) -> &'static str {
         Some("webmanifest") => "application/manifest+json",
         Some("xml") => "application/xml",
         Some("md") => "text/markdown; charset=utf-8",
+        Some("rst") => "text/x-rst; charset=utf-8",
         Some("txt") => "text/plain; charset=utf-8",
+        Some("toml") => "text/plain; charset=utf-8",
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
@@ -278,6 +486,29 @@ mod tests {
         assert_eq!(resolve(root, "/repo/", "/search.json"), None);
     }
 
+    #[tokio::test]
+    async fn snapshots_and_atomically_replaces_transient_builds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("site");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("index.html"), "first").unwrap();
+        std::fs::write(staging.join("404.html"), "missing").unwrap();
+
+        let site = MemorySite::load(&staging).await.unwrap();
+        assert!(!staging.exists());
+        assert_eq!(site.response("/", "/").await.unwrap().1, b"first");
+
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("index.html"), "second").unwrap();
+        std::fs::write(staging.join("search.json"), "[]").unwrap();
+        site.replace_from(&staging).await.unwrap();
+
+        assert!(!staging.exists());
+        assert_eq!(site.response("/", "/").await.unwrap().1, b"second");
+        assert!(site.response("/", "/404.html").await.is_none());
+        assert_eq!(site.response("/", "/search.json").await.unwrap().1, b"[]");
+    }
+
     #[test]
     fn content_types() {
         assert_eq!(
@@ -286,17 +517,32 @@ mod tests {
         );
         assert_eq!(content_type(Path::new("x.json")), "application/json");
         assert_eq!(
+            content_type(Path::new("article.rst")),
+            "text/x-rst; charset=utf-8"
+        );
+        assert_eq!(
             content_type(Path::new("manifest.webmanifest")),
             "application/manifest+json"
         );
         assert_eq!(content_type(Path::new("CNAME")), "application/octet-stream");
     }
 
+    #[tokio::test]
+    async fn busy_dev_port_falls_back_to_an_available_one() {
+        let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let listener = bind(port).await.unwrap();
+        assert_ne!(listener.local_addr().unwrap().port(), port);
+    }
+
     #[test]
     fn injects_reload_client_without_touching_the_build() {
-        let html = inject_reload(b"<body>Hello</body>", "/repo/");
+        let html = inject_reload(b"<body>Hello</body>", "/repo/", "run-1");
         let html = String::from_utf8(html).unwrap();
-        assert!(html.contains("new EventSource('/repo/__aggr/reload')"));
+        assert!(html.contains("new EventSource('/repo/__aggr/reload?run=run-1')"));
+        assert!(html.contains("caches.delete"));
+        assert!(html.contains("window.AGGR.pwa=false"));
+        assert!(html.contains("__aggr_dev"));
         assert!(html.ends_with("</body>"));
     }
 

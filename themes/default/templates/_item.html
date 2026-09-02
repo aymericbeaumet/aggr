@@ -2,18 +2,18 @@
 <li class="row" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}">
   <span class="rank">{{ rank }}.</span>
   <div class="cell">
-    <a class="title" href="{{ item.link }}" rel="noopener noreferrer">{{ item.title }}</a>
+    <a class="title" href="{{ item.url | url_for }}">{{ item.title }}</a>
     {% if item.domain %}<a class="domain" href="{{ ('sources/' ~ item.source ~ '/') | url_for }}">({{ item.domain }})</a>{% endif %}
     {% if site.params.excerpts and item.excerpt %}<p class="excerpt">{{ item.excerpt }}</p>{% endif %}
     <div class="meta">
-      <time datetime="{{ item.date }}">{{ item.date | date }}</time>
+      <time datetime="{{ item.date }}" title="{{ item.date }}">{{ item.date | date }}</time>
       {% if item.authors %}<span>· {{ item.authors | join(', ') }}</span>{% endif %}
       {% if item.extra.points is defined %}<span>· {{ item.extra.points }} points</span>{% endif %}
       {% if item.extra.comments_url is defined %}
-      <span>· <a href="{{ item.extra.comments_url }}">{% if item.extra.num_comments is defined %}{{ item.extra.num_comments }} comments{% else %}comments{% endif %}</a></span>
+      <span>· <a href="{{ item.extra.comments_url }}" target="_blank" rel="noopener noreferrer">{% if item.extra.num_comments is defined %}{{ item.extra.num_comments }} comments{% else %}comments{% endif %}</a></span>
       {% endif %}
-      <span>· <a href="{{ item.url | url_for }}">read</a></span>
-      {% for discussion in item.discussions %}<span>· <a href="{{ discussion.url }}" rel="noopener noreferrer">{{ discussion.name }}</a></span>{% endfor %}
+      <span>· <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer">original</a></span>
+      {% for discussion in item.discussions %}<span>· <a href="{{ discussion.url }}" target="_blank" rel="noopener noreferrer">{{ discussion.name }}</a></span>{% endfor %}
     </div>
   </div>
 </li>
