@@ -57,6 +57,7 @@ pub fn render_fingerprint(
         ("context", include_str!("site/context.rs")),
         ("outputs", include_str!("site/outputs.rs")),
         ("pagefind", include_str!("site/pagefind.rs")),
+        ("related", include_str!("site/related.rs")),
         ("render", include_str!("site/render.rs")),
     ] {
         hash_field(&mut hash, name.as_bytes(), source.as_bytes());

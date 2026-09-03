@@ -10,7 +10,7 @@
   "display": "standalone",
   "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
   "background_color": "#f4f6f7",
-  "theme_color": "#2b1a17",
+  "theme_color": "#291a1b",
   "icons": [
     { "src": "{{ 'assets/icon-192.png' | url_for }}", "sizes": "192x192", "type": "image/png" },
     { "src": "{{ 'assets/icon-512.png' | url_for }}", "sizes": "512x512", "type": "image/png" },

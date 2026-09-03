@@ -116,6 +116,13 @@ pub struct ItemCtx {
     pub raw_url: Option<String>,
     pub history_url: Option<String>,
     pub edit_url: Option<String>,
+    /// Chronological and related links resolved once at build time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_article: Option<ArticleLinkCtx>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_article: Option<ArticleLinkCtx>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub related_article: Option<ArticleLinkCtx>,
     /// Rendered Markdown; only filled on the item's own page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_html: Option<String>,
@@ -260,7 +267,27 @@ impl ItemCtx {
             raw_url: options.links.map(|l| l.raw(&md)),
             history_url: options.links.map(|l| l.history(&md)),
             edit_url: options.links.map(|l| l.edit(&md)),
+            previous_article: None,
+            next_article: None,
+            related_article: None,
             body_html: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArticleLinkCtx {
+    pub title: String,
+    pub url: String,
+    pub domain: String,
+}
+
+impl From<&ItemCtx> for ArticleLinkCtx {
+    fn from(item: &ItemCtx) -> Self {
+        Self {
+            title: item.title.clone(),
+            url: item.url.clone(),
+            domain: item.domain.clone(),
         }
     }
 }

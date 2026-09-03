@@ -773,6 +773,9 @@ mod tests {
             raw_url: None,
             history_url: None,
             edit_url: None,
+            previous_article: None,
+            next_article: None,
+            related_article: None,
             body_html: Some("<p>Clean &amp; <strong>complete</strong></p>".into()),
         }
     }

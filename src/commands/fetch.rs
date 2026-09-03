@@ -465,6 +465,7 @@ fn plan(raw: &RawItem, source: &Source, options: &Options, content_kind: Content
         Some(html) => content::to_markdown(html, base.as_ref()),
         None => raw.summary.clone().unwrap_or_default(),
     };
+    let body = content::strip_leading_published_date(&body, published);
     let (html, truncated) = match &raw.content_html {
         Some(html) if options.html && source.html => {
             let (stored, truncated) = content::storage_html(html, options.html_max_bytes);
@@ -564,6 +565,22 @@ mod tests {
         let planned = plan(&future, &source(), &options(), ContentKind::None);
         assert_eq!(planned.dir, "items/blog/2026/09");
         assert_eq!(planned.front.published, Some(options().now));
+    }
+
+    #[test]
+    fn plan_drops_extracted_leading_publication_dates() {
+        let published = Utc.with_ymd_and_hms(2026, 9, 2, 1, 0, 0).unwrap();
+        let raw = RawItem {
+            title: "Dated article".into(),
+            link: "https://blog.example/dated".into(),
+            published: Some(published),
+            content_html: Some("<p>2nd September 2026</p><p>The actual opening.</p>".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            plan(&raw, &source(), &options(), ContentKind::Extracted).body,
+            "The actual opening.\n"
+        );
     }
 
     #[test]

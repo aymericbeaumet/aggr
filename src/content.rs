@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 use ammonia::UrlRelative;
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, NaiveDate, Utc};
 use dom_smoothie::Readability;
 use url::Url;
 
@@ -365,6 +366,74 @@ pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
     tidy_markdown(&markdown)
 }
 
+/// Remove a publication date that readability promoted to the first Markdown paragraph. The
+/// candidate must be a date-only block matching the stored publication day (allowing one day for
+/// source-local dates around UTC midnight), so dates that are part of the article remain intact.
+pub fn strip_leading_published_date(markdown: &str, published: Option<DateTime<Utc>>) -> String {
+    let Some(published) = published else {
+        return markdown.to_string();
+    };
+    let Some((first, rest)) = markdown.split_once("\n\n") else {
+        return markdown.to_string();
+    };
+    if first.lines().count() != 1 {
+        return markdown.to_string();
+    }
+    let plain = html_to_text(&render_markdown(first));
+    let Some(candidate) = parse_date_only(&plain) else {
+        return markdown.to_string();
+    };
+    let distance = candidate
+        .signed_duration_since(published.date_naive())
+        .num_days()
+        .unsigned_abs();
+    if distance > 1 {
+        return markdown.to_string();
+    }
+    rest.trim_start_matches('\n').to_string()
+}
+
+fn parse_date_only(raw: &str) -> Option<NaiveDate> {
+    let value = raw
+        .trim()
+        .trim_matches(['*', '_'])
+        .strip_prefix("Published on ")
+        .or_else(|| raw.trim().strip_prefix("Posted on "))
+        .unwrap_or(raw.trim());
+    let value = without_ordinal_suffixes(value);
+    ["%Y-%m-%d", "%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y"]
+        .iter()
+        .find_map(|format| NaiveDate::parse_from_str(value.trim(), format).ok())
+}
+
+fn without_ordinal_suffixes(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if index > 0
+            && bytes[index - 1].is_ascii_digit()
+            && matches!(
+                bytes.get(index..index + 2),
+                Some(b"st" | b"nd" | b"rd" | b"th")
+            )
+            && bytes
+                .get(index + 2)
+                .is_none_or(|next| !next.is_ascii_alphabetic())
+        {
+            index += 2;
+            continue;
+        }
+        let ch = value[index..]
+            .chars()
+            .next()
+            .expect("valid character boundary");
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
 fn tidy_markdown(markdown: &str) -> String {
     let mut out = String::with_capacity(markdown.len());
     let mut blank_run = 0;
@@ -665,6 +734,36 @@ mod tests {
         assert!(!md.ends_with("\n\n"), "{md}");
         assert!(!md.contains("\n\n\n"), "{md}");
         assert_eq!(to_markdown("", None), "");
+    }
+
+    #[test]
+    fn strips_only_a_leading_date_that_matches_publication() {
+        use chrono::{TimeZone as _, Utc};
+
+        let published = Utc.with_ymd_and_hms(2026, 9, 2, 14, 16, 42).unwrap();
+        let body = "2nd September 2026\n\nAnthropic published the prompts.\n";
+        assert_eq!(
+            strip_leading_published_date(body, Some(published)),
+            "Anthropic published the prompts.\n"
+        );
+        assert_eq!(
+            strip_leading_published_date(
+                "[September 2, 2026](/archive)\n\nBody.\n",
+                Some(published)
+            ),
+            "Body.\n"
+        );
+        assert_eq!(
+            strip_leading_published_date("2nd September 2025\n\nBody.\n", Some(published)),
+            "2nd September 2025\n\nBody.\n"
+        );
+        assert_eq!(
+            strip_leading_published_date(
+                "We met on 2nd September 2026.\n\nBody.\n",
+                Some(published)
+            ),
+            "We met on 2nd September 2026.\n\nBody.\n"
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@
 pub mod context;
 pub mod outputs;
 mod pagefind;
+mod related;
 pub mod render;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,8 +19,8 @@ use crate::content;
 use crate::model::Item;
 use crate::store::{Status, Store};
 use context::{
-    BuildCtx, CategoryCtx, GitHubLinks, ItemCtx, ItemOptions, PageCtx, PaginatorCtx, SiteCtx,
-    SourceCtx, SourceErrorCtx,
+    ArticleLinkCtx, BuildCtx, CategoryCtx, GitHubLinks, ItemCtx, ItemOptions, PageCtx,
+    PaginatorCtx, SiteCtx, SourceCtx, SourceErrorCtx,
 };
 use render::{Layers, Renderer};
 
@@ -446,6 +447,9 @@ pub fn build(
     let status = store.status()?;
     let mut all_items = store.items()?;
     all_items.retain(|item| !item.front.hidden);
+    for item in &mut all_items {
+        item.body = content::strip_leading_published_date(&item.body, item.front.published);
+    }
     all_items.sort_by(|a, b| {
         b.created_at()
             .cmp(&a.created_at())
@@ -492,6 +496,20 @@ pub fn build(
                 now: info.now,
             },
         ));
+    }
+
+    let recommendations = related::resolve(&archive_items);
+    let article_links: Vec<_> = archive_items.iter().map(ArticleLinkCtx::from).collect();
+    for (item, recommendation) in archive_items.iter_mut().zip(recommendations) {
+        item.previous_article = recommendation
+            .previous
+            .map(|index| article_links[index].clone());
+        item.next_article = recommendation
+            .next
+            .map(|index| article_links[index].clone());
+        item.related_article = recommendation
+            .related
+            .map(|index| article_links[index].clone());
     }
 
     let river_items: Vec<ItemCtx> = window
@@ -755,10 +773,8 @@ pub fn build(
             )?
             .as_bytes(),
         )?;
-        write(
-            &representation.with_extension("md"),
-            &store.item_bytes(&item.path)?,
-        )?;
+        let markdown = crate::store::frontmatter::render(&item.front, &item.body)?;
+        write(&representation.with_extension("md"), markdown.as_bytes())?;
         write(
             &representation.with_extension("txt"),
             outputs::text_item(&ctx).as_bytes(),
@@ -1458,6 +1474,68 @@ mod tests {
             out.join("items/blog/2026-09-01-post-0/index.html")
                 .is_file()
         );
+    }
+
+    #[test]
+    fn item_pages_link_to_the_next_and_a_distinct_related_article() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(
+            dir.path(),
+            4,
+            "max_age_days = 30\npwa = false\ndiscussions = []\n",
+        );
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+
+        let newest =
+            std::fs::read_to_string(out.join("items/blog/2026-09-04-post-3/index.html")).unwrap();
+        assert!(
+            newest.contains("data-next-url=\"items/blog/2026-09-03-post-2/\""),
+            "{newest}"
+        );
+        assert!(!newest.contains("data-previous-url="), "{newest}");
+        assert!(newest.contains("<span class=\"article-more-label\">next article</span>"));
+        assert!(newest.contains("<span class=\"article-more-title\">Post 2</span>"));
+        assert!(newest.contains("<span class=\"article-more-label\">related article</span>"));
+        assert!(newest.contains("<span class=\"article-more-title\">Post 1</span>"));
+
+        let second =
+            std::fs::read_to_string(out.join("items/blog/2026-09-03-post-2/index.html")).unwrap();
+        assert!(second.contains("data-previous-url=\"items/blog/2026-09-04-post-3/\""));
+        assert!(second.contains("data-next-url=\"items/blog/2026-09-02-post-1/\""));
+    }
+
+    #[test]
+    fn build_cleans_leading_publication_dates_from_existing_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(
+            dir.path(),
+            1,
+            "max_age_days = 30\npwa = false\ndiscussions = []\n",
+        );
+        let mut item = store.items().unwrap().remove(0);
+        item.body = "1st September 2026\n\nActual opening.\n".into();
+        let stem = item.path.rsplit('/').next().unwrap();
+        let dir_path = item.path.rsplit_once('/').unwrap().0;
+        store
+            .write_item(crate::store::NewItem {
+                dir: dir_path,
+                stem,
+                front: &item.front,
+                body: &item.body,
+                html: None,
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+
+        let html =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
+        assert!(!html.contains("1st September 2026"), "{html}");
+        assert!(html.contains("Actual opening."), "{html}");
+        let markdown =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0.md")).unwrap();
+        assert!(!markdown.contains("1st September 2026"), "{markdown}");
     }
 
     #[test]

@@ -281,12 +281,6 @@ impl Store {
         Ok(paths)
     }
 
-    /// The exact bytes of an item's `.md`, for blob hashes and raw copies.
-    pub fn item_bytes(&self, path: &str) -> Result<Vec<u8>> {
-        let file = self.root.join(format!("{path}.md"));
-        fs::read(&file).with_context(|| format!("reading {}", file.display()))
-    }
-
     pub fn read_html(&self, path: &str) -> Result<Option<String>> {
         let file = self.root.join(format!("{path}.html"));
         match fs::read_to_string(&file) {

@@ -33,6 +33,10 @@ impl SearchDocument {
     pub fn new(item: &ItemCtx, markdown: &str) -> Self {
         let mut meta = BTreeMap::new();
         meta.insert("title".into(), item.title.clone());
+        meta.insert(
+            "source".into(),
+            format!("{} {} {}", item.source_name, item.source, item.domain),
+        );
         meta.insert("date".into(), item.date.to_rfc3339());
         meta.insert(
             "aggr_display".into(),
@@ -159,6 +163,9 @@ mod tests {
             raw_url: None,
             history_url: None,
             edit_url: None,
+            previous_article: None,
+            next_article: None,
+            related_article: None,
             body_html: None,
         }
     }
@@ -173,8 +180,9 @@ mod tests {
         assert!(document.content.contains("Human prose about Ferris"));
         assert!(document.content.contains("useful label"));
         assert!(!document.content.contains("https://"));
-        assert_eq!(document.meta.len(), 3);
+        assert_eq!(document.meta.len(), 4);
         assert_eq!(document.meta["title"], "Useful result");
+        assert_eq!(document.meta["source"], "Blog blog secret.example");
         let display: serde_json::Value = serde_json::from_slice(
             &hex::decode(&document.meta["aggr_display"]).expect("hex display metadata"),
         )

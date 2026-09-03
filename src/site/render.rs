@@ -308,6 +308,21 @@ mod tests {
     }
 
     #[test]
+    fn embedded_theme_keeps_article_links_and_navigation_distinct() {
+        let css_file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
+        assert!(css.contains("--accent: #8ea1ff"));
+        assert!(css.contains(".body a { color: var(--accent-strong); font-style: normal"));
+        assert!(css.contains(".article-more"));
+
+        let script_file = DefaultTheme::get("static/app.js").unwrap();
+        let script = std::str::from_utf8(script_file.data.as_ref()).unwrap();
+        assert!(script.contains("url.searchParams.set(\"q\", query)"));
+        assert!(script.contains("event.key === \"ArrowRight\""));
+        assert!(script.contains("event.key === \"ArrowLeft\""));
+    }
+
+    #[test]
     fn overlay_wins_over_embedded_and_rejects_escapes() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("templates")).unwrap();

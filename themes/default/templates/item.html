@@ -6,13 +6,15 @@
 <link rel="alternate" type="text/plain" title="Plain text" href="{{ (representation ~ '.txt') | url_for }}">
 <link rel="alternate" type="text/x-rst" title="reStructuredText" href="{{ (representation ~ '.rst') | url_for }}">
 <link rel="alternate" type="application/ld+json" title="JSON-LD" href="{{ (representation ~ '.json') | url_for }}">
+{% if item.previous_article %}<link rel="prev" href="{{ item.previous_article.url | url_for }}">{% endif %}
+{% if item.next_article %}<link rel="next" href="{{ item.next_article.url | url_for }}">{% endif %}
 {% if item.published %}<meta property="article:published_time" content="{{ item.published }}">{% endif %}
 {% if item.updated %}<meta property="article:modified_time" content="{{ item.updated }}">{% endif %}
 {% if item.category %}<meta property="article:section" content="{{ item.category }}">{% endif %}
 {% for label in item.labels %}<meta property="article:tag" content="{{ label }}">{% endfor %}
 {% endblock %}
 {% block content %}
-<article class="item h-entry" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}">
+<article class="item h-entry" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}"{% if item.previous_article %} data-previous-url="{{ item.previous_article.url | url_for }}"{% endif %}{% if item.next_article %} data-next-url="{{ item.next_article.url | url_for }}"{% endif %}>
   <a class="u-uid" href="{{ item.url | url_for }}" hidden></a>
   <header class="itemhead">
     <h1 class="p-name">{{ item.title }}</h1>
@@ -30,6 +32,24 @@
   <p class="empty">This source publishes titles only — <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer">open the original</a>.</p>
   {% endif %}
   <div class="body e-content">{{ item.body_html | safe }}</div>
+  {% if item.next_article or item.related_article %}
+  <nav class="article-more" aria-label="Continue reading">
+    {% if item.next_article %}
+    <a class="article-more-link" href="{{ item.next_article.url | url_for }}" rel="next" aria-keyshortcuts="ArrowRight">
+      <span class="article-more-label">next article</span>
+      <span class="article-more-title">{{ item.next_article.title }}</span>
+      {% if item.next_article.domain %}<span class="article-more-domain">{{ item.next_article.domain }}</span>{% endif %}
+    </a>
+    {% endif %}
+    {% if item.related_article %}
+    <a class="article-more-link" href="{{ item.related_article.url | url_for }}">
+      <span class="article-more-label">related article</span>
+      <span class="article-more-title">{{ item.related_article.title }}</span>
+      {% if item.related_article.domain %}<span class="article-more-domain">{{ item.related_article.domain }}</span>{% endif %}
+    </a>
+    {% endif %}
+  </nav>
+  {% endif %}
   <footer class="permalinks">
     {% if item.permalink %}
     <a href="{{ item.permalink }}" target="_blank" rel="noopener noreferrer">permalink</a>

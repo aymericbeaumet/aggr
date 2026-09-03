@@ -142,9 +142,8 @@
     try { localStorage.setItem("aggr:theme", mode); } catch (error) { /* private mode */ }
     var picker = $("#theme-mode");
     if (picker) picker.value = mode;
-    var dark = mode === "dark" || (mode === "auto" && darkPreference && darkPreference.matches);
     var meta = $("#theme-color");
-    if (meta) meta.setAttribute("content", dark ? "#180f0e" : "#2b1a17");
+    if (meta) meta.setAttribute("content", getComputedStyle(document.documentElement).getPropertyValue("--nav-bg").trim());
   }
   function themeMode() {
     var stored;
@@ -229,6 +228,7 @@
             termSaturation: 0.8,
             metaWeights: {
               title: 9,
+              source: 3,
               date: 0,
               aggr_display: 0
             }
@@ -316,6 +316,11 @@
       }
     }
     function schedule() {
+      var url = new URL(location.href);
+      var query = input.value.trim();
+      if (query) url.searchParams.set("q", query);
+      else url.searchParams.delete("q");
+      history.replaceState(history.state, "", url);
       render();
     }
     count.style.visibility = "hidden";
@@ -356,6 +361,16 @@
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey || event.target.closest("input, textarea, select, button, a, [contenteditable=true]")) return;
+    if (KIND === "item" && (event.key === "ArrowRight" || event.key === "ArrowLeft")) {
+      var article = $("article.item");
+      var target = article && article.dataset[event.key === "ArrowRight" ? "nextUrl" : "previousUrl"];
+      if (!target) return;
+      event.preventDefault();
+      var destination = new URL(target, document.baseURI).href;
+      if (window.swup) window.swup.navigate(destination);
+      else location.href = destination;
+      return;
+    }
     var row = selected >= 0 ? rows()[selected] : null;
     if (event.key === "j") select(selected + 1);
     else if (event.key === "k") select(selected - 1);
