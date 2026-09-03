@@ -299,6 +299,15 @@ mod tests {
     }
 
     #[test]
+    fn embedded_theme_only_recolors_the_24_hour_boundary() {
+        let file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(file.data.as_ref()).unwrap();
+        assert!(css.contains(".row:not(.age-h24) + .row.age-h24"));
+        assert!(!css.contains("age-boundary.age-h1"));
+        assert!(!css.contains("age-boundary.age-h3"));
+    }
+
+    #[test]
     fn overlay_wins_over_embedded_and_rejects_escapes() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("templates")).unwrap();

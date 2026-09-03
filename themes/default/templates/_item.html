@@ -1,5 +1,5 @@
 {# One river row. Expects `item` and `rank`. Keep the structure in sync with renderRow() in app.js. #}
-<li class="row h-entry age-{{ item.age_band }}{% if age_boundary %} age-boundary{% endif %}" data-age="{{ item.age_band }}" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}">
+<li class="row h-entry age-{{ item.age_band }}" data-age="{{ item.age_band }}" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}">
   <a class="u-uid" href="{{ item.url | url_for }}" hidden></a>
   <span class="rank">{{ rank }}.</span>
   <div class="cell">

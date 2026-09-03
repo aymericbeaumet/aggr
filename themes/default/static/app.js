@@ -65,7 +65,7 @@
         time.textContent = text;
       }
     });
-    applyAgeBoundaries(root);
+    applyAgeBands(root);
   }
 
   function ageBand(iso) {
@@ -75,9 +75,8 @@
     if (age < 24 * 60 * 60 * 1000) return "h3";
     return "h24";
   }
-  function applyAgeBoundaries(root) {
+  function applyAgeBands(root) {
     $$(".rows:not(.search-results)", root).forEach(function (list) {
-      var previous = null;
       $$(".row", list).forEach(function (row) {
         var time = $(".meta time[datetime]", row);
         if (!time) return;
@@ -85,8 +84,6 @@
         row.classList.remove("age-fresh", "age-h1", "age-h3", "age-h24");
         row.classList.add("age-" + band);
         row.dataset.age = band;
-        row.classList.toggle("age-boundary", previous !== null && previous !== band);
-        previous = band;
       });
     });
   }

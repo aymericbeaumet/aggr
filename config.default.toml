@@ -30,21 +30,18 @@ pwa = true
 # Newest item pages cached ahead of time for offline reading (the feed and assets always are).
 offline_items = 100
 
-# Per-item links that search for conversations. `{url}` and `{title}` are URL-encoded.
-[[site.discussions]]
-name = "Hacker News"
-url = "https://hn.algolia.com/?q={url}"
-provider = "hackernews"
-
-# Add any others you want:
+# Discussion matching is opt-in. These add per-item links, find the highest-engagement exact
+# match when possible, and otherwise fall back to search. `{url}` and `{title}` are URL-encoded.
 # [[site.discussions]]
-# name = "Reddit"
-# url = "https://www.reddit.com/search/?q=url%3A{url}"
+# provider = "hackernews"
+# [[site.discussions]]
 # provider = "reddit"
 # [[site.discussions]]
-# name = "X"
-# url = "https://x.com/search?q={url}"
 # provider = "x"
+# A custom search needs a label and URL template instead:
+# [[site.discussions]]
+# name = "Lobsters"
+# url = "https://lobste.rs/search?q={url}"
 
 # Free-form values available to templates as `site.params`.
 [site.params]
@@ -81,7 +78,7 @@ content = "heavy"
 # the day's issue.
 [digest]
 at = "08:00"
-timezone = "UTC"
+timezone = "UTC" # IANA name
 # Placeholders: {number} {date} {count} {title}
 title = "Digest #{number} · {date} · {count} new"
 label = "digest"

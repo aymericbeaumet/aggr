@@ -71,24 +71,58 @@ impl Default for SiteConfig {
             out: PathBuf::from("_site"),
             pwa: true,
             offline_items: 100,
-            discussions: vec![DiscussionLinkConfig {
-                name: "Hacker News".into(),
-                url: "https://hn.algolia.com/?q={url}".into(),
-                provider: Some(DiscussionProvider::HackerNews),
-            }],
+            discussions: Vec::new(),
             params: toml::Table::new(),
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscussionLinkConfig {
     pub name: String,
     pub url: String,
     /// Optional build-time lookup. A failure always falls back to `url`.
-    #[serde(default)]
     pub provider: Option<DiscussionProvider>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDiscussionLinkConfig {
+    #[serde(default)]
+    provider: Option<DiscussionProvider>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for DiscussionLinkConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawDiscussionLinkConfig::deserialize(deserializer)?;
+        if let Some(provider) = raw.provider {
+            if raw.name.is_some() || raw.url.is_some() {
+                return Err(serde::de::Error::custom(
+                    "a built-in discussion accepts only `provider`; use `name` + `url` for a custom one",
+                ));
+            }
+            return Ok(provider.discussion());
+        }
+        match (raw.name, raw.url) {
+            (Some(name), Some(url)) if !name.trim().is_empty() && !url.trim().is_empty() => {
+                Ok(Self {
+                    name,
+                    url,
+                    provider: None,
+                })
+            }
+            _ => Err(serde::de::Error::custom(
+                "set `provider` for a built-in discussion, or both `name` and `url` for a custom one",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -101,6 +135,19 @@ pub enum DiscussionProvider {
 }
 
 impl DiscussionProvider {
+    fn discussion(self) -> DiscussionLinkConfig {
+        let (name, url) = match self {
+            Self::HackerNews => ("Hacker News", "https://hn.algolia.com/?q={url}"),
+            Self::Reddit => ("Reddit", "https://www.reddit.com/search/?q=url%3A{url}"),
+            Self::X => ("X", "https://x.com/search?q={url}"),
+        };
+        DiscussionLinkConfig {
+            name: name.into(),
+            url: url.into(),
+            provider: Some(self),
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::HackerNews => "hackernews",
@@ -902,8 +949,46 @@ mod tests {
         assert_eq!(config.fetch.retries, compiled.fetch.retries);
         assert_eq!(config.fetch.content, compiled.fetch.content);
         assert_eq!(config.site.discussions, compiled.site.discussions);
+        assert!(compiled.site.discussions.is_empty());
         assert_eq!(config.digest, Some(DigestConfig::default()));
         assert!(config.sources.is_empty());
+    }
+
+    #[test]
+    fn discussion_matching_is_opt_in_with_provider_shorthand() {
+        let config = Config::parse(
+            r#"
+[[site.discussions]]
+provider = "hackernews"
+
+[[site.discussions]]
+provider = "reddit"
+
+[[site.discussions]]
+name = "Lobsters"
+url = "https://lobste.rs/search?q={url}"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.site.discussions.len(), 3);
+        assert_eq!(
+            config.site.discussions[0],
+            DiscussionProvider::HackerNews.discussion()
+        );
+        assert_eq!(
+            config.site.discussions[1],
+            DiscussionProvider::Reddit.discussion()
+        );
+        assert_eq!(config.site.discussions[2].name, "Lobsters");
+        assert_eq!(config.site.discussions[2].provider, None);
+
+        for invalid in [
+            "[[site.discussions]]\nprovider = \"hackernews\"\nname = \"HN\"\n",
+            "[[site.discussions]]\nname = \"Lobsters\"\n",
+            "[[site.discussions]]\nurl = \"https://example.com/{url}\"\n",
+        ] {
+            assert!(Config::parse(invalid).is_err(), "accepted {invalid:?}");
+        }
     }
 
     #[test]

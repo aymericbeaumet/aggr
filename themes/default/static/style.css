@@ -170,9 +170,12 @@ button.linkish:hover { text-decoration: underline; }
 /* rows */
 .rows { list-style: none; margin: 0; padding: 0; }
 .row { display: flex; align-items: flex-start; gap: 0.35rem; padding: 0.3rem 0; border-bottom: 1px solid var(--faint); }
-.row:has(+ .row.age-boundary.age-h1) { border-bottom-color: color-mix(in srgb, var(--accent) 75%, transparent); }
-.row:has(+ .row.age-boundary.age-h3) { border-bottom-color: color-mix(in srgb, var(--accent) 48%, transparent); }
-.row:has(+ .row.age-boundary.age-h24) { border-bottom-color: color-mix(in srgb, var(--accent) 25%, transparent); }
+/* Pull the 24h row over the existing separator so its top border recolors that line without
+   adding one. The adjacent selector works everywhere we support and does not rely on `:has()`. */
+.row:not(.age-h24) + .row.age-h24 {
+  border-top: 1px solid color-mix(in srgb, var(--discussion-found) 40%, var(--faint));
+  margin-top: -1px;
+}
 .row.is-selected { background: color-mix(in srgb, var(--accent) 8%, transparent); margin: 0 -0.5rem; padding-left: 0.5rem; padding-right: 0.5rem; }
 .rank { color: var(--muted); min-width: 2.1rem; text-align: right; font-variant-numeric: tabular-nums; padding-top: 0.05rem; }
 .cell { min-width: 0; flex: 1; }

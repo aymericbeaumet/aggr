@@ -17,7 +17,7 @@ title = \"My reads\"
 
 [digest]
 at = \"08:00\"                          # daily GitHub issue; 24-hour HH:MM
-timezone = \"UTC\"
+timezone = \"UTC\"                      # IANA name
 
 [[sources]]
 url = \"https://blog.rust-lang.org/feed.xml\"
