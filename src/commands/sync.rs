@@ -1,22 +1,31 @@
 //! `aggr sync`: fetch, commit with trailers, push, move `refs/aggr/last-good`. What CI runs.
 
+use std::path::Path;
+
 use anyhow::{Result, bail};
 
 use super::Project;
 use super::fetch::{self, Report};
-use crate::cli::FetchArgs;
+use crate::cli::{FetchArgs, SyncArgs};
 use crate::git::{CommitMessage, PushOutcome};
 use crate::store::Outcome;
 
 pub const LAST_GOOD: &str = "refs/aggr/last-good";
 
-pub async fn run(project: &Project, args: &FetchArgs) -> Result<()> {
+pub async fn run(project: &Project, args: &SyncArgs) -> Result<()> {
     let worktree = project.worktree()?;
     let first = worktree.head_sha()?.is_none();
-    let report = fetch::run(project, &worktree, args).await?;
+    let report = fetch::run(project, &worktree, &args.fetch).await?;
 
-    if args.dry_run {
+    if args.fetch.dry_run {
         println!("dry run: {} new item(s), nothing committed", report.added());
+        return finish(&report);
+    }
+    if args.fetch_only {
+        println!(
+            "fetch only: {} new item(s), nothing committed or pushed",
+            report.added()
+        );
         return finish(&report);
     }
 
@@ -46,6 +55,21 @@ pub async fn run(project: &Project, args: &FetchArgs) -> Result<()> {
         println!("{head}");
     }
     finish(&report)
+}
+
+/// The same required synchronization stage for dev, redirected to its private cache and stopped
+/// before git commit/push. Keeping this here prevents build and dev from growing different fetch
+/// semantics over time.
+pub async fn run_dev(
+    project: &Project,
+    worktree: &crate::git::Worktree,
+    args: &FetchArgs,
+    cache: &Path,
+) -> Result<Report> {
+    let report =
+        fetch::run_with_cache(project, worktree, args, cache, fetch::StatePolicy::DevCache).await?;
+    finish(&report)?;
+    Ok(report)
 }
 
 fn finish(report: &Report) -> Result<()> {

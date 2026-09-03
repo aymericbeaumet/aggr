@@ -1,27 +1,34 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="listhead"><h1>Sources <span class="muted">({{ sources | length }})</span></h1></div>
-{% if sources %}
-<table class="sources">
-  <thead><tr><th>source</th><th>type</th><th>category</th><th class="num">items</th><th>latest</th><th>status</th></tr></thead>
-  <tbody>
-  {% for source in sources %}
-    <tr{% if source.error %} class="has-error"{% endif %}>
-      <td>
-        <a href="{{ source.page | url_for }}">{{ source.name }}</a>
-        {% if source.site_url %}<a class="muted" href="{{ source.site_url }}" target="_blank" rel="noopener noreferrer">↗</a>{% endif %}
-      </td>
-      <td>{% if source.url %}<a class="muted" href="{{ source.url }}" target="_blank" rel="noopener noreferrer" title="{{ source.url }}">{{ source.engine }}</a>{% else %}{{ source.engine }}{% endif %}</td>
-      <td>{{ source.category or '' }}</td>
-      <td class="num">{{ source.count }}</td>
-      <td>{% if source.latest %}<time datetime="{{ source.latest }}" title="{{ source.latest }}">{{ source.latest | date }}</time>{% else %}—{% endif %}</td>
-      <td>{% if source.error %}<span class="error" title="{{ source.error.message }}">⚠ error since <time datetime="{{ source.error.since }}" title="{{ source.error.since }}">{{ source.error.since | date }}</time></span>{% else %}<span class="ok">ok</span>{% endif %}</td>
-    </tr>
-    {% if source.error %}<tr class="errdetail"><td colspan="6"><code>{{ source.error.message }}</code></td></tr>{% endif %}
-  {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<p class="empty">No sources configured. Add a <code>[[sources]]</code> entry to <code>aggr.toml</code>.</p>
-{% endif %}
+<section class="page" aria-labelledby="page-title">
+  <header class="page-header"><h1 id="page-title">{{ page.title }}</h1></header>
+  <div class="page-body">
+  {% if sources %}
+    <div class="sources-scroll" role="region" aria-label="Configured sources" tabindex="0">
+    <table class="sources">
+      <caption class="sr-only">{{ sources | length }} configured sources</caption>
+      <thead><tr><th scope="col">source</th><th scope="col">type</th><th scope="col">category</th><th scope="col" class="num">items</th><th scope="col">latest</th><th scope="col">status</th></tr></thead>
+      <tbody>
+      {% for source in sources %}
+        <tr{% if source.error %} class="has-error"{% endif %}>
+          <td>
+            <a href="{{ source.page | url_for }}">{{ source.name }}</a>
+            {% if source.site_url %}<a class="muted" href="{{ source.site_url }}" target="_blank" rel="noopener noreferrer" aria-label="Open {{ source.name }} website in a new tab">↗</a>{% endif %}
+          </td>
+          <td>{% if source.url %}<a class="muted" href="{{ source.url }}" target="_blank" rel="noopener noreferrer" title="{{ source.url }}">{{ source.engine }}</a>{% else %}{{ source.engine }}{% endif %}</td>
+          <td>{{ source.category or '' }}</td>
+          <td class="num">{{ source.count }}</td>
+          <td>{% if source.latest %}<time datetime="{{ source.latest }}" title="{{ source.latest }}">{{ source.latest | date }}</time>{% else %}—{% endif %}</td>
+          <td>{% if source.error %}<span class="error" title="{{ source.error.message }}">error since <time datetime="{{ source.error.since }}" title="{{ source.error.since }}">{{ source.error.since | date }}</time></span>{% else %}<span class="ok">ok</span>{% endif %}</td>
+        </tr>
+        {% if source.error %}<tr class="errdetail"><td colspan="6"><code>{{ source.error.message }}</code></td></tr>{% endif %}
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  {% else %}
+    <p class="empty">No sources configured. Add a <code>[[sources]]</code> entry to <code>aggr.toml</code>.</p>
+  {% endif %}
+  </div>
+</section>
 {% endblock %}

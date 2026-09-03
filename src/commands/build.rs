@@ -2,8 +2,9 @@
 //! Plain builds are served from `/`; `--release` builds for the public URL and writes the CNAME.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
 
 use super::Project;
@@ -11,13 +12,13 @@ use crate::cli::BuildArgs;
 
 /// Public `aggr build`: rendered output always follows a completed sync.
 pub async fn sync_and_run(project: &Project, args: &BuildArgs) -> Result<()> {
-    super::sync::run(project, &crate::cli::FetchArgs::default()).await?;
-    run(project, args).map(|_| ())
+    super::sync::run(project, &crate::cli::SyncArgs::default()).await?;
+    run(project, args).await.map(|_| ())
 }
 use crate::site::{self, BuildInfo, Summary};
 use crate::store::Store;
 
-pub fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
+pub async fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
     let worktree = project.worktree()?;
     let out = out_dir(project, args);
     let base_url = base_url(project, args)?;
@@ -36,65 +37,119 @@ pub fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
         ),
         None => (worktree.dir().to_path_buf(), worktree.head_sha()?),
     };
+    let config_sha = project.config_sha();
+    let cache_dir = project.build_cache_dir()?;
+    let store = Store::open(&data_dir);
+    let now = Utc::now();
+    let discussions = resolve_discussions(project, &store, &cache_dir, now).await?;
+    let discussions_fingerprint = discussions.fingerprint();
+    let fingerprint = crate::cache::render_fingerprint(
+        &project.config,
+        &project.root,
+        config_sha.as_deref(),
+        data_sha.as_deref(),
+        base_url.as_deref(),
+        args.release,
+        Some(&discussions_fingerprint),
+    )?;
+    if let Some(summary) = crate::cache::restore_render(&cache_dir, &fingerprint, &out)? {
+        print_summary(summary, &out, base_url.as_deref(), true);
+        return Ok(summary);
+    }
 
+    let scratch = tempfile::Builder::new()
+        .prefix("aggr-build-")
+        .tempdir_in(&cache_dir)
+        .context("creating render cache staging directory")?;
+    let rendered = scratch.path().join("site");
     let info = BuildInfo {
-        out: out.clone(),
-        base_url,
-        config_sha: project.config_sha(),
+        out: rendered.clone(),
+        base_url: base_url.clone(),
+        config_sha,
         config_path: project.config_repo_path(),
         data_sha,
-        now: Utc::now(),
+        now,
         release: args.release,
+        discussions,
     };
     let summary = site::build(
         &project.config,
         &project.sources,
-        &Store::open(&data_dir),
+        &store,
         &project.root,
         &info,
     )?;
-    println!(
-        "built {} page(s), {} item(s), {} stub(s) into {}{}",
-        summary.pages,
-        summary.items,
-        summary.stubs,
-        out.display(),
-        info.base_url
-            .as_deref()
-            .map(|url| format!(" for {url}"))
-            .unwrap_or_default()
-    );
+    crate::cache::store_render(&cache_dir, &fingerprint, &rendered, summary)?;
+    crate::cache::restore_render(&cache_dir, &fingerprint, &out)?
+        .context("the rendered site disappeared from its cache")?;
+    print_summary(summary, &out, base_url.as_deref(), false);
     Ok(summary)
 }
 
-/// Render a transient store into an explicit directory without touching git or configured paths.
+fn print_summary(summary: Summary, out: &Path, base_url: Option<&str>, cached: bool) {
+    println!(
+        "built {} page(s), {} item(s), {} stub(s) {} {}{}",
+        summary.pages,
+        summary.items,
+        summary.stubs,
+        if cached { "from cache into" } else { "into" },
+        out.display(),
+        base_url
+            .map(|url| format!(" for {url}"))
+            .unwrap_or_default()
+    );
+}
+
+/// Render dev's isolated store into staging before the server swaps its in-memory snapshot.
 pub fn run_ephemeral(
     project: &Project,
     args: &BuildArgs,
     data_dir: &Path,
     out: &Path,
+    discussions: crate::discussions::ResolutionSet,
 ) -> Result<Summary> {
+    let store = Store::open(data_dir);
+    let now = Utc::now();
     let info = BuildInfo {
         out: out.to_path_buf(),
         base_url: base_url(project, args)?,
         config_sha: project.config_sha(),
         config_path: project.config_repo_path(),
         data_sha: None,
-        now: Utc::now(),
+        now,
         release: args.release,
+        discussions,
     };
     let summary = site::build(
         &project.config,
         &project.sources,
-        &Store::open(data_dir),
+        &store,
         &project.root,
         &info,
     )?;
     println!(
-        "built {} page(s), {} item(s), {} stub(s) in the transient dev site",
+        "built {} page(s), {} item(s), {} stub(s) for the in-memory dev snapshot",
         summary.pages, summary.items, summary.stubs
     );
     Ok(summary)
+}
+
+pub async fn resolve_discussions(
+    project: &Project,
+    store: &Store,
+    cache_dir: &Path,
+    now: chrono::DateTime<Utc>,
+) -> Result<crate::discussions::ResolutionSet> {
+    let items = store.items()?;
+    let client = Arc::new(crate::http::Client::new(&project.config.fetch)?);
+    crate::discussions::resolve(
+        &project.config.site.discussions,
+        &items,
+        client,
+        cache_dir,
+        now,
+    )
+    .await
 }
 
 /// `--out`, else `[site] out`, both relative to the directory holding `aggr.toml`.

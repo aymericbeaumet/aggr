@@ -11,16 +11,70 @@ use crate::http::{Request, Response};
 use crate::model::{RawItem, sha1_hex};
 
 pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
-    let previous = Validators::from_state(ctx.state);
-    let response = ctx
-        .client
+    let remembered = (ctx.state.url == url.as_str())
+        .then_some(ctx.state.resolved_url.as_deref())
+        .flatten()
+        .and_then(|url| Url::parse(url).ok());
+    let endpoint = remembered.as_ref().unwrap_or(url);
+    let previous = if ctx.state.url == url.as_str() {
+        Validators::from_state(ctx.state)
+    } else {
+        Validators::default()
+    };
+    let response = match request(endpoint, source, ctx, &previous).await {
+        Ok(response) => response,
+        Err(err) if endpoint != url => {
+            log::debug!(
+                "{}: cached endpoint {endpoint} failed, rediscovering: {err:#}",
+                source.slug
+            );
+            return fetch_fresh(url, source, ctx).await;
+        }
+        Err(primary) => {
+            if let Some(discovered) = discover_common(url, source, ctx).await {
+                return Ok(discovered);
+            }
+            return Err(primary).context("fetching the configured URL and common feed endpoints");
+        }
+    };
+    interpret(response, source, ctx, previous).await
+}
+
+async fn fetch_fresh(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
+    let response = match request(url, source, ctx, &Validators::default()).await {
+        Ok(response) => response,
+        Err(primary) => {
+            if let Some(discovered) = discover_common(url, source, ctx).await {
+                return Ok(discovered);
+            }
+            return Err(primary).context("fetching the configured URL and common feed endpoints");
+        }
+    };
+    interpret(response, source, ctx, Validators::default()).await
+}
+
+async fn request(
+    url: &Url,
+    source: &Source,
+    ctx: &Context<'_>,
+    previous: &Validators,
+) -> Result<Response> {
+    ctx.client
         .get(Request {
             url,
             headers: &source.headers,
             etag: previous.etag.as_deref(),
             last_modified: previous.last_modified.as_deref(),
         })
-        .await?;
+        .await
+}
+
+async fn interpret(
+    response: Response,
+    source: &Source,
+    ctx: &Context<'_>,
+    previous: Validators,
+) -> Result<Fetch> {
     let body = match response {
         Response::NotModified => {
             return Ok(Fetch::Unchanged {
@@ -34,18 +88,133 @@ pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetc
         etag: body.etag.clone(),
         last_modified: body.last_modified.clone(),
         body_hash: Some(sha1_hex(&body.bytes)),
+        resolved_url: Some(body.final_url.to_string()),
     };
     if validators.body_hash == previous.body_hash {
         return Ok(Fetch::Unchanged { validators });
     }
 
-    let feed = parse(&body.bytes, &body.final_url)?;
-    let (meta, items) = convert(&feed, &body.final_url);
-    Ok(Fetch::Changed {
+    if let Ok(feed) = parse(&body.bytes, &body.final_url) {
+        return Ok(changed(feed, &body.final_url, validators));
+    }
+
+    let page = String::from_utf8_lossy(&body.bytes);
+    for candidate in crate::sources::html::feed_links(&page, &body.final_url) {
+        if candidate == body.final_url {
+            continue;
+        }
+        match request(&candidate, source, ctx, &Validators::default()).await {
+            Ok(Response::Ok(feed_body)) => match parse(&feed_body.bytes, &feed_body.final_url) {
+                Ok(feed) => {
+                    return Ok(changed(
+                        feed,
+                        &feed_body.final_url,
+                        Validators {
+                            etag: feed_body.etag,
+                            last_modified: feed_body.last_modified,
+                            body_hash: Some(sha1_hex(&feed_body.bytes)),
+                            resolved_url: Some(feed_body.final_url.to_string()),
+                        },
+                    ));
+                }
+                Err(err) => log::debug!(
+                    "{}: advertised feed {candidate} did not parse: {err:#}",
+                    source.slug
+                ),
+            },
+            Ok(Response::NotModified) => {}
+            Err(err) => log::debug!(
+                "{}: advertised feed {candidate} failed: {err:#}",
+                source.slug
+            ),
+        }
+    }
+
+    match crate::sources::html::extract(&page, &body.final_url) {
+        Ok((meta, items)) => Ok(Fetch::Changed {
+            validators,
+            meta,
+            items,
+        }),
+        Err(html_err) => {
+            if let Some(discovered) = discover_common(&body.final_url, source, ctx).await {
+                return Ok(discovered);
+            }
+            Err(html_err).context("discovering a feed or article listing")
+        }
+    }
+}
+
+fn changed(feed: Feed, url: &Url, validators: Validators) -> Fetch {
+    let (meta, items) = convert(&feed, url);
+    Fetch::Changed {
         validators,
         meta,
         items,
-    })
+    }
+}
+
+async fn discover_common(url: &Url, source: &Source, ctx: &Context<'_>) -> Option<Fetch> {
+    for candidate in common_feed_urls(url) {
+        if candidate == *url {
+            continue;
+        }
+        let body = match request(&candidate, source, ctx, &Validators::default()).await {
+            Ok(Response::Ok(body)) => body,
+            Ok(Response::NotModified) => continue,
+            Err(err) => {
+                log::debug!("{}: common feed {candidate} failed: {err:#}", source.slug);
+                continue;
+            }
+        };
+        let feed = match parse(&body.bytes, &body.final_url) {
+            Ok(feed) => feed,
+            Err(err) => {
+                log::debug!(
+                    "{}: common feed {candidate} did not parse: {err:#}",
+                    source.slug
+                );
+                continue;
+            }
+        };
+        return Some(changed(
+            feed,
+            &body.final_url,
+            Validators {
+                etag: body.etag,
+                last_modified: body.last_modified,
+                body_hash: Some(sha1_hex(&body.bytes)),
+                resolved_url: Some(body.final_url.to_string()),
+            },
+        ));
+    }
+    None
+}
+
+fn common_feed_urls(page: &Url) -> Vec<Url> {
+    let mut urls = Vec::new();
+    for name in [
+        "rss.xml",
+        "feed.xml",
+        "atom.xml",
+        "feed.atom",
+        "index.xml",
+        "feed",
+        "rss",
+    ] {
+        if let Ok(url) = page.join(name) {
+            urls.push(url);
+        }
+    }
+    if let Ok(mut root) = page.join("/") {
+        for name in ["feed.xml", "rss.xml", "atom.xml", "feed.atom", "index.xml"] {
+            root.set_path(&format!("/{name}"));
+            urls.push(root.clone());
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    urls.retain(|url| seen.insert(url.as_str().to_owned()));
+    urls
 }
 
 /// RSS, Atom or JSON Feed bytes; relative links resolve against the URL the body came from.
@@ -215,6 +384,7 @@ pub(super) fn untitled(link: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use httpmock::prelude::*;
 
     const RSS: &str = r#"<?xml version="1.0"?>
 <rss version="2.0"><channel>
@@ -325,6 +495,117 @@ line two</content>
         assert_eq!(
             text_to_html("a < b\n\nc & d"),
             "<p>a &lt; b</p>\n<p>c &amp; d</p>"
+        );
+    }
+
+    fn source(url: Url) -> Source {
+        Source {
+            slug: "site".into(),
+            name: None,
+            category: None,
+            labels: vec![],
+            headers: vec![],
+            html: true,
+            content: crate::config::ContentMode::Light,
+            engine: crate::config::Engine::Feed { url },
+        }
+    }
+
+    #[tokio::test]
+    async fn discovers_then_reuses_the_feed_endpoint() {
+        let server = MockServer::start_async().await;
+        let homepage = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/blog");
+                then.status(200).body(
+                    "<link rel=\"alternate\" type=\"application/rss+xml\" href=\"/feed.xml\">",
+                );
+            })
+            .await;
+        let first_feed = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/feed.xml");
+                then.status(200).header("etag", "\"v1\"").body(RSS);
+            })
+            .await;
+        let configured = Url::parse(&server.url("/blog")).unwrap();
+        let source = source(configured.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let mut state = crate::store::SourceState::default();
+        let ctx = Context {
+            client: &client,
+            state: &state,
+            cache_dir: cache.path(),
+        };
+        let Fetch::Changed {
+            validators, items, ..
+        } = fetch(&configured, &source, &ctx).await.unwrap()
+        else {
+            panic!("expected discovered feed");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            validators.resolved_url.as_deref(),
+            Some(server.url("/feed.xml").as_str())
+        );
+        validators.apply(&mut state);
+        state.url = configured.to_string();
+        first_feed.delete_async().await;
+
+        let conditional = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/feed.xml")
+                    .header("if-none-match", "\"v1\"");
+                then.status(304);
+            })
+            .await;
+        let ctx = Context {
+            client: &client,
+            state: &state,
+            cache_dir: cache.path(),
+        };
+        assert!(matches!(
+            fetch(&configured, &source, &ctx).await.unwrap(),
+            Fetch::Unchanged { .. }
+        ));
+        homepage.assert_calls_async(1).await;
+        conditional.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_article_cards_when_a_site_has_no_feed() {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/news");
+                then.status(200).body(
+                    "<title>News</title><article><h2><a href=\"/news/one\">One story</a></h2><time datetime=\"2026-09-02\"></time></article>",
+                );
+            })
+            .await;
+        let configured = Url::parse(&server.url("/news")).unwrap();
+        let source = source(configured.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let state = crate::store::SourceState::default();
+        let cache = tempfile::tempdir().unwrap();
+        let ctx = Context {
+            client: &client,
+            state: &state,
+            cache_dir: cache.path(),
+        };
+        let Fetch::Changed {
+            items, validators, ..
+        } = fetch(&configured, &source, &ctx).await.unwrap()
+        else {
+            panic!("expected HTML fallback");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].link, server.url("/news/one"));
+        assert_eq!(
+            validators.resolved_url.as_deref(),
+            Some(configured.as_str())
         );
     }
 }

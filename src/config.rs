@@ -7,8 +7,6 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use url::Url;
 
-use crate::sources::html;
-
 pub const DEFAULT_FILE: &str = "aggr.toml";
 
 /// Every option with its default value, commented. Shipped as `config.default.toml` and written
@@ -18,14 +16,15 @@ pub const DEFAULTS: &str = include_str!("../config.default.toml");
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Files (or globs) relative to this one whose `[[sources]]` are appended, in order.
-    pub include: Vec<String>,
     pub site: SiteConfig,
     pub store: StoreConfig,
     pub fetch: FetchConfig,
     /// Present → a daily digest is posted as a GitHub issue.
     pub digest: Option<DigestConfig>,
     pub sources: Vec<SourceConfig>,
+    /// Root and included TOML files that produced this config; used for exact build-cache keys.
+    #[serde(skip)]
+    pub(crate) loaded_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,11 +32,11 @@ pub struct Config {
 pub struct SiteConfig {
     pub title: String,
     pub description: String,
+    /// BCP 47 language tag used by HTML and syndication formats.
+    pub language: String,
     pub theme: String,
-    /// IANA name; used for the digest schedule and date display.
-    pub timezone: chrono_tz::Tz,
     pub items_per_page: usize,
-    /// Items rendered in full; older ones become redirect stubs to their GitHub permalink.
+    /// Items shown in the recent home feed. Source/category/tag archives remain complete.
     pub max_items: usize,
     pub max_age_days: u32,
     pub max_stubs: usize,
@@ -61,8 +60,8 @@ impl Default for SiteConfig {
         Self {
             title: "aggr".into(),
             description: String::new(),
+            language: "en".into(),
             theme: "default".into(),
-            timezone: chrono_tz::UTC,
             items_per_page: 60,
             max_items: 5000,
             max_age_days: 365,
@@ -72,20 +71,90 @@ impl Default for SiteConfig {
             out: PathBuf::from("_site"),
             pwa: true,
             offline_items: 100,
-            discussions: vec![DiscussionLinkConfig {
-                name: "Hacker News".into(),
-                url: "https://hn.algolia.com/?q={url}".into(),
-            }],
+            discussions: Vec::new(),
             params: toml::Table::new(),
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscussionLinkConfig {
     pub name: String,
     pub url: String,
+    /// Optional build-time lookup. A failure always falls back to `url`.
+    pub provider: Option<DiscussionProvider>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDiscussionLinkConfig {
+    #[serde(default)]
+    provider: Option<DiscussionProvider>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for DiscussionLinkConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawDiscussionLinkConfig::deserialize(deserializer)?;
+        if let Some(provider) = raw.provider {
+            if raw.name.is_some() || raw.url.is_some() {
+                return Err(serde::de::Error::custom(
+                    "a built-in discussion accepts only `provider`; use `name` + `url` for a custom one",
+                ));
+            }
+            return Ok(provider.discussion());
+        }
+        match (raw.name, raw.url) {
+            (Some(name), Some(url)) if !name.trim().is_empty() && !url.trim().is_empty() => {
+                Ok(Self {
+                    name,
+                    url,
+                    provider: None,
+                })
+            }
+            _ => Err(serde::de::Error::custom(
+                "set `provider` for a built-in discussion, or both `name` and `url` for a custom one",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum DiscussionProvider {
+    #[serde(alias = "hn")]
+    HackerNews,
+    Reddit,
+    X,
+}
+
+impl DiscussionProvider {
+    fn discussion(self) -> DiscussionLinkConfig {
+        let (name, url) = match self {
+            Self::HackerNews => ("Hacker News", "https://hn.algolia.com/?q={url}"),
+            Self::Reddit => ("Reddit", "https://www.reddit.com/search/?q=url%3A{url}"),
+            Self::X => ("X", "https://x.com/search?q={url}"),
+        };
+        DiscussionLinkConfig {
+            name: name.into(),
+            url: url.into(),
+            provider: Some(self),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HackerNews => "hackernews",
+            Self::Reddit => "reddit",
+            Self::X => "x",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +190,8 @@ pub struct FetchConfig {
     pub concurrency: usize,
     /// Concurrent original-article downloads within each source in `heavy` mode.
     pub article_concurrency: usize,
+    /// Newest entries considered from one source per sync; avoids an unbounded first import.
+    pub max_items_per_source: usize,
     pub timeout_secs: u64,
     /// `{version}` expands to the aggr version.
     pub user_agent: String,
@@ -135,6 +206,7 @@ impl Default for FetchConfig {
         Self {
             concurrency: 16,
             article_concurrency: 4,
+            max_items_per_source: 100,
             timeout_secs: 20,
             user_agent: "aggr/{version} (+https://github.com/aymericbeaumet/aggr)".into(),
             max_body_bytes: 10_000_000,
@@ -163,8 +235,10 @@ impl FetchConfig {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct DigestConfig {
-    /// Local time of day (`HH:MM`, in `[site] timezone`) after which the first run posts the digest.
+    /// Local time of day (24-hour `HH:MM`) after which the first run posts the digest.
     pub at: chrono::NaiveTime,
+    /// IANA timezone used only for the digest schedule.
+    pub timezone: chrono_tz::Tz,
     /// Issue title, with `{number}`, `{date}`, `{count}` and `{title}` placeholders.
     pub title: String,
     /// Label put on every digest issue (created on first use).
@@ -183,6 +257,7 @@ impl Default for DigestConfig {
     fn default() -> Self {
         Self {
             at: chrono::NaiveTime::from_hms_opt(8, 0, 0).expect("valid time"),
+            timezone: chrono_tz::UTC,
             title: "Digest #{number} · {date} · {count} new".into(),
             label: "digest".into(),
             assignees: Vec::new(),
@@ -221,15 +296,6 @@ pub struct SourceConfig {
     pub sources: Vec<String>,
     /// `type = "aggr"`: newest items considered per run.
     pub limit: Option<usize>,
-    /// `type = "html"`: CSS selector for the item elements.
-    pub items: Option<String>,
-    /// `type = "html"`: field selectors, `css`, `css@attr` or `@attr` (item's own attribute).
-    pub title: Option<String>,
-    pub link: Option<String>,
-    pub date: Option<String>,
-    /// `type = "html"`: chrono format for `date` (e.g. `%m.%d.%y`); common shapes parse without.
-    pub date_format: Option<String>,
-    pub summary: Option<String>,
 }
 
 /// A source after defaults, presets, and `${ENV}` expansion have been applied.
@@ -258,22 +324,6 @@ pub enum Engine {
         sources: Vec<String>,
         limit: usize,
     },
-    /// A listing page scraped with CSS selectors.
-    Html {
-        url: Url,
-        fields: HtmlFields,
-    },
-}
-
-/// `type = "html"` selectors, checked for syntax at load time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HtmlFields {
-    pub items: String,
-    pub title: Option<String>,
-    pub link: Option<String>,
-    pub date: Option<String>,
-    pub date_format: Option<String>,
-    pub summary: Option<String>,
 }
 
 pub const AGGR_SOURCE_LIMIT: usize = 200;
@@ -281,53 +331,45 @@ pub const AGGR_SOURCE_LIMIT: usize = 200;
 impl Engine {
     pub fn name(&self) -> &'static str {
         match self {
-            Engine::Feed { .. } => "feed",
+            Engine::Feed { .. } => "web",
             Engine::Aggr { .. } => "aggr",
-            Engine::Html { .. } => "html",
         }
     }
 
     /// The URL a human would associate with the source, for status output and `site_url` fallback.
     pub fn url(&self) -> Option<&Url> {
         match self {
-            Engine::Feed { url } | Engine::Aggr { url, .. } | Engine::Html { url, .. } => Some(url),
+            Engine::Feed { url } | Engine::Aggr { url, .. } => Some(url),
         }
     }
 }
 
-/// A file named in `include`: sources only, optionally all under one category.
+/// A file named by a relative `.toml` source URL: source entries only.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct IncludeFile {
-    /// Category for every source below that does not set its own.
-    pub category: Option<String>,
-    pub sources: Vec<SourceConfig>,
+struct SourceFile {
+    sources: Vec<SourceConfig>,
 }
 
 impl Config {
-    /// Parse `path` and append the sources of every file it includes.
+    /// Parse `path` and expand relative `.toml` source URLs in place.
     pub fn load(path: &Path) -> Result<Self> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut config =
             Self::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
-        let dir = path.parent().unwrap_or(Path::new("."));
-        for pattern in std::mem::take(&mut config.include) {
-            for file in include_paths(dir, &pattern)? {
-                let text = std::fs::read_to_string(&file)
-                    .with_context(|| format!("reading {}", file.display()))?;
-                let included: IncludeFile =
-                    toml::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
-                config
-                    .sources
-                    .extend(included.sources.into_iter().map(|mut source| {
-                        if source.category.is_none() {
-                            source.category = included.category.clone();
-                        }
-                        source
-                    }));
-            }
-        }
+        let root = path
+            .canonicalize()
+            .with_context(|| format!("resolving {}", path.display()))?;
+        config.loaded_files.push(root.clone());
+        let mut stack = vec![root.clone()];
+        config.sources = expand_source_files(
+            std::mem::take(&mut config.sources),
+            &root,
+            None,
+            &mut config.loaded_files,
+            &mut stack,
+        )?;
         Ok(config)
     }
 
@@ -338,6 +380,10 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.site.language.trim().is_empty() || self.site.language.contains(char::is_whitespace)
+        {
+            bail!("[site] language must be a BCP 47 tag such as `en` or `fr-FR`");
+        }
         if self.site.items_per_page == 0 {
             bail!("[site] items_per_page must be at least 1");
         }
@@ -346,6 +392,9 @@ impl Config {
         }
         if self.fetch.article_concurrency == 0 {
             bail!("[fetch] article_concurrency must be at least 1");
+        }
+        if self.fetch.max_items_per_source == 0 {
+            bail!("[fetch] max_items_per_source must be at least 1");
         }
         if self.store.branch.is_empty() || self.store.branch.contains(char::is_whitespace) {
             bail!(
@@ -403,26 +452,112 @@ impl Config {
     }
 }
 
-/// Files an `include` entry names, relative to the config's directory, sorted. A plain path
-/// must exist; a glob must match something, so a typo never silently drops a topic.
-pub fn include_paths(dir: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+fn expand_source_files(
+    sources: Vec<SourceConfig>,
+    declaring_file: &Path,
+    inherited_category: Option<&str>,
+    loaded_files: &mut Vec<PathBuf>,
+    stack: &mut Vec<PathBuf>,
+) -> Result<Vec<SourceConfig>> {
+    let dir = declaring_file.parent().unwrap_or(Path::new("."));
+    let mut expanded = Vec::new();
+    for (index, mut source) in sources.into_iter().enumerate() {
+        let Some(pattern) = source_file_pattern(&source).map(str::to_string) else {
+            if source.category.as_deref().is_none_or(str::is_empty) {
+                source.category = inherited_category.map(str::to_string);
+            }
+            expanded.push(source);
+            continue;
+        };
+        validate_source_file_entry(&source).with_context(|| {
+            format!("[[sources]] #{} in {}", index + 1, declaring_file.display())
+        })?;
+        let category = source
+            .category
+            .as_deref()
+            .filter(|category| !category.is_empty())
+            .or(inherited_category)
+            .map(str::to_string);
+        for file in source_file_paths(dir, &pattern)? {
+            let canonical = file
+                .canonicalize()
+                .with_context(|| format!("resolving {}", file.display()))?;
+            if let Some(start) = stack.iter().position(|ancestor| ancestor == &canonical) {
+                let mut cycle: Vec<_> = stack[start..]
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect();
+                cycle.push(canonical.display().to_string());
+                bail!("source-file cycle: {}", cycle.join(" -> "));
+            }
+            let text = std::fs::read_to_string(&canonical)
+                .with_context(|| format!("reading {}", canonical.display()))?;
+            let included: SourceFile = toml::from_str(&text)
+                .with_context(|| format!("parsing {}", canonical.display()))?;
+            loaded_files.push(canonical.clone());
+            stack.push(canonical.clone());
+            let nested = expand_source_files(
+                included.sources,
+                &canonical,
+                category.as_deref(),
+                loaded_files,
+                stack,
+            );
+            stack.pop();
+            expanded.extend(nested?);
+        }
+    }
+    Ok(expanded)
+}
+
+fn source_file_pattern(source: &SourceConfig) -> Option<&str> {
+    let raw = source.url.as_deref()?;
+    let path = Path::new(raw);
+    (source.kind.is_none()
+        && path.is_relative()
+        && !raw.contains("://")
+        && (raw.ends_with(".toml") || raw.contains(['*', '?', '['])))
+    .then_some(raw)
+}
+
+fn validate_source_file_entry(source: &SourceConfig) -> Result<()> {
+    let has_other_key = source.kind.is_some()
+        || source.name.is_some()
+        || source.slug.is_some()
+        || !source.labels.is_empty()
+        || !source.headers.is_empty()
+        || source.html.is_some()
+        || source.content.is_some()
+        || source.repo.is_some()
+        || source.branch.is_some()
+        || !source.sources.is_empty()
+        || source.limit.is_some();
+    if has_other_key {
+        bail!("a local TOML source may only set `url` and `category`");
+    }
+    Ok(())
+}
+
+/// Files a local TOML source URL names, relative to the declaring file, sorted. A plain path must
+/// exist; a glob must match something, so a typo never silently drops a topic.
+fn source_file_paths(dir: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
     let full = dir.join(pattern);
     let is_glob = pattern.contains(['*', '?', '[']);
     if !is_glob {
         if !full.is_file() {
-            bail!("include {pattern:?}: {} does not exist", full.display());
+            bail!("source file {pattern:?}: {} does not exist", full.display());
         }
         return Ok(vec![full]);
     }
     let pattern_str = full.to_string_lossy();
     let mut paths: Vec<PathBuf> = glob::glob(&pattern_str)
-        .with_context(|| format!("include {pattern:?}: invalid glob"))?
+        .with_context(|| format!("source file {pattern:?}: invalid glob"))?
         .filter_map(|entry| entry.ok())
         .filter(|path| path.is_file())
         .collect();
     if paths.is_empty() {
         bail!(
-            "include {pattern:?} matched no file under {}",
+            "source file {pattern:?} matched no file under {}",
             dir.display()
         );
     }
@@ -450,14 +585,6 @@ fn resolve_source(
         ("sources", !raw.sources.is_empty()),
         ("limit", raw.limit.is_some()),
     ];
-    let html_keys = [
-        ("items", raw.items.is_some()),
-        ("title", raw.title.is_some()),
-        ("link", raw.link.is_some()),
-        ("date", raw.date.is_some()),
-        ("date_format", raw.date_format.is_some()),
-        ("summary", raw.summary.is_some()),
-    ];
     let only = |owner: &str, keys: &[(&str, bool)]| -> Result<()> {
         for (key, set) in keys {
             if *set {
@@ -469,44 +596,11 @@ fn resolve_source(
     let engine = match kind {
         "feed" => {
             only("aggr", &aggr_keys)?;
-            only("html", &html_keys)?;
             Engine::Feed {
                 url: http_url(raw, env)?,
             }
         }
-        "html" => {
-            only("aggr", &aggr_keys)?;
-            let items = raw
-                .items
-                .as_deref()
-                .map(str::trim)
-                .filter(|items| !items.is_empty())
-                .context("`items` (a CSS selector for the entries) is required")?;
-            html::selector(items).context("`items`")?;
-            for (key, spec) in [
-                ("title", &raw.title),
-                ("link", &raw.link),
-                ("date", &raw.date),
-                ("summary", &raw.summary),
-            ] {
-                if let Some(spec) = spec {
-                    html::Field::parse(spec).with_context(|| format!("`{key}`"))?;
-                }
-            }
-            Engine::Html {
-                url: http_url(raw, env)?,
-                fields: HtmlFields {
-                    items: items.to_string(),
-                    title: raw.title.clone(),
-                    link: raw.link.clone(),
-                    date: raw.date.clone(),
-                    date_format: raw.date_format.clone(),
-                    summary: raw.summary.clone(),
-                },
-            }
-        }
         "aggr" => {
-            only("html", &html_keys)?;
             let url = match (&raw.repo, &raw.url) {
                 (Some(repo), None) => {
                     let repo = expand_env(repo, env)?;
@@ -536,7 +630,7 @@ fn resolve_source(
                 limit,
             }
         }
-        other => bail!("unknown source type {other:?}; known types: feed, html, aggr"),
+        other => bail!("unknown source type {other:?}; known types: feed, aggr"),
     };
 
     let slug = match &raw.slug {
@@ -697,7 +791,7 @@ mod tests {
         let sources = config.resolve_sources(&no_env).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].slug, "example-com");
-        assert_eq!(sources[0].engine.name(), "feed");
+        assert_eq!(sources[0].engine.name(), "web");
         assert!(sources[0].html);
     }
 
@@ -721,40 +815,16 @@ mod tests {
     }
 
     #[test]
-    fn resolves_html_sources_and_checks_their_selectors() {
-        let config = Config::parse(
-            "[[sources]]\ntype = \"html\"\nname = \"Cog\"\nurl = \"https://a.b/blog\"\n\
-             items = \"li > a\"\ntitle = \"h2\"\nlink = \"@href\"\ndate_format = \"%m.%d.%y\"\n",
-        )
-        .unwrap();
-        let sources = config.resolve_sources(&no_env).unwrap();
-        assert_eq!(sources[0].slug, "cog");
-        assert_eq!(sources[0].engine.name(), "html");
-        match &sources[0].engine {
-            Engine::Html { fields, .. } => {
-                assert_eq!(fields.items, "li > a");
-                assert_eq!(fields.date, None);
-                assert_eq!(fields.date_format.as_deref(), Some("%m.%d.%y"));
-            }
-            other => panic!("{other:?}"),
-        }
+    fn configured_html_engine_is_no_longer_needed() {
+        let err =
+            Config::parse("[[sources]]\ntype = \"html\"\nurl = \"https://a.b/\"\nitems = \"li\"\n")
+                .unwrap_err();
+        assert!(err.to_string().contains("items"), "{err:#}");
 
-        let missing =
+        let config =
             Config::parse("[[sources]]\ntype = \"html\"\nurl = \"https://a.b/\"\n").unwrap();
-        let err = missing.resolve_sources(&no_env).unwrap_err();
-        assert!(format!("{err:#}").contains("`items`"), "{err:#}");
-        let bad = Config::parse(
-            "[[sources]]\ntype = \"html\"\nurl = \"https://a.b/\"\nitems = \"li\"\ntitle = \"h2 >\"\n",
-        )
-        .unwrap();
-        let err = bad.resolve_sources(&no_env).unwrap_err();
-        assert!(format!("{err:#}").contains("invalid selector"), "{err:#}");
-        let feed = Config::parse("[[sources]]\nurl = \"https://a.b/\"\nitems = \"li\"\n").unwrap();
-        let err = feed.resolve_sources(&no_env).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("`items` only applies to `type = \"html\"`"),
-            "{err:#}"
-        );
+        let err = config.resolve_sources(&no_env).unwrap_err();
+        assert!(format!("{err:#}").contains("known types: feed, aggr"));
     }
 
     #[test]
@@ -859,7 +929,6 @@ mod tests {
         let compiled = Config::default();
         assert_eq!(config.site.title, compiled.site.title);
         assert_eq!(config.site.theme, compiled.site.theme);
-        assert_eq!(config.site.timezone, compiled.site.timezone);
         assert_eq!(config.site.items_per_page, compiled.site.items_per_page);
         assert_eq!(config.site.max_items, compiled.site.max_items);
         assert_eq!(config.site.max_age_days, compiled.site.max_age_days);
@@ -880,21 +949,62 @@ mod tests {
         assert_eq!(config.fetch.retries, compiled.fetch.retries);
         assert_eq!(config.fetch.content, compiled.fetch.content);
         assert_eq!(config.site.discussions, compiled.site.discussions);
+        assert!(compiled.site.discussions.is_empty());
         assert_eq!(config.digest, Some(DigestConfig::default()));
         assert!(config.sources.is_empty());
     }
 
     #[test]
+    fn discussion_matching_is_opt_in_with_provider_shorthand() {
+        let config = Config::parse(
+            r#"
+[[site.discussions]]
+provider = "hackernews"
+
+[[site.discussions]]
+provider = "reddit"
+
+[[site.discussions]]
+name = "Lobsters"
+url = "https://lobste.rs/search?q={url}"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.site.discussions.len(), 3);
+        assert_eq!(
+            config.site.discussions[0],
+            DiscussionProvider::HackerNews.discussion()
+        );
+        assert_eq!(
+            config.site.discussions[1],
+            DiscussionProvider::Reddit.discussion()
+        );
+        assert_eq!(config.site.discussions[2].name, "Lobsters");
+        assert_eq!(config.site.discussions[2].provider, None);
+
+        for invalid in [
+            "[[site.discussions]]\nprovider = \"hackernews\"\nname = \"HN\"\n",
+            "[[site.discussions]]\nname = \"Lobsters\"\n",
+            "[[site.discussions]]\nurl = \"https://example.com/{url}\"\n",
+        ] {
+            assert!(Config::parse(invalid).is_err(), "accepted {invalid:?}");
+        }
+    }
+
+    #[test]
     fn parses_digest_time_and_timezone() {
         let config =
-            Config::parse("[site]\ntimezone = \"Europe/Paris\"\n[digest]\nat = \"07:30\"\n")
-                .unwrap();
-        assert_eq!(config.site.timezone, chrono_tz::Europe::Paris);
+            Config::parse("[digest]\nat = \"07:30\"\ntimezone = \"Europe/Paris\"\n").unwrap();
         assert_eq!(
-            config.digest.unwrap().at,
+            config.digest.as_ref().unwrap().timezone,
+            chrono_tz::Europe::Paris
+        );
+        assert_eq!(
+            config.digest.as_ref().unwrap().at,
             chrono::NaiveTime::from_hms_opt(7, 30, 0).unwrap()
         );
-        assert!(Config::parse("[site]\ntimezone = \"Mars/Olympus\"\n").is_err());
+        assert!(Config::parse("[site]\ntimezone = \"UTC\"\n").is_err());
+        assert!(Config::parse("[digest]\ntimezone = \"Mars/Olympus\"\n").is_err());
         assert!(Config::parse("[digest]\nat = \"25:00\"\n").is_err());
         assert!(Config::parse("").unwrap().digest.is_none());
     }
@@ -913,18 +1023,26 @@ mod tests {
     }
 
     #[test]
-    fn includes_append_sources_with_a_default_category() {
+    fn local_toml_sources_expand_in_place_with_category_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(
             root.join("aggr.toml"),
-            "include = [\"aggr-ai.toml\", \"topics/*.toml\"]\n[[sources]]\nurl = \"https://a.b/feed\"\n",
+            "[[sources]]\nurl = \"https://a.b/feed\"\n\
+             [[sources]]\nurl = \"./aggr-ai.toml\"\ncategory = \"ai\"\n\
+             [[sources]]\nurl = \"./topics/*.toml\"\n",
         )
         .unwrap();
         std::fs::write(
             root.join("aggr-ai.toml"),
-            "category = \"ai\"\n[[sources]]\nurl = \"https://ai.example/feed\"\n\
-             [[sources]]\nurl = \"https://ml.example/feed\"\ncategory = \"ml\"\n",
+            "[[sources]]\nurl = \"https://ai.example/feed\"\n\
+             [[sources]]\nurl = \"https://ml.example/feed\"\ncategory = \"ml\"\n\
+             [[sources]]\nurl = \"./nested.toml\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("nested.toml"),
+            "[[sources]]\nurl = \"https://nested.example/feed\"\n",
         )
         .unwrap();
         std::fs::create_dir(root.join("topics")).unwrap();
@@ -951,6 +1069,7 @@ mod tests {
                 "https://a.b/feed",
                 "https://ai.example/feed",
                 "https://ml.example/feed",
+                "https://nested.example/feed",
                 "https://aa.example/feed",
                 "https://z.example/feed",
             ],
@@ -962,19 +1081,55 @@ mod tests {
             Some("ml"),
             "explicit wins"
         );
-        assert_eq!(config.sources[3].category, None);
-        assert!(config.include.is_empty(), "consumed");
+        assert_eq!(
+            config.sources[3].category.as_deref(),
+            Some("ai"),
+            "the outer category flows through a nested include"
+        );
+        assert_eq!(config.sources[4].category, None);
+        assert_eq!(config.loaded_files.len(), 5);
 
-        std::fs::write(root.join("aggr.toml"), "include = [\"missing.toml\"]\n").unwrap();
+        std::fs::write(
+            root.join("aggr.toml"),
+            "[[sources]]\nurl = \"./missing.toml\"\n",
+        )
+        .unwrap();
         let err = Config::load(&root.join("aggr.toml")).unwrap_err();
         assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
-        std::fs::write(root.join("aggr.toml"), "include = [\"nope/*.toml\"]\n").unwrap();
+        std::fs::write(
+            root.join("aggr.toml"),
+            "[[sources]]\nurl = \"./nope/*.toml\"\n",
+        )
+        .unwrap();
         let err = Config::load(&root.join("aggr.toml")).unwrap_err();
         assert!(format!("{err:#}").contains("matched no file"), "{err:#}");
-        std::fs::write(root.join("aggr.toml"), "include = [\"bad.toml\"]\n").unwrap();
+        std::fs::write(
+            root.join("aggr.toml"),
+            "[[sources]]\nurl = \"./bad.toml\"\n",
+        )
+        .unwrap();
         std::fs::write(root.join("bad.toml"), "[site]\ntitle = \"x\"\n").unwrap();
         let err = Config::load(&root.join("aggr.toml")).unwrap_err();
         assert!(format!("{err:#}").contains("site"), "only sources: {err:#}");
+
+        std::fs::write(
+            root.join("aggr.toml"),
+            "[[sources]]\nurl = \"./aggr.toml\"\n",
+        )
+        .unwrap();
+        let err = Config::load(&root.join("aggr.toml")).unwrap_err();
+        assert!(format!("{err:#}").contains("source-file cycle"), "{err:#}");
+
+        std::fs::write(
+            root.join("aggr.toml"),
+            "[[sources]]\nurl = \"./nested.toml\"\nname = \"not allowed\"\n",
+        )
+        .unwrap();
+        let err = Config::load(&root.join("aggr.toml")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("may only set `url` and `category`"),
+            "{err:#}"
+        );
     }
 
     #[test]

@@ -1,19 +1,21 @@
 {# One river row. Expects `item` and `rank`. Keep the structure in sync with renderRow() in app.js. #}
-<li class="row" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}">
+<li class="row h-entry age-{{ item.age_band }}" data-age="{{ item.age_band }}" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}">
+  <a class="u-uid" href="{{ item.url | url_for }}" hidden></a>
   <span class="rank">{{ rank }}.</span>
   <div class="cell">
-    <a class="title" href="{{ item.url | url_for }}">{{ item.title }}</a>
+    <a class="title p-name u-url" href="{{ item.url | url_for }}">{{ item.title }}</a>
     {% if item.domain %}<a class="domain" href="{{ ('sources/' ~ item.source ~ '/') | url_for }}">({{ item.domain }})</a>{% endif %}
     {% if site.params.excerpts and item.excerpt %}<p class="excerpt">{{ item.excerpt }}</p>{% endif %}
     <div class="meta">
-      <time datetime="{{ item.date }}" title="{{ item.date }}">{{ item.date | date }}</time>
-      {% if item.authors %}<span>· {{ item.authors | join(', ') }}</span>{% endif %}
+      <time class="dt-published" datetime="{{ item.date }}" title="{{ item.date }}">{{ item.date | date }}</time>
       {% if item.extra.points is defined %}<span>· {{ item.extra.points }} points</span>{% endif %}
       {% if item.extra.comments_url is defined %}
       <span>· <a href="{{ item.extra.comments_url }}" target="_blank" rel="noopener noreferrer">{% if item.extra.num_comments is defined %}{{ item.extra.num_comments }} comments{% else %}comments{% endif %}</a></span>
       {% endif %}
-      <span>· <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer">original</a></span>
-      {% for discussion in item.discussions %}<span>· <a href="{{ discussion.url }}" target="_blank" rel="noopener noreferrer">{{ discussion.name }}</a></span>{% endfor %}
+      <span>· <a class="u-bookmark-of" href="{{ item.link }}" target="_blank" rel="external noopener noreferrer via">original</a></span>
+      {% for discussion in item.discussions %}<span>· <a class="discussion{% if discussion.found %} is-found{% endif %}" href="{{ discussion.url }}" target="_blank" rel="noopener noreferrer"{% if discussion.found %} aria-label="{{ discussion.name }}, matching discussion found{% if discussion.score is not none %}, score {{ discussion.score }}{% endif %}"{% endif %}>{{ discussion.name }}</a></span>{% endfor %}
     </div>
+    {% if item.category %}<data class="p-category" value="{{ item.category }}" hidden></data>{% endif %}
+    {% for label in item.labels %}<data class="p-category" value="{{ label }}" hidden></data>{% endfor %}
   </div>
 </li>

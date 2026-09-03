@@ -6,15 +6,18 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
+use chrono::Utc;
 use notify::{RecursiveMode, Watcher as _};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 use tokio::time::{Duration, sleep};
 
-use super::{Project, build, fetch};
+use super::{Project, build, sync};
 use crate::cli::{BuildArgs, DevArgs, FetchArgs};
 use crate::git::Worktree;
+
+const DEV_KEY_FILE: &str = ".aggr-dev-key";
 
 #[derive(Clone)]
 struct MemorySite {
@@ -32,6 +35,18 @@ impl MemorySite {
         }
     }
 
+    fn cached(root: &Path) -> Option<Self> {
+        root.join(".aggr-site")
+            .is_file()
+            .then(|| read_site(root))
+            .transpose()
+            .ok()
+            .flatten()
+            .map(|files| Self {
+                files: Arc::new(RwLock::new(files)),
+            })
+    }
+
     #[cfg(test)]
     async fn load(staging: &Path) -> Result<Self> {
         let files = read_site(staging)?;
@@ -41,9 +56,22 @@ impl MemorySite {
         })
     }
 
-    async fn replace_from(&self, staging: &Path) -> Result<()> {
+    async fn replace_from(&self, staging: &Path, cached: &Path) -> Result<()> {
         let files = read_site(staging)?;
-        remove_build(staging)?;
+        if cached.exists() {
+            remove_build(cached)?;
+        }
+        if let Some(parent) = cached.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::rename(staging, cached).with_context(|| {
+            format!(
+                "promoting dev build {} to {}",
+                staging.display(),
+                cached.display()
+            )
+        })?;
         *self.files.write().await = files;
         Ok(())
     }
@@ -69,6 +97,16 @@ impl MemorySite {
             .unwrap_or_else(|| b"not found".to_vec());
         (key, body)
     }
+}
+
+#[derive(Clone)]
+struct DevState {
+    data: PathBuf,
+    cache: PathBuf,
+    cached: PathBuf,
+    staging: PathBuf,
+    site: MemorySite,
+    reload: broadcast::Sender<()>,
 }
 
 fn read_site(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -106,9 +144,16 @@ pub async fn run_with_reload(
     args: &DevArgs,
     data: PathBuf,
     cache: PathBuf,
-    root: PathBuf,
-    scratch: PathBuf,
+    cached: PathBuf,
+    staging: PathBuf,
 ) -> Result<()> {
+    // Install the process signal handler before the listener becomes visible. This makes even an
+    // immediate Ctrl-C (common when a command was started by mistake) a graceful shutdown.
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+    let shutdown_task = tokio::spawn(async move {
+        let _ = shutdown_tx.send(tokio::signal::ctrl_c().await);
+    });
+    tokio::task::yield_now().await;
     let base = crate::site::base_path(build::base_url(project, &args.build)?.as_deref());
     let listener = bind(args.port).await?;
     let url = format!("http://127.0.0.1:{}{base}", listener.local_addr()?.port());
@@ -117,54 +162,115 @@ pub async fn run_with_reload(
         "syncing {} source(s) in the background…",
         project.sources.len()
     );
-    let site = MemorySite::loading();
+    let site = match MemorySite::cached(&cached) {
+        Some(site) => {
+            println!("restored the previous dev build from cache");
+            site
+        }
+        None => MemorySite::loading(),
+    };
     let (reload, _) = broadcast::channel(16);
-    let serving = host(listener, site.clone(), &base, reload.clone(), &scratch);
+    let serving = host(listener, site.clone(), &base, reload.clone());
+    let state = DevState {
+        data,
+        cache,
+        cached,
+        staging,
+        site,
+        reload,
+    };
     let initializing = async {
-        match refresh(
-            project,
-            &args.fetch,
-            &args.build,
-            &data,
-            &cache,
-            &root,
-            &site,
-        )
-        .await
-        {
-            Ok(()) => {
+        match refresh(project, &args.fetch, &args.build, &state, true).await {
+            Ok(rebuilt) => {
                 println!("ready: {url}");
-                let _ = reload.send(());
+                if rebuilt {
+                    let _ = state.reload.send(());
+                }
             }
             Err(err) => eprintln!("initial build failed: {err:#}"),
         }
-        let _watcher = watch(project, args, data, cache, root, site, reload)?;
+        let _watcher = watch(project, args, state)?;
         std::future::pending::<Result<()>>().await
     };
-    tokio::try_join!(serving, initializing)?;
-    Ok(())
+    let result = tokio::select! {
+        result = serving => result,
+        result = initializing => result,
+        signal = &mut shutdown_rx => {
+            signal.context("Ctrl-C task stopped")?.context("listening for Ctrl-C")?;
+            println!("stopping");
+            Ok(())
+        }
+    };
+    shutdown_task.abort();
+    result
 }
 
 async fn refresh(
     project: &Project,
     fetch_args: &FetchArgs,
     build_args: &BuildArgs,
-    data: &Path,
-    cache: &Path,
-    out: &Path,
-    site: &MemorySite,
-) -> Result<()> {
-    let worktree = Worktree::ephemeral(data.to_path_buf());
-    let report = fetch::run_with_cache(project, &worktree, fetch_args, cache).await?;
-    if report.all_failed() {
-        anyhow::bail!("every source failed");
+    state: &DevState,
+    sync_sources: bool,
+) -> Result<bool> {
+    let base_url = build::base_url(project, build_args)?;
+    let worktree = Worktree::ephemeral(state.data.clone());
+    let visible_change = if sync_sources {
+        let report = sync::run_dev(project, &worktree, fetch_args, &state.cache).await?;
+        println!(
+            "dev data: {} new item(s) in the isolated system cache (never committed or pushed)",
+            report.added()
+        );
+        report.added() > 0
+            || report.removed > 0
+            || report.status_changed
+            || report
+                .sources
+                .iter()
+                .any(|source| source.outcome == crate::store::Outcome::Ok && !source.unchanged)
+    } else {
+        println!("rebuilding from cached source data");
+        true
+    };
+    let store = crate::store::Store::open(&state.data);
+    let discussions = build::resolve_discussions(project, &store, &state.cache, Utc::now()).await?;
+    let discussions_fingerprint = discussions.fingerprint();
+    let fingerprint = crate::cache::render_fingerprint(
+        &project.config,
+        &project.root,
+        project.config_sha().as_deref(),
+        None,
+        base_url.as_deref(),
+        build_args.release,
+        Some(&discussions_fingerprint),
+    )?;
+    if !visible_change && dev_key_matches(&state.cached, &fingerprint) {
+        println!("dev build already current");
+        return Ok(false);
     }
-    println!(
-        "dev data: {} new item(s) in an ephemeral store (never committed or pushed)",
-        report.added()
-    );
-    build::run_ephemeral(project, build_args, data, out)?;
-    site.replace_from(out).await
+    // The staging directory is disposable. A template error may leave a partial tree without the
+    // safety marker used for user-selected output directories, so always reset it before retrying.
+    remove_build(&state.staging)?;
+    build::run_ephemeral(
+        project,
+        build_args,
+        &state.data,
+        &state.staging,
+        discussions,
+    )?;
+    std::fs::write(state.staging.join(DEV_KEY_FILE), fingerprint)
+        .context("writing the dev build fingerprint")?;
+    state
+        .site
+        .replace_from(&state.staging, &state.cached)
+        .await
+        .map(|()| true)
+}
+
+fn dev_key_matches(site: &Path, fingerprint: &str) -> bool {
+    std::fs::read_to_string(site.join(DEV_KEY_FILE))
+        .ok()
+        .is_some_and(|stored| stored == fingerprint)
+        && site.join(".aggr-site").is_file()
 }
 
 async fn host(
@@ -172,7 +278,6 @@ async fn host(
     site: MemorySite,
     base: &str,
     reload: broadcast::Sender<()>,
-    scratch: &Path,
 ) -> Result<()> {
     let base = base.to_string();
     let run = SystemTime::now()
@@ -181,27 +286,16 @@ async fn host(
         .as_nanos()
         .to_string();
     loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                let (stream, _) = accepted?;
-                let site = site.clone();
-                let base = base.clone();
-                let run = run.clone();
-                let reload = reload.clone();
-                tokio::spawn(async move {
-                    if let Err(err) = handle(stream, &site, &base, &run, &reload).await {
-                        log::debug!("dev server: {err:#}");
-                    }
-                });
+        let (stream, _) = listener.accept().await?;
+        let site = site.clone();
+        let base = base.clone();
+        let run = run.clone();
+        let reload = reload.clone();
+        tokio::spawn(async move {
+            if let Err(err) = handle(stream, &site, &base, &run, &reload).await {
+                log::debug!("dev server: {err:#}");
             }
-            signal = tokio::signal::ctrl_c() => {
-                signal.context("listening for ctrl-c")?;
-                std::fs::remove_dir_all(scratch)
-                    .context("removing the transient dev workspace")?;
-                println!("stopping");
-                return Ok(());
-            }
-        }
+        });
     }
 }
 
@@ -219,15 +313,7 @@ async fn bind(port: u16) -> Result<TcpListener> {
     }
 }
 
-fn watch(
-    project: &Project,
-    args: &DevArgs,
-    data: PathBuf,
-    cache: PathBuf,
-    out: PathBuf,
-    site: MemorySite,
-    reload: broadcast::Sender<()>,
-) -> Result<notify::RecommendedWatcher> {
+fn watch(project: &Project, args: &DevArgs, state: DevState) -> Result<notify::RecommendedWatcher> {
     let (events, mut changes) = mpsc::unbounded_channel();
     let mut watcher = notify::recommended_watcher(move |event| {
         let _ = events.send(event);
@@ -260,31 +346,33 @@ fn watch(
     tokio::spawn(async move {
         while let Some(event) = changes.recv().await {
             let Ok(event) = event else { continue };
-            if !event.paths.iter().any(|path| watched(path, &out)) {
+            if !event.paths.iter().any(|path| watched(path, &state.staging)) {
                 continue;
             }
+            let mut changed = event.paths;
             sleep(Duration::from_millis(150)).await;
-            while changes.try_recv().is_ok() {}
+            while let Ok(event) = changes.try_recv() {
+                if let Ok(event) = event {
+                    changed.extend(event.paths);
+                }
+            }
+            let sync_sources = changed.iter().any(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
+            });
             let result = match Project::load(&config_path) {
                 Ok(project) => {
-                    refresh(
-                        &project,
-                        &fetch_args,
-                        &build_args,
-                        &data,
-                        &cache,
-                        &out,
-                        &site,
-                    )
-                    .await
+                    refresh(&project, &fetch_args, &build_args, &state, sync_sources).await
                 }
                 Err(err) => Err(err),
             };
             match result {
-                Ok(_) => {
+                Ok(true) => {
                     println!("reloaded");
-                    let _ = reload.send(());
+                    let _ = state.reload.send(());
                 }
+                Ok(false) => println!("already current"),
                 Err(err) => eprintln!("build failed: {err:#}"),
             }
         }
@@ -369,7 +457,7 @@ async fn handle(
 
 fn inject_reload(body: &[u8], base: &str, run: &str) -> Vec<u8> {
     let script = format!(
-        "<script>(function(){{if(window.AGGR)window.AGGR.pwa=false;var u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistrations().then(function(r){{r.forEach(function(x){{x.unregister()}})}});if('caches'in window)caches.keys().then(function(k){{k.forEach(function(x){{caches.delete(x)}})}});new EventSource('{}__aggr/reload?run={}').onmessage=function(){{var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();</script>",
+        "<script>(function(){{if(window.AGGR)window.AGGR.pwa=false;var b=new URL({0:?},location.origin),u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistration(b).then(function(r){{if(r)r.unregister()}});if('caches'in window){{var p='aggr:'+encodeURIComponent(b.pathname)+':';caches.keys().then(function(k){{k.filter(function(x){{return x.indexOf(p)===0}}).forEach(function(x){{caches.delete(x)}})}})}}new EventSource('{0}__aggr/reload?run={1}').onmessage=function(){{var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();</script>",
         base, run
     );
     let html = String::from_utf8_lossy(body);
@@ -425,6 +513,24 @@ fn percent_decode(path: &str) -> String {
 }
 
 pub fn content_type(path: &Path) -> &'static str {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("atom.xml" | "feed.xml") => return "application/atom+xml; charset=utf-8",
+        Some("rss.xml") => return "application/rss+xml; charset=utf-8",
+        Some("feed.json") => return "application/feed+json; charset=utf-8",
+        Some("opensearch.xml") => {
+            return "application/opensearchdescription+xml; charset=utf-8";
+        }
+        _ => {}
+    }
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "json")
+        && path
+            .components()
+            .any(|component| component.as_os_str() == "items")
+    {
+        return "application/ld+json; charset=utf-8";
+    }
     match path.extension().and_then(|e| e.to_str()) {
         Some("html") => "text/html; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
@@ -490,6 +596,7 @@ mod tests {
     async fn snapshots_and_atomically_replaces_transient_builds() {
         let tmp = tempfile::tempdir().unwrap();
         let staging = tmp.path().join("site");
+        let cached = tmp.path().join("cached");
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join("index.html"), "first").unwrap();
         std::fs::write(staging.join("404.html"), "missing").unwrap();
@@ -501,9 +608,10 @@ mod tests {
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join("index.html"), "second").unwrap();
         std::fs::write(staging.join("search.json"), "[]").unwrap();
-        site.replace_from(&staging).await.unwrap();
+        site.replace_from(&staging, &cached).await.unwrap();
 
         assert!(!staging.exists());
+        assert!(cached.join("index.html").is_file());
         assert_eq!(site.response("/", "/").await.unwrap().1, b"second");
         assert!(site.response("/", "/404.html").await.is_none());
         assert_eq!(site.response("/", "/search.json").await.unwrap().1, b"[]");
@@ -516,6 +624,26 @@ mod tests {
             "text/html; charset=utf-8"
         );
         assert_eq!(content_type(Path::new("x.json")), "application/json");
+        assert_eq!(
+            content_type(Path::new("items/source/post.json")),
+            "application/ld+json; charset=utf-8"
+        );
+        assert_eq!(
+            content_type(Path::new("sources/a/feed.json")),
+            "application/feed+json; charset=utf-8"
+        );
+        assert_eq!(
+            content_type(Path::new("atom.xml")),
+            "application/atom+xml; charset=utf-8"
+        );
+        assert_eq!(
+            content_type(Path::new("rss.xml")),
+            "application/rss+xml; charset=utf-8"
+        );
+        assert_eq!(
+            content_type(Path::new("opensearch.xml")),
+            "application/opensearchdescription+xml; charset=utf-8"
+        );
         assert_eq!(
             content_type(Path::new("article.rst")),
             "text/x-rst; charset=utf-8"

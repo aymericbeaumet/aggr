@@ -14,6 +14,24 @@ use serde::Serialize;
 #[folder = "themes/default/"]
 struct DefaultTheme;
 
+/// Content hash of the embedded fallback theme. This makes build-cache invalidation exact even
+/// while developing theme changes without bumping the package version.
+pub fn default_theme_hash() -> String {
+    let mut names: Vec<_> = DefaultTheme::iter().map(|name| name.into_owned()).collect();
+    names.sort();
+    let mut bytes = Vec::new();
+    for name in names {
+        let Some(file) = DefaultTheme::get(&name) else {
+            continue;
+        };
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(file.data.as_ref());
+        bytes.push(0xff);
+    }
+    crate::model::sha1_hex(&bytes)
+}
+
 /// Directories consulted before the embedded theme, most specific first. Each may contain
 /// `templates/` and `static/`.
 #[derive(Debug, Clone, Default)]
@@ -267,7 +285,7 @@ mod tests {
             "index.html",
             "item.html",
             "sources.html",
-            "settings.html",
+            "preferences.html",
             "404.html",
             "offline.html",
             "manifest.webmanifest",
@@ -278,6 +296,53 @@ mod tests {
                 "missing embedded template {name}"
             );
         }
+    }
+
+    #[test]
+    fn embedded_theme_only_recolors_the_24_hour_boundary() {
+        let file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(file.data.as_ref()).unwrap();
+        assert!(css.contains(".row:not(.age-h24) + .row.age-h24"));
+        assert!(!css.contains("age-boundary.age-h1"));
+        assert!(!css.contains("age-boundary.age-h3"));
+    }
+
+    #[test]
+    fn embedded_theme_keeps_article_links_and_navigation_distinct() {
+        let css_file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
+        assert!(css.contains("--accent: #8ea1ff"));
+        assert!(css.contains(".body a { color: var(--accent-strong); font-style: normal"));
+        assert!(css.contains(".article-more"));
+        assert!(css.contains(".main[data-navigation-focus]:focus-visible { outline: none; }"));
+
+        let script_file = DefaultTheme::get("static/app.js").unwrap();
+        let script = std::str::from_utf8(script_file.data.as_ref()).unwrap();
+        assert!(script.contains("url.searchParams.set(\"q\", query)"));
+        assert!(script.contains("KIND === \"river\" && direction === \"next\""));
+        assert!(script.contains("direction === \"previous\" ? BASE"));
+        assert!(script.contains("[\"ArrowLeft\", \"h\", \"k\"]"));
+        assert!(script.contains("[\"ArrowRight\", \"l\", \"j\"]"));
+        assert!(!script.contains("var selected ="));
+        assert!(!script.contains("event.key === \"o\""));
+        assert!(!script.contains("event.key === \"Enter\""));
+        assert!(script.contains("wireMenuNavigation"));
+        assert!(script.contains("event.key === \"?\""));
+        assert!(script.contains("f: \"\", c: \"categories/\", t: \"tags/\""));
+
+        let base_file = DefaultTheme::get("templates/base.html").unwrap();
+        let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
+        assert!(base.contains("id=\"shortcut-help\""));
+        assert!(base.contains("Keyboard shortcuts"));
+        assert!(base.contains("data-route=\"preferences/\""));
+        assert!(!base.contains("data-route=\"settings/\""));
+        assert!(!base.contains("id=\"shortcut-lists\""));
+
+        let item_file = DefaultTheme::get("templates/item.html").unwrap();
+        let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
+        assert!(item.contains("for article in item.recommended_articles"));
+        assert!(!item.contains("article-more-label"));
+        assert!(!item.contains("class=\"permalinks\""));
     }
 
     #[test]

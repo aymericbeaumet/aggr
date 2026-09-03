@@ -27,11 +27,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             clap_complete::generate(shell, &mut Cli::command(), "aggr", &mut std::io::stdout());
             Ok(())
         }
-        Command::Fetch(args) => {
-            let project = Project::load(&cli.config)?;
-            let worktree = project.worktree()?;
-            fetch::run(&project, &worktree, &args).await.map(|_| ())
-        }
         Command::Sync(args) => sync::run(&Project::load(&cli.config)?, &args).await,
         Command::Build(args) => build::sync_and_run(&Project::load(&cli.config)?, &args).await,
         Command::Dev(args) => dev::run(&Project::load(&cli.config)?, &args).await,
@@ -79,11 +74,18 @@ impl Project {
         Ok(worktree)
     }
 
-    /// Scratch space next to the data worktree, never committed anywhere.
-    pub fn cache_dir(&self) -> Result<PathBuf> {
-        let dir = self.repo.root().join(".aggr").join("cache");
+    /// Repository-local cache for build/sync. It is never shared with `aggr dev`.
+    pub fn build_cache_dir(&self) -> Result<PathBuf> {
+        let dir = crate::cache::build(self.repo.root());
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         self.repo.exclude(&dir)?;
+        Ok(dir)
+    }
+
+    /// OS-standard, project-isolated cache for dev. It never touches this repository's worktree.
+    pub fn dev_cache_dir(&self) -> Result<PathBuf> {
+        let dir = crate::cache::dev(&self.config_path)?;
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         Ok(dir)
     }
 

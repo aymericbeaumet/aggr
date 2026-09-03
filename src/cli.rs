@@ -36,10 +36,8 @@ pub struct Cli {
 pub enum Command {
     /// Write a commented aggr.toml (and optionally the GitHub workflow) in the current directory.
     Init(InitArgs),
-    /// Fetch sources and write new items into the data worktree without committing.
-    Fetch(FetchArgs),
     /// Fetch, commit to the data branch, and push. This is what CI runs.
-    Sync(FetchArgs),
+    Sync(SyncArgs),
     /// Sync, then render the static site into the output directory.
     Build(BuildArgs),
     /// Sync and build in a disposable workspace, then serve with live reload.
@@ -76,6 +74,15 @@ pub struct FetchArgs {
     /// Rewrite items that already exist (hand edits are lost).
     #[arg(long)]
     pub refresh: bool,
+}
+
+#[derive(Debug, Args, Default, Clone)]
+pub struct SyncArgs {
+    #[command(flatten)]
+    pub fetch: FetchArgs,
+    /// Write fetched data locally, but do not commit or push it.
+    #[arg(long)]
+    pub fetch_only: bool,
 }
 
 #[derive(Debug, Args, Default)]
@@ -138,5 +145,16 @@ mod tests {
             after_subcommand.config,
             PathBuf::from("/tmp/reader/aggr.toml")
         );
+    }
+
+    #[test]
+    fn fetch_is_a_sync_mode_instead_of_a_command() {
+        let cli = Cli::try_parse_from(["aggr", "sync", "--fetch-only", "--refresh"]).unwrap();
+        let Command::Sync(sync) = cli.command else {
+            panic!("expected sync");
+        };
+        assert!(sync.fetch_only);
+        assert!(sync.fetch.refresh);
+        assert!(Cli::try_parse_from(["aggr", "fetch"]).is_err());
     }
 }

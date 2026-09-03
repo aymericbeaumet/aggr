@@ -16,7 +16,8 @@ title = \"My reads\"
 # url = \"https://reads.example.com\"   # custom domain: also writes the CNAME file
 
 [digest]
-at = \"08:00\"                          # daily GitHub issue, in [site] timezone
+at = \"08:00\"                          # daily GitHub issue; 24-hour HH:MM
+timezone = \"UTC\"                      # IANA name
 
 [[sources]]
 url = \"https://blog.rust-lang.org/feed.xml\"

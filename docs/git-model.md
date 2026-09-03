@@ -1,7 +1,8 @@
 # The git model
 
-aggr has no database and no cache directory: the repository's history is both. This page is
-the contract — what goes where, what is never rewritten, and what a run may or may not do.
+aggr needs no database service: repository history is the source of truth. Local caches only
+accelerate fetching and rendering and may be discarded at any time. This page is the contract —
+what goes where, what is never rewritten, and what a run may or may not do.
 
 ## Two branches, one set of refs
 
@@ -33,10 +34,10 @@ status.toml                                            sources currently failing
 
 - **Item paths are identities.** Storage stays date-partitioned, while the public site uses
   `/items/<source>/<stem>/` plus `.md`, `.txt`, `.rst`, and `.json` representations. Search
-  index and the browser's read/star state all key on the path. The date is `published` (or the
+  index and alternate representations all key on the path. The date is `published` (or the
   time of first sight) at write time and is never moved. File names are lowercase ASCII slugs,
   ≤ 60 characters, safe on every OS; collisions in a directory get `-2`, `-3`.
-- **Write once.** A fetch never overwrites an existing `.md`; hand edits win. `aggr fetch
+- **Write once.** A sync never overwrites an existing `.md`; hand edits win. `aggr sync
   --refresh` is the explicit exception.
 - **Deleted stays deleted.** Dedupe keys (`sha1` of the entry id, of the normalized link with
   tracking parameters removed, and of `title|published`) are appended to `seen.txt` when an item
@@ -98,8 +99,8 @@ last digest" is the diff between those two commits.
 
 ## Reproducibility
 
-The site footer stamps `config@<main sha7> · data@<aggr sha7> · aggr vX.Y.Z`. Given those two
-hashes and the binary, `aggr build --data-ref <sha>` renders the same site anywhere.
+Render-cache keys include the config files, data commit, theme, target URL, and binary renderer
+sources. Given those inputs, `aggr build --data-ref <sha>` renders the same site anywhere.
 
 ## Editing the branch by hand
 

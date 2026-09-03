@@ -30,7 +30,11 @@ pub struct Store {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SourceState {
+    /// URL configured by the user. A change invalidates the discovered endpoint below.
     pub url: String,
+    /// Feed endpoint discovered from a website, or the final page URL for HTML fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,12 +279,6 @@ impl Store {
             }
         }
         Ok(paths)
-    }
-
-    /// The exact bytes of an item's `.md`, for blob hashes and raw copies.
-    pub fn item_bytes(&self, path: &str) -> Result<Vec<u8>> {
-        let file = self.root.join(format!("{path}.md"));
-        fs::read(&file).with_context(|| format!("reading {}", file.display()))
     }
 
     pub fn read_html(&self, path: &str) -> Result<Option<String>> {

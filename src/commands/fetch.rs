@@ -1,9 +1,9 @@
-//! `aggr fetch`: every selected source in parallel, each writing only its own directory of the
-//! data worktree. The store's dedupe keys decide what is new; nothing here touches git.
+//! Shared fetch stage for sync/build/dev: every source runs in parallel and writes only its own
+//! directory. The store's dedupe keys decide what is new; nothing in this module touches git.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
@@ -37,6 +37,14 @@ pub struct SourceReport {
     pub unchanged: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StatePolicy {
+    /// Preserve the no-new-items/no-commit invariant of the append-only branch.
+    PersistentBranch,
+    /// Keep validators current in dev's private cache even when no item was added.
+    DevCache,
+}
+
 impl Report {
     pub fn added(&self) -> usize {
         self.sources.iter().map(|s| s.added).sum()
@@ -65,12 +73,20 @@ struct Options {
     html: bool,
     html_max_bytes: usize,
     article_concurrency: usize,
+    max_items_per_source: usize,
     now: DateTime<Utc>,
 }
 
 pub async fn run(project: &Project, worktree: &Worktree, args: &FetchArgs) -> Result<Report> {
-    let cache_dir = project.cache_dir()?;
-    run_with_cache(project, worktree, args, &cache_dir).await
+    let cache_dir = project.build_cache_dir()?;
+    run_with_cache(
+        project,
+        worktree,
+        args,
+        &cache_dir,
+        StatePolicy::PersistentBranch,
+    )
+    .await
 }
 
 pub async fn run_with_cache(
@@ -78,6 +94,7 @@ pub async fn run_with_cache(
     worktree: &Worktree,
     args: &FetchArgs,
     cache_dir: &Path,
+    state_policy: StatePolicy,
 ) -> Result<Report> {
     let selected: Vec<Source> = project.sources.clone();
     let store = Arc::new(Store::open(worktree.dir()));
@@ -88,22 +105,34 @@ pub async fn run_with_cache(
         html: project.config.store.html,
         html_max_bytes: project.config.store.html_max_bytes,
         article_concurrency: project.config.fetch.article_concurrency,
+        max_items_per_source: project.config.fetch.max_items_per_source,
         now: Utc::now(),
     };
     let limit = Arc::new(Semaphore::new(project.config.fetch.concurrency));
+    let article_failures = Arc::new(ArticleFailures::default());
 
     let mut tasks = JoinSet::new();
     for source in selected {
-        let (store, client, cache_dir, options, limit) = (
+        let (store, client, cache_dir, options, limit, article_failures) = (
             store.clone(),
             client.clone(),
             cache_dir.to_path_buf(),
             options.clone(),
             limit.clone(),
+            article_failures.clone(),
         );
         tasks.spawn(async move {
             let _permit = limit.acquire_owned().await;
-            let result = fetch_one(&source, &store, &client, &cache_dir, &options).await;
+            let result = fetch_one(
+                &source,
+                &store,
+                &client,
+                &cache_dir,
+                &options,
+                &article_failures,
+                state_policy,
+            )
+            .await;
             (source.slug, result)
         });
     }
@@ -189,6 +218,8 @@ async fn fetch_one(
     client: &http::Client,
     cache_dir: &Path,
     options: &Options,
+    article_failures: &ArticleFailures,
+    state_policy: StatePolicy,
 ) -> Result<SourceReport> {
     let slug = &source.slug;
     let state = store.source_state(slug)?;
@@ -203,30 +234,36 @@ async fn fetch_one(
     if let Some(url) = source.engine.url() {
         next_state.url = url.to_string();
     }
-    let report = match fetched {
+    let (report, visible_change) = match fetched {
         Fetch::Unchanged { validators } => {
             validators.apply(&mut next_state);
-            SourceReport {
-                slug: slug.clone(),
-                outcome: Outcome::Ok,
-                added: 0,
-                unchanged: true,
-            }
+            (
+                SourceReport {
+                    slug: slug.clone(),
+                    outcome: Outcome::Ok,
+                    added: 0,
+                    unchanged: true,
+                },
+                false,
+            )
         }
         Fetch::Changed {
             validators,
             meta,
-            items,
+            mut items,
         } => {
             validators.apply(&mut next_state);
             next_state.title = meta.title.or(next_state.title);
             next_state.site_url = meta.site_url.or(next_state.site_url);
+            let metadata_changed =
+                next_state.title != state.title || next_state.site_url != state.site_url;
 
             let seen = store.seen(slug)?;
             let mut new_keys: Vec<String> = Vec::new();
             let mut prospective = seen.clone();
             let mut taken: HashSet<(String, String)> = HashSet::new();
             let mut added = 0;
+            keep_newest(&mut items, options.max_items_per_source);
             // Feeds list newest first; preserve oldest-first writes while original pages download
             // concurrently. This keeps deterministic suffixes without making heavy mode serial.
             let mut candidates = Vec::new();
@@ -243,7 +280,8 @@ async fn fetch_one(
             }
             let enriched = stream::iter(candidates)
                 .map(|(raw, keys, known)| async move {
-                    let (raw, kind) = heavy_content(&raw, source, client).await;
+                    let (raw, kind) =
+                        heavy_content(&raw, source, client, cache_dir, article_failures).await;
                     (raw, kind, keys, known)
                 })
                 .buffered(options.article_concurrency)
@@ -279,24 +317,60 @@ async fn fetch_one(
             if !options.dry_run && !new_keys.is_empty() {
                 store.append_seen(slug, &new_keys, options.now)?;
             }
-            SourceReport {
-                slug: slug.clone(),
-                outcome: Outcome::Ok,
-                added,
-                unchanged: false,
-            }
+            (
+                SourceReport {
+                    slug: slug.clone(),
+                    outcome: Outcome::Ok,
+                    added,
+                    unchanged: added == 0 && !metadata_changed,
+                },
+                added > 0,
+            )
         }
     };
-    if !options.dry_run {
+    if !options.dry_run && (visible_change || state_policy == StatePolicy::DevCache) {
         store.write_source_state(slug, &next_state)?;
     }
     Ok(report)
+}
+
+fn keep_newest(items: &mut Vec<RawItem>, limit: usize) {
+    items.sort_by_key(|item| std::cmp::Reverse(item.created_at()));
+    items.truncate(limit);
+}
+
+#[derive(Default)]
+struct ArticleFailures {
+    hosts: Mutex<HashSet<String>>,
+}
+
+impl ArticleFailures {
+    fn blocked(&self, url: &url::Url) -> bool {
+        url.host_str().is_some_and(|host| {
+            self.hosts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains(host)
+        })
+    }
+
+    /// Returns true when this is the first denial recorded for the host.
+    fn block(&self, url: &url::Url) -> bool {
+        url.host_str().is_some_and(|host| {
+            self.hosts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(host.to_string())
+        })
+    }
 }
 
 async fn heavy_content(
     raw: &RawItem,
     source: &Source,
     client: &http::Client,
+    cache_dir: &Path,
+    failures: &ArticleFailures,
 ) -> (RawItem, ContentKind) {
     let fallback = if raw.content_html.is_some() {
         ContentKind::Feed
@@ -309,20 +383,42 @@ async fn heavy_content(
     let Ok(url) = url::Url::parse(&raw.link) else {
         return (raw.clone(), fallback);
     };
+    if failures.blocked(&url) {
+        return (raw.clone(), fallback);
+    }
     let result = async {
+        let cache = crate::cache::ArticleCache::new(cache_dir);
+        let cached = cache.load(&url)?;
         let response = client
             .get(http::Request {
                 url: &url,
                 headers: &source.headers,
-                etag: None,
-                last_modified: None,
+                etag: cached.as_ref().and_then(|entry| entry.etag.as_deref()),
+                last_modified: cached
+                    .as_ref()
+                    .and_then(|entry| entry.last_modified.as_deref()),
             })
-            .await?;
-        let http::Response::Ok(body) = response else {
-            anyhow::bail!("original page unexpectedly returned not modified");
+            .await;
+        let response = match response {
+            Ok(http::Response::Ok(body)) => cache.store(&url, &body)?,
+            Ok(http::Response::NotModified) => {
+                cached.context("original page returned not modified without a cached response")?
+            }
+            Err(err) => match cached {
+                Some(cached) => {
+                    log::debug!("using cached original page after fetch failed: {err:#}");
+                    cached
+                }
+                None => return Err(err),
+            },
         };
-        let page = String::from_utf8_lossy(&body.bytes);
-        content::extract_article(&page, &body.final_url)
+        if let Some(extracted) = cache.extracted(&response.body_hash)? {
+            return Ok(extracted);
+        }
+        let page = String::from_utf8_lossy(&response.bytes);
+        let extracted = content::extract_article(&page, &response.final_url)?;
+        cache.store_extracted(&response.body_hash, &extracted)?;
+        Ok(extracted)
     }
     .await;
     match result {
@@ -332,11 +428,19 @@ async fn heavy_content(
             (enriched, ContentKind::Extracted)
         }
         Err(err) => {
-            log::warn!(
-                "{}: heavy content fallback for {}: {err:#}",
-                source.slug,
-                raw.link
-            );
+            let denied = matches!(http::status_code(&err), Some(401 | 403 | 429));
+            if !denied || failures.block(&url) {
+                log::warn!(
+                    "{}: heavy content fallback for {}: {err:#}{}",
+                    source.slug,
+                    raw.link,
+                    if denied {
+                        "; skipping this host for the rest of the run"
+                    } else {
+                        ""
+                    }
+                );
+            }
             (raw.clone(), fallback)
         }
     }
@@ -354,12 +458,14 @@ struct Planned {
 fn plan(raw: &RawItem, source: &Source, options: &Options, content_kind: ContentKind) -> Planned {
     // A future-dated entry would otherwise land in a directory that does not exist yet.
     let published = raw.published.map(|date| date.min(options.now));
-    let date = published.unwrap_or(options.now);
+    let updated = raw.updated.map(|date| date.min(options.now));
+    let date = published.or(updated).unwrap_or(options.now);
     let base = url::Url::parse(&raw.link).ok();
     let body = match &raw.content_html {
         Some(html) => content::to_markdown(html, base.as_ref()),
         None => raw.summary.clone().unwrap_or_default(),
     };
+    let body = content::strip_leading_published_date(&body, published);
     let (html, truncated) = match &raw.content_html {
         Some(html) if options.html && source.html => {
             let (stored, truncated) = content::storage_html(html, options.html_max_bytes);
@@ -372,7 +478,7 @@ fn plan(raw: &RawItem, source: &Source, options: &Options, content_kind: Content
         link: raw.link.clone(),
         source: source.slug.clone(),
         published,
-        updated: raw.updated.map(|date| date.min(options.now)),
+        updated,
         first_seen: options.now,
         authors: raw.authors.clone(),
         labels: source
@@ -428,6 +534,7 @@ mod tests {
             html: true,
             html_max_bytes: 1000,
             article_concurrency: 4,
+            max_items_per_source: 200,
             now: Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap(),
         }
     }
@@ -461,6 +568,22 @@ mod tests {
     }
 
     #[test]
+    fn plan_drops_extracted_leading_publication_dates() {
+        let published = Utc.with_ymd_and_hms(2026, 9, 2, 1, 0, 0).unwrap();
+        let raw = RawItem {
+            title: "Dated article".into(),
+            link: "https://blog.example/dated".into(),
+            published: Some(published),
+            content_html: Some("<p>2nd September 2026</p><p>The actual opening.</p>".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            plan(&raw, &source(), &options(), ContentKind::Extracted).body,
+            "The actual opening.\n"
+        );
+    }
+
+    #[test]
     fn titles_only_entries_keep_the_summary_as_body_and_no_html() {
         let raw = RawItem {
             title: "T".into(),
@@ -489,13 +612,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn first_import_keeps_only_the_newest_bounded_entries() {
+        let mut items = (1..=5)
+            .map(|day| RawItem {
+                title: day.to_string(),
+                published: Some(Utc.with_ymd_and_hms(2026, 9, day, 0, 0, 0).unwrap()),
+                ..Default::default()
+            })
+            .collect();
+        keep_newest(&mut items, 2);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.title.as_str())
+                .collect::<Vec<_>>(),
+            ["5", "4"]
+        );
+    }
+
     #[tokio::test]
     async fn heavy_downloads_the_article_while_light_keeps_feed_content() {
         let server = MockServer::start_async().await;
         let article = server
             .mock_async(|when, then| {
                 when.method(GET).path("/post");
-                then.status(200).body(
+                then.status(200).header("etag", "\"article-v1\"").body(
                     "<html><title>Post</title><article><h1>Post</h1><p>The complete original article has substantially more useful text than its feed excerpt.</p><p>This second paragraph makes it readable.</p></article></html>",
                 );
             })
@@ -511,8 +653,10 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+        let cache = tempfile::tempdir().unwrap();
 
-        let (heavy, kind) = heavy_content(&raw, &source(), &client).await;
+        let failures = ArticleFailures::default();
+        let (heavy, kind) = heavy_content(&raw, &source(), &client, cache.path(), &failures).await;
         assert_eq!(kind, ContentKind::Extracted);
         assert!(
             heavy
@@ -521,14 +665,64 @@ mod tests {
                 .contains("complete original article")
         );
         article.assert_calls_async(1).await;
+        article.delete_async().await;
+        let not_modified = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/post")
+                    .header("if-none-match", "\"article-v1\"");
+                then.status(304);
+            })
+            .await;
+        let (cached, kind) = heavy_content(&raw, &source(), &client, cache.path(), &failures).await;
+        assert_eq!(kind, ContentKind::Extracted);
+        assert!(
+            cached
+                .content_html
+                .unwrap()
+                .contains("complete original article")
+        );
+        not_modified.assert_calls_async(1).await;
 
         let light = Source {
             content: ContentMode::Light,
             ..source()
         };
-        let (unchanged, kind) = heavy_content(&raw, &light, &client).await;
+        let (unchanged, kind) = heavy_content(&raw, &light, &client, cache.path(), &failures).await;
         assert_eq!(kind, ContentKind::Feed);
         assert_eq!(unchanged.content_html, raw.content_html);
-        article.assert_calls_async(1).await;
+        not_modified.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn heavy_stops_retrying_a_host_that_denies_article_requests() {
+        let server = MockServer::start_async().await;
+        let denied = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/post");
+                then.status(403);
+            })
+            .await;
+        let raw = RawItem {
+            title: "Post".into(),
+            link: server.url("/post"),
+            content_html: Some("<p>feed copy</p>".into()),
+            ..Default::default()
+        };
+        let client = http::Client::new(&crate::config::FetchConfig {
+            retries: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let failures = ArticleFailures::default();
+
+        for _ in 0..3 {
+            let (item, kind) =
+                heavy_content(&raw, &source(), &client, cache.path(), &failures).await;
+            assert_eq!(kind, ContentKind::Feed);
+            assert_eq!(item.content_html, raw.content_html);
+        }
+        denied.assert_calls_async(1).await;
     }
 }

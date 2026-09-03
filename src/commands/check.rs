@@ -10,16 +10,16 @@ use tokio::task::JoinSet;
 use super::Project;
 use crate::config::{Engine, Source};
 use crate::git;
-use crate::http::{self, Request, Response};
-use crate::sources::{feed, html};
+use crate::http;
+use crate::sources::{self, Fetch, feed};
+use crate::store::SourceState;
 
 pub async fn run(project: &Project) -> Result<()> {
     println!(
-        "config: {} ({} source(s), theme {:?}, timezone {})",
+        "config: {} ({} source(s), theme {:?})",
         project.config_path.display(),
         project.sources.len(),
-        project.config.site.theme,
-        project.config.site.timezone
+        project.config.site.theme
     );
     if let Some(repository) = project.config.repository() {
         println!("repository: {repository}");
@@ -28,7 +28,7 @@ pub async fn run(project: &Project) -> Result<()> {
         println!(
             "digest: daily at {} ({})",
             digest.at.format("%H:%M"),
-            project.config.site.timezone
+            digest.timezone
         );
     }
 
@@ -79,56 +79,31 @@ pub async fn run(project: &Project) -> Result<()> {
 async fn probe(source: &Source, client: &http::Client) -> Result<String> {
     match &source.engine {
         Engine::Feed { url } => {
-            let request = Request {
-                headers: &source.headers,
-                ..Request::get(url)
+            let state = SourceState::default();
+            let cache = tempfile::tempdir()?;
+            let ctx = sources::Context {
+                client,
+                state: &state,
+                cache_dir: cache.path(),
             };
-            let body = match client.get(request).await? {
-                Response::Ok(body) => body,
-                Response::NotModified => bail!("unexpected 304 without validators"),
+            let (meta, items, resolved) = match feed::fetch(url, source, &ctx).await? {
+                Fetch::Changed {
+                    validators,
+                    meta,
+                    items,
+                } => (meta, items, validators.resolved_url),
+                Fetch::Unchanged { .. } => bail!("unexpected unchanged source without validators"),
             };
-            let parsed = feed::parse(&body.bytes, &body.final_url)?;
             Ok(format!(
-                "{} entr{}{}",
-                parsed.entries.len(),
-                if parsed.entries.len() == 1 {
-                    "y"
-                } else {
-                    "ies"
-                },
-                parsed
-                    .title
-                    .as_ref()
-                    .map(|t| format!("  \"{}\"", t.content))
-                    .unwrap_or_default()
-            ))
-        }
-        Engine::Html { url, fields } => {
-            let request = Request {
-                headers: &source.headers,
-                ..Request::get(url)
-            };
-            let body = match client.get(request).await? {
-                Response::Ok(body) => body,
-                Response::NotModified => bail!("unexpected 304 without validators"),
-            };
-            let (meta, items) = html::extract(
-                &String::from_utf8_lossy(&body.bytes),
-                &body.final_url,
-                fields,
-            )?;
-            let dated = items.iter().filter(|item| item.published.is_some()).count();
-            Ok(format!(
-                "{} item(s), {dated} dated{}{}",
+                "{} item(s){}{}",
                 items.len(),
                 meta.title
-                    .as_ref()
-                    .map(|t| format!("  \"{t}\""))
+                    .map(|title| format!("  \"{title}\""))
                     .unwrap_or_default(),
-                items
-                    .first()
-                    .map(|item| format!("  first: {:?}", item.title))
-                    .unwrap_or_default()
+                resolved
+                    .filter(|resolved| resolved != url.as_str())
+                    .map(|resolved| format!("  discovered {resolved}"))
+                    .unwrap_or_default(),
             ))
         }
         Engine::Aggr { url, branch, .. } => {
