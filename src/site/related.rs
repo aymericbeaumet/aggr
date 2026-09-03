@@ -1,17 +1,19 @@
-//! Build-time chronological and related-article planning.
+//! Build-time chronological navigation and article suggestions.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::context::ItemCtx;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+const ARTICLE_LIMIT: usize = 3;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Recommendation {
     pub previous: Option<usize>,
     pub next: Option<usize>,
-    pub related: Option<usize>,
+    pub articles: Vec<usize>,
 }
 
-/// Resolve navigation for items sorted newest first. Relatedness follows the same weighted-index
+/// Resolve navigation for items sorted newest first. Suggestions follow the same weighted-index
 /// model used by established static-site generators: shared labels dominate, then category,
 /// uncommon title terms, and source. An inverted index keeps this proportional to matching
 /// features rather than comparing every pair of articles.
@@ -35,32 +37,42 @@ pub fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
                 let candidates = &postings[feature.as_str()];
                 let weight = feature_weight(feature, items.len(), candidates.len());
                 for &candidate in candidates {
-                    if candidate != index && Some(candidate) != next {
+                    if candidate != index {
                         *scores.entry(candidate).or_default() += weight;
                     }
                 }
             }
-            let related = scores
+            let mut ranked: Vec<_> = scores.into_iter().collect();
+            ranked.sort_by(|(a_index, a_score), (b_index, b_score)| {
+                b_score
+                    .cmp(a_score)
+                    .then_with(|| items[*b_index].date.cmp(&items[*a_index].date))
+                    .then_with(|| items[*a_index].path.cmp(&items[*b_index].path))
+            });
+            let mut articles: Vec<_> = ranked
                 .into_iter()
-                .max_by(|(a_index, a_score), (b_index, b_score)| {
-                    a_score
-                        .cmp(b_score)
-                        .then_with(|| items[*a_index].date.cmp(&items[*b_index].date))
-                        .then_with(|| items[*b_index].path.cmp(&items[*a_index].path))
-                })
                 .map(|(candidate, _)| candidate)
-                .or_else(|| fallback(items.len(), index, next));
+                .take(ARTICLE_LIMIT)
+                .collect();
+            fill_fallback(&mut articles, items.len(), index);
             Recommendation {
                 previous,
                 next,
-                related,
+                articles,
             }
         })
         .collect()
 }
 
-fn fallback(len: usize, current: usize, next: Option<usize>) -> Option<usize> {
-    (0..len).find(|candidate| *candidate != current && Some(*candidate) != next)
+fn fill_fallback(articles: &mut Vec<usize>, len: usize, current: usize) {
+    for candidate in 0..len {
+        if articles.len() == ARTICLE_LIMIT {
+            break;
+        }
+        if candidate != current && !articles.contains(&candidate) {
+            articles.push(candidate);
+        }
+    }
 }
 
 fn item_features(item: &ItemCtx) -> Vec<String> {
@@ -148,13 +160,13 @@ mod tests {
             edit_url: None,
             previous_article: None,
             next_article: None,
-            related_article: None,
+            recommended_articles: Vec::new(),
             body_html: None,
         }
     }
 
     #[test]
-    fn chronology_and_related_articles_are_deterministic_and_distinct() {
+    fn chronology_and_recommendations_are_deterministic_and_distinct() {
         let items = vec![
             item("Rust async runtimes", "a", "engineering", &["rust"], 12),
             item("Product update", "b", "news", &["release"], 11),
@@ -167,8 +179,7 @@ mod tests {
         assert_eq!(recommendations[0].next, Some(1));
         assert_eq!(recommendations[1].previous, Some(0));
         assert_eq!(recommendations[1].next, Some(2));
-        assert_eq!(recommendations[0].related, Some(2));
-        assert_ne!(recommendations[0].related, recommendations[0].next);
+        assert_eq!(recommendations[0].articles, vec![2, 3, 1]);
         assert_eq!(resolve(&items), recommendations);
     }
 }

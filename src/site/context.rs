@@ -116,13 +116,13 @@ pub struct ItemCtx {
     pub raw_url: Option<String>,
     pub history_url: Option<String>,
     pub edit_url: Option<String>,
-    /// Chronological and related links resolved once at build time.
+    /// Chronological navigation and non-adjacent suggestions resolved once at build time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_article: Option<ArticleLinkCtx>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_article: Option<ArticleLinkCtx>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub related_article: Option<ArticleLinkCtx>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recommended_articles: Vec<ArticleLinkCtx>,
     /// Rendered Markdown; only filled on the item's own page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_html: Option<String>,
@@ -269,7 +269,7 @@ impl ItemCtx {
             edit_url: options.links.map(|l| l.edit(&md)),
             previous_article: None,
             next_article: None,
-            related_article: None,
+            recommended_articles: Vec::new(),
             body_html: None,
         }
     }

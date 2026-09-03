@@ -572,7 +572,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(!index.contains("&#x2f;"));
     let item = site.join("items/demo/2026-09-01-hello-there");
     let page = std::fs::read_to_string(item.join("index.html")).unwrap();
-    assert!(page.contains("https://github.com/o/r/blob/"), "{page}");
+    assert!(!page.contains("https://github.com/o/r/blob/"), "{page}");
     assert!(!page.contains("alert("), "{page}");
     let representation = site.join("items/demo/2026-09-01-hello-there");
     assert!(representation.with_extension("md").exists());

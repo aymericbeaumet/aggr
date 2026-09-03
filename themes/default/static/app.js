@@ -375,7 +375,7 @@
     }
     if (KIND === "item" && (event.key === "ArrowRight" || event.key === "ArrowLeft")) {
       var article = $("article.item");
-      var target = article && article.dataset[event.key === "ArrowRight" ? "nextUrl" : "previousUrl"];
+      var target = article && (article.dataset[event.key === "ArrowRight" ? "nextUrl" : "previousUrl"] || (event.key === "ArrowLeft" ? BASE : null));
       if (!target) return;
       event.preventDefault();
       navigate(target);

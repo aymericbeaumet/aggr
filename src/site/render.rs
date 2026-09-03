@@ -322,10 +322,13 @@ mod tests {
         assert!(script.contains("KIND === \"river\" && event.key === \"ArrowRight\""));
         assert!(script.contains("event.key === \"ArrowRight\""));
         assert!(script.contains("event.key === \"ArrowLeft\""));
+        assert!(script.contains("event.key === \"ArrowLeft\" ? BASE"));
 
         let item_file = DefaultTheme::get("templates/item.html").unwrap();
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
-        assert!(item.contains(">previous article</span>"));
+        assert!(item.contains("for article in item.recommended_articles"));
+        assert!(!item.contains("article-more-label"));
+        assert!(!item.contains("class=\"permalinks\""));
     }
 
     #[test]

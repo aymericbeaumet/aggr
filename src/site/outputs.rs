@@ -775,7 +775,7 @@ mod tests {
             edit_url: None,
             previous_article: None,
             next_article: None,
-            related_article: None,
+            recommended_articles: Vec::new(),
             body_html: Some("<p>Clean &amp; <strong>complete</strong></p>".into()),
         }
     }

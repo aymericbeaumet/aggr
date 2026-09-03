@@ -507,9 +507,11 @@ pub fn build(
         item.next_article = recommendation
             .next
             .map(|index| article_links[index].clone());
-        item.related_article = recommendation
-            .related
-            .map(|index| article_links[index].clone());
+        item.recommended_articles = recommendation
+            .articles
+            .into_iter()
+            .map(|index| article_links[index].clone())
+            .collect();
     }
 
     let river_items: Vec<ItemCtx> = window
@@ -1477,34 +1479,31 @@ mod tests {
     }
 
     #[test]
-    fn item_pages_link_to_the_next_and_a_distinct_related_article() {
+    fn item_pages_show_three_unlabelled_article_suggestions() {
         let dir = tempfile::tempdir().unwrap();
         let (config, sources, store) = fixture(
             dir.path(),
-            4,
+            6,
             "max_age_days = 30\npwa = false\ndiscussions = []\n",
         );
         let out = dir.path().join("out");
         build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
 
         let newest =
-            std::fs::read_to_string(out.join("items/blog/2026-09-04-post-3/index.html")).unwrap();
+            std::fs::read_to_string(out.join("items/blog/2026-09-06-post-5/index.html")).unwrap();
         assert!(
-            newest.contains("data-next-url=\"items/blog/2026-09-03-post-2/\""),
+            newest.contains("data-next-url=\"items/blog/2026-09-05-post-4/\""),
             "{newest}"
         );
         assert!(!newest.contains("data-previous-url="), "{newest}");
-        assert!(newest.contains("<span class=\"article-more-label\">next article</span>"));
-        assert!(newest.contains("<span class=\"article-more-title\">Post 2</span>"));
-        assert!(newest.contains("<span class=\"article-more-label\">related article</span>"));
-        assert!(newest.contains("<span class=\"article-more-title\">Post 1</span>"));
+        assert_eq!(newest.matches("class=\"article-more-link\"").count(), 3);
+        assert!(!newest.contains("article-more-label"), "{newest}");
 
         let second =
-            std::fs::read_to_string(out.join("items/blog/2026-09-03-post-2/index.html")).unwrap();
-        assert!(second.contains("data-previous-url=\"items/blog/2026-09-04-post-3/\""));
-        assert!(second.contains("data-next-url=\"items/blog/2026-09-02-post-1/\""));
-        assert!(second.contains("<span class=\"article-more-label\">previous article</span>"));
-        assert!(second.contains("<span class=\"article-more-title\">Post 3</span>"));
+            std::fs::read_to_string(out.join("items/blog/2026-09-05-post-4/index.html")).unwrap();
+        assert!(second.contains("data-previous-url=\"items/blog/2026-09-06-post-5/\""));
+        assert!(second.contains("data-next-url=\"items/blog/2026-09-04-post-3/\""));
+        assert_eq!(second.matches("class=\"article-more-link\"").count(), 3);
     }
 
     #[test]
