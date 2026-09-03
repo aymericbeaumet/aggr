@@ -625,6 +625,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     let tags = std::fs::read_to_string(site.join("tags/index.html")).unwrap();
     assert!(tags.contains(">#example</a>"), "{tags}");
     let tag = std::fs::read_to_string(site.join("tags/example/index.html")).unwrap();
+    let tag = tag.replace("\r\n", "\n");
     assert!(tag.contains("<h1>\n      #example\n"), "{tag}");
     let search = std::fs::read_to_string(site.join("search/index.html")).unwrap();
     assert!(search.contains(">#example (2)</option>"), "{search}");
