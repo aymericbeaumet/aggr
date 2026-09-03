@@ -70,6 +70,43 @@
   </nav>
 </header>
 <span id="aggr-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></span>
+<dialog id="shortcut-help" class="shortcut-help" aria-labelledby="shortcut-help-title" aria-keyshortcuts="?">
+  <form method="dialog">
+    <header class="shortcut-help-head">
+      <h2 id="shortcut-help-title">Keyboard shortcuts</h2>
+      <button class="shortcut-close" value="close" aria-label="Close keyboard shortcuts">×</button>
+    </header>
+    <div class="shortcut-groups">
+      <section aria-labelledby="shortcut-anywhere">
+        <h3 id="shortcut-anywhere">Anywhere</h3>
+        <dl class="shortcut-list">
+          <div><dt><kbd>⌘</kbd><kbd>K</kbd> / <kbd>Ctrl</kbd><kbd>K</kbd></dt><dd>Search</dd></div>
+          <div><dt><kbd>/</kbd></dt><dd>Search</dd></div>
+          <div><dt><kbd>g</kbd><kbd>f</kbd></dt><dd>Feed</dd></div>
+          <div><dt><kbd>g</kbd><kbd>c</kbd></dt><dd>Categories</dd></div>
+          <div><dt><kbd>g</kbd><kbd>t</kbd></dt><dd>Tags</dd></div>
+          <div><dt><kbd>g</kbd><kbd>s</kbd></dt><dd>Sources</dd></div>
+          <div><dt><kbd>g</kbd><kbd>p</kbd></dt><dd>Settings</dd></div>
+          <div><dt><kbd>?</kbd></dt><dd>Show this help</dd></div>
+        </dl>
+      </section>
+      <section aria-labelledby="shortcut-lists">
+        <h3 id="shortcut-lists">Lists</h3>
+        <dl class="shortcut-list">
+          <div><dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / previous</dd></div>
+          <div><dt><kbd>Enter</kbd></dt><dd>Open article</dd></div>
+          <div><dt><kbd>o</kbd></dt><dd>Open original</dd></div>
+        </dl>
+      </section>
+      <section aria-labelledby="shortcut-articles">
+        <h3 id="shortcut-articles">Articles</h3>
+        <dl class="shortcut-list">
+          <div><dt><kbd>←</kbd> / <kbd>→</kbd></dt><dd>Previous / next</dd></div>
+        </dl>
+      </section>
+    </div>
+  </form>
+</dialog>
 <main id="swup" class="main{% if page.paginator %} h-feed{% endif %}" tabindex="-1">
 <span id="aggr-page" data-root="{{ page.root }}" data-kind="{{ page.kind }}" hidden></span>
 {% block content %}{% endblock %}

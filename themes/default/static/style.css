@@ -129,6 +129,33 @@ button.linkish:hover { text-decoration: underline; }
 .brand-icon { display: block; width: 1em; height: 1em; object-fit: contain; object-position: center; align-self: center; flex: 0 0 auto; }
 .nav-spacer { flex: 1; }
 
+/* keyboard help */
+.shortcut-help {
+  width: min(42rem, calc(100% - 2rem));
+  max-height: calc(100dvh - 2rem);
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  color: var(--fg);
+  background: var(--panel);
+  border: 1px solid var(--faint);
+  border-radius: 8px;
+  box-shadow: 0 1rem 3rem rgb(0 0 0 / 0.3);
+}
+.shortcut-help::backdrop { background: rgb(10 10 14 / 0.58); }
+.shortcut-help form { padding: 1rem 1.1rem 1.2rem; }
+.shortcut-help-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.shortcut-help-head h2 { margin: 0; font-size: 1.15rem; }
+.shortcut-close { min-width: 2rem; min-height: 2rem; padding: 0; border: 0; color: var(--muted); background: transparent; font: 1.4rem/1 var(--font); cursor: pointer; }
+.shortcut-groups { display: grid; grid-template-columns: 1.4fr 1fr; gap: 1.25rem 2rem; margin-top: 1rem; }
+.shortcut-groups section:first-child { grid-row: span 2; }
+.shortcut-groups h3 { margin: 0 0 0.45rem; color: var(--muted); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.shortcut-list { margin: 0; }
+.shortcut-list > div { display: grid; grid-template-columns: minmax(8.5rem, 1fr) 1fr; align-items: baseline; gap: 1rem; padding: 0.3rem 0; }
+.shortcut-list dt, .shortcut-list dd { margin: 0; }
+.shortcut-list dd { color: var(--muted); }
+.shortcut-list kbd { display: inline-block; min-width: 1.6em; margin-right: 0.15rem; padding: 0.08rem 0.3rem; text-align: center; color: var(--fg); background: var(--code); border: 1px solid var(--faint); border-radius: 3px; box-shadow: 0 1px 0 var(--faint); }
+
 /* content column */
 .main { width: 100%; max-width: var(--max); margin: 0 auto; padding: 0.75rem 0.75rem 2rem; flex: 1; }
 .main:focus { outline: none; }
@@ -263,6 +290,8 @@ button.linkish:hover { text-decoration: underline; }
   .setting { align-items: flex-start; flex-direction: column; gap: 0.4rem; }
   .article-more { grid-template-columns: 1fr; }
   .sources-scroll { overflow-x: auto; overscroll-behavior-inline: contain; }
+  .shortcut-groups { grid-template-columns: 1fr; }
+  .shortcut-groups section:first-child { grid-row: auto; }
 }
 
 /* Only show the fixed attribution when it fits in the gutter beside the reading column. */

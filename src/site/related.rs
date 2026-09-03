@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::context::ItemCtx;
 
-const ARTICLE_LIMIT: usize = 3;
+const RECOMMENDATION_COUNT: usize = 3;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Recommendation {
@@ -52,9 +52,13 @@ pub fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
             let mut articles: Vec<_> = ranked
                 .into_iter()
                 .map(|(candidate, _)| candidate)
-                .take(ARTICLE_LIMIT)
+                .take(RECOMMENDATION_COUNT)
                 .collect();
             fill_fallback(&mut articles, items.len(), index);
+            debug_assert_eq!(
+                articles.len(),
+                RECOMMENDATION_COUNT.min(items.len().saturating_sub(1))
+            );
             Recommendation {
                 previous,
                 next,
@@ -66,7 +70,7 @@ pub fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
 
 fn fill_fallback(articles: &mut Vec<usize>, len: usize, current: usize) {
     for candidate in 0..len {
-        if articles.len() == ARTICLE_LIMIT {
+        if articles.len() == RECOMMENDATION_COUNT {
             break;
         }
         if candidate != current && !articles.contains(&candidate) {
@@ -181,5 +185,29 @@ mod tests {
         assert_eq!(recommendations[1].next, Some(2));
         assert_eq!(recommendations[0].articles, vec![2, 3, 1]);
         assert_eq!(resolve(&items), recommendations);
+    }
+
+    #[test]
+    fn unrelated_articles_still_receive_three_distinct_suggestions() {
+        let items = vec![
+            item("Alpha", "a", "one", &["red"], 12),
+            item("Bravo", "b", "two", &["blue"], 11),
+            item("Charlie", "c", "three", &["green"], 10),
+            item("Delta", "d", "four", &["yellow"], 9),
+            item("Echo", "e", "five", &["purple"], 8),
+        ];
+
+        for (current, recommendation) in resolve(&items).into_iter().enumerate() {
+            assert_eq!(recommendation.articles.len(), 3);
+            assert!(!recommendation.articles.contains(&current));
+            assert_eq!(
+                recommendation
+                    .articles
+                    .iter()
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                3
+            );
+        }
     }
 }

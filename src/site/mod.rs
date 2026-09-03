@@ -1504,6 +1504,19 @@ mod tests {
         assert!(second.contains("data-previous-url=\"items/blog/2026-09-06-post-5/\""));
         assert!(second.contains("data-next-url=\"items/blog/2026-09-04-post-3/\""));
         assert_eq!(second.matches("class=\"article-more-link\"").count(), 3);
+
+        for day in 1..=6 {
+            let page = std::fs::read_to_string(out.join(format!(
+                "items/blog/2026-09-{day:02}-post-{}/index.html",
+                day - 1
+            )))
+            .unwrap();
+            assert_eq!(
+                page.matches("class=\"article-more-link\"").count(),
+                3,
+                "day {day} should always have three suggestions"
+            );
+        }
     }
 
     #[test]

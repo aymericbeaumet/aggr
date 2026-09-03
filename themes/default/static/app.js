@@ -7,6 +7,8 @@
   var KIND = (window.AGGR && window.AGGR.kind) || document.body.getAttribute("data-kind") || "";
   var PWA = window.AGGR ? window.AGGR.pwa !== false : true;
   var darkPreference = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)");
+  var gotoTimer;
+  var waitingForGoto = false;
 
   function $(selector, root) { return (root || document).querySelector(selector); }
   function $$(selector, root) { return Array.prototype.slice.call((root || document).querySelectorAll(selector)); }
@@ -341,6 +343,50 @@
     if (window.swup) window.swup.navigate(destination);
     else location.href = destination;
   }
+  function wireMenuNavigation() {
+    $$(".nav a[data-route]:not([target])").forEach(function (link) {
+      if (link.dataset.navigationBound === "true") return;
+      link.dataset.navigationBound = "true";
+      link.addEventListener("click", function (event) {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        event.stopPropagation();
+        navigate(link.href);
+      });
+    });
+  }
+  function shortcutHelp() {
+    var dialog = $("#shortcut-help");
+    if (!dialog) return;
+    if (dialog.open) dialog.close();
+    else if (dialog.showModal) dialog.showModal();
+    else dialog.setAttribute("open", "");
+  }
+  function wireShortcutHelp() {
+    var dialog = $("#shortcut-help");
+    if (!dialog || dialog.dataset.bound === "true") return;
+    dialog.dataset.bound = "true";
+    dialog.addEventListener("click", function (event) {
+      if (event.target === dialog) dialog.close();
+    });
+  }
+  function beginGoto() {
+    waitingForGoto = true;
+    clearTimeout(gotoTimer);
+    gotoTimer = setTimeout(function () { waitingForGoto = false; }, 1200);
+  }
+  function finishGoto(key) {
+    if (!waitingForGoto) return false;
+    waitingForGoto = false;
+    clearTimeout(gotoTimer);
+    var routes = { f: "", c: "categories/", t: "tags/", s: "sources/", p: "settings/" };
+    if (!Object.prototype.hasOwnProperty.call(routes, key)) return false;
+    navigate(new URL(routes[key], BASE).href);
+    return true;
+  }
+  function isEditing(target) {
+    return target instanceof Element && !!target.closest("input, textarea, select, button, a, [contenteditable=true]");
+  }
   function select(index) {
     var all = rows();
     if (!all.length) return;
@@ -365,7 +411,28 @@
       }
       return;
     }
-    if (event.altKey || event.ctrlKey || event.metaKey || event.target.closest("input, textarea, select, button, a, [contenteditable=true]")) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || isEditing(event.target)) return;
+    if (event.key === "?") {
+      event.preventDefault();
+      shortcutHelp();
+      return;
+    }
+    if (finishGoto(event.key.toLowerCase())) {
+      event.preventDefault();
+      return;
+    }
+    if (event.key.toLowerCase() === "g") {
+      event.preventDefault();
+      beginGoto();
+      return;
+    }
+    if (event.key === "/") {
+      event.preventDefault();
+      var query = $("#q");
+      if (KIND === "search" && query) query.focus({ preventScroll: true });
+      else navigate(new URL("search/", BASE).href);
+      return;
+    }
     if (KIND === "river" && event.key === "ArrowRight") {
       var first = $(".rows .row");
       if (!first || !first.dataset.url) return;
@@ -440,6 +507,8 @@
       var active = $(".nav [aria-current=page]");
       if (active) active.scrollIntoView({ block: "nearest", inline: "nearest" });
     }
+    wireMenuNavigation();
+    wireShortcutHelp();
     var picker = $("#theme-mode");
     if (picker) picker.addEventListener("change", function () { setTheme(picker.value); });
     var datePicker = $("#date-format");

@@ -323,6 +323,14 @@ mod tests {
         assert!(script.contains("event.key === \"ArrowRight\""));
         assert!(script.contains("event.key === \"ArrowLeft\""));
         assert!(script.contains("event.key === \"ArrowLeft\" ? BASE"));
+        assert!(script.contains("wireMenuNavigation"));
+        assert!(script.contains("event.key === \"?\""));
+        assert!(script.contains("f: \"\", c: \"categories/\", t: \"tags/\""));
+
+        let base_file = DefaultTheme::get("templates/base.html").unwrap();
+        let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
+        assert!(base.contains("id=\"shortcut-help\""));
+        assert!(base.contains("Keyboard shortcuts"));
 
         let item_file = DefaultTheme::get("templates/item.html").unwrap();
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
