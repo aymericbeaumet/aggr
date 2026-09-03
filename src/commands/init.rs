@@ -16,7 +16,7 @@ title = \"My reads\"
 # url = \"https://reads.example.com\"   # custom domain: also writes the CNAME file
 
 [digest]
-at = \"08:00\"                          # daily GitHub issue
+at = \"08:00\"                          # daily GitHub issue; 24-hour HH:MM
 timezone = \"UTC\"
 
 [[sources]]

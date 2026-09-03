@@ -340,6 +340,7 @@ pub fn sanitize(html: &str, base: Option<&Url>) -> String {
         .link_rel(Some("noopener noreferrer"))
         .set_tag_attribute_value("a", "target", "_blank")
         .set_tag_attribute_value("img", "loading", "lazy")
+        .set_tag_attribute_value("img", "decoding", "async")
         .set_tag_attribute_value("img", "referrerpolicy", "no-referrer")
         .clean(html)
         .to_string()

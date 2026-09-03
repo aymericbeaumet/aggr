@@ -17,10 +17,11 @@
   </div>
 </div>
 {% endif %}
+{% set paginator = page.paginator %}
 {% if items %}
-<ol class="rows" start="{{ page.offset + 1 }}">
+<ol class="rows" role="list" start="{{ paginator.offset + 1 }}">
   {% for item in items %}
-    {% set rank = loop.index + page.offset %}
+    {% set rank = loop.index + paginator.offset %}
     {% set age_boundary = loop.changed(item.age_band) and not loop.first %}
     {% include "_item.html" %}
   {% endfor %}
@@ -28,16 +29,16 @@
 {% else %}
 <p class="empty">Nothing here yet.</p>
 {% endif %}
-{% if page.total > 1 %}
-<nav class="pager">
+{% if paginator.number_pagers > 1 %}
+<nav class="pager" aria-label="Pagination">
   <span class="pager-side">
-    {% if page.first %}<a href="{{ page.first | url_for }}">⇤ first</a>{% endif %}
-    {% if page.prev %}<a href="{{ page.prev | url_for }}">← newer</a>{% endif %}
+    {% if paginator.previous %}<a href="{{ paginator.first | url_for }}">⇤ first</a>{% endif %}
+    {% if paginator.previous %}<a href="{{ paginator.previous | url_for }}">← newer</a>{% endif %}
   </span>
-  <span>page {{ page.number }} / {{ page.total }}</span>
+  <span>page {{ paginator.current_index }} / {{ paginator.number_pagers }}</span>
   <span class="pager-side">
-    {% if page.next %}<a href="{{ page.next | url_for }}">older →</a>{% endif %}
-    {% if page.last %}<a href="{{ page.last | url_for }}">last ⇥</a>{% endif %}
+    {% if paginator.next %}<a href="{{ paginator.next | url_for }}">older →</a>{% endif %}
+    {% if paginator.next %}<a href="{{ paginator.last | url_for }}">last ⇥</a>{% endif %}
   </span>
 </nav>
 {% endif %}

@@ -6,7 +6,7 @@ pub mod outputs;
 mod pagefind;
 pub mod render;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
@@ -18,8 +18,8 @@ use crate::content;
 use crate::model::Item;
 use crate::store::{Status, Store};
 use context::{
-    BuildCtx, CategoryCtx, GitHubLinks, ItemCtx, ItemOptions, PageCtx, SiteCtx, SourceCtx,
-    SourceErrorCtx,
+    BuildCtx, CategoryCtx, GitHubLinks, ItemCtx, ItemOptions, PageCtx, PaginatorCtx, SiteCtx,
+    SourceCtx, SourceErrorCtx,
 };
 use render::{Layers, Renderer};
 
@@ -68,22 +68,66 @@ pub fn window(
     out
 }
 
-/// Page paths for `total` items at `per_page`, first page at `prefix`, then `prefix + page/N/`.
-pub fn paginate(
-    prefix: &str,
-    total: usize,
-    per_page: usize,
-) -> Vec<(usize, String, std::ops::Range<usize>)> {
-    let pages = total.div_ceil(per_page).max(1);
-    (1..=pages)
-        .map(|number| {
-            let path = if number == 1 {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pager {
+    pub path: String,
+    pub range: std::ops::Range<usize>,
+    pub context: PaginatorCtx,
+}
+
+fn navigation_path(path: &str) -> String {
+    if path.is_empty() {
+        "./".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn canonical_url(site: &SiteCtx, path: &str) -> Option<String> {
+    site.base_url
+        .as_ref()
+        .map(|root| format!("{root}{}", path.trim_start_matches('/')))
+}
+
+/// Zola-style pagers for `total` entries: the first lives at `prefix`, then `page/N/`.
+pub fn paginate(prefix: &str, total: usize, per_page: usize) -> Vec<Pager> {
+    assert!(per_page > 0, "paginate_by must be positive");
+    let number_pagers = total.div_ceil(per_page).max(1);
+    let paths: Vec<_> = (1..=number_pagers)
+        .map(|current_index| {
+            if current_index == 1 {
                 prefix.to_string()
             } else {
-                format!("{prefix}page/{number}/")
-            };
-            let start = (number - 1) * per_page;
-            (number, path, start..(start + per_page).min(total))
+                format!("{prefix}page/{current_index}/")
+            }
+        })
+        .collect();
+    let first = navigation_path(&paths[0]);
+    let last = navigation_path(paths.last().expect("at least one pager"));
+    paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let current_index = index + 1;
+            let start = index * per_page;
+            Pager {
+                path: path.clone(),
+                range: start..(start + per_page).min(total),
+                context: PaginatorCtx {
+                    paginate_by: per_page,
+                    base_url: format!("{prefix}page/"),
+                    number_pagers,
+                    first: first.clone(),
+                    last: last.clone(),
+                    previous: index
+                        .checked_sub(1)
+                        .map(|previous| navigation_path(&paths[previous])),
+                    next: paths.get(index + 1).map(|next| navigation_path(next)),
+                    current_index,
+                    total_items: total,
+                    offset: start,
+                },
+            }
         })
         .collect()
 }
@@ -106,6 +150,7 @@ pub fn precache_paths(
         "offline.html",
         "manifest.webmanifest",
     ];
+    let mut seen = BTreeSet::new();
     SHELLS
         .iter()
         .map(|path| path.to_string())
@@ -120,20 +165,21 @@ pub fn precache_paths(
         )
         .chain(item_urls.into_iter().take(offline_items))
         .map(|path| format!("{base}{path}"))
+        .filter(|path| seen.insert(path.clone()))
         .collect()
 }
 
-/// Names the precache. Every build gets its own so a page is never served from the previous
-/// build's cache once the new worker has taken over.
+/// Names the precache from durable build inputs. A no-op rebuild therefore reuses its cache,
+/// while a changed worker refreshes the same keys during installation.
 pub fn cache_version(build: &BuildCtx) -> String {
     fn short(sha: Option<&str>) -> &str {
         sha.map_or("local", |sha| &sha[..sha.len().min(12)])
     }
     format!(
         "{}-{}-{}",
+        build.version,
         short(build.data_sha.as_deref()),
-        short(build.config_sha.as_deref()),
-        build.time.format("%Y%m%d%H%M%S")
+        short(build.config_sha.as_deref())
     )
 }
 
@@ -184,6 +230,129 @@ struct Ctx<'a> {
     category: Option<&'a CategoryCtx>,
     #[serde(skip_serializing_if = "Option::is_none")]
     html: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema: Option<serde_json::Value>,
+}
+
+/// Schema.org metadata is publication metadata, so it is emitted only when the build has a
+/// stable public URL. Internal navigation stays relative and the resulting tree remains movable.
+fn structured_data(
+    site: &SiteCtx,
+    page: &PageCtx,
+    items: &[ItemCtx],
+    item: Option<&ItemCtx>,
+) -> Option<serde_json::Value> {
+    let site_url = site.base_url.as_deref()?;
+    let page_url = page.canonical_url.as_deref()?;
+    let website_id = format!("{site_url}#website");
+    let website = serde_json::json!({
+        "@type": "WebSite",
+        "@id": website_id,
+        "url": site_url,
+        "name": site.title,
+        "description": site.description,
+        "inLanguage": site.language,
+        "potentialAction": {
+            "@type": "SearchAction",
+            "target": {
+                "@type": "EntryPoint",
+                "urlTemplate": format!("{site_url}search/?q={{search_term_string}}")
+            },
+            "query-input": "required name=search_term_string"
+        }
+    });
+
+    let page_node = if let Some(item) = item {
+        let article_id = format!("{page_url}#article");
+        let authors: Vec<_> = item
+            .authors
+            .iter()
+            .map(|name| serde_json::json!({"@type": "Person", "name": name}))
+            .collect();
+        let mut article = serde_json::json!({
+            "@type": "BlogPosting",
+            "@id": article_id,
+            "url": page_url,
+            "headline": item.title,
+            "description": item.excerpt,
+            "inLanguage": site.language,
+            "datePublished": item.published.unwrap_or(item.date).to_rfc3339(),
+            "dateModified": item.updated.unwrap_or(item.date).to_rfc3339(),
+            "mainEntityOfPage": {"@id": format!("{page_url}#webpage")},
+            "isBasedOn": item.link,
+            "keywords": item.labels,
+        });
+        if let Some(category) = &item.category {
+            article["articleSection"] = serde_json::Value::String(category.clone());
+        }
+        if !authors.is_empty() {
+            article["author"] = serde_json::Value::Array(authors);
+        }
+        serde_json::json!({
+            "@type": "WebPage",
+            "@id": format!("{page_url}#webpage"),
+            "url": page_url,
+            "name": page.title,
+            "description": item.excerpt,
+            "inLanguage": site.language,
+            "isPartOf": {"@id": website_id},
+            "mainEntity": article,
+        })
+    } else {
+        let page_type = match page.kind.as_str() {
+            "search" => "SearchResultsPage",
+            "river" | "source" | "category" | "tag" | "sources" | "categories" | "tags" => {
+                "CollectionPage"
+            }
+            _ => "WebPage",
+        };
+        let mut node = serde_json::json!({
+            "@type": page_type,
+            "@id": format!("{page_url}#webpage"),
+            "url": page_url,
+            "name": page.title,
+            "description": site.description,
+            "inLanguage": site.language,
+            "isPartOf": {"@id": website_id},
+        });
+        if page.paginator.is_some() {
+            let offset = page
+                .paginator
+                .as_ref()
+                .map_or(0, |paginator| paginator.offset);
+            let elements: Vec<_> = items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let url = format!("{site_url}{}", item.url);
+                    serde_json::json!({
+                        "@type": "DataFeedItem",
+                        "position": offset + index + 1,
+                        "dateCreated": item.date.to_rfc3339(),
+                        "item": {
+                            "@type": "BlogPosting",
+                            "@id": format!("{url}#article"),
+                            "url": url,
+                            "headline": item.title,
+                            "isBasedOn": item.link,
+                        }
+                    })
+                })
+                .collect();
+            node["mainEntity"] = serde_json::json!({
+                "@type": "DataFeed",
+                "@id": format!("{page_url}#feed"),
+                "name": page.title,
+                "dataFeedElement": elements,
+            });
+        }
+        node
+    };
+
+    Some(serde_json::json!({
+        "@context": "https://schema.org",
+        "@graph": [website, page_node],
+    }))
 }
 
 /// What `sw.js` sees: the cache name and the install-time fetch list.
@@ -223,9 +392,15 @@ pub fn build(
 
     let base = base_path(info.base_url.as_deref());
     let repository = config.repository();
+    let description = if config.site.description.trim().is_empty() {
+        format!("Latest entries from {}.", config.site.title)
+    } else {
+        config.site.description.clone()
+    };
     let site = SiteCtx {
         title: config.site.title.clone(),
-        description: config.site.description.clone(),
+        description,
+        language: config.site.language.clone(),
         base_path: base.clone(),
         base_url: info.base_url.clone().map(|url| ensure_trailing_slash(&url)),
         repository: repository.clone(),
@@ -324,122 +499,142 @@ pub fn build(
         .iter()
         .map(|&index| archive_items[index].clone())
         .collect();
+    let stored_by_path: BTreeMap<&str, &Item> = all_items
+        .iter()
+        .map(|item| (item.path.as_str(), item))
+        .collect();
 
-    let categories = category_contexts(&source_ctxs, &archive_items);
-    let tags = tag_contexts(&archive_items);
+    let source_members = source_members(&archive_items);
+    let TaxonomyIndex {
+        terms: categories,
+        members: category_members,
+    } = taxonomy_index(&archive_items, Taxonomy::Categories);
+    let TaxonomyIndex {
+        terms: tags,
+        members: tag_members,
+    } = taxonomy_index(&archive_items, Taxonomy::Tags);
     let mut pages = 0;
     let per_page = config.site.items_per_page;
-    let mut write_list = |kind: &str,
-                          title: &str,
-                          prefix: &str,
-                          list: &[ItemCtx],
-                          source: Option<&SourceCtx>,
-                          category: Option<&CategoryCtx>|
-     -> Result<()> {
-        let pagination = paginate(prefix, list.len(), per_page);
-        let total = pagination.len();
-        for (number, path, range) in &pagination {
-            let link = |index: usize| {
-                let path = pagination[index].1.clone();
-                if path.is_empty() {
-                    "./".to_string()
-                } else {
-                    path
+    let mut sitemap_urls: Vec<outputs::SitemapUrl> = Vec::new();
+    {
+        let mut write_list = |kind: &str,
+                              title: &str,
+                              prefix: &str,
+                              list: &[ItemCtx],
+                              source: Option<&SourceCtx>,
+                              category: Option<&CategoryCtx>|
+         -> Result<()> {
+            let pagination = paginate(prefix, list.len(), per_page);
+            for pager in &pagination {
+                let page = PageCtx {
+                    kind: kind.to_string(),
+                    title: title.to_string(),
+                    path: pager.path.clone(),
+                    root: relative_root(&pager.path),
+                    canonical_url: canonical_url(&site, &pager.path),
+                    feed_path: Some(prefix.to_string()),
+                    paginator: Some(pager.context.clone()),
+                };
+                let page_items = &list[pager.range.clone()];
+                if let Some(url) = &page.canonical_url {
+                    sitemap_urls.push(outputs::SitemapUrl::new(
+                        url,
+                        page_items
+                            .iter()
+                            .map(|item| item.updated.unwrap_or(item.date))
+                            .max(),
+                    ));
                 }
-            };
-            let page = PageCtx {
-                kind: kind.to_string(),
-                title: title.to_string(),
-                path: path.clone(),
-                root: relative_root(path),
-                number: *number,
-                total,
-                offset: range.start,
-                first: (*number > 1).then(|| link(0)),
-                prev: (*number > 1).then(|| link(number - 2)),
-                next: (*number < total).then(|| link(*number)),
-                last: (*number < total).then(|| link(total - 1)),
-            };
-            let html = renderer.render(
-                "index.html",
-                Ctx {
-                    site: &site,
-                    build: &build_ctx,
-                    page,
-                    items: &list[range.clone()],
-                    sources: &source_ctxs,
-                    categories: &categories,
-                    tags: &tags,
-                    item: None,
-                    source,
-                    category,
-                    html: None,
-                },
-            )?;
-            write(&out.join(path).join("index.html"), html.as_bytes())?;
-            pages += 1;
-        }
-        Ok(())
-    };
+                let schema = structured_data(&site, &page, page_items, None);
+                let html = renderer.render(
+                    "index.html",
+                    Ctx {
+                        site: &site,
+                        build: &build_ctx,
+                        page,
+                        items: page_items,
+                        sources: &source_ctxs,
+                        categories: &categories,
+                        tags: &tags,
+                        item: None,
+                        source,
+                        category,
+                        html: None,
+                        schema,
+                    },
+                )?;
+                write(&out.join(&pager.path).join("index.html"), html.as_bytes())?;
+                pages += 1;
+            }
+            Ok(())
+        };
 
-    write_list("river", &config.site.title, "", &river_items, None, None)?;
-    for source in &source_ctxs {
-        let list: Vec<ItemCtx> = archive_items
-            .iter()
-            .filter(|i| i.source == source.slug)
-            .cloned()
-            .collect();
-        write_list(
-            "source",
-            &source.name,
-            &source.page,
-            &list,
-            Some(source),
-            None,
-        )?;
+        write_list("river", &config.site.title, "", &river_items, None, None)?;
+        for source in &source_ctxs {
+            let list = indexed_items(
+                &archive_items,
+                source_members.get(&source.slug).map(Vec::as_slice),
+            );
+            write_list(
+                "source",
+                &source.name,
+                &source.page,
+                &list,
+                Some(source),
+                None,
+            )?;
+            let feed_items = feed_items(&list, &stored_by_path, per_page);
+            write_collection_feeds(
+                out,
+                &site,
+                &build_ctx,
+                &source.name,
+                &source.page,
+                &feed_items,
+            )?;
+        }
+        for category in &categories {
+            let list = indexed_items(
+                &archive_items,
+                category_members.get(&category.slug).map(Vec::as_slice),
+            );
+            write_list(
+                "category",
+                &category.name,
+                &category.page,
+                &list,
+                None,
+                Some(category),
+            )?;
+            let feed_items = feed_items(&list, &stored_by_path, per_page);
+            write_collection_feeds(
+                out,
+                &site,
+                &build_ctx,
+                &category.name,
+                &category.page,
+                &feed_items,
+            )?;
+        }
+        for tag in &tags {
+            let list = indexed_items(
+                &archive_items,
+                tag_members.get(&tag.slug).map(Vec::as_slice),
+            );
+            write_list("tag", &tag.name, &tag.page, &list, None, Some(tag))?;
+            let feed_items = feed_items(&list, &stored_by_path, per_page);
+            write_collection_feeds(out, &site, &build_ctx, &tag.name, &tag.page, &feed_items)?;
+        }
     }
-    for category in &categories {
-        let list: Vec<ItemCtx> = archive_items
-            .iter()
-            .filter(|i| i.category.as_deref() == Some(&category.name))
-            .cloned()
-            .collect();
-        write_list(
-            "category",
-            &category.name,
-            &category.page,
-            &list,
-            None,
-            Some(category),
-        )?;
-        write_collection_feeds(
-            out,
-            &site,
-            &build_ctx,
-            &category.name,
-            &category.page,
-            &list[..list.len().min(per_page)],
-        )?;
-    }
-    for tag in &tags {
-        let list: Vec<ItemCtx> = archive_items
-            .iter()
-            .filter(|item| {
-                item.labels
-                    .iter()
-                    .any(|label| context::category_slug(label) == tag.slug)
-            })
-            .cloned()
-            .collect();
-        write_list("tag", &tag.name, &tag.page, &list, None, Some(tag))?;
-        write_collection_feeds(
-            out,
-            &site,
-            &build_ctx,
-            &tag.name,
-            &tag.page,
-            &list[..list.len().min(per_page)],
-        )?;
+
+    let archive_updated = archive_items
+        .iter()
+        .map(|item| item.updated.unwrap_or(item.date))
+        .max();
+    for path in ["sources/", "categories/", "tags/"] {
+        if let Some(url) = canonical_url(&site, path) {
+            sitemap_urls.push(outputs::SitemapUrl::new(url, archive_updated));
+        }
     }
 
     let simple = |kind: &str,
@@ -455,21 +650,19 @@ pub fn build(
             title: title.to_string(),
             path: path.to_string(),
             root: relative_root(path),
-            number: 1,
-            total: 1,
-            offset: 0,
-            first: None,
-            prev: None,
-            next: None,
-            last: None,
+            canonical_url: canonical_url(&site, path),
+            feed_path: matches!(kind, "sources" | "categories" | "tags").then(|| path.to_string()),
+            paginator: None,
         };
+        let items = page_items.unwrap_or(&archive_items);
+        let schema = structured_data(&site, &page, items, item);
         renderer.render(
             template,
             Ctx {
                 site: &site,
                 build: &build_ctx,
                 page,
-                items: page_items.unwrap_or(&archive_items),
+                items,
                 sources: &source_ctxs,
                 categories: &categories,
                 tags: &tags,
@@ -477,6 +670,7 @@ pub fn build(
                 source: None,
                 category: None,
                 html,
+                schema,
             },
         )
     };
@@ -577,6 +771,12 @@ pub fn build(
             &representation.with_extension("json"),
             outputs::item_json(&site, &ctx, &item.body)?.as_bytes(),
         )?;
+        if let Some(url) = canonical_url(&site, &ctx.url) {
+            sitemap_urls.push(outputs::SitemapUrl::new(
+                url,
+                Some(ctx.updated.unwrap_or(ctx.date)),
+            ));
+        }
     }
 
     let search_documents: Vec<_> = archive_items
@@ -587,17 +787,26 @@ pub fn build(
 
     let stubs = 0;
 
-    let feed_items = &river_items[..river_items.len().min(per_page)];
-    let atom = outputs::atom_feed(&site, &build_ctx, feed_items);
+    let root_feed_items = feed_items(&river_items, &stored_by_path, per_page);
+    let archive_feed_items = feed_items(&archive_items, &stored_by_path, per_page);
+    let atom = outputs::atom_feed(&site, &build_ctx, &root_feed_items);
     write(&out.join("feed.xml"), atom.as_bytes())?;
     write(&out.join("atom.xml"), atom.as_bytes())?;
     write(
         &out.join("rss.xml"),
-        outputs::rss_collection(&site, &build_ctx, &site.title, "", feed_items).as_bytes(),
+        outputs::rss_collection(&site, &build_ctx, &site.title, "", &root_feed_items).as_bytes(),
     )?;
     write(
         &out.join("feed.json"),
-        outputs::json_collection(&site, &site.title, "", feed_items)?.as_bytes(),
+        outputs::json_collection(&site, &site.title, "", &root_feed_items)?.as_bytes(),
+    )?;
+    write_collection_feeds(
+        out,
+        &site,
+        &build_ctx,
+        &format!("{} sources", site.title),
+        "sources/",
+        &archive_feed_items,
     )?;
     write_collection_feeds(
         out,
@@ -605,7 +814,7 @@ pub fn build(
         &build_ctx,
         &format!("{} categories", site.title),
         "categories/",
-        feed_items,
+        &archive_feed_items,
     )?;
     write_collection_feeds(
         out,
@@ -613,8 +822,50 @@ pub fn build(
         &build_ctx,
         &format!("{} tags", site.title),
         "tags/",
-        feed_items,
+        &archive_feed_items,
     )?;
+    if let Some(root) = site.base_url.as_deref() {
+        let default_search_description = format!("Search {}", site.title);
+        let search_description = if site.description.is_empty() {
+            &default_search_description
+        } else {
+            &site.description
+        };
+        let search_url = format!("{root}search/?q={{searchTerms}}");
+        let opensearch_url = format!("{root}opensearch.xml");
+        let opensearch = outputs::opensearch_description(&outputs::OpenSearchDescription {
+            short_name: &site.title,
+            description: search_description,
+            search_url: &search_url,
+            self_url: Some(&opensearch_url),
+        });
+        write(&out.join("opensearch.xml"), opensearch.as_bytes())?;
+
+        sitemap_urls.sort_by(|left, right| left.loc.cmp(&right.loc));
+        sitemap_urls.dedup_by(|left, right| {
+            if left.loc != right.loc {
+                return false;
+            }
+            right.lastmod = left.lastmod.max(right.lastmod);
+            true
+        });
+        let sitemap_url = format!("{root}sitemap.xml");
+        let sitemap = outputs::sitemap(
+            &sitemap_urls,
+            &sitemap_url,
+            outputs::SitemapLimits::default(),
+        )?;
+        write(&out.join("sitemap.xml"), sitemap.root_xml().as_bytes())?;
+        for chunk in sitemap.chunks() {
+            write(&out.join(&chunk.name), chunk.xml.as_bytes())?;
+        }
+        if site.base_path == "/" {
+            write(
+                &out.join("robots.txt"),
+                format!("User-agent: *\nAllow: /\nSitemap: {sitemap_url}\n").as_bytes(),
+            )?;
+        }
+    }
     write(&out.join(".nojekyll"), b"")?;
     write(&out.join(MARKER), env!("CARGO_PKG_VERSION").as_bytes())?;
     if let Some(domain) = cname(info) {
@@ -622,7 +873,7 @@ pub fn build(
     }
     let assets = renderer.write_static(out)?;
 
-    pagefind::build(out, &search_documents)?;
+    pagefind::build(out, &search_documents, &site.language)?;
 
     if config.site.pwa {
         let offline_items = &archive_items[..archive_items.len().min(config.site.offline_items)];
@@ -652,17 +903,16 @@ pub fn build(
             )?
             .as_bytes(),
         )?;
-        let lists = source_ctxs
+        let scoped_lists = source_ctxs
             .iter()
             .map(|s| s.page.clone())
             .chain(categories.iter().map(|c| c.page.clone()))
             .chain(tags.iter().map(|tag| tag.page.clone()))
-            .chain([
-                "categories/".to_string(),
-                "tags/".to_string(),
-                "search-meta.json".to_string(),
-            ])
-            .chain(files_under(out, "pagefind")?);
+            .take(config.site.offline_items.clamp(32, 256));
+        let lists = ["categories/".to_string(), "tags/".to_string()]
+            .into_iter()
+            .chain(scoped_lists)
+            .chain(pagefind_precache_paths(out)?);
         let sw = renderer.render(
             "sw.js",
             SwCtx {
@@ -764,49 +1014,85 @@ fn source_contexts(
         .collect()
 }
 
-fn category_contexts(sources: &[SourceCtx], items: &[ItemCtx]) -> Vec<CategoryCtx> {
-    let mut categories: BTreeMap<&str, usize> = sources
-        .iter()
-        .filter_map(|s| s.category.as_deref())
-        .map(|c| (c, 0))
-        .collect();
-    for item in items {
-        if let Some(category) = item.category.as_deref()
-            && let Some(count) = categories.get_mut(category)
-        {
-            *count += 1;
+#[derive(Clone, Copy)]
+enum Taxonomy {
+    Categories,
+    Tags,
+}
+
+struct TaxonomyIndex {
+    terms: Vec<CategoryCtx>,
+    members: BTreeMap<String, Vec<usize>>,
+}
+
+fn source_members(items: &[ItemCtx]) -> BTreeMap<String, Vec<usize>> {
+    let mut members: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, item) in items.iter().enumerate() {
+        members.entry(item.source.clone()).or_default().push(index);
+    }
+    members
+}
+
+fn taxonomy_index(items: &[ItemCtx], taxonomy: Taxonomy) -> TaxonomyIndex {
+    let mut names: BTreeMap<String, String> = BTreeMap::new();
+    let mut members: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, item) in items.iter().enumerate() {
+        let terms_for_item: Vec<&str> = match taxonomy {
+            Taxonomy::Categories => item.category.as_deref().into_iter().collect(),
+            Taxonomy::Tags => item.labels.iter().map(String::as_str).collect(),
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for name in terms_for_item {
+            let slug = context::category_slug(name);
+            if slug.is_empty() || !seen.insert(slug.clone()) {
+                continue;
+            }
+            names
+                .entry(slug.clone())
+                .or_insert_with(|| name.to_string());
+            members.entry(slug).or_default().push(index);
         }
     }
-    categories
+    let root = match taxonomy {
+        Taxonomy::Categories => "categories",
+        Taxonomy::Tags => "tags",
+    };
+    let terms = names
         .into_iter()
-        .filter(|(_, count)| *count > 0)
-        .map(|(name, count)| {
-            let slug = context::category_slug(name);
-            CategoryCtx {
-                name: name.to_string(),
-                page: format!("categories/{slug}/"),
-                slug,
-                count,
-            }
+        .map(|(slug, name)| CategoryCtx {
+            page: format!("{root}/{slug}/"),
+            count: members.get(&slug).map_or(0, Vec::len),
+            name,
+            slug,
         })
+        .collect();
+    TaxonomyIndex { terms, members }
+}
+
+fn indexed_items(items: &[ItemCtx], indices: Option<&[usize]>) -> Vec<ItemCtx> {
+    indices
+        .into_iter()
+        .flatten()
+        .map(|&index| items[index].clone())
         .collect()
 }
 
-fn tag_contexts(items: &[ItemCtx]) -> Vec<CategoryCtx> {
-    let mut tags: BTreeMap<String, (String, usize)> = BTreeMap::new();
-    for item in items {
-        for name in &item.labels {
-            let slug = context::category_slug(name);
-            let entry = tags.entry(slug).or_insert_with(|| (name.clone(), 0));
-            entry.1 += 1;
-        }
-    }
-    tags.into_iter()
-        .map(|(slug, (name, count))| CategoryCtx {
-            page: format!("tags/{slug}/"),
-            name,
-            slug,
-            count,
+/// Prepare a bounded feed once, then hand the same identity/order/content to every serializer.
+/// This mirrors Zola's feed-scope pipeline and keeps Atom, RSS, and JSON Feed in lockstep.
+fn feed_items(
+    items: &[ItemCtx],
+    stored_by_path: &BTreeMap<&str, &Item>,
+    limit: usize,
+) -> Vec<ItemCtx> {
+    items
+        .iter()
+        .take(limit)
+        .cloned()
+        .map(|mut item| {
+            item.body_html = stored_by_path
+                .get(item.path.as_str())
+                .map(|stored| content::render_markdown(&stored.body));
+            item
         })
         .collect()
 }
@@ -894,6 +1180,34 @@ fn files_under(root: &Path, directory: &str) -> Result<Vec<String>> {
     Ok(paths)
 }
 
+/// Keep install cost bounded on very large archives. Small Pagefind indexes remain completely
+/// searchable offline; once the index exceeds the budget, only its loader/runtime is installed
+/// and searches visited online naturally populate the scoped runtime cache.
+fn pagefind_precache_paths(root: &Path) -> Result<Vec<String>> {
+    const MAX_BYTES: u64 = 8 * 1024 * 1024;
+    const MAX_FILES: usize = 512;
+
+    let files = files_under(root, "pagefind")?;
+    let total_bytes = files.iter().try_fold(0_u64, |total, file| {
+        std::fs::metadata(root.join(file))
+            .map(|metadata| total.saturating_add(metadata.len()))
+            .with_context(|| format!("reading metadata for {file}"))
+    })?;
+    if files.len() <= MAX_FILES && total_bytes <= MAX_BYTES {
+        return Ok(files);
+    }
+    Ok(files
+        .into_iter()
+        .filter(|file| {
+            let name = Path::new(file)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            name == "pagefind.js" || name == "pagefind-entry.json" || name.ends_with(".wasm")
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -928,30 +1242,52 @@ mod tests {
     fn pagination_paths() {
         let pages = paginate("", 0, 10);
         assert_eq!(pages.len(), 1);
-        assert_eq!(pages[0].1, "");
+        assert_eq!(pages[0].path, "");
+        assert_eq!(pages[0].range, 0..0);
+        assert_eq!(pages[0].context.first, "./");
+        assert_eq!(pages[0].context.last, "./");
+        assert_eq!(pages[0].context.total_items, 0);
         let pages = paginate("sources/x/", 25, 10);
         assert_eq!(
-            pages.iter().map(|p| p.1.as_str()).collect::<Vec<_>>(),
+            pages.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(),
             ["sources/x/", "sources/x/page/2/", "sources/x/page/3/"]
         );
-        assert_eq!(pages[2].2, 20..25);
+        assert_eq!(pages[2].range, 20..25);
+    }
+
+    #[test]
+    fn paginator_context_uses_stable_edge_and_adjacent_routes() {
+        let pages = paginate("", 35, 10);
+        let first = &pages[0].context;
+        assert_eq!(first.current_index, 1);
+        assert_eq!(first.number_pagers, 4);
+        assert_eq!(first.paginate_by, 10);
+        assert_eq!(first.total_items, 35);
+        assert_eq!(first.first, "./");
+        assert_eq!(first.last, "page/4/");
+        assert_eq!(first.previous, None);
+        assert_eq!(first.next.as_deref(), Some("page/2/"));
+
+        let middle = &pages[2].context;
+        assert_eq!(middle.first, "./");
+        assert_eq!(middle.last, "page/4/");
+        assert_eq!(middle.previous.as_deref(), Some("page/2/"));
+        assert_eq!(middle.next.as_deref(), Some("page/4/"));
+        assert_eq!(middle.offset, 20);
+
+        let last = &pages[3].context;
+        assert_eq!(last.previous.as_deref(), Some("page/3/"));
+        assert_eq!(last.next, None);
+
+        let nested = paginate("sources/x/", 11, 10);
+        assert_eq!(nested[1].context.first, "sources/x/");
+        assert_eq!(nested[1].context.previous.as_deref(), Some("sources/x/"));
+        assert_eq!(nested[1].context.last, "sources/x/page/2/");
     }
 
     #[test]
     fn categories_without_rendered_items_are_omitted() {
-        let source = SourceCtx {
-            slug: "empty".into(),
-            name: "Empty".into(),
-            url: None,
-            site_url: None,
-            category: Some("unused".into()),
-            engine: "web".into(),
-            count: 0,
-            latest: None,
-            error: None,
-            page: "sources/empty/".into(),
-        };
-        assert!(category_contexts(&[source], &[]).is_empty());
+        assert!(taxonomy_index(&[], Taxonomy::Categories).terms.is_empty());
     }
 
     #[test]
@@ -985,7 +1321,7 @@ mod tests {
     fn precache_lists_shells_lists_assets_and_the_newest_items() {
         let paths = precache_paths(
             "/repo/",
-            ["sources/a/".to_string()],
+            ["sources/a/".to_string(), "sources/a/".to_string()],
             &["style.css".to_string()],
             ["items/a/1/".to_string(), "items/a/2/".to_string()],
             1,
@@ -997,10 +1333,39 @@ mod tests {
         assert!(paths.contains(&"/repo/assets/style.css".to_string()));
         assert!(paths.contains(&"/repo/items/a/1/".to_string()));
         assert!(!paths.contains(&"/repo/items/a/2/".to_string()));
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| *path == "/repo/sources/a/")
+                .count(),
+            1
+        );
     }
 
     #[test]
-    fn cache_version_changes_with_data_config_and_time() {
+    fn oversized_pagefind_precache_keeps_only_its_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let pagefind = dir.path().join("pagefind");
+        std::fs::create_dir_all(&pagefind).unwrap();
+        std::fs::write(pagefind.join("pagefind.js"), "runtime").unwrap();
+        std::fs::write(pagefind.join("pagefind-entry.json"), "{}").unwrap();
+        std::fs::write(pagefind.join("pagefind.wasm"), "wasm").unwrap();
+        for index in 0..510 {
+            std::fs::write(pagefind.join(format!("fragment-{index}.pf_fragment")), "x").unwrap();
+        }
+
+        assert_eq!(
+            pagefind_precache_paths(dir.path()).unwrap(),
+            [
+                "pagefind/pagefind-entry.json",
+                "pagefind/pagefind.js",
+                "pagefind/pagefind.wasm",
+            ]
+        );
+    }
+
+    #[test]
+    fn cache_version_changes_with_content_but_not_rebuild_time() {
         let build = BuildCtx {
             time: day(2),
             version: "0".into(),
@@ -1008,16 +1373,18 @@ mod tests {
             data_sha: None,
             release: false,
         };
-        assert_eq!(
-            cache_version(&build),
-            format!("local-{}-20260902000000", "c".repeat(12))
-        );
+        assert_eq!(cache_version(&build), format!("0-local-{}", "c".repeat(12)));
         let later = BuildCtx {
             data_sha: Some("d".repeat(40)),
             time: day(3),
             ..build.clone()
         };
         assert_ne!(cache_version(&later), cache_version(&build));
+        let rebuilt = BuildCtx {
+            time: day(3),
+            ..build.clone()
+        };
+        assert_eq!(cache_version(&rebuilt), cache_version(&build));
     }
 
     /// A store with `count` items of one source, newest last, and a matching config.
@@ -1109,6 +1476,26 @@ mod tests {
         assert!(middle.contains("href=\"page/2/\">← newer</a>"), "{middle}");
         assert!(middle.contains("href=\"page/4/\">older →</a>"), "{middle}");
         assert!(middle.contains("href=\"page/5/\">last ⇥</a>"), "{middle}");
+        assert!(
+            middle.contains("<link rel=\"canonical\" href=\"https://u.github.io/repo/page/3/\">"),
+            "{middle}"
+        );
+        assert!(
+            middle.contains("<link rel=\"first\" href=\"./\">"),
+            "{middle}"
+        );
+        assert!(
+            middle.contains("<link rel=\"prev\" href=\"page/2/\">"),
+            "{middle}"
+        );
+        assert!(
+            middle.contains("<link rel=\"next\" href=\"page/4/\">"),
+            "{middle}"
+        );
+        assert!(
+            middle.contains("<link rel=\"last\" href=\"page/5/\">"),
+            "{middle}"
+        );
 
         let second = std::fs::read_to_string(out.join("page/2/index.html")).unwrap();
         assert!(second.contains("href=\"./\">⇤ first</a>"), "{second}");
@@ -1128,7 +1515,9 @@ mod tests {
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(out.join("manifest.webmanifest")).unwrap())
                 .unwrap();
-        assert_eq!(manifest["name"], "Demo <site>");
+        assert_eq!(manifest["name"], "Aggr");
+        assert_eq!(manifest["short_name"], "Aggr");
+        assert_eq!(manifest["description"], "Latest entries from Demo <site>.");
         assert_eq!(manifest["start_url"], "./");
         assert_eq!(manifest["scope"], "./");
         assert_eq!(manifest["display"], "standalone");
@@ -1160,12 +1549,12 @@ mod tests {
         }
 
         let sw = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        let version = format!("{}-{}-20260920000000", "d".repeat(12), "c".repeat(12));
+        let version = format!("1.1.0-{}-{}", "d".repeat(12), "c".repeat(12));
         assert!(sw.contains(&format!("var VERSION = {version:?};")), "{sw}");
         assert!(sw.contains("new URL(\"./\", self.registration.scope)"));
         assert!(sw.contains("\"assets/style-"));
         assert!(sw.contains("\"pagefind/pagefind.js\""));
-        assert!(sw.contains("\"search-meta.json\""));
+        assert!(!out.join("search-meta.json").exists());
         assert!(
             !sw.contains("assets/logo-"),
             "the multi-megabyte source icon is not precached"
@@ -1189,6 +1578,19 @@ mod tests {
         assert!(offline.contains("<link rel=\"manifest\" href=\"manifest.webmanifest\">"));
         assert!(offline.contains("pwa: true"));
         let river = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(
+            river.contains("<title>aggr | demo &lt;site&gt;</title>"),
+            "{river}"
+        );
+        assert!(
+            river.contains(
+                "<meta name=\"description\" content=\"Latest entries from Demo &lt;site&gt;.\">"
+            ),
+            "{river}"
+        );
+        assert!(river.contains("type=\"application/ld+json\""), "{river}");
+        assert!(river.contains("https://schema.org"), "{river}");
+        assert!(river.contains("rel=\"search\""), "{river}");
         assert!(river.contains("rel=\"apple-touch-icon\""));
         assert!(river.contains("name=\"theme-color\""));
         assert!(river.contains("href=\"sources/\""), "{river}");
@@ -1196,6 +1598,55 @@ mod tests {
         assert!(river.contains("aggr.toml ↗</a>"), "{river}");
         assert!(out.join("settings/index.html").is_file());
         assert!(out.join("pagefind/pagefind.js").is_file());
+        assert!(out.join("sources/blog/atom.xml").is_file());
+        assert!(out.join("sources/blog/rss.xml").is_file());
+        assert!(out.join("sources/blog/feed.json").is_file());
+        let atom = std::fs::read_to_string(out.join("sources/blog/atom.xml")).unwrap();
+        assert!(atom.contains("xml:lang=\"en\""), "{atom}");
+        assert!(atom.contains("<id>urn:aggr:item:"), "{atom}");
+        assert!(atom.contains("<link rel=\"via\""), "{atom}");
+        assert!(atom.contains("<content type=\"html\">"), "{atom}");
+        let opensearch = std::fs::read_to_string(out.join("opensearch.xml")).unwrap();
+        assert!(
+            opensearch.contains("https://u.github.io/repo/search/?q={searchTerms}"),
+            "{opensearch}"
+        );
+        let sitemap = std::fs::read_to_string(out.join("sitemap.xml")).unwrap();
+        assert!(
+            sitemap.contains("https://u.github.io/repo/items/blog/2026-09-03-post-2/"),
+            "{sitemap}"
+        );
+        assert!(
+            !out.join("robots.txt").exists(),
+            "a robots file under a project subpath cannot govern the origin"
+        );
+        let item =
+            std::fs::read_to_string(out.join("items/blog/2026-09-03-post-2/index.html")).unwrap();
+        assert!(
+            item.contains("<link rel=\"canonical\" href=\"https://u.github.io/repo/items/blog/2026-09-03-post-2/\">"),
+            "{item}"
+        );
+        assert!(
+            item.contains("<link rel=\"via\" href=\"https://blog.example/2\">"),
+            "{item}"
+        );
+        assert!(item.contains("isBasedOn"), "{item}");
+    }
+
+    #[test]
+    fn origin_root_build_advertises_its_sitemap_in_robots() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let out = dir.path().join("out");
+        let mut build_info = info(out.clone());
+        build_info.base_url = Some("https://reads.example/".into());
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+
+        let robots = std::fs::read_to_string(out.join("robots.txt")).unwrap();
+        assert_eq!(
+            robots,
+            "User-agent: *\nAllow: /\nSitemap: https://reads.example/sitemap.xml\n"
+        );
     }
 
     #[test]

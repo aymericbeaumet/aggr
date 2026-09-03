@@ -12,6 +12,7 @@ use crate::model::{ContentKind, Item};
 pub struct SiteCtx {
     pub title: String,
     pub description: String,
+    pub language: String,
     /// Path prefix every site link is built on, always starting and ending with `/`.
     pub base_path: String,
     /// Absolute URL of the site root when known (feed and canonical links).
@@ -54,14 +55,35 @@ pub struct PageCtx {
     pub path: String,
     /// Relative path from this page back to the output root (`../../`).
     pub root: String,
-    pub number: usize,
-    pub total: usize,
-    /// Rank of the first item on this page, 0-based.
-    pub offset: usize,
-    pub first: Option<String>,
-    pub prev: Option<String>,
+    /// Absolute public URL when this build knows one.
+    pub canonical_url: Option<String>,
+    /// Site-relative collection whose Atom/RSS/JSON feeds this page advertises.
+    pub feed_path: Option<String>,
+    /// Present for list pages. The shape follows Zola's paginator template contract so themes
+    /// can use the same first/last/previous/next mental model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paginator: Option<PaginatorCtx>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PaginatorCtx {
+    /// Maximum number of entries in one pager.
+    pub paginate_by: usize,
+    /// Route prefix for numbered pagers, e.g. `sources/rust/page/`.
+    pub base_url: String,
+    /// Number of generated pagers.
+    pub number_pagers: usize,
+    /// Routes for the two edges. These are always present, including on an edge pager.
+    pub first: String,
+    pub last: String,
+    pub previous: Option<String>,
     pub next: Option<String>,
-    pub last: Option<String>,
+    /// Current pager, 1-indexed.
+    pub current_index: usize,
+    /// Number of entries across every pager.
+    pub total_items: usize,
+    /// Rank of the first entry on this pager, 0-based.
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]

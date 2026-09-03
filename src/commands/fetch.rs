@@ -1,5 +1,5 @@
-//! `aggr fetch`: every selected source in parallel, each writing only its own directory of the
-//! data worktree. The store's dedupe keys decide what is new; nothing here touches git.
+//! Shared fetch stage for sync/build/dev: every source runs in parallel and writes only its own
+//! directory. The store's dedupe keys decide what is new; nothing in this module touches git.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;

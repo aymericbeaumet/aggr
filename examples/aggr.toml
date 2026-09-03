@@ -8,7 +8,7 @@ description = "A few sources, rendered from an append-only git branch."
 # url = "https://reads.example.com"
 
 [digest]
-at = "08:00"
+at = "08:00" # 24-hour HH:MM
 timezone = "Europe/Paris"
 
 [[sources]]

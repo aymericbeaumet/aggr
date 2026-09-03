@@ -4,8 +4,10 @@
 "use strict";
 
 var VERSION = {{ version | json }};
-var PRECACHE = "aggr-precache-" + VERSION;
-var RUNTIME = "aggr-runtime";
+var SCOPE_KEY = encodeURIComponent(new URL(self.registration.scope).pathname);
+var CACHE_NAMESPACE = "aggr:" + SCOPE_KEY + ":";
+var PRECACHE = CACHE_NAMESPACE + "precache-" + VERSION;
+var RUNTIME = CACHE_NAMESPACE + "runtime";
 var RUNTIME_MAX = 500;
 var BASE = new URL("./", self.registration.scope).pathname;
 var OFFLINE = BASE + "offline.html";
@@ -13,13 +15,13 @@ var NETWORK_TIMEOUT = 4000;
 var URLS = {{ precache | json }}.map(function (path) { return new URL(path, self.registration.scope).pathname; });
 
 // Fetch past the HTTP cache so a new build never precaches the previous build's pages. Every
-// listed file was emitted by the same atomic build, so a missing one must reject installation
-// rather than activate a worker whose offline experience is incomplete.
+// listed file was emitted by the same atomic build. One transient response must not strand an old
+// worker forever, so entries retry naturally on navigation when an individual install fetch fails.
 function precache(cache, urls) {
   var chunk = urls.slice(0, 16);
   if (!chunk.length) return Promise.resolve();
   return Promise.all(chunk.map(function (url) {
-    return cache.add(new Request(url, { cache: "reload" }));
+    return cache.add(new Request(url, { cache: "reload" })).catch(function () { return null; });
   })).then(function () { return precache(cache, urls.slice(16)); });
 }
 
@@ -35,7 +37,7 @@ self.addEventListener("activate", function (event) {
   event.waitUntil(
     caches.keys().then(function (names) {
       return Promise.all(names.filter(function (name) {
-        return name.indexOf("aggr-precache-") === 0 && name !== PRECACHE;
+        return name.indexOf(CACHE_NAMESPACE + "precache-") === 0 && name !== PRECACHE;
       }).map(function (name) { return caches.delete(name); }));
     }).then(function () {
       if (self.registration.navigationPreload) return self.registration.navigationPreload.enable();
@@ -51,7 +53,7 @@ function timeout(ms) {
 
 // Keep the runtime cache bounded; Cache.keys() lists entries oldest first.
 function remember(request, response) {
-  if (!response || !response.ok) return Promise.resolve(response);
+  if (!response || (!response.ok && response.type !== "opaque")) return Promise.resolve(response);
   var copy = response.clone();
   return caches.open(RUNTIME).then(function (cache) {
     return cache.put(request, copy).then(function () { return cache.keys(); }).then(function (keys) {
@@ -91,10 +93,15 @@ self.addEventListener("fetch", function (event) {
   var request = event.request;
   if (request.method !== "GET") return;
   var url = new URL(request.url);
-  if (url.origin !== self.location.origin || url.pathname.indexOf(BASE) !== 0) return;
+  if (url.origin !== self.location.origin) {
+    if (request.destination === "image") event.respondWith(cacheFirst(request));
+    return;
+  }
+  if (url.pathname.indexOf(BASE) !== 0) return;
   var acceptsHtml = (request.headers.get("accept") || "").indexOf("text/html") !== -1;
   var isSwup = (request.headers.get("x-requested-with") || "").toLowerCase() === "swup";
-  if (request.mode === "navigate" || acceptsHtml || isSwup) {
+  var mutable = /\/(?:atom|rss|feed)\.xml$|\/feed\.json$|\/manifest\.webmanifest$|\/opensearch\.xml$|\/sitemap(?:-\d+)?\.xml$|\/robots\.txt$|\/aggr\.toml$/.test(url.pathname);
+  if (request.mode === "navigate" || acceptsHtml || isSwup || mutable) {
     event.respondWith(networkFirst(request, event.preloadResponse));
   } else {
     event.respondWith(cacheFirst(request));

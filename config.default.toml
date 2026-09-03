@@ -4,14 +4,11 @@
 # minimal file `aggr init` writes and only add what you change. Unknown keys are errors.
 # `${VAR}` in `url` and `headers` values expands from the environment (secrets in CI).
 
-# Other files whose [[sources]] are appended to this one, to organise sources by topic.
-# Paths and globs are relative to this file; an included file may set `category` for all of
-# its sources. Example: include = ["aggr-ai.toml", "sources/*.toml"]
-include = []
-
 [site]
 title = "aggr"
 description = ""
+# BCP 47 language tag used by HTML and feeds.
+language = "en"
 # "default", or a directory relative to the repository (e.g. "themes/mine").
 theme = "default"
 items_per_page = 60
@@ -80,7 +77,8 @@ retries = 2
 content = "heavy"
 
 # Daily digest posted as a GitHub issue (GitHub emails the assignees). Remove the section to
-# disable. The first workflow run after `at` in this timezone posts the day's issue.
+# disable. `at` uses 24-hour HH:MM format; the first workflow run after it in this timezone posts
+# the day's issue.
 [digest]
 at = "08:00"
 timezone = "UTC"
@@ -104,6 +102,12 @@ max_items = 200
 # labels = ["programming", "rust"]
 # headers = { Authorization = "Bearer ${TOKEN}" }
 # html = true
+
+# A relative TOML URL expands source entries from another file at this position. Globs work too.
+# `category` becomes the default for included sources that do not set their own.
+# [[sources]]
+# url = "./aggr-ai.toml"       # or "./sources/*.toml"
+# category = "ai"
 
 # Another aggr repository: its data branch is mirrored and its items flow into this site.
 # [[sources]]

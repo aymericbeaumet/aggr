@@ -27,11 +27,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             clap_complete::generate(shell, &mut Cli::command(), "aggr", &mut std::io::stdout());
             Ok(())
         }
-        Command::Fetch(args) => {
-            let project = Project::load(&cli.config)?;
-            let worktree = project.worktree()?;
-            fetch::run(&project, &worktree, &args).await.map(|_| ())
-        }
         Command::Sync(args) => sync::run(&Project::load(&cli.config)?, &args).await,
         Command::Build(args) => build::sync_and_run(&Project::load(&cli.config)?, &args).await,
         Command::Dev(args) => dev::run(&Project::load(&cli.config)?, &args).await,

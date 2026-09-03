@@ -66,6 +66,8 @@ html[data-theme="dark"] { color-scheme: dark; }
 body {
   margin: 0;
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
   color: var(--fg);
   font: 15px/1.45 var(--font);
@@ -135,8 +137,11 @@ button.linkish:hover { text-decoration: underline; }
 .nav-spacer { flex: 1; }
 
 /* content column */
-.main { max-width: var(--max); margin: 0 auto; padding: 0.75rem 0.75rem 2rem; }
+.main { width: 100%; max-width: var(--max); margin: 0 auto; padding: 0.75rem 0.75rem 2rem; flex: 1; }
 .main:focus { outline: none; }
+.main:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.footer { position: fixed; right: max(0.75rem, env(safe-area-inset-right)); bottom: max(0.5rem, env(safe-area-inset-bottom)); z-index: 1; padding: 0.2rem 0.35rem; color: var(--muted); font-size: 0.72rem; background: var(--bg); }
+.footer a { color: inherit; }
 .page { min-width: 0; }
 .page-header { margin: 0.25rem 0 1rem; }
 .page-header h1 { margin: 0; font-size: 1.35rem; line-height: 1.25; }
@@ -252,6 +257,11 @@ button.linkish:hover { text-decoration: underline; }
   .nav-sep { margin: 0 0.45rem; }
   .setting { align-items: flex-start; flex-direction: column; gap: 0.4rem; }
   .sources-scroll { overflow-x: auto; overscroll-behavior-inline: contain; }
+}
+
+/* Only show the fixed attribution when it fits in the gutter beside the reading column. */
+@media (max-width: 72rem), (max-height: 30rem) {
+  .footer { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

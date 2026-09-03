@@ -440,6 +440,41 @@ fn sync_bootstraps_appends_and_leaves_no_trace_when_nothing_changed() {
 }
 
 #[test]
+fn sync_fetch_only_writes_locally_without_committing_or_pushing() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200)
+            .header("content-type", "application/rss+xml")
+            .body(FEED);
+    });
+    let repo = TestRepo::new();
+    repo.write_config(&server.url("/feed.xml"), "");
+
+    repo.aggr()
+        .args(["sync", "--fetch-only"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo: +2"))
+        .stdout(predicate::str::contains(
+            "fetch only: 2 new item(s), nothing committed or pushed",
+        ));
+
+    assert!(
+        repo.data_dir()
+            .join("items/demo/2026/09/2026-09-01-hello-there.md")
+            .is_file()
+    );
+    assert!(repo.origin_rev("refs/heads/aggr").is_none());
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&repo.clone)
+        .output()
+        .unwrap();
+    assert!(status.stdout.is_empty());
+}
+
+#[test]
 fn source_errors_are_recorded_on_transition_only_and_all_failed_is_fatal() {
     let server = MockServer::start();
     server.mock(|when, then| {
@@ -518,6 +553,8 @@ fn build_renders_the_site_and_release_needs_a_url() {
     );
     assert!(index.contains("Hello there"));
     assert!(index.contains(">aggr.toml ↗</a>"));
+    assert!(index.contains(">built with aggr</a>"));
+    assert!(index.contains("href=\"https://github.com/aymericbeaumet/aggr\""));
     assert!(index.contains("href=\"sources/\""), "{index}");
     assert!(index.contains("href=\"settings/\""), "{index}");
     assert!(index.contains("target=\"_blank\""), "{index}");
@@ -554,7 +591,10 @@ fn build_renders_the_site_and_release_needs_a_url() {
         category < first_tag,
         "tags must follow the category: {page}"
     );
-    assert!(page.contains("<time datetime=\"2026-09-01T"), "{page}");
+    assert!(
+        page.contains("<time class=\"dt-published\" datetime=\"2026-09-01T"),
+        "{page}"
+    );
     assert!(page.contains("title=\"2026-09-01T"), "{page}");
     assert!(!page.contains("blob "), "{page}");
     assert!(site.join("pagefind/pagefind.js").exists());
@@ -769,13 +809,14 @@ fn included_topic_files_and_automatic_html_fallback_work_end_to_end() {
     std::fs::write(
         repo.clone.join("aggr-ai.toml"),
         format!(
-            "category = \"ai\"\n[[sources]]\nname = \"Scraped\"\nurl = \"{}\"\n",
+            "[[sources]]\nname = \"Scraped\"\nurl = \"{}\"\n",
             server.url("/blog")
         ),
     )
     .unwrap();
     repo.write_raw_config(&format!(
-        "include = [\"aggr-*.toml\"]\n[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n\
+        "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n\
+         [[sources]]\nurl = \"./aggr-*.toml\"\ncategory = \"ai\"\n\
          [[sources]]\nurl = \"{}\"\nname = \"Demo\"\ncategory = \"demo\"\n",
         server.url("/feed.xml")
     ));

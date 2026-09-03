@@ -247,6 +247,9 @@ async fn refresh(
         println!("dev build already current");
         return Ok(false);
     }
+    // The staging directory is disposable. A template error may leave a partial tree without the
+    // safety marker used for user-selected output directories, so always reset it before retrying.
+    remove_build(&state.staging)?;
     build::run_ephemeral(
         project,
         build_args,
@@ -454,7 +457,7 @@ async fn handle(
 
 fn inject_reload(body: &[u8], base: &str, run: &str) -> Vec<u8> {
     let script = format!(
-        "<script>(function(){{if(window.AGGR)window.AGGR.pwa=false;var u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistrations().then(function(r){{r.forEach(function(x){{x.unregister()}})}});if('caches'in window)caches.keys().then(function(k){{k.forEach(function(x){{caches.delete(x)}})}});new EventSource('{}__aggr/reload?run={}').onmessage=function(){{var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();</script>",
+        "<script>(function(){{if(window.AGGR)window.AGGR.pwa=false;var b=new URL({0:?},location.origin),u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistration(b).then(function(r){{if(r)r.unregister()}});if('caches'in window){{var p='aggr:'+encodeURIComponent(b.pathname)+':';caches.keys().then(function(k){{k.filter(function(x){{return x.indexOf(p)===0}}).forEach(function(x){{caches.delete(x)}})}})}}new EventSource('{0}__aggr/reload?run={1}').onmessage=function(){{var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();</script>",
         base, run
     );
     let html = String::from_utf8_lossy(body);
@@ -510,6 +513,24 @@ fn percent_decode(path: &str) -> String {
 }
 
 pub fn content_type(path: &Path) -> &'static str {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("atom.xml" | "feed.xml") => return "application/atom+xml; charset=utf-8",
+        Some("rss.xml") => return "application/rss+xml; charset=utf-8",
+        Some("feed.json") => return "application/feed+json; charset=utf-8",
+        Some("opensearch.xml") => {
+            return "application/opensearchdescription+xml; charset=utf-8";
+        }
+        _ => {}
+    }
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "json")
+        && path
+            .components()
+            .any(|component| component.as_os_str() == "items")
+    {
+        return "application/ld+json; charset=utf-8";
+    }
     match path.extension().and_then(|e| e.to_str()) {
         Some("html") => "text/html; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
@@ -603,6 +624,26 @@ mod tests {
             "text/html; charset=utf-8"
         );
         assert_eq!(content_type(Path::new("x.json")), "application/json");
+        assert_eq!(
+            content_type(Path::new("items/source/post.json")),
+            "application/ld+json; charset=utf-8"
+        );
+        assert_eq!(
+            content_type(Path::new("sources/a/feed.json")),
+            "application/feed+json; charset=utf-8"
+        );
+        assert_eq!(
+            content_type(Path::new("atom.xml")),
+            "application/atom+xml; charset=utf-8"
+        );
+        assert_eq!(
+            content_type(Path::new("rss.xml")),
+            "application/rss+xml; charset=utf-8"
+        );
+        assert_eq!(
+            content_type(Path::new("opensearch.xml")),
+            "application/opensearchdescription+xml; charset=utf-8"
+        );
         assert_eq!(
             content_type(Path::new("article.rst")),
             "text/x-rst; charset=utf-8"

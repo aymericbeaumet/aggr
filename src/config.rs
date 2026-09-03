@@ -16,8 +16,6 @@ pub const DEFAULTS: &str = include_str!("../config.default.toml");
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Files (or globs) relative to this one whose `[[sources]]` are appended, in order.
-    pub include: Vec<String>,
     pub site: SiteConfig,
     pub store: StoreConfig,
     pub fetch: FetchConfig,
@@ -34,6 +32,8 @@ pub struct Config {
 pub struct SiteConfig {
     pub title: String,
     pub description: String,
+    /// BCP 47 language tag used by HTML and syndication formats.
+    pub language: String,
     pub theme: String,
     pub items_per_page: usize,
     /// Items shown in the recent home feed. Source/category/tag archives remain complete.
@@ -60,6 +60,7 @@ impl Default for SiteConfig {
         Self {
             title: "aggr".into(),
             description: String::new(),
+            language: "en".into(),
             theme: "default".into(),
             items_per_page: 60,
             max_items: 5000,
@@ -187,7 +188,7 @@ impl FetchConfig {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct DigestConfig {
-    /// Local time of day (`HH:MM`) after which the first run posts the digest.
+    /// Local time of day (24-hour `HH:MM`) after which the first run posts the digest.
     pub at: chrono::NaiveTime,
     /// IANA timezone used only for the digest schedule.
     pub timezone: chrono_tz::Tz,
@@ -296,47 +297,32 @@ impl Engine {
     }
 }
 
-/// A file named in `include`: sources only, optionally all under one category.
+/// A file named by a relative `.toml` source URL: source entries only.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct IncludeFile {
-    /// Category for every source below that does not set its own.
-    pub category: Option<String>,
-    pub sources: Vec<SourceConfig>,
+struct SourceFile {
+    sources: Vec<SourceConfig>,
 }
 
 impl Config {
-    /// Parse `path` and append the sources of every file it includes.
+    /// Parse `path` and expand relative `.toml` source URLs in place.
     pub fn load(path: &Path) -> Result<Self> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut config =
             Self::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
-        config.loaded_files.push(
-            path.canonicalize()
-                .with_context(|| format!("resolving {}", path.display()))?,
-        );
-        let dir = path.parent().unwrap_or(Path::new("."));
-        for pattern in std::mem::take(&mut config.include) {
-            for file in include_paths(dir, &pattern)? {
-                let text = std::fs::read_to_string(&file)
-                    .with_context(|| format!("reading {}", file.display()))?;
-                let included: IncludeFile =
-                    toml::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
-                config
-                    .sources
-                    .extend(included.sources.into_iter().map(|mut source| {
-                        if source.category.is_none() {
-                            source.category = included.category.clone();
-                        }
-                        source
-                    }));
-                config.loaded_files.push(
-                    file.canonicalize()
-                        .with_context(|| format!("resolving {}", file.display()))?,
-                );
-            }
-        }
+        let root = path
+            .canonicalize()
+            .with_context(|| format!("resolving {}", path.display()))?;
+        config.loaded_files.push(root.clone());
+        let mut stack = vec![root.clone()];
+        config.sources = expand_source_files(
+            std::mem::take(&mut config.sources),
+            &root,
+            None,
+            &mut config.loaded_files,
+            &mut stack,
+        )?;
         Ok(config)
     }
 
@@ -347,6 +333,10 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.site.language.trim().is_empty() || self.site.language.contains(char::is_whitespace)
+        {
+            bail!("[site] language must be a BCP 47 tag such as `en` or `fr-FR`");
+        }
         if self.site.items_per_page == 0 {
             bail!("[site] items_per_page must be at least 1");
         }
@@ -415,26 +405,112 @@ impl Config {
     }
 }
 
-/// Files an `include` entry names, relative to the config's directory, sorted. A plain path
-/// must exist; a glob must match something, so a typo never silently drops a topic.
-pub fn include_paths(dir: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+fn expand_source_files(
+    sources: Vec<SourceConfig>,
+    declaring_file: &Path,
+    inherited_category: Option<&str>,
+    loaded_files: &mut Vec<PathBuf>,
+    stack: &mut Vec<PathBuf>,
+) -> Result<Vec<SourceConfig>> {
+    let dir = declaring_file.parent().unwrap_or(Path::new("."));
+    let mut expanded = Vec::new();
+    for (index, mut source) in sources.into_iter().enumerate() {
+        let Some(pattern) = source_file_pattern(&source).map(str::to_string) else {
+            if source.category.as_deref().is_none_or(str::is_empty) {
+                source.category = inherited_category.map(str::to_string);
+            }
+            expanded.push(source);
+            continue;
+        };
+        validate_source_file_entry(&source).with_context(|| {
+            format!("[[sources]] #{} in {}", index + 1, declaring_file.display())
+        })?;
+        let category = source
+            .category
+            .as_deref()
+            .filter(|category| !category.is_empty())
+            .or(inherited_category)
+            .map(str::to_string);
+        for file in source_file_paths(dir, &pattern)? {
+            let canonical = file
+                .canonicalize()
+                .with_context(|| format!("resolving {}", file.display()))?;
+            if let Some(start) = stack.iter().position(|ancestor| ancestor == &canonical) {
+                let mut cycle: Vec<_> = stack[start..]
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect();
+                cycle.push(canonical.display().to_string());
+                bail!("source-file cycle: {}", cycle.join(" -> "));
+            }
+            let text = std::fs::read_to_string(&canonical)
+                .with_context(|| format!("reading {}", canonical.display()))?;
+            let included: SourceFile = toml::from_str(&text)
+                .with_context(|| format!("parsing {}", canonical.display()))?;
+            loaded_files.push(canonical.clone());
+            stack.push(canonical.clone());
+            let nested = expand_source_files(
+                included.sources,
+                &canonical,
+                category.as_deref(),
+                loaded_files,
+                stack,
+            );
+            stack.pop();
+            expanded.extend(nested?);
+        }
+    }
+    Ok(expanded)
+}
+
+fn source_file_pattern(source: &SourceConfig) -> Option<&str> {
+    let raw = source.url.as_deref()?;
+    let path = Path::new(raw);
+    (source.kind.is_none()
+        && path.is_relative()
+        && !raw.contains("://")
+        && (raw.ends_with(".toml") || raw.contains(['*', '?', '['])))
+    .then_some(raw)
+}
+
+fn validate_source_file_entry(source: &SourceConfig) -> Result<()> {
+    let has_other_key = source.kind.is_some()
+        || source.name.is_some()
+        || source.slug.is_some()
+        || !source.labels.is_empty()
+        || !source.headers.is_empty()
+        || source.html.is_some()
+        || source.content.is_some()
+        || source.repo.is_some()
+        || source.branch.is_some()
+        || !source.sources.is_empty()
+        || source.limit.is_some();
+    if has_other_key {
+        bail!("a local TOML source may only set `url` and `category`");
+    }
+    Ok(())
+}
+
+/// Files a local TOML source URL names, relative to the declaring file, sorted. A plain path must
+/// exist; a glob must match something, so a typo never silently drops a topic.
+fn source_file_paths(dir: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
     let full = dir.join(pattern);
     let is_glob = pattern.contains(['*', '?', '[']);
     if !is_glob {
         if !full.is_file() {
-            bail!("include {pattern:?}: {} does not exist", full.display());
+            bail!("source file {pattern:?}: {} does not exist", full.display());
         }
         return Ok(vec![full]);
     }
     let pattern_str = full.to_string_lossy();
     let mut paths: Vec<PathBuf> = glob::glob(&pattern_str)
-        .with_context(|| format!("include {pattern:?}: invalid glob"))?
+        .with_context(|| format!("source file {pattern:?}: invalid glob"))?
         .filter_map(|entry| entry.ok())
         .filter(|path| path.is_file())
         .collect();
     if paths.is_empty() {
         bail!(
-            "include {pattern:?} matched no file under {}",
+            "source file {pattern:?} matched no file under {}",
             dir.display()
         );
     }
@@ -862,18 +938,26 @@ mod tests {
     }
 
     #[test]
-    fn includes_append_sources_with_a_default_category() {
+    fn local_toml_sources_expand_in_place_with_category_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(
             root.join("aggr.toml"),
-            "include = [\"aggr-ai.toml\", \"topics/*.toml\"]\n[[sources]]\nurl = \"https://a.b/feed\"\n",
+            "[[sources]]\nurl = \"https://a.b/feed\"\n\
+             [[sources]]\nurl = \"./aggr-ai.toml\"\ncategory = \"ai\"\n\
+             [[sources]]\nurl = \"./topics/*.toml\"\n",
         )
         .unwrap();
         std::fs::write(
             root.join("aggr-ai.toml"),
-            "category = \"ai\"\n[[sources]]\nurl = \"https://ai.example/feed\"\n\
-             [[sources]]\nurl = \"https://ml.example/feed\"\ncategory = \"ml\"\n",
+            "[[sources]]\nurl = \"https://ai.example/feed\"\n\
+             [[sources]]\nurl = \"https://ml.example/feed\"\ncategory = \"ml\"\n\
+             [[sources]]\nurl = \"./nested.toml\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("nested.toml"),
+            "[[sources]]\nurl = \"https://nested.example/feed\"\n",
         )
         .unwrap();
         std::fs::create_dir(root.join("topics")).unwrap();
@@ -900,6 +984,7 @@ mod tests {
                 "https://a.b/feed",
                 "https://ai.example/feed",
                 "https://ml.example/feed",
+                "https://nested.example/feed",
                 "https://aa.example/feed",
                 "https://z.example/feed",
             ],
@@ -911,19 +996,55 @@ mod tests {
             Some("ml"),
             "explicit wins"
         );
-        assert_eq!(config.sources[3].category, None);
-        assert!(config.include.is_empty(), "consumed");
+        assert_eq!(
+            config.sources[3].category.as_deref(),
+            Some("ai"),
+            "the outer category flows through a nested include"
+        );
+        assert_eq!(config.sources[4].category, None);
+        assert_eq!(config.loaded_files.len(), 5);
 
-        std::fs::write(root.join("aggr.toml"), "include = [\"missing.toml\"]\n").unwrap();
+        std::fs::write(
+            root.join("aggr.toml"),
+            "[[sources]]\nurl = \"./missing.toml\"\n",
+        )
+        .unwrap();
         let err = Config::load(&root.join("aggr.toml")).unwrap_err();
         assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
-        std::fs::write(root.join("aggr.toml"), "include = [\"nope/*.toml\"]\n").unwrap();
+        std::fs::write(
+            root.join("aggr.toml"),
+            "[[sources]]\nurl = \"./nope/*.toml\"\n",
+        )
+        .unwrap();
         let err = Config::load(&root.join("aggr.toml")).unwrap_err();
         assert!(format!("{err:#}").contains("matched no file"), "{err:#}");
-        std::fs::write(root.join("aggr.toml"), "include = [\"bad.toml\"]\n").unwrap();
+        std::fs::write(
+            root.join("aggr.toml"),
+            "[[sources]]\nurl = \"./bad.toml\"\n",
+        )
+        .unwrap();
         std::fs::write(root.join("bad.toml"), "[site]\ntitle = \"x\"\n").unwrap();
         let err = Config::load(&root.join("aggr.toml")).unwrap_err();
         assert!(format!("{err:#}").contains("site"), "only sources: {err:#}");
+
+        std::fs::write(
+            root.join("aggr.toml"),
+            "[[sources]]\nurl = \"./aggr.toml\"\n",
+        )
+        .unwrap();
+        let err = Config::load(&root.join("aggr.toml")).unwrap_err();
+        assert!(format!("{err:#}").contains("source-file cycle"), "{err:#}");
+
+        std::fs::write(
+            root.join("aggr.toml"),
+            "[[sources]]\nurl = \"./nested.toml\"\nname = \"not allowed\"\n",
+        )
+        .unwrap();
+        let err = Config::load(&root.join("aggr.toml")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("may only set `url` and `category`"),
+            "{err:#}"
+        );
     }
 
     #[test]

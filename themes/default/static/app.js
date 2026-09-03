@@ -1,8 +1,9 @@
 // aggr default theme. No build step, no dependencies.
 (function () {
   "use strict";
+  function resolveRoot(relative) { return new URL(relative || "./", window.location.href).href; }
   var script = document.querySelector("script[src$='assets/app.js']");
-  var BASE = (window.AGGR && window.AGGR.base) || (script && script.getAttribute("src").slice(0, -"assets/app.js".length)) || "./";
+  var BASE = resolveRoot((window.AGGR && window.AGGR.base) || (script && script.getAttribute("src").slice(0, -"assets/app.js".length)) || "./");
   var KIND = (window.AGGR && window.AGGR.kind) || document.body.getAttribute("data-kind") || "";
   var PWA = window.AGGR ? window.AGGR.pwa !== false : true;
   var darkPreference = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)");
@@ -109,6 +110,36 @@
     });
   }
 
+  var PAGE_HEAD_SELECTOR = [
+    'meta[name="description"]',
+    'meta[property^="og:"]',
+    'meta[name^="twitter:"]',
+    'meta[property^="article:"]',
+    'link[rel="canonical"]',
+    'link[rel="first"]',
+    'link[rel="last"]',
+    'link[rel="prev"]',
+    'link[rel="next"]',
+    'link[rel="alternate"]',
+    'link[rel="search"]',
+    'link[rel="via"]',
+    'script[type="application/ld+json"]'
+  ].join(',');
+  function syncPageHead(incoming) {
+    if (!incoming || !incoming.head) return;
+    $$(PAGE_HEAD_SELECTOR, document.head).forEach(function (node) { node.remove(); });
+    $$(PAGE_HEAD_SELECTOR, incoming.head).forEach(function (node) {
+      document.head.appendChild(document.importNode(node, true));
+    });
+  }
+
+  function announceNavigation() {
+    var announcer = $("#aggr-announcer");
+    if (!announcer) return;
+    announcer.textContent = "";
+    requestAnimationFrame(function () { announcer.textContent = "Navigated to " + document.title; });
+  }
+
   function setTheme(mode) {
     document.documentElement.dataset.theme = mode;
     try { localStorage.setItem("aggr:theme", mode); } catch (error) { /* private mode */ }
@@ -160,7 +191,7 @@
     display = display || {};
     var original = display.original || page;
     var date = entry.meta.date || "";
-    var meta = [date ? el("time", { datetime: date, title: date, text: date.slice(0, 10) }) : null, document.createTextNode(" · "), el("a", { href: original, target: "_blank", rel: "noopener noreferrer", text: "original" })];
+    var meta = [date ? el("time", { "class": "dt-published", datetime: date, title: date, text: date.slice(0, 10) }) : null, document.createTextNode(" · "), el("a", { "class": "u-bookmark-of", href: original, target: "_blank", rel: "external noopener noreferrer via", text: "original" })];
     var discussions = display.discussions || ((window.AGGR && window.AGGR.discussions) || []);
     discussions.forEach(function (discussion) {
       var url = discussion.url.replace("{url}", encodeURIComponent(original)).replace("{title}", encodeURIComponent(entry.meta.title || ""));
@@ -175,10 +206,11 @@
     var excerpt = el("div", { "class": "search-excerpt" });
     if (entry.excerpt) excerpt.innerHTML = entry.excerpt;
     else excerpt.textContent = display.excerpt || "";
-    return el("li", { "class": "row", "data-url": page, "data-link": original }, [
+    return el("li", { "class": "row h-entry", "data-url": page, "data-link": original }, [
+      el("a", { "class": "u-uid", href: page, hidden: "" }),
       el("span", { "class": "rank", text: rank + "." }),
       el("div", { "class": "cell" }, [
-        el("a", { "class": "title", href: page, text: entry.meta.title }),
+        el("a", { "class": "title p-name u-url", href: page, text: entry.meta.title }),
         display.domain ? el("a", { "class": "domain", href: BASE + "sources/" + display.source_slug + "/", text: "(" + display.domain + ")" }) : null,
         excerpt,
         el("div", { "class": "meta" }, meta.filter(Boolean))
@@ -187,23 +219,38 @@
   }
 
   var pagefind;
-  var searchMetadata;
   function loadPagefind() {
     if (!pagefind) {
-      pagefind = import(new URL("pagefind/pagefind.js", document.baseURI).href).then(async function (api) {
-        await api.options({ baseUrl: new URL(".", document.baseURI).pathname, excerptLength: 24 });
+      pagefind = import(new URL("pagefind/pagefind.js", BASE).href).then(async function (api) {
+        await api.options({
+          basePath: new URL("pagefind/", BASE).pathname,
+          excerptLength: 28,
+          ranking: {
+            termFrequency: 0.65,
+            termSimilarity: 1,
+            pageLength: 0.35,
+            termSaturation: 0.8,
+            metaWeights: {
+              title: 9,
+              date: 0,
+              aggr_display: 0
+            }
+          }
+        });
         await api.init();
         return api;
       });
     }
     return pagefind;
   }
-  function loadSearchMetadata() {
-    if (!searchMetadata) {
-      searchMetadata = fetch(new URL("search-meta.json", document.baseURI).href, { credentials: "same-origin" })
-        .then(function (response) { if (!response.ok) throw new Error("search metadata unavailable"); return response.json(); });
-    }
-    return searchMetadata;
+  function searchDisplay(data) {
+    var meta = data.meta || {};
+    try {
+      var hex = meta.aggr_display || "";
+      var bytes = new Uint8Array(hex.length / 2);
+      for (var i = 0; i < bytes.length; i += 1) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch (error) { return {}; }
   }
   function fillSearch() {
     var list = $("#list");
@@ -216,8 +263,9 @@
     var count = $("#count");
     var status = $("#search-status");
     var empty = $("#empty");
+    var initialQuery = new URL(location.href).searchParams.get("q");
+    if (!input.value && initialQuery) input.value = initialQuery;
     var generation = 0;
-    var timer;
     function show(rows, total, searched) {
       var fragment = document.createDocumentFragment();
       rows.forEach(function (entry, i) { fragment.appendChild(renderResult(entry.data, entry.display, i + 1)); });
@@ -241,17 +289,28 @@
       if (!searched) { show([], 0, false); return; }
       list.setAttribute("aria-busy", "true");
       try {
-        var loaded = await Promise.all([loadPagefind(), loadSearchMetadata()]);
-        var api = loaded[0];
-        var metadata = loaded[1];
+        var api = await loadPagefind();
         var options = { filters: filters };
         if (sort.value === "newest") options.sort = { date: "desc" };
-        var found = await api.search(query || null, options);
-        var rows = await Promise.all(found.results.slice(0, 40).map(async function (result) {
+        var found = query && api.debouncedSearch
+          ? await api.debouncedSearch(query, options, 45)
+          : await api.search(query || null, options);
+        if (!found || current !== generation) return;
+        var results = found.results.slice(0, 40);
+        var first = results.slice(0, 12);
+        var rows = await Promise.all(first.map(async function (result) {
           var data = await result.data();
-          return { data: data, display: metadata[data.url.replace(/^\/+/, "")] || {} };
+          return { data: data, display: searchDisplay(data) };
         }));
-        if (current === generation) show(rows, found.results.length, true);
+        if (current !== generation) return;
+        show(rows, found.results.length, true);
+        if (results.length > first.length) {
+          var rest = await Promise.all(results.slice(first.length).map(async function (result) {
+            var data = await result.data();
+            return { data: data, display: searchDisplay(data) };
+          }));
+          if (current === generation) show(rows.concat(rest), found.results.length, true);
+        }
       } catch (error) {
         if (current === generation) {
           show([], 0, true);
@@ -260,14 +319,7 @@
       }
     }
     function schedule() {
-      clearTimeout(timer);
-      timer = setTimeout(render, 80);
-      var query = input.value.trim();
-      if (query) {
-        loadPagefind()
-          .then(function (api) { return api.preload ? api.preload(query) : null; })
-          .catch(function () { /* render reports an unavailable index without an unhandled rejection */ });
-      }
+      render();
     }
     count.style.visibility = "hidden";
     input.addEventListener("focus", loadPagefind, { once: true });
@@ -277,6 +329,7 @@
     sort.addEventListener("change", render);
     if (form) form.addEventListener("submit", function (event) { event.preventDefault(); render(); });
     if (document.activeElement === input) loadPagefind();
+    if (input.value.trim() || category.value || tag.value) render();
   }
 
   var selected = -1;
@@ -291,6 +344,20 @@
     if (title) title.focus({ preventScroll: true });
   }
   document.addEventListener("keydown", function (event) {
+    if (!event.altKey && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      loadPagefind().catch(function () { /* the search page reports an unavailable index */ });
+      var input = $("#q");
+      if (KIND === "search" && input) {
+        input.focus({ preventScroll: true });
+        input.select();
+      } else {
+        var search = new URL("search/", BASE).href;
+        if (window.swup) window.swup.navigate(search);
+        else location.href = search;
+      }
+      return;
+    }
     if (event.altKey || event.ctrlKey || event.metaKey || event.target.closest("input, textarea, select, button, a, [contenteditable=true]")) return;
     var row = selected >= 0 ? rows()[selected] : null;
     if (event.key === "j") select(selected + 1);
@@ -312,7 +379,16 @@
   function serviceWorker() {
     if (!("serviceWorker" in navigator) || location.protocol === "file:") return;
     if (!PWA) {
-      navigator.serviceWorker.getRegistrations().then(function (registrations) { registrations.forEach(function (registration) { registration.unregister(); }); });
+      navigator.serviceWorker.getRegistration(BASE).then(function (registration) {
+        if (registration) registration.unregister();
+      });
+      if ("caches" in window) {
+        var namespace = "aggr:" + encodeURIComponent(new URL(BASE).pathname) + ":";
+        caches.keys().then(function (names) {
+          names.filter(function (name) { return name.indexOf(namespace) === 0; })
+            .forEach(function (name) { caches.delete(name); });
+        });
+      }
       return;
     }
     if (KIND === "html") return;
@@ -327,7 +403,7 @@
   function bootPage() {
     var page = $("#aggr-page");
     if (page) {
-      BASE = page.dataset.root;
+      BASE = resolveRoot(page.dataset.root);
       KIND = page.dataset.kind;
       $("#aggr-base").setAttribute("href", BASE);
       document.body.dataset.kind = KIND;
@@ -356,12 +432,24 @@
 
   importState();
   bootPage();
+  var searchLink = $(".nav [data-route='search/']");
+  if (searchLink) {
+    ["pointerenter", "focus", "touchstart"].forEach(function (eventName) {
+      searchLink.addEventListener(eventName, function () {
+        loadPagefind().catch(function () { /* the search page reports an unavailable index */ });
+      }, { once: true, passive: true });
+    });
+  }
   if (window.Swup) {
     window.swup = new window.Swup({ containers: ["#swup"], cache: true, animationSelector: false });
+    window.swup.hooks.before("content:replace", function (visit) {
+      syncPageHead(visit && visit.to && visit.to.document);
+    });
     window.swup.hooks.on("history:popstate", function () { selected = -1; });
     window.swup.hooks.on("page:view", function () {
       selected = -1;
       bootPage();
+      announceNavigation();
       var target = KIND === "search" ? $("#q") : $("#swup");
       if (target) target.focus({ preventScroll: true });
     });

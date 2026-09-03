@@ -12,7 +12,7 @@ use crate::cli::BuildArgs;
 
 /// Public `aggr build`: rendered output always follows a completed sync.
 pub async fn sync_and_run(project: &Project, args: &BuildArgs) -> Result<()> {
-    super::sync::run(project, &crate::cli::FetchArgs::default()).await?;
+    super::sync::run(project, &crate::cli::SyncArgs::default()).await?;
     run(project, args).await.map(|_| ())
 }
 use crate::site::{self, BuildInfo, Summary};

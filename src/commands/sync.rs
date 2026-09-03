@@ -6,19 +6,26 @@ use anyhow::{Result, bail};
 
 use super::Project;
 use super::fetch::{self, Report};
-use crate::cli::FetchArgs;
+use crate::cli::{FetchArgs, SyncArgs};
 use crate::git::{CommitMessage, PushOutcome};
 use crate::store::Outcome;
 
 pub const LAST_GOOD: &str = "refs/aggr/last-good";
 
-pub async fn run(project: &Project, args: &FetchArgs) -> Result<()> {
+pub async fn run(project: &Project, args: &SyncArgs) -> Result<()> {
     let worktree = project.worktree()?;
     let first = worktree.head_sha()?.is_none();
-    let report = fetch::run(project, &worktree, args).await?;
+    let report = fetch::run(project, &worktree, &args.fetch).await?;
 
-    if args.dry_run {
+    if args.fetch.dry_run {
         println!("dry run: {} new item(s), nothing committed", report.added());
+        return finish(&report);
+    }
+    if args.fetch_only {
+        println!(
+            "fetch only: {} new item(s), nothing committed or pushed",
+            report.added()
+        );
         return finish(&report);
     }
 

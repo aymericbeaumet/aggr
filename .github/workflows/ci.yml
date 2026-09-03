@@ -34,6 +34,9 @@ jobs:
         if: matrix.name == 'linux-amd64'
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - name: Check shipped default config
+        if: matrix.name == 'linux-amd64'
+        run: cargo run --locked -- check --config config.default.toml
 
   msrv:
     runs-on: ubuntu-latest
