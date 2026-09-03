@@ -32,31 +32,42 @@
   <p class="empty">This source publishes titles only — <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer">open the original</a>.</p>
   {% endif %}
   <div class="body e-content">{{ item.body_html | safe }}</div>
-  {% if item.next_article or item.related_article %}
-  <nav class="article-more" aria-label="Continue reading">
-    {% if item.next_article %}
-    <a class="article-more-link" href="{{ item.next_article.url | url_for }}" rel="next" aria-keyshortcuts="ArrowRight">
-      <span class="article-more-label">next article</span>
-      <span class="article-more-title">{{ item.next_article.title }}</span>
-      {% if item.next_article.domain %}<span class="article-more-domain">{{ item.next_article.domain }}</span>{% endif %}
-    </a>
+  {% if item.previous_article or item.next_article or item.related_article or item.permalink %}
+  <footer class="article-footer">
+    {% if item.previous_article or item.next_article or item.related_article %}
+    <nav class="article-more" aria-label="Continue reading">
+      {% if item.previous_article %}
+      <a class="article-more-link" href="{{ item.previous_article.url | url_for }}" rel="prev" aria-keyshortcuts="ArrowLeft">
+        <span class="article-more-label">previous article</span>
+        <span class="article-more-title">{{ item.previous_article.title }}</span>
+        {% if item.previous_article.domain %}<span class="article-more-domain">{{ item.previous_article.domain }}</span>{% endif %}
+      </a>
+      {% endif %}
+      {% if item.next_article %}
+      <a class="article-more-link" href="{{ item.next_article.url | url_for }}" rel="next" aria-keyshortcuts="ArrowRight">
+        <span class="article-more-label">next article</span>
+        <span class="article-more-title">{{ item.next_article.title }}</span>
+        {% if item.next_article.domain %}<span class="article-more-domain">{{ item.next_article.domain }}</span>{% endif %}
+      </a>
+      {% endif %}
+      {% if item.related_article %}
+      <a class="article-more-link" href="{{ item.related_article.url | url_for }}">
+        <span class="article-more-label">related article</span>
+        <span class="article-more-title">{{ item.related_article.title }}</span>
+        {% if item.related_article.domain %}<span class="article-more-domain">{{ item.related_article.domain }}</span>{% endif %}
+      </a>
+      {% endif %}
+    </nav>
     {% endif %}
-    {% if item.related_article %}
-    <a class="article-more-link" href="{{ item.related_article.url | url_for }}">
-      <span class="article-more-label">related article</span>
-      <span class="article-more-title">{{ item.related_article.title }}</span>
-      {% if item.related_article.domain %}<span class="article-more-domain">{{ item.related_article.domain }}</span>{% endif %}
-    </a>
-    {% endif %}
-  </nav>
-  {% endif %}
-  <footer class="permalinks">
     {% if item.permalink %}
-    <a href="{{ item.permalink }}" target="_blank" rel="noopener noreferrer">permalink</a>
-    <a href="{{ item.raw_url }}" target="_blank" rel="noopener noreferrer">raw</a>
-    <a href="{{ item.history_url }}" target="_blank" rel="noopener noreferrer">history</a>
-    <a href="{{ item.edit_url }}" target="_blank" rel="noopener noreferrer">edit</a>
+    <div class="permalinks">
+      <a href="{{ item.permalink }}" target="_blank" rel="noopener noreferrer">permalink</a>
+      <a href="{{ item.raw_url }}" target="_blank" rel="noopener noreferrer">raw</a>
+      <a href="{{ item.history_url }}" target="_blank" rel="noopener noreferrer">history</a>
+      <a href="{{ item.edit_url }}" target="_blank" rel="noopener noreferrer">edit</a>
+    </div>
     {% endif %}
   </footer>
+  {% endif %}
 </article>
 {% endblock %}

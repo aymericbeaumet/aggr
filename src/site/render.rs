@@ -314,12 +314,18 @@ mod tests {
         assert!(css.contains("--accent: #8ea1ff"));
         assert!(css.contains(".body a { color: var(--accent-strong); font-style: normal"));
         assert!(css.contains(".article-more"));
+        assert!(css.contains(".main[data-navigation-focus]:focus-visible { outline: none; }"));
 
         let script_file = DefaultTheme::get("static/app.js").unwrap();
         let script = std::str::from_utf8(script_file.data.as_ref()).unwrap();
         assert!(script.contains("url.searchParams.set(\"q\", query)"));
+        assert!(script.contains("KIND === \"river\" && event.key === \"ArrowRight\""));
         assert!(script.contains("event.key === \"ArrowRight\""));
         assert!(script.contains("event.key === \"ArrowLeft\""));
+
+        let item_file = DefaultTheme::get("templates/item.html").unwrap();
+        let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
+        assert!(item.contains(">previous article</span>"));
     }
 
     #[test]

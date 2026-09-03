@@ -1503,6 +1503,8 @@ mod tests {
             std::fs::read_to_string(out.join("items/blog/2026-09-03-post-2/index.html")).unwrap();
         assert!(second.contains("data-previous-url=\"items/blog/2026-09-04-post-3/\""));
         assert!(second.contains("data-next-url=\"items/blog/2026-09-02-post-1/\""));
+        assert!(second.contains("<span class=\"article-more-label\">previous article</span>"));
+        assert!(second.contains("<span class=\"article-more-title\">Post 3</span>"));
     }
 
     #[test]
