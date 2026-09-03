@@ -1642,7 +1642,12 @@ mod tests {
         }
 
         let sw = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        let version = format!("1.1.0-{}-{}", "d".repeat(12), "c".repeat(12));
+        let version = format!(
+            "{}-{}-{}",
+            env!("CARGO_PKG_VERSION"),
+            "d".repeat(12),
+            "c".repeat(12)
+        );
         assert!(sw.contains(&format!("var VERSION = {version:?};")), "{sw}");
         assert!(sw.contains("new URL(\"./\", self.registration.scope)"));
         assert!(sw.contains("\"assets/style-"));
