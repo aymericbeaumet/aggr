@@ -58,8 +58,10 @@ pub struct PageCtx {
     pub total: usize,
     /// Rank of the first item on this page, 0-based.
     pub offset: usize,
+    pub first: Option<String>,
     pub prev: Option<String>,
     pub next: Option<String>,
+    pub last: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

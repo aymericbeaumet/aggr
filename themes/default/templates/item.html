@@ -11,7 +11,7 @@
       {% if item.published %}<span>· published <time datetime="{{ item.published }}" title="{{ item.published }}">{{ item.published | date('%Y-%m-%d %H:%M') }}</time></span>{% endif %}
       {% if item.updated and item.updated != item.published %}<span>· updated <time datetime="{{ item.updated }}" title="{{ item.updated }}">{{ item.updated | date }}</time></span>{% endif %}
       {% if item.category %}<span>· <a href="{{ ('categories/' ~ (item.category | slug) ~ '/') | url_for }}">{{ item.category }}</a></span>{% endif %}
-      {% for label in item.labels %}<a class="tag" href="{{ ('tags/' ~ (label | slug) ~ '/') | url_for }}">{{ label }}</a>{% endfor %}
+      {% for label in item.labels %}<span>· <a class="tag" href="{{ ('tags/' ~ (label | slug) ~ '/') | url_for }}">#{{ label }}</a></span>{% endfor %}
       <span>· <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer">original</a></span>
       {% for discussion in item.discussions %}<span>· <a class="discussion{% if discussion.found %} is-found{% endif %}" href="{{ discussion.url }}" target="_blank" rel="noopener noreferrer"{% if discussion.found %} aria-label="{{ discussion.name }}, matching discussion found{% if discussion.score is not none %}, score {{ discussion.score }}{% endif %}"{% endif %}>{{ discussion.name }}</a></span>{% endfor %}
     </div>

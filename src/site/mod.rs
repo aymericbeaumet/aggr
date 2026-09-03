@@ -339,6 +339,14 @@ pub fn build(
         let pagination = paginate(prefix, list.len(), per_page);
         let total = pagination.len();
         for (number, path, range) in &pagination {
+            let link = |index: usize| {
+                let path = pagination[index].1.clone();
+                if path.is_empty() {
+                    "./".to_string()
+                } else {
+                    path
+                }
+            };
             let page = PageCtx {
                 kind: kind.to_string(),
                 title: title.to_string(),
@@ -347,8 +355,10 @@ pub fn build(
                 number: *number,
                 total,
                 offset: range.start,
-                prev: (*number > 1).then(|| pagination[number - 2].1.clone()),
-                next: (*number < total).then(|| pagination[*number].1.clone()),
+                first: (*number > 1).then(|| link(0)),
+                prev: (*number > 1).then(|| link(number - 2)),
+                next: (*number < total).then(|| link(*number)),
+                last: (*number < total).then(|| link(total - 1)),
             };
             let html = renderer.render(
                 "index.html",
@@ -448,8 +458,10 @@ pub fn build(
             number: 1,
             total: 1,
             offset: 0,
+            first: None,
             prev: None,
             next: None,
+            last: None,
         };
         renderer.render(
             template,
@@ -1079,6 +1091,28 @@ mod tests {
             out.join("items/blog/2026-09-01-post-0/index.html")
                 .is_file()
         );
+    }
+
+    #[test]
+    fn middle_pages_link_to_adjacent_and_edge_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(
+            dir.path(),
+            5,
+            "items_per_page = 1\npwa = false\ndiscussions = []\n",
+        );
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+
+        let middle = std::fs::read_to_string(out.join("page/3/index.html")).unwrap();
+        assert!(middle.contains("href=\"./\">⇤ first</a>"), "{middle}");
+        assert!(middle.contains("href=\"page/2/\">← newer</a>"), "{middle}");
+        assert!(middle.contains("href=\"page/4/\">older →</a>"), "{middle}");
+        assert!(middle.contains("href=\"page/5/\">last ⇥</a>"), "{middle}");
+
+        let second = std::fs::read_to_string(out.join("page/2/index.html")).unwrap();
+        assert!(second.contains("href=\"./\">⇤ first</a>"), "{second}");
+        assert!(second.contains("href=\"./\">← newer</a>"), "{second}");
     }
 
     #[test]

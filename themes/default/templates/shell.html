@@ -10,7 +10,7 @@
       <label class="sr-only" for="category-filter">Filter by category</label>
       <select id="category-filter" name="category"><option value="">all categories</option>{% for category in categories %}<option value="{{ category.name }}">{{ category.name }} ({{ category.count }})</option>{% endfor %}</select>
       <label class="sr-only" for="tag-filter">Filter by tag</label>
-      <select id="tag-filter" name="tag"><option value="">all tags</option>{% for tag in tags %}<option value="{{ tag.name }}">{{ tag.name }} ({{ tag.count }})</option>{% endfor %}</select>
+      <select id="tag-filter" name="tag"><option value="">all tags</option>{% for tag in tags %}<option value="{{ tag.name }}">#{{ tag.name }} ({{ tag.count }})</option>{% endfor %}</select>
       <label class="sr-only" for="search-sort">Sort results</label>
       <select id="search-sort" name="sort"><option value="relevance">relevance</option><option value="newest">newest</option></select>
       <output id="count" class="search-count muted" for="q category-filter tag-filter search-sort" aria-hidden="true">0</output>

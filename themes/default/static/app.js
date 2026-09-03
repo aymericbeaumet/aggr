@@ -27,8 +27,8 @@
     var minutes = Math.floor(seconds / 60);
     if (minutes < 60) return minutes + "m ago";
     var hours = Math.floor(minutes / 60);
-    if (hours < 36) return hours + "h ago";
-    var days = Math.floor(hours / 24);
+    if (hours < 24) return hours + "h ago";
+    var days = Math.ceil(hours / 24);
     if (days < 45) return days + "d ago";
     var months = Math.floor(days / 30);
     if (months < 18) return months + "mo ago";
@@ -57,7 +57,7 @@
       if (text && !isNaN(timestamp)) {
         var local = new Intl.DateTimeFormat(undefined, {
           weekday: "long", year: "numeric", month: "long", day: "numeric",
-          hour: "2-digit", minute: "2-digit", second: "2-digit", timeZoneName: "long"
+          hour: "2-digit", minute: "2-digit", second: "2-digit"
         }).format(new Date(timestamp));
         time.title = local;
         time.setAttribute("aria-label", text + "; " + local);

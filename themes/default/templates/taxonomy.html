@@ -5,7 +5,7 @@
   <div class="page-body">
     <ul class="taxonomy-list" aria-label="{{ page.title }}">
     {% for term in (categories if page.kind == 'categories' else tags) %}
-      {% if term.count > 0 %}<li><a href="{{ term.page | url_for }}">{{ term.name }}</a> <span class="muted" aria-label="{{ term.count }} items">{{ term.count }}</span></li>{% endif %}
+      {% if term.count > 0 %}<li><a href="{{ term.page | url_for }}">{{ '#' if page.kind == 'tags' }}{{ term.name }}</a> <span class="muted" aria-label="{{ term.count }} items">{{ term.count }}</span></li>{% endif %}
     {% endfor %}
     </ul>
   </div>

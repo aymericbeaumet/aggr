@@ -7,7 +7,7 @@
       {{ source.name }}
       {% if source.site_url %}<a class="muted" href="{{ source.site_url }}" target="_blank" rel="noopener noreferrer">({{ source.site_url | domain }})</a>{% endif %}
     {% elif page.kind in ['category', 'tag'] and category %}
-      {{ category.name }}
+      {{ '#' if page.kind == 'tag' }}{{ category.name }}
     {% endif %}
   </h1>
   <div class="listtools">
@@ -30,9 +30,15 @@
 {% endif %}
 {% if page.total > 1 %}
 <nav class="pager">
-  {% if page.prev %}<a href="{{ page.prev | url_for }}">← newer</a>{% else %}<span></span>{% endif %}
+  <span class="pager-side">
+    {% if page.first %}<a href="{{ page.first | url_for }}">⇤ first</a>{% endif %}
+    {% if page.prev %}<a href="{{ page.prev | url_for }}">← newer</a>{% endif %}
+  </span>
   <span>page {{ page.number }} / {{ page.total }}</span>
-  {% if page.next %}<a href="{{ page.next | url_for }}">older →</a>{% else %}<span></span>{% endif %}
+  <span class="pager-side">
+    {% if page.next %}<a href="{{ page.next | url_for }}">older →</a>{% endif %}
+    {% if page.last %}<a href="{{ page.last | url_for }}">last ⇥</a>{% endif %}
+  </span>
 </nav>
 {% endif %}
 {% endblock %}

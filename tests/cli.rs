@@ -548,6 +548,12 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert_eq!(json["source"], "demo");
     assert!(!item.join("html.html").exists());
     assert!(page.contains(">original</a>"), "{page}");
+    let category = page.find(">demo</a>").unwrap();
+    let first_tag = page.find(">#example</a>").unwrap();
+    assert!(
+        category < first_tag,
+        "tags must follow the category: {page}"
+    );
     assert!(page.contains("<time datetime=\"2026-09-01T"), "{page}");
     assert!(page.contains("title=\"2026-09-01T"), "{page}");
     assert!(!page.contains("blob "), "{page}");
@@ -576,6 +582,12 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(site.join("tags/example/atom.xml").exists());
     assert!(site.join("tags/example/rss.xml").exists());
     assert!(site.join("tags/example/feed.json").exists());
+    let tags = std::fs::read_to_string(site.join("tags/index.html")).unwrap();
+    assert!(tags.contains(">#example</a>"), "{tags}");
+    let tag = std::fs::read_to_string(site.join("tags/example/index.html")).unwrap();
+    assert!(tag.contains("<h1>\n      #example\n"), "{tag}");
+    let search = std::fs::read_to_string(site.join("search/index.html")).unwrap();
+    assert!(search.contains(">#example (2)</option>"), "{search}");
     assert!(!site.join("CNAME").exists());
     // Installable and readable offline: manifest, worker precaching the newest pages, fallback.
     assert!(index.contains("rel=\"manifest\""), "{index}");

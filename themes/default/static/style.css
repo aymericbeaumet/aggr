@@ -9,6 +9,7 @@
   --accent: #8ea1ff;
   --accent-fg: #111827;
   --focus: #4056c7;
+  --discussion-found: #a94700;
   --link: #111111;
   --visited: #111111;
   --error: #b42318;
@@ -37,12 +38,14 @@ html[data-theme="dark"] {
     --code: #1f272f;
     --nav-bg: #180f0e;
     --nav-fg: #fff1df;
+    --discussion-found: #ffad76;
 }
 @media (prefers-color-scheme: dark) {
   html:not([data-theme]), html[data-theme="auto"] {
     --bg: #0f1418; --panel: #161c22; --fg: #dbe2e8; --muted: #a6b2bd;
     --faint: #2a333c; --accent: #8ea1ff; --accent-fg: #101426; --link: #f4f6f7;
     --visited: #f4f6f7; --error: #f97066; --ok: #aebaff; --code: #1f272f; --focus: #aebaff;
+    --discussion-found: #ffad76;
     --nav-bg: #180f0e; --nav-fg: #fff1df;
   }
 }
@@ -119,7 +122,7 @@ button.linkish:hover { text-decoration: underline; }
   min-height: 2.5rem;
   line-height: 1.25rem;
 }
-.nav a { color: inherit; padding: 0.55rem 0; opacity: 0.85; }
+.nav a { color: inherit; display: inline-flex; align-items: center; min-height: 2.5rem; padding: 0; opacity: 0.85; }
 .nav a:hover, .nav a[aria-current] { opacity: 1; text-decoration: none; }
 .nav-menu { display: inline-flex; align-items: center; white-space: nowrap; }
 .nav .menu-link { display: inline-flex; align-items: center; }
@@ -128,7 +131,7 @@ button.linkish:hover { text-decoration: underline; }
 .nav a[aria-current] .menu-label { border-bottom-color: currentColor; }
 .nav .brand { display: inline-flex; align-items: center; gap: 0.35rem; font-weight: 700; opacity: 1; margin-right: 0.8rem; }
 .brand-title { text-transform: lowercase; }
-.brand-icon { display: block; width: 1em; height: 1em; object-fit: contain; flex: 0 0 auto; }
+.brand-icon { display: block; width: 1em; height: 1em; object-fit: contain; object-position: center; align-self: center; flex: 0 0 auto; }
 .nav-spacer { flex: 1; }
 
 /* content column */
@@ -162,10 +165,9 @@ button.linkish:hover { text-decoration: underline; }
 /* rows */
 .rows { list-style: none; margin: 0; padding: 0; }
 .row { display: flex; align-items: flex-start; gap: 0.35rem; padding: 0.3rem 0; border-bottom: 1px solid var(--faint); }
-.row.age-boundary { margin-top: 0.3rem; padding-top: 0.55rem; }
-.row.age-boundary.age-h1 { border-top: 2px solid color-mix(in srgb, var(--accent) 75%, transparent); }
-.row.age-boundary.age-h3 { border-top: 2px solid color-mix(in srgb, var(--accent) 48%, transparent); }
-.row.age-boundary.age-h24 { border-top: 2px solid color-mix(in srgb, var(--accent) 25%, transparent); }
+.row:has(+ .row.age-boundary.age-h1) { border-bottom-color: color-mix(in srgb, var(--accent) 75%, transparent); }
+.row:has(+ .row.age-boundary.age-h3) { border-bottom-color: color-mix(in srgb, var(--accent) 48%, transparent); }
+.row:has(+ .row.age-boundary.age-h24) { border-bottom-color: color-mix(in srgb, var(--accent) 25%, transparent); }
 .row.is-selected { background: color-mix(in srgb, var(--accent) 8%, transparent); margin: 0 -0.5rem; padding-left: 0.5rem; padding-right: 0.5rem; }
 .rank { color: var(--muted); min-width: 2.1rem; text-align: right; font-variant-numeric: tabular-nums; padding-top: 0.05rem; }
 .cell { min-width: 0; flex: 1; }
@@ -177,15 +179,14 @@ button.linkish:hover { text-decoration: underline; }
 .meta { color: var(--muted); font-size: 0.8rem; display: flex; flex-wrap: wrap; gap: 0 0.3rem; }
 .meta a { color: inherit; }
 .meta .discussion.is-found {
-  color: var(--focus);
-  font-weight: 650;
-  text-decoration: underline;
-  text-decoration-thickness: 0.08em;
-  text-underline-offset: 0.14em;
+  color: var(--discussion-found);
 }
+.meta .discussion.is-found:hover { text-decoration: none; }
 
 /* pager */
-.pager { display: flex; justify-content: space-between; padding: 0.75rem 0; color: var(--muted); font-size: 0.9rem; }
+.pager { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 1rem; padding: 0.75rem 0; color: var(--muted); font-size: 0.9rem; }
+.pager-side { display: flex; flex-wrap: wrap; gap: 1rem; }
+.pager-side:last-child { justify-content: flex-end; }
 
 /* item page */
 .itemhead h1 { font-size: 1.35rem; line-height: 1.25; margin: 0.25rem 0 0.35rem; }
