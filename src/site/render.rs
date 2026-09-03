@@ -285,7 +285,7 @@ mod tests {
             "index.html",
             "item.html",
             "sources.html",
-            "settings.html",
+            "preferences.html",
             "404.html",
             "offline.html",
             "manifest.webmanifest",
@@ -319,10 +319,13 @@ mod tests {
         let script_file = DefaultTheme::get("static/app.js").unwrap();
         let script = std::str::from_utf8(script_file.data.as_ref()).unwrap();
         assert!(script.contains("url.searchParams.set(\"q\", query)"));
-        assert!(script.contains("KIND === \"river\" && event.key === \"ArrowRight\""));
-        assert!(script.contains("event.key === \"ArrowRight\""));
-        assert!(script.contains("event.key === \"ArrowLeft\""));
-        assert!(script.contains("event.key === \"ArrowLeft\" ? BASE"));
+        assert!(script.contains("KIND === \"river\" && direction === \"next\""));
+        assert!(script.contains("direction === \"previous\" ? BASE"));
+        assert!(script.contains("[\"ArrowLeft\", \"h\", \"k\"]"));
+        assert!(script.contains("[\"ArrowRight\", \"l\", \"j\"]"));
+        assert!(!script.contains("var selected ="));
+        assert!(!script.contains("event.key === \"o\""));
+        assert!(!script.contains("event.key === \"Enter\""));
         assert!(script.contains("wireMenuNavigation"));
         assert!(script.contains("event.key === \"?\""));
         assert!(script.contains("f: \"\", c: \"categories/\", t: \"tags/\""));
@@ -331,6 +334,9 @@ mod tests {
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
         assert!(base.contains("id=\"shortcut-help\""));
         assert!(base.contains("Keyboard shortcuts"));
+        assert!(base.contains("data-route=\"preferences/\""));
+        assert!(!base.contains("data-route=\"settings/\""));
+        assert!(!base.contains("id=\"shortcut-lists\""));
 
         let item_file = DefaultTheme::get("templates/item.html").unwrap();
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();

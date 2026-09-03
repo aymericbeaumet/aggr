@@ -336,8 +336,6 @@
     if (input.value.trim() || category.value || tag.value) render();
   }
 
-  var selected = -1;
-  function rows() { return $$(".row"); }
   function navigate(target) {
     var destination = new URL(target, document.baseURI).href;
     if (window.swup) window.swup.navigate(destination);
@@ -379,7 +377,7 @@
     if (!waitingForGoto) return false;
     waitingForGoto = false;
     clearTimeout(gotoTimer);
-    var routes = { f: "", c: "categories/", t: "tags/", s: "sources/", p: "settings/" };
+    var routes = { f: "", c: "categories/", t: "tags/", s: "sources/", p: "preferences/" };
     if (!Object.prototype.hasOwnProperty.call(routes, key)) return false;
     navigate(new URL(routes[key], BASE).href);
     return true;
@@ -387,14 +385,11 @@
   function isEditing(target) {
     return target instanceof Element && !!target.closest("input, textarea, select, button, a, [contenteditable=true]");
   }
-  function select(index) {
-    var all = rows();
-    if (!all.length) return;
-    selected = Math.max(0, Math.min(all.length - 1, index));
-    all.forEach(function (row, i) { row.classList.toggle("is-selected", i === selected); });
-    all[selected].scrollIntoView({ block: "nearest" });
-    var title = $("a.title", all[selected]);
-    if (title) title.focus({ preventScroll: true });
+  function navigationDirection(key) {
+    var normalized = key.length === 1 ? key.toLowerCase() : key;
+    if (["ArrowLeft", "h", "k"].indexOf(normalized) !== -1) return "previous";
+    if (["ArrowRight", "l", "j"].indexOf(normalized) !== -1) return "next";
+    return null;
   }
   document.addEventListener("keydown", function (event) {
     if (!event.altKey && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -433,31 +428,22 @@
       else navigate(new URL("search/", BASE).href);
       return;
     }
-    if (KIND === "river" && event.key === "ArrowRight") {
+    var direction = navigationDirection(event.key);
+    if (KIND === "river" && direction === "next") {
       var first = $(".rows .row");
       if (!first || !first.dataset.url) return;
       event.preventDefault();
       navigate(first.dataset.url);
       return;
     }
-    if (KIND === "item" && (event.key === "ArrowRight" || event.key === "ArrowLeft")) {
+    if (KIND === "item" && direction) {
       var article = $("article.item");
-      var target = article && (article.dataset[event.key === "ArrowRight" ? "nextUrl" : "previousUrl"] || (event.key === "ArrowLeft" ? BASE : null));
+      var target = article && (article.dataset[direction === "next" ? "nextUrl" : "previousUrl"] || (direction === "previous" ? BASE : null));
       if (!target) return;
       event.preventDefault();
       navigate(target);
       return;
     }
-    var row = selected >= 0 ? rows()[selected] : null;
-    if (event.key === "j") select(selected + 1);
-    else if (event.key === "k") select(selected - 1);
-    else if (event.key === "o" && row) window.open(row.dataset.link, "_blank", "noopener");
-    else if (event.key === "Enter" && row) {
-      if (window.swup) window.swup.navigate(row.dataset.url);
-      else location.href = row.dataset.url;
-    }
-    else return;
-    event.preventDefault();
   });
 
   function toast(text, action, onAction) {
@@ -536,9 +522,7 @@
     window.swup.hooks.before("content:replace", function (visit) {
       syncPageHead(visit && visit.to && visit.to.document);
     });
-    window.swup.hooks.on("history:popstate", function () { selected = -1; });
     window.swup.hooks.on("page:view", function () {
-      selected = -1;
       bootPage();
       announceNavigation();
       var target = KIND === "search" ? $("#q") : $("#swup");

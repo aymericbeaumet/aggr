@@ -63,7 +63,7 @@
       <span class="nav-sep" aria-hidden="true">|</span>
       <a class="menu-link" data-route="sources/" data-kinds="sources source" href="{{ 'sources/' | url_for }}"{% if page.kind in ['sources', 'source'] %} aria-current="page"{% endif %}><span class="menu-label">sources</span></a>
       <span class="nav-sep" aria-hidden="true">|</span>
-      <a class="menu-link" data-route="settings/" data-kinds="settings" href="{{ 'settings/' | url_for }}"{% if page.kind == 'settings' %} aria-current="page"{% endif %}><span class="menu-label">settings</span></a>
+      <a class="menu-link" data-route="preferences/" data-kinds="preferences" href="{{ 'preferences/' | url_for }}"{% if page.kind == 'preferences' %} aria-current="page"{% endif %}><span class="menu-label">preferences</span></a>
     </span>
     <span class="nav-spacer"></span>
     <a class="config-link"{% if not site.config_url %} data-route="aggr.toml"{% endif %} href="{{ site.config_url or ('aggr.toml' | url_for) }}" target="_blank" rel="noopener noreferrer">aggr.toml ↗</a>
@@ -86,22 +86,15 @@
           <div><dt><kbd>g</kbd><kbd>c</kbd></dt><dd>Categories</dd></div>
           <div><dt><kbd>g</kbd><kbd>t</kbd></dt><dd>Tags</dd></div>
           <div><dt><kbd>g</kbd><kbd>s</kbd></dt><dd>Sources</dd></div>
-          <div><dt><kbd>g</kbd><kbd>p</kbd></dt><dd>Settings</dd></div>
+          <div><dt><kbd>g</kbd><kbd>p</kbd></dt><dd>Preferences</dd></div>
           <div><dt><kbd>?</kbd></dt><dd>Show this help</dd></div>
-        </dl>
-      </section>
-      <section aria-labelledby="shortcut-lists">
-        <h3 id="shortcut-lists">Lists</h3>
-        <dl class="shortcut-list">
-          <div><dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / previous</dd></div>
-          <div><dt><kbd>Enter</kbd></dt><dd>Open article</dd></div>
-          <div><dt><kbd>o</kbd></dt><dd>Open original</dd></div>
         </dl>
       </section>
       <section aria-labelledby="shortcut-articles">
         <h3 id="shortcut-articles">Articles</h3>
         <dl class="shortcut-list">
-          <div><dt><kbd>←</kbd> / <kbd>→</kbd></dt><dd>Previous / next</dd></div>
+          <div><dt><kbd>←</kbd> / <kbd>h</kbd> / <kbd>k</kbd></dt><dd>Previous</dd></div>
+          <div><dt><kbd>→</kbd> / <kbd>l</kbd> / <kbd>j</kbd></dt><dd>Next</dd></div>
         </dl>
       </section>
     </div>

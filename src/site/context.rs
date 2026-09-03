@@ -48,7 +48,7 @@ pub struct BuildCtx {
 #[derive(Debug, Clone, Serialize)]
 pub struct PageCtx {
     /// `river`, `source`, `category`, `tag`, taxonomy indexes, `item`, `sources`, `search`,
-    /// `settings`, `404`, or `offline`.
+    /// `preferences`, `404`, or `offline`.
     pub kind: String,
     pub title: String,
     /// Site path of this page, e.g. `sources/rust-blog/`.

@@ -146,7 +146,7 @@ pub fn precache_paths(
         "",
         "sources/",
         "search/",
-        "settings/",
+        "preferences/",
         "404.html",
         "offline.html",
         "manifest.webmanifest",
@@ -739,12 +739,12 @@ pub fn build(
         .as_bytes(),
     )?;
     write(
-        &out.join("settings/index.html"),
+        &out.join("preferences/index.html"),
         simple(
-            "settings",
-            "Settings",
-            "settings/",
-            "settings.html",
+            "preferences",
+            "Preferences",
+            "preferences/",
+            "preferences.html",
             None,
             None,
             None,
@@ -1346,7 +1346,8 @@ mod tests {
         );
         assert_eq!(paths[0], "/repo/");
         assert!(paths.contains(&"/repo/offline.html".to_string()));
-        assert!(paths.contains(&"/repo/settings/".to_string()));
+        assert!(paths.contains(&"/repo/preferences/".to_string()));
+        assert!(!paths.contains(&"/repo/settings/".to_string()));
         assert!(paths.contains(&"/repo/sources/a/".to_string()));
         assert!(paths.contains(&"/repo/assets/style.css".to_string()));
         assert!(paths.contains(&"/repo/items/a/1/".to_string()));
@@ -1686,9 +1687,10 @@ mod tests {
         assert!(river.contains("rel=\"apple-touch-icon\""));
         assert!(river.contains("name=\"theme-color\""));
         assert!(river.contains("href=\"sources/\""), "{river}");
-        assert!(river.contains("href=\"settings/\""), "{river}");
+        assert!(river.contains("href=\"preferences/\""), "{river}");
         assert!(river.contains("aggr.toml ↗</a>"), "{river}");
-        assert!(out.join("settings/index.html").is_file());
+        assert!(out.join("preferences/index.html").is_file());
+        assert!(!out.join("settings/index.html").exists());
         assert!(out.join("pagefind/pagefind.js").is_file());
         assert!(out.join("sources/blog/atom.xml").is_file());
         assert!(out.join("sources/blog/rss.xml").is_file());

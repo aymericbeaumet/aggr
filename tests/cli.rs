@@ -556,7 +556,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(index.contains(">built with aggr</a>"));
     assert!(index.contains("href=\"https://github.com/aymericbeaumet/aggr\""));
     assert!(index.contains("href=\"sources/\""), "{index}");
-    assert!(index.contains("href=\"settings/\""), "{index}");
+    assert!(index.contains("href=\"preferences/\""), "{index}");
     assert!(index.contains("target=\"_blank\""), "{index}");
     assert!(!index.contains("built <time"));
     assert!(index.contains("id=\"swup\""));
@@ -604,7 +604,8 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(site.join("feed.json").exists());
     assert!(site.join(".nojekyll").exists());
     assert!(site.join("sources/demo/index.html").exists());
-    assert!(site.join("settings/index.html").exists());
+    assert!(site.join("preferences/index.html").exists());
+    assert!(!site.join("settings/index.html").exists());
     assert!(site.join("aggr.toml").exists());
     assert!(site.join("categories/demo/index.html").exists());
     assert!(site.join("categories/demo/atom.xml").exists());
