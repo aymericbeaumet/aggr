@@ -59,3 +59,39 @@ jobs:
           cargo="$(perl -ne 'print $1 if /^version = "(.*)"/' Cargo.toml)"
           file="$(tr -d '[:space:]' < VERSION)"
           [ "$cargo" = "$file" ] || { echo "Cargo.toml says $cargo, VERSION says $file"; exit 1; }
+
+  # Exercise the same-commit installer used by the reusable workflow. Before a version-bump commit
+  # is released, use the latest existing release so the bump can still pass CI and be tagged.
+  installer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: aymericbeaumet/aggr
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          if gh release view "v$version" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "expected=$version" >> "$GITHUB_OUTPUT"
+          else
+            latest="$(gh release view --repo "$RELEASE_REPOSITORY" --json tagName --jq .tagName)"
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "expected=${latest#v}" >> "$GITHUB_OUTPUT"
+          fi
+      - id: install-current
+        if: steps.release.outputs.released == 'true'
+        uses: $/.github/actions/install
+      - id: install-latest
+        if: steps.release.outputs.released != 'true'
+        uses: $/.github/actions/install
+        with:
+          version: ${{ steps.release.outputs.expected }}
+      - env:
+          EXPECTED: ${{ steps.release.outputs.expected }}
+        run: |
+          actual="$(aggr --version | awk '{ print $2 }')"
+          [ "$actual" = "$EXPECTED" ] || { echo "installed $actual, expected $EXPECTED"; exit 1; }

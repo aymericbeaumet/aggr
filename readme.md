@@ -48,6 +48,11 @@ changes, appends new items to the orphan `aggr` branch, builds the site, and dep
 Pages. Forks must enable scheduled workflows once in the Actions tab. Private repositories need a
 GitHub plan that supports private Pages; `pages: false` keeps the result as an Actions artifact.
 
+The `@v1` reference follows every compatible release automatically. Its installer is loaded from
+the reusable workflow's exact commit, so the workflow and binary cannot drift and reader
+repositories never need a version bump. Use an immutable `@vX.Y.Z` tag or full commit SHA only when
+you deliberately want to freeze updates.
+
 ## Configure sources
 
 Only write values you want to change. The commented

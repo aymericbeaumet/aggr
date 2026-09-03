@@ -17,10 +17,6 @@ on:
         description: Path to aggr.toml, relative to the repository root.
         type: string
         default: aggr.toml
-      version:
-        description: aggr release to install. Defaults to the one this workflow was tagged with.
-        type: string
-        default: ""
       pages:
         description: Deploy the site to GitHub Pages. Off, the site is only kept as a run artifact.
         type: boolean
@@ -56,9 +52,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: aymericbeaumet/aggr@v1
+      # `$` resolves inside aggr at this reusable workflow's exact commit, even when the caller is
+      # another repository. The workflow and binary therefore always advance together under `@v1`.
+      - uses: $/.github/actions/install
         with:
-          version: ${{ inputs.version }}
+          token: ${{ github.token }}
 
       # The data ref is part of the key. A partial restore still helps after new items arrive;
       # aggr's own fingerprint rejects stale config, theme, URL or binary output. Cache only the
