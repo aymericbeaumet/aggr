@@ -1,6 +1,6 @@
 {% extends "base.html" %}
-{# Served by the service worker for any page that is neither online nor cached. app.js fills
-   #list with the item pages the cache does hold. #}
+{# Served by the service worker for any page that is neither online nor cached. The newest
+   guaranteed-precached entries are rendered here so fallback works before JavaScript. #}
 {% block content %}
 <div class="listhead">
   <h1>Offline</h1>
@@ -8,9 +8,13 @@
 </div>
 <p class="empty">
   You are offline and this page is not cached. Head back to the <a href="{{ '' | url_for }}">feed</a>,
-  or read what is already on this device:
+  or read one of the newest entries cached during installation:
 </p>
-<ol class="rows" id="list" data-shell="offline"></ol>
-<p class="empty" id="empty" hidden>Nothing cached yet — pages you open while online stay readable offline.</p>
-<noscript><p class="empty">This page needs JavaScript to list the cached items.</p></noscript>
+{% if items %}<ol class="rows" id="list" data-shell="offline">
+{% for item in items %}
+  {% set rank = loop.index %}
+  {% set age_boundary = loop.changed(item.age_band) and not loop.first %}
+  {% include "_item.html" %}
+{% endfor %}
+</ol>{% else %}<p class="empty">Nothing is cached yet.</p>{% endif %}
 {% endblock %}

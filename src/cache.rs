@@ -43,10 +43,24 @@ pub fn render_fingerprint(
     data_sha: Option<&str>,
     base_url: Option<&str>,
     release: bool,
+    discussions: Option<&str>,
 ) -> Result<String> {
     let mut hash = Sha1::new();
-    hash_field(&mut hash, b"schema", b"render-v1");
+    hash_field(&mut hash, b"schema", b"render-v2");
     hash_field(&mut hash, b"version", env!("CARGO_PKG_VERSION").as_bytes());
+    // Development builds often keep the package version while renderer code changes. Hash the
+    // implementation itself so a prior binary can never make a new binary restore stale HTML.
+    for (name, source) in [
+        ("content", include_str!("content.rs")),
+        ("model", include_str!("model.rs")),
+        ("site", include_str!("site/mod.rs")),
+        ("context", include_str!("site/context.rs")),
+        ("outputs", include_str!("site/outputs.rs")),
+        ("pagefind", include_str!("site/pagefind.rs")),
+        ("render", include_str!("site/render.rs")),
+    ] {
+        hash_field(&mut hash, name.as_bytes(), source.as_bytes());
+    }
     hash_field(
         &mut hash,
         b"embedded-theme",
@@ -60,6 +74,11 @@ pub fn render_fingerprint(
     hash_field(&mut hash, b"data-sha", data_sha.unwrap_or("").as_bytes());
     hash_field(&mut hash, b"base-url", base_url.unwrap_or("").as_bytes());
     hash_field(&mut hash, b"release", if release { b"1" } else { b"0" });
+    hash_field(
+        &mut hash,
+        b"discussions",
+        discussions.unwrap_or("").as_bytes(),
+    );
     hash_field(
         &mut hash,
         b"repository",
@@ -491,6 +510,7 @@ mod tests {
             Some("data"),
             None,
             false,
+            None,
         )
         .unwrap();
 
@@ -502,6 +522,7 @@ mod tests {
             Some("data"),
             None,
             false,
+            None,
         )
         .unwrap();
         assert_ne!(first, theme_changed);
@@ -514,8 +535,21 @@ mod tests {
             Some("data"),
             None,
             false,
+            None,
         )
         .unwrap();
         assert_ne!(theme_changed, config_changed);
+
+        let discussion_changed = render_fingerprint(
+            &config,
+            root.path(),
+            Some("config"),
+            Some("data"),
+            None,
+            false,
+            Some("new-direct-link"),
+        )
+        .unwrap();
+        assert_ne!(config_changed, discussion_changed);
     }
 }

@@ -335,7 +335,7 @@ async fn fetch_one(
 }
 
 fn keep_newest(items: &mut Vec<RawItem>, limit: usize) {
-    items.sort_by_key(|item| std::cmp::Reverse(item.published.or(item.updated)));
+    items.sort_by_key(|item| std::cmp::Reverse(item.created_at()));
     items.truncate(limit);
 }
 
@@ -458,7 +458,8 @@ struct Planned {
 fn plan(raw: &RawItem, source: &Source, options: &Options, content_kind: ContentKind) -> Planned {
     // A future-dated entry would otherwise land in a directory that does not exist yet.
     let published = raw.published.map(|date| date.min(options.now));
-    let date = published.unwrap_or(options.now);
+    let updated = raw.updated.map(|date| date.min(options.now));
+    let date = published.or(updated).unwrap_or(options.now);
     let base = url::Url::parse(&raw.link).ok();
     let body = match &raw.content_html {
         Some(html) => content::to_markdown(html, base.as_ref()),
@@ -476,7 +477,7 @@ fn plan(raw: &RawItem, source: &Source, options: &Options, content_kind: Content
         link: raw.link.clone(),
         source: source.slug.clone(),
         published,
-        updated: raw.updated.map(|date| date.min(options.now)),
+        updated,
         first_seen: options.now,
         authors: raw.authors.clone(),
         labels: source

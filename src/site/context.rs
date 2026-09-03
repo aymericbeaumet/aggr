@@ -29,6 +29,10 @@ pub struct SiteCtx {
 pub struct DiscussionLinkCtx {
     pub name: String,
     pub url: String,
+    /// A direct link to a matching discussion rather than the provider's search page.
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,6 +75,8 @@ pub struct ItemCtx {
     pub source_name: String,
     pub category: Option<String>,
     pub date: DateTime<Utc>,
+    /// Stable build-time age bucket used for the 1h, 3h and 24h visual boundaries.
+    pub age_band: &'static str,
     pub published: Option<DateTime<Utc>>,
     pub updated: Option<DateTime<Utc>>,
     pub first_seen: DateTime<Utc>,
@@ -184,14 +190,7 @@ pub fn category_slug(name: &str) -> String {
 }
 
 impl ItemCtx {
-    pub fn from_item(
-        item: &Item,
-        source_name: &str,
-        category: Option<&str>,
-        links: Option<&GitHubLinks<'_>>,
-        excerpt: String,
-        discussions: &[crate::config::DiscussionLinkConfig],
-    ) -> Self {
+    pub fn from_item(item: &Item, options: ItemOptions<'_>) -> Self {
         let md = item.md_path();
         Self {
             path: item.path.clone(),
@@ -200,34 +199,72 @@ impl ItemCtx {
             link: item.front.link.clone(),
             domain: domain_of(&item.front.link),
             source: item.front.source.clone(),
-            source_name: source_name.to_string(),
-            category: category.map(str::to_string),
+            source_name: options.source_name.to_string(),
+            category: options.category.map(str::to_string),
             date: item.created_at(),
+            age_band: age_band(options.now, item.created_at()),
             published: item.front.published,
             updated: item.front.updated,
             first_seen: item.front.first_seen,
             authors: item.front.authors.clone(),
             labels: item.front.labels.clone(),
-            discussions: discussions
+            discussions: options
+                .discussions
                 .iter()
-                .map(|discussion| DiscussionLinkCtx {
-                    name: compact_name(&discussion.name),
-                    url: discussion
-                        .url
-                        .replace("{url}", &encode_query(&item.front.link))
-                        .replace("{title}", &encode_query(&item.front.title)),
+                .map(|discussion| {
+                    let found = discussion
+                        .provider
+                        .and_then(|provider| options.resolutions.get(provider, &item.front.link));
+                    DiscussionLinkCtx {
+                        name: compact_name(&discussion.name),
+                        url: found.map(|found| found.url.clone()).unwrap_or_else(|| {
+                            discussion
+                                .url
+                                .replace("{url}", &encode_query(&item.front.link))
+                                .replace("{title}", &encode_query(&item.front.title))
+                        }),
+                        found: found.is_some(),
+                        score: found.map(|found| found.score),
+                    }
                 })
                 .collect(),
             summary: item.front.summary.clone(),
-            excerpt,
+            excerpt: options.excerpt,
             content: item.front.content,
             extra: item.front.extra.clone(),
-            permalink: links.map(|l| l.permalink(&md)),
-            raw_url: links.map(|l| l.raw(&md)),
-            history_url: links.map(|l| l.history(&md)),
-            edit_url: links.map(|l| l.edit(&md)),
+            permalink: options.links.map(|l| l.permalink(&md)),
+            raw_url: options.links.map(|l| l.raw(&md)),
+            history_url: options.links.map(|l| l.history(&md)),
+            edit_url: options.links.map(|l| l.edit(&md)),
             body_html: None,
         }
+    }
+}
+
+pub struct ItemOptions<'a> {
+    pub source_name: &'a str,
+    pub category: Option<&'a str>,
+    pub links: Option<&'a GitHubLinks<'a>>,
+    pub excerpt: String,
+    pub discussions: &'a [crate::config::DiscussionLinkConfig],
+    pub resolutions: &'a crate::discussions::ResolutionSet,
+    pub now: DateTime<Utc>,
+}
+
+/// Age bands are half-open: exactly 1h enters `h1`, exactly 3h enters `h3`, and exactly 24h
+/// enters `h24`. Future dates are treated as fresh.
+pub fn age_band(now: DateTime<Utc>, date: DateTime<Utc>) -> &'static str {
+    let age = now
+        .signed_duration_since(date)
+        .max(chrono::Duration::zero());
+    if age < chrono::Duration::hours(1) {
+        "fresh"
+    } else if age < chrono::Duration::hours(3) {
+        "h1"
+    } else if age < chrono::Duration::hours(24) {
+        "h3"
+    } else {
+        "h24"
     }
 }
 
@@ -245,6 +282,18 @@ fn encode_query(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn age_bands_change_at_exact_visual_boundaries() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 3, 12, 0, 0).unwrap();
+        assert_eq!(age_band(now, now + chrono::Duration::minutes(1)), "fresh");
+        assert_eq!(age_band(now, now - chrono::Duration::minutes(59)), "fresh");
+        assert_eq!(age_band(now, now - chrono::Duration::hours(1)), "h1");
+        assert_eq!(age_band(now, now - chrono::Duration::minutes(179)), "h1");
+        assert_eq!(age_band(now, now - chrono::Duration::hours(3)), "h3");
+        assert_eq!(age_band(now, now - chrono::Duration::hours(24)), "h24");
+    }
 
     #[test]
     fn github_links_pin_to_the_data_sha() {

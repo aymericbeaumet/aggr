@@ -5,6 +5,7 @@ use anyhow::Result;
 use super::context::{BuildCtx, ItemCtx, SiteCtx};
 
 /// A ~200 byte page that sends old URLs to the item's GitHub permalink.
+#[cfg(test)]
 pub fn redirect_stub(target: &str) -> String {
     let target = escape(target);
     format!(

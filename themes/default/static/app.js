@@ -24,15 +24,15 @@
     if (isNaN(timestamp)) return null;
     var seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
     if (seconds < 60) return "just now";
-    var minutes = Math.round(seconds / 60);
+    var minutes = Math.floor(seconds / 60);
     if (minutes < 60) return minutes + "m ago";
-    var hours = Math.round(minutes / 60);
+    var hours = Math.floor(minutes / 60);
     if (hours < 36) return hours + "h ago";
-    var days = Math.round(hours / 24);
+    var days = Math.floor(hours / 24);
     if (days < 45) return days + "d ago";
-    var months = Math.round(days / 30);
+    var months = Math.floor(days / 30);
     if (months < 18) return months + "mo ago";
-    return Math.round(days / 365) + "y ago";
+    return Math.floor(days / 365) + "y ago";
   }
   function dateFormat() {
     var stored;
@@ -53,7 +53,40 @@
     $$("time[datetime]", root).forEach(function (time) {
       var exact = time.getAttribute("datetime");
       var text = dateText(exact, format);
-      if (text) { time.title = exact; time.textContent = text; }
+      var timestamp = Date.parse(exact);
+      if (text && !isNaN(timestamp)) {
+        var local = new Intl.DateTimeFormat(undefined, {
+          weekday: "long", year: "numeric", month: "long", day: "numeric",
+          hour: "2-digit", minute: "2-digit", second: "2-digit", timeZoneName: "long"
+        }).format(new Date(timestamp));
+        time.title = local;
+        time.setAttribute("aria-label", text + "; " + local);
+        time.textContent = text;
+      }
+    });
+    applyAgeBoundaries(root);
+  }
+
+  function ageBand(iso) {
+    var age = Math.max(0, Date.now() - Date.parse(iso));
+    if (age < 60 * 60 * 1000) return "fresh";
+    if (age < 3 * 60 * 60 * 1000) return "h1";
+    if (age < 24 * 60 * 60 * 1000) return "h3";
+    return "h24";
+  }
+  function applyAgeBoundaries(root) {
+    $$(".rows:not(.search-results)", root).forEach(function (list) {
+      var previous = null;
+      $$(".row", list).forEach(function (row) {
+        var time = $(".meta time[datetime]", row);
+        if (!time) return;
+        var band = ageBand(time.getAttribute("datetime"));
+        row.classList.remove("age-fresh", "age-h1", "age-h3", "age-h24");
+        row.classList.add("age-" + band);
+        row.dataset.age = band;
+        row.classList.toggle("age-boundary", previous !== null && previous !== band);
+        previous = band;
+      });
     });
   }
   function setDateFormat(format) {
@@ -122,37 +155,55 @@
     });
   }
 
-  function renderResult(entry, rank) {
+  function renderResult(entry, display, rank) {
     var page = BASE + entry.url.replace(/^\/+/, "");
-    var original = entry.meta.original || page;
+    display = display || {};
+    var original = display.original || page;
     var date = entry.meta.date || "";
     var meta = [date ? el("time", { datetime: date, title: date, text: date.slice(0, 10) }) : null, document.createTextNode(" · "), el("a", { href: original, target: "_blank", rel: "noopener noreferrer", text: "original" })];
-    ((window.AGGR && window.AGGR.discussions) || []).forEach(function (discussion) {
+    var discussions = display.discussions || ((window.AGGR && window.AGGR.discussions) || []);
+    discussions.forEach(function (discussion) {
       var url = discussion.url.replace("{url}", encodeURIComponent(original)).replace("{title}", encodeURIComponent(entry.meta.title || ""));
       meta.push(document.createTextNode(" · "));
-      meta.push(el("a", { href: url, target: "_blank", rel: "noopener noreferrer", text: discussion.name.toLowerCase().replace(/\s+/g, "") }));
+      meta.push(el("a", {
+        "class": "discussion" + (discussion.found ? " is-found" : ""),
+        href: url, target: "_blank", rel: "noopener noreferrer",
+        "aria-label": discussion.found ? discussion.name + ", matching discussion found" : discussion.name,
+        text: discussion.name.toLowerCase().replace(/\s+/g, "")
+      }));
     });
+    var excerpt = el("div", { "class": "search-excerpt" });
+    if (entry.excerpt) excerpt.innerHTML = entry.excerpt;
+    else excerpt.textContent = display.excerpt || "";
     return el("li", { "class": "row", "data-url": page, "data-link": original }, [
       el("span", { "class": "rank", text: rank + "." }),
       el("div", { "class": "cell" }, [
         el("a", { "class": "title", href: page, text: entry.meta.title }),
-        entry.meta.domain ? el("a", { "class": "domain", href: BASE + "sources/" + entry.meta.source_slug + "/", text: "(" + entry.meta.domain + ")" }) : null,
-        el("div", { "class": "search-excerpt", html: entry.excerpt }),
+        display.domain ? el("a", { "class": "domain", href: BASE + "sources/" + display.source_slug + "/", text: "(" + display.domain + ")" }) : null,
+        excerpt,
         el("div", { "class": "meta" }, meta.filter(Boolean))
       ])
     ]);
   }
 
   var pagefind;
+  var searchMetadata;
   function loadPagefind() {
     if (!pagefind) {
       pagefind = import(new URL("pagefind/pagefind.js", document.baseURI).href).then(async function (api) {
-        await api.options({ baseUrl: new URL(".", document.baseURI).pathname });
+        await api.options({ baseUrl: new URL(".", document.baseURI).pathname, excerptLength: 24 });
         await api.init();
         return api;
       });
     }
     return pagefind;
+  }
+  function loadSearchMetadata() {
+    if (!searchMetadata) {
+      searchMetadata = fetch(new URL("search-meta.json", document.baseURI).href, { credentials: "same-origin" })
+        .then(function (response) { if (!response.ok) throw new Error("search metadata unavailable"); return response.json(); });
+    }
+    return searchMetadata;
   }
   function fillSearch() {
     var list = $("#list");
@@ -163,17 +214,21 @@
     var tag = $("#tag-filter");
     var sort = $("#search-sort");
     var count = $("#count");
+    var status = $("#search-status");
     var empty = $("#empty");
     var generation = 0;
-    function show(rows, searched) {
-      list.textContent = "";
-      rows.forEach(function (entry, i) { list.appendChild(renderResult(entry, i + 1)); });
+    var timer;
+    function show(rows, total, searched) {
+      var fragment = document.createDocumentFragment();
+      rows.forEach(function (entry, i) { fragment.appendChild(renderResult(entry.data, entry.display, i + 1)); });
+      list.replaceChildren(fragment);
       list.setAttribute("aria-busy", "false");
       empty.hidden = rows.length > 0;
       empty.textContent = searched ? "No matching items." : "Type to search the most recent items.";
-      var label = rows.length === 100 ? "100 or more results" : rows.length + (rows.length === 1 ? " result" : " results");
-      count.textContent = rows.length === 100 ? "100+" : String(rows.length);
-      count.setAttribute("aria-label", label);
+      var label = total + (total === 1 ? " result" : " results");
+      count.textContent = total > 999 ? "999+" : String(total);
+      count.style.visibility = searched ? "visible" : "hidden";
+      if (status) status.textContent = searched ? label : "";
       formatTimes(list);
     }
     async function render() {
@@ -183,37 +238,45 @@
       if (category.value) filters.category = category.value;
       if (tag.value) filters.tag = tag.value;
       var searched = !!query || !!Object.keys(filters).length;
-      if (!searched) { show([], false); return; }
+      if (!searched) { show([], 0, false); return; }
       list.setAttribute("aria-busy", "true");
       try {
-        var api = await loadPagefind();
+        var loaded = await Promise.all([loadPagefind(), loadSearchMetadata()]);
+        var api = loaded[0];
+        var metadata = loaded[1];
         var options = { filters: filters };
         if (sort.value === "newest") options.sort = { date: "desc" };
         var found = await api.search(query || null, options);
-        var rows = await Promise.all(found.results.slice(0, 100).map(function (result) { return result.data(); }));
-        if (current === generation) show(rows, true);
+        var rows = await Promise.all(found.results.slice(0, 40).map(async function (result) {
+          var data = await result.data();
+          return { data: data, display: metadata[data.url.replace(/^\/+/, "")] || {} };
+        }));
+        if (current === generation) show(rows, found.results.length, true);
       } catch (error) {
         if (current === generation) {
-          show([], true);
+          show([], 0, true);
           empty.textContent = "Search is unavailable right now.";
         }
       }
     }
-    function addOptions(select, values) {
-      Object.keys(values || {}).sort().forEach(function (value) {
-        var total = Number(values[value]) || 0;
-        if (total > 0) select.appendChild(el("option", { value: value, text: value + " (" + total + ")" }));
-      });
+    function schedule() {
+      clearTimeout(timer);
+      timer = setTimeout(render, 80);
+      var query = input.value.trim();
+      if (query) {
+        loadPagefind()
+          .then(function (api) { return api.preload ? api.preload(query) : null; })
+          .catch(function () { /* render reports an unavailable index without an unhandled rejection */ });
+      }
     }
-    loadPagefind().then(function (api) { return api.filters(); }).then(function (filters) {
-      addOptions(category, filters.category);
-      addOptions(tag, filters.tag);
-    });
-    input.addEventListener("input", render);
+    count.style.visibility = "hidden";
+    input.addEventListener("focus", loadPagefind, { once: true });
+    input.addEventListener("input", schedule);
     category.addEventListener("change", render);
     tag.addEventListener("change", render);
     sort.addEventListener("change", render);
     if (form) form.addEventListener("submit", function (event) { event.preventDefault(); render(); });
+    if (document.activeElement === input) loadPagefind();
   }
 
   var selected = -1;
@@ -224,9 +287,11 @@
     selected = Math.max(0, Math.min(all.length - 1, index));
     all.forEach(function (row, i) { row.classList.toggle("is-selected", i === selected); });
     all[selected].scrollIntoView({ block: "nearest" });
+    var title = $("a.title", all[selected]);
+    if (title) title.focus({ preventScroll: true });
   }
   document.addEventListener("keydown", function (event) {
-    if (event.altKey || event.ctrlKey || event.metaKey || /^(input|textarea)$/i.test(event.target.tagName)) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.target.closest("input, textarea, select, button, a, [contenteditable=true]")) return;
     var row = selected >= 0 ? rows()[selected] : null;
     if (event.key === "j") select(selected + 1);
     else if (event.key === "k") select(selected - 1);
@@ -274,6 +339,8 @@
         if (active) link.setAttribute("aria-current", "page");
         else link.removeAttribute("aria-current");
       });
+      var active = $(".nav [aria-current=page]");
+      if (active) active.scrollIntoView({ block: "nearest", inline: "nearest" });
     }
     var picker = $("#theme-mode");
     if (picker) picker.addEventListener("change", function () { setTheme(picker.value); });
@@ -295,8 +362,8 @@
     window.swup.hooks.on("page:view", function () {
       selected = -1;
       bootPage();
-      var main = $("#swup");
-      if (main) main.focus({ preventScroll: true });
+      var target = KIND === "search" ? $("#q") : $("#swup");
+      if (target) target.focus({ preventScroll: true });
     });
   }
   if (darkPreference) {
@@ -307,4 +374,5 @@
     else if (darkPreference.addListener) darkPreference.addListener(syncAutoTheme);
   }
   serviceWorker();
+  setInterval(function () { formatTimes($("#swup") || document); }, 60 * 1000);
 })();

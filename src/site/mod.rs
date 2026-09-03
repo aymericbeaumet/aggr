@@ -18,7 +18,8 @@ use crate::content;
 use crate::model::Item;
 use crate::store::{Status, Store};
 use context::{
-    BuildCtx, CategoryCtx, GitHubLinks, ItemCtx, PageCtx, SiteCtx, SourceCtx, SourceErrorCtx,
+    BuildCtx, CategoryCtx, GitHubLinks, ItemCtx, ItemOptions, PageCtx, SiteCtx, SourceCtx,
+    SourceErrorCtx,
 };
 use render::{Layers, Renderer};
 
@@ -36,16 +37,18 @@ pub struct BuildInfo {
     pub now: DateTime<Utc>,
     /// Production build: absolute URLs from `base_url`, CNAME for custom domains.
     pub release: bool,
+    pub discussions: crate::discussions::ResolutionSet,
 }
 
-/// Which items get full pages and which get redirect stubs.
+/// Which items belong on the recent home feed. `stubbed` is retained for configuration and
+/// planning compatibility; archive builds render every retained item as a full page.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Window {
     pub rendered: Vec<usize>,
     pub stubbed: Vec<usize>,
 }
 
-/// Split items (sorted newest first, hidden already removed) into the site window and the rest.
+/// Split items (sorted newest first, hidden already removed) into the recent feed and its tail.
 pub fn window(
     dates: &[DateTime<Utc>],
     now: DateTime<Utc>,
@@ -85,8 +88,8 @@ pub fn paginate(
         .collect()
 }
 
-/// Everything the service worker fetches at install, as site paths under `base`: the shells,
-/// the first page of every list, every asset and the newest `offline_items` item pages.
+/// Everything the service worker fetches at install, as site paths under `base`: shells, list
+/// indexes, the assets needed to render them, the Pagefind bundle, and newest offline items.
 pub fn precache_paths(
     base: &str,
     lists: impl IntoIterator<Item = String>,
@@ -107,7 +110,14 @@ pub fn precache_paths(
         .iter()
         .map(|path| path.to_string())
         .chain(lists)
-        .chain(assets.iter().map(|name| format!("assets/{name}")))
+        .chain(
+            assets
+                .iter()
+                .filter(|name| {
+                    name.ends_with(".css") || name.ends_with(".js") || name.starts_with("favicon-")
+                })
+                .map(|name| format!("assets/{name}")),
+        )
         .chain(item_urls.into_iter().take(offline_items))
         .map(|path| format!("{base}{path}"))
         .collect()
@@ -236,6 +246,8 @@ pub fn build(
             .map(|d| context::DiscussionLinkCtx {
                 name: context::compact_name(&d.name),
                 url: d.url.clone(),
+                found: false,
+                score: None,
             })
             .collect(),
         params: config.site.params.clone(),
@@ -277,9 +289,11 @@ pub fn build(
         config.site.max_stubs,
     );
 
-    let mut items = Vec::with_capacity(window.rendered.len());
-    for &index in &window.rendered {
-        let item = &all_items[index];
+    // The bounded window controls only the river. Source/category/tag pages, search, and clean
+    // article pages are archives over the retained database; `[store]` retention is the explicit
+    // knob for bounding those. This keeps old sources browsable without making the home feed stale.
+    let mut archive_items = Vec::with_capacity(all_items.len());
+    for item in &all_items {
         let (source_name, category) = source_by_slug
             .get(item.front.source.as_str())
             .map(|s| (s.name.as_str(), s.category.as_deref()))
@@ -291,18 +305,28 @@ pub fn build(
             .map(|s| content::excerpt(&s, EXCERPT_CHARS))
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| content::excerpt(&item.body, EXCERPT_CHARS));
-        items.push(ItemCtx::from_item(
+        archive_items.push(ItemCtx::from_item(
             item,
-            source_name,
-            category,
-            links.as_ref(),
-            excerpt,
-            &config.site.discussions,
+            ItemOptions {
+                source_name,
+                category,
+                links: links.as_ref(),
+                excerpt,
+                discussions: &config.site.discussions,
+                resolutions: &info.discussions,
+                now: info.now,
+            },
         ));
     }
 
-    let categories = category_contexts(&source_ctxs, &items);
-    let tags = tag_contexts(&items);
+    let river_items: Vec<ItemCtx> = window
+        .rendered
+        .iter()
+        .map(|&index| archive_items[index].clone())
+        .collect();
+
+    let categories = category_contexts(&source_ctxs, &archive_items);
+    let tags = tag_contexts(&archive_items);
     let mut pages = 0;
     let per_page = config.site.items_per_page;
     let mut write_list = |kind: &str,
@@ -348,9 +372,9 @@ pub fn build(
         Ok(())
     };
 
-    write_list("river", &config.site.title, "", &items, None, None)?;
+    write_list("river", &config.site.title, "", &river_items, None, None)?;
     for source in &source_ctxs {
-        let list: Vec<ItemCtx> = items
+        let list: Vec<ItemCtx> = archive_items
             .iter()
             .filter(|i| i.source == source.slug)
             .cloned()
@@ -365,7 +389,7 @@ pub fn build(
         )?;
     }
     for category in &categories {
-        let list: Vec<ItemCtx> = items
+        let list: Vec<ItemCtx> = archive_items
             .iter()
             .filter(|i| i.category.as_deref() == Some(&category.name))
             .cloned()
@@ -388,7 +412,7 @@ pub fn build(
         )?;
     }
     for tag in &tags {
-        let list: Vec<ItemCtx> = items
+        let list: Vec<ItemCtx> = archive_items
             .iter()
             .filter(|item| {
                 item.labels
@@ -413,7 +437,8 @@ pub fn build(
                   path: &str,
                   template: &str,
                   item: Option<&ItemCtx>,
-                  html: Option<&str>|
+                  html: Option<&str>,
+                  page_items: Option<&[ItemCtx]>|
      -> Result<String> {
         let page = PageCtx {
             kind: kind.to_string(),
@@ -432,7 +457,7 @@ pub fn build(
                 site: &site,
                 build: &build_ctx,
                 page,
-                items: &items,
+                items: page_items.unwrap_or(&archive_items),
                 sources: &source_ctxs,
                 categories: &categories,
                 tags: &tags,
@@ -446,7 +471,16 @@ pub fn build(
 
     write(
         &out.join("sources/index.html"),
-        simple("sources", "Sources", "sources/", "sources.html", None, None)?.as_bytes(),
+        simple(
+            "sources",
+            "Sources",
+            "sources/",
+            "sources.html",
+            None,
+            None,
+            None,
+        )?
+        .as_bytes(),
     )?;
     write(
         &out.join("categories/index.html"),
@@ -457,16 +491,26 @@ pub fn build(
             "taxonomy.html",
             None,
             None,
+            None,
         )?
         .as_bytes(),
     )?;
     write(
         &out.join("tags/index.html"),
-        simple("tags", "Tags", "tags/", "taxonomy.html", None, None)?.as_bytes(),
+        simple("tags", "Tags", "tags/", "taxonomy.html", None, None, None)?.as_bytes(),
     )?;
     write(
         &out.join("search/index.html"),
-        simple("search", "Search", "search/", "shell.html", None, None)?.as_bytes(),
+        simple(
+            "search",
+            "Search",
+            "search/",
+            "shell.html",
+            None,
+            None,
+            None,
+        )?
+        .as_bytes(),
     )?;
     write(
         &out.join("settings/index.html"),
@@ -477,24 +521,33 @@ pub fn build(
             "settings.html",
             None,
             None,
+            None,
         )?
         .as_bytes(),
     )?;
     write(
         &out.join("404.html"),
-        simple("404", "Not found", "", "404.html", None, None)?.as_bytes(),
+        simple("404", "Not found", "", "404.html", None, None, None)?.as_bytes(),
     )?;
     pages += 6;
 
-    for (ctx, &index) in items.iter().zip(&window.rendered) {
-        let item = &all_items[index];
+    for (ctx, item) in archive_items.iter().zip(&all_items) {
         let mut ctx = ctx.clone();
         ctx.body_html = Some(content::render_markdown(&item.body));
         let dir = out.join(&ctx.url);
         let representation = out.join(ctx.url.trim_end_matches('/'));
         write(
             &dir.join("index.html"),
-            simple("item", &ctx.title, &ctx.url, "item.html", Some(&ctx), None)?.as_bytes(),
+            simple(
+                "item",
+                &ctx.title,
+                &ctx.url,
+                "item.html",
+                Some(&ctx),
+                None,
+                None,
+            )?
+            .as_bytes(),
         )?;
         write(
             &representation.with_extension("md"),
@@ -514,20 +567,15 @@ pub fn build(
         )?;
     }
 
-    let mut stubs = 0;
-    if let Some(links) = &links {
-        for &index in &window.stubbed {
-            let item = &all_items[index];
-            let stub = outputs::redirect_stub(&links.permalink(&item.md_path()));
-            write(
-                &out.join(context::item_url(&item.path)).join("index.html"),
-                stub.as_bytes(),
-            )?;
-            stubs += 1;
-        }
-    }
+    let search_documents: Vec<_> = archive_items
+        .iter()
+        .zip(&all_items)
+        .map(|(item, stored)| pagefind::SearchDocument::new(item, &stored.body))
+        .collect();
 
-    let feed_items = &items[..items.len().min(per_page)];
+    let stubs = 0;
+
+    let feed_items = &river_items[..river_items.len().min(per_page)];
     let atom = outputs::atom_feed(&site, &build_ctx, feed_items);
     write(&out.join("feed.xml"), atom.as_bytes())?;
     write(&out.join("atom.xml"), atom.as_bytes())?;
@@ -562,7 +610,10 @@ pub fn build(
     }
     let assets = renderer.write_static(out)?;
 
+    pagefind::build(out, &search_documents)?;
+
     if config.site.pwa {
+        let offline_items = &archive_items[..archive_items.len().min(config.site.offline_items)];
         write(
             &out.join("offline.html"),
             simple(
@@ -572,6 +623,7 @@ pub fn build(
                 "offline.html",
                 None,
                 None,
+                Some(offline_items),
             )?
             .as_bytes(),
         )?;
@@ -584,6 +636,7 @@ pub fn build(
                 "manifest.webmanifest",
                 None,
                 None,
+                None,
             )?
             .as_bytes(),
         )?;
@@ -592,7 +645,12 @@ pub fn build(
             .map(|s| s.page.clone())
             .chain(categories.iter().map(|c| c.page.clone()))
             .chain(tags.iter().map(|tag| tag.page.clone()))
-            .chain(["categories/".to_string(), "tags/".to_string()]);
+            .chain([
+                "categories/".to_string(),
+                "tags/".to_string(),
+                "search-meta.json".to_string(),
+            ])
+            .chain(files_under(out, "pagefind")?);
         let sw = renderer.render(
             "sw.js",
             SwCtx {
@@ -603,7 +661,7 @@ pub fn build(
                     "",
                     lists,
                     &assets,
-                    items.iter().map(|i| i.url.clone()),
+                    archive_items.iter().map(|i| i.url.clone()),
                     config.site.offline_items,
                 ),
             },
@@ -612,11 +670,9 @@ pub fn build(
         pages += 1;
     }
 
-    pagefind::build(out)?;
-
     Ok(Summary {
         pages,
-        items: items.len(),
+        items: archive_items.len(),
         stubs,
     })
 }
@@ -807,6 +863,25 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
 }
 
+fn files_under(root: &Path, directory: &str) -> Result<Vec<String>> {
+    let base = root.join(directory);
+    let mut paths = Vec::new();
+    for entry in walkdir::WalkDir::new(&base) {
+        let entry = entry.with_context(|| format!("reading {}", base.display()))?;
+        if entry.file_type().is_file() {
+            paths.push(
+                entry
+                    .path()
+                    .strip_prefix(root)?
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -976,7 +1051,34 @@ mod tests {
             data_sha: Some("d".repeat(40)),
             now: day(20),
             release: false,
+            discussions: crate::discussions::ResolutionSet::default(),
         }
+    }
+
+    #[test]
+    fn old_items_stay_browsable_in_source_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(
+            dir.path(),
+            1,
+            "max_age_days = 5\npwa = false\ndiscussions = []\n",
+        );
+        let out = dir.path().join("out");
+        let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        assert_eq!(summary.items, 1);
+        assert_eq!(summary.stubs, 0);
+
+        let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(
+            !feed.contains("Post 0"),
+            "old items should not crowd the recent feed"
+        );
+        let source = std::fs::read_to_string(out.join("sources/blog/index.html")).unwrap();
+        assert!(source.contains("Post 0"), "{source}");
+        assert!(
+            out.join("items/blog/2026-09-01-post-0/index.html")
+                .is_file()
+        );
     }
 
     #[test]
@@ -1028,6 +1130,15 @@ mod tests {
         assert!(sw.contains(&format!("var VERSION = {version:?};")), "{sw}");
         assert!(sw.contains("new URL(\"./\", self.registration.scope)"));
         assert!(sw.contains("\"assets/style-"));
+        assert!(sw.contains("\"pagefind/pagefind.js\""));
+        assert!(sw.contains("\"search-meta.json\""));
+        assert!(
+            !sw.contains("assets/logo-"),
+            "the multi-megabyte source icon is not precached"
+        );
+        assert!(sw.contains("navigationPreload.enable"));
+        assert!(sw.contains("x-requested-with"));
+        assert!(sw.contains("caches.match(request, { ignoreSearch: true })"));
         assert!(sw.contains("\"offline.html\""));
         assert!(sw.contains("\"sources/blog/\""));
         // Newest two of three: posts 2 and 1, not 0.
@@ -1038,6 +1149,9 @@ mod tests {
 
         let offline = std::fs::read_to_string(out.join("offline.html")).unwrap();
         assert!(offline.contains("data-shell=\"offline\""));
+        assert!(offline.contains("Post 2"));
+        assert!(offline.contains("Post 1"));
+        assert!(!offline.contains("Post 0"));
         assert!(offline.contains("<link rel=\"manifest\" href=\"manifest.webmanifest\">"));
         assert!(offline.contains("pwa: true"));
         let river = std::fs::read_to_string(out.join("index.html")).unwrap();

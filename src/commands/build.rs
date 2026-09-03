@@ -2,6 +2,7 @@
 //! Plain builds are served from `/`; `--release` builds for the public URL and writes the CNAME.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
@@ -12,12 +13,12 @@ use crate::cli::BuildArgs;
 /// Public `aggr build`: rendered output always follows a completed sync.
 pub async fn sync_and_run(project: &Project, args: &BuildArgs) -> Result<()> {
     super::sync::run(project, &crate::cli::FetchArgs::default()).await?;
-    run(project, args).map(|_| ())
+    run(project, args).await.map(|_| ())
 }
 use crate::site::{self, BuildInfo, Summary};
 use crate::store::Store;
 
-pub fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
+pub async fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
     let worktree = project.worktree()?;
     let out = out_dir(project, args);
     let base_url = base_url(project, args)?;
@@ -38,6 +39,10 @@ pub fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
     };
     let config_sha = project.config_sha();
     let cache_dir = project.build_cache_dir()?;
+    let store = Store::open(&data_dir);
+    let now = Utc::now();
+    let discussions = resolve_discussions(project, &store, &cache_dir, now).await?;
+    let discussions_fingerprint = discussions.fingerprint();
     let fingerprint = crate::cache::render_fingerprint(
         &project.config,
         &project.root,
@@ -45,6 +50,7 @@ pub fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
         data_sha.as_deref(),
         base_url.as_deref(),
         args.release,
+        Some(&discussions_fingerprint),
     )?;
     if let Some(summary) = crate::cache::restore_render(&cache_dir, &fingerprint, &out)? {
         print_summary(summary, &out, base_url.as_deref(), true);
@@ -62,13 +68,14 @@ pub fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
         config_sha,
         config_path: project.config_repo_path(),
         data_sha,
-        now: Utc::now(),
+        now,
         release: args.release,
+        discussions,
     };
     let summary = site::build(
         &project.config,
         &project.sources,
-        &Store::open(&data_dir),
+        &store,
         &project.root,
         &info,
     )?;
@@ -99,20 +106,24 @@ pub fn run_ephemeral(
     args: &BuildArgs,
     data_dir: &Path,
     out: &Path,
+    discussions: crate::discussions::ResolutionSet,
 ) -> Result<Summary> {
+    let store = Store::open(data_dir);
+    let now = Utc::now();
     let info = BuildInfo {
         out: out.to_path_buf(),
         base_url: base_url(project, args)?,
         config_sha: project.config_sha(),
         config_path: project.config_repo_path(),
         data_sha: None,
-        now: Utc::now(),
+        now,
         release: args.release,
+        discussions,
     };
     let summary = site::build(
         &project.config,
         &project.sources,
-        &Store::open(data_dir),
+        &store,
         &project.root,
         &info,
     )?;
@@ -121,6 +132,24 @@ pub fn run_ephemeral(
         summary.pages, summary.items, summary.stubs
     );
     Ok(summary)
+}
+
+pub async fn resolve_discussions(
+    project: &Project,
+    store: &Store,
+    cache_dir: &Path,
+    now: chrono::DateTime<Utc>,
+) -> Result<crate::discussions::ResolutionSet> {
+    let items = store.items()?;
+    let client = Arc::new(crate::http::Client::new(&project.config.fetch)?);
+    crate::discussions::resolve(
+        &project.config.site.discussions,
+        &items,
+        client,
+        cache_dir,
+        now,
+    )
+    .await
 }
 
 /// `--out`, else `[site] out`, both relative to the directory holding `aggr.toml`.

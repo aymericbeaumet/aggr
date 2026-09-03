@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
+use chrono::Utc;
 use notify::{RecursiveMode, Watcher as _};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -212,6 +213,27 @@ async fn refresh(
     sync_sources: bool,
 ) -> Result<bool> {
     let base_url = build::base_url(project, build_args)?;
+    let worktree = Worktree::ephemeral(state.data.clone());
+    let visible_change = if sync_sources {
+        let report = sync::run_dev(project, &worktree, fetch_args, &state.cache).await?;
+        println!(
+            "dev data: {} new item(s) in the isolated system cache (never committed or pushed)",
+            report.added()
+        );
+        report.added() > 0
+            || report.removed > 0
+            || report.status_changed
+            || report
+                .sources
+                .iter()
+                .any(|source| source.outcome == crate::store::Outcome::Ok && !source.unchanged)
+    } else {
+        println!("rebuilding from cached source data");
+        true
+    };
+    let store = crate::store::Store::open(&state.data);
+    let discussions = build::resolve_discussions(project, &store, &state.cache, Utc::now()).await?;
+    let discussions_fingerprint = discussions.fingerprint();
     let fingerprint = crate::cache::render_fingerprint(
         &project.config,
         &project.root,
@@ -219,29 +241,19 @@ async fn refresh(
         None,
         base_url.as_deref(),
         build_args.release,
+        Some(&discussions_fingerprint),
     )?;
-    let worktree = Worktree::ephemeral(state.data.clone());
-    if sync_sources {
-        let report = sync::run_dev(project, &worktree, fetch_args, &state.cache).await?;
-        println!(
-            "dev data: {} new item(s) in the isolated system cache (never committed or pushed)",
-            report.added()
-        );
-        let visible_change = report.added() > 0
-            || report.removed > 0
-            || report.status_changed
-            || report
-                .sources
-                .iter()
-                .any(|source| source.outcome == crate::store::Outcome::Ok && !source.unchanged);
-        if !visible_change && dev_key_matches(&state.cached, &fingerprint) {
-            println!("dev build already current");
-            return Ok(false);
-        }
-    } else {
-        println!("rebuilding from cached source data");
+    if !visible_change && dev_key_matches(&state.cached, &fingerprint) {
+        println!("dev build already current");
+        return Ok(false);
     }
-    build::run_ephemeral(project, build_args, &state.data, &state.staging)?;
+    build::run_ephemeral(
+        project,
+        build_args,
+        &state.data,
+        &state.staging,
+        discussions,
+    )?;
     std::fs::write(state.staging.join(DEV_KEY_FILE), fingerprint)
         .context("writing the dev build fingerprint")?;
     state

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+{% if page.kind == 'river' %}<h1 class="sr-only">{{ site.title }} feed</h1>{% endif %}
 {% if page.kind != 'river' or (source and source.error) %}<div class="listhead">
   <h1>
     {% if page.kind == 'source' and source %}
@@ -20,6 +21,7 @@
 <ol class="rows" start="{{ page.offset + 1 }}">
   {% for item in items %}
     {% set rank = loop.index + page.offset %}
+    {% set age_boundary = loop.changed(item.age_band) and not loop.first %}
     {% include "_item.html" %}
   {% endfor %}
 </ol>

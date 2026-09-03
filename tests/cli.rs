@@ -65,7 +65,7 @@ impl TestRepo {
 
     fn write_config(&self, feed_url: &str, extra: &str) {
         self.write_raw_config(&format!(
-            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n{extra}\n[fetch]\ncontent = \"light\"\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\nlabels = [\"example\", \"news\"]\n"
+            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\ndiscussions = []\n{extra}\n[fetch]\ncontent = \"light\"\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\nlabels = [\"example\", \"news\"]\n"
         ));
     }
 
@@ -548,10 +548,6 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert_eq!(json["source"], "demo");
     assert!(!item.join("html.html").exists());
     assert!(page.contains(">original</a>"), "{page}");
-    assert!(
-        page.find(">original</a>").unwrap() < page.find(">hackernews</a>").unwrap(),
-        "{page}"
-    );
     assert!(page.contains("<time datetime=\"2026-09-01T"), "{page}");
     assert!(page.contains("title=\"2026-09-01T"), "{page}");
     assert!(!page.contains("blob "), "{page}");

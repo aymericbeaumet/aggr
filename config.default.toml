@@ -15,9 +15,11 @@ description = ""
 # "default", or a directory relative to the repository (e.g. "themes/mine").
 theme = "default"
 items_per_page = 60
-# Items rendered in full; older ones become redirect stubs to their GitHub permalink.
+# Recent home-feed window. Source/category/tag archives remain complete until `[store]` retention.
 max_items = 5000
 max_age_days = 365
+# Legacy compatibility knob. Source/category/tag archives now render complete pages; use
+# `[store]` retention below to bound the database itself.
 max_stubs = 20000
 # "owner/repo" for permalinks; auto-detected from $GITHUB_REPOSITORY in Actions.
 # repository = "owner/repo"
@@ -35,14 +37,17 @@ offline_items = 100
 [[site.discussions]]
 name = "Hacker News"
 url = "https://hn.algolia.com/?q={url}"
+provider = "hackernews"
 
 # Add any others you want:
 # [[site.discussions]]
 # name = "Reddit"
 # url = "https://www.reddit.com/search/?q=url%3A{url}"
+# provider = "reddit"
 # [[site.discussions]]
 # name = "X"
 # url = "https://x.com/search?q={url}"
+# provider = "x"
 
 # Free-form values available to templates as `site.params`.
 [site.params]

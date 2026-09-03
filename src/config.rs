@@ -36,7 +36,7 @@ pub struct SiteConfig {
     pub description: String,
     pub theme: String,
     pub items_per_page: usize,
-    /// Items rendered in full; older ones become redirect stubs to their GitHub permalink.
+    /// Items shown in the recent home feed. Source/category/tag archives remain complete.
     pub max_items: usize,
     pub max_age_days: u32,
     pub max_stubs: usize,
@@ -73,6 +73,7 @@ impl Default for SiteConfig {
             discussions: vec![DiscussionLinkConfig {
                 name: "Hacker News".into(),
                 url: "https://hn.algolia.com/?q={url}".into(),
+                provider: Some(DiscussionProvider::HackerNews),
             }],
             params: toml::Table::new(),
         }
@@ -84,6 +85,28 @@ impl Default for SiteConfig {
 pub struct DiscussionLinkConfig {
     pub name: String,
     pub url: String,
+    /// Optional build-time lookup. A failure always falls back to `url`.
+    #[serde(default)]
+    pub provider: Option<DiscussionProvider>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum DiscussionProvider {
+    #[serde(alias = "hn")]
+    HackerNews,
+    Reddit,
+    X,
+}
+
+impl DiscussionProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HackerNews => "hackernews",
+            Self::Reddit => "reddit",
+            Self::X => "x",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -24,6 +24,14 @@ pub struct RawItem {
     pub extra: BTreeMap<String, serde_yaml_ng::Value>,
 }
 
+impl RawItem {
+    /// Creation time supplied by the source. `updated` is the best available creation signal
+    /// for sources that expose only JSON-LD's `dateModified` (or equivalent).
+    pub fn created_at(&self) -> Option<DateTime<Utc>> {
+        self.published.or(self.updated)
+    }
+}
+
 /// Where the Markdown body came from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -84,7 +92,10 @@ pub struct Item {
 impl Item {
     /// Creation time supplied by the source, falling back to when aggr first saw the item.
     pub fn created_at(&self) -> DateTime<Utc> {
-        self.front.published.unwrap_or(self.front.first_seen)
+        self.front
+            .published
+            .or(self.front.updated)
+            .unwrap_or(self.front.first_seen)
     }
 
     pub fn md_path(&self) -> String {
@@ -211,6 +222,44 @@ pub fn sha1_hex(input: impl AsRef<[u8]>) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn created_at_has_one_ordering_rule_before_and_after_storage() {
+        let published = Utc.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap();
+        let updated = Utc.with_ymd_and_hms(2026, 9, 2, 9, 0, 0).unwrap();
+        let seen = Utc.with_ymd_and_hms(2026, 9, 3, 9, 0, 0).unwrap();
+        let raw = RawItem {
+            published: Some(published),
+            updated: Some(updated),
+            ..Default::default()
+        };
+        assert_eq!(raw.created_at(), Some(published));
+        let updated_only = RawItem {
+            published: None,
+            ..raw.clone()
+        };
+        assert_eq!(updated_only.created_at(), Some(updated));
+
+        let item = Item {
+            path: "items/x/a".into(),
+            front: FrontMatter {
+                published: None,
+                updated: Some(updated),
+                first_seen: seen,
+                ..Default::default()
+            },
+            body: String::new(),
+        };
+        assert_eq!(item.created_at(), updated);
+        let undated = Item {
+            front: FrontMatter {
+                updated: None,
+                ..item.front.clone()
+            },
+            ..item
+        };
+        assert_eq!(undated.created_at(), seen);
+    }
 
     fn date(y: i32, m: u32, d: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, m, d, 12, 0, 0).unwrap()

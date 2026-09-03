@@ -75,7 +75,9 @@ jobs:
       - id: render-cache
         uses: actions/cache/restore@v4
         with:
-          path: .aggr/cache/build-v1/render-v1
+          path: |
+            .aggr/cache/build-v1/render-v1
+            .aggr/cache/build-v1/discussions-v1
           key: ${{ steps.cache-key-before.outputs.key }}
           restore-keys: |
             aggr-render-v1-${{ github.repository_id }}-
@@ -108,7 +110,9 @@ jobs:
           steps.cache-key-before.outputs.key != steps.cache-key-after.outputs.key
         uses: actions/cache/save@v4
         with:
-          path: .aggr/cache/build-v1/render-v1
+          path: |
+            .aggr/cache/build-v1/render-v1
+            .aggr/cache/build-v1/discussions-v1
           key: ${{ steps.cache-key-after.outputs.key }}
 
       - if: inputs.pages

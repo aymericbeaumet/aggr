@@ -130,6 +130,11 @@ title = "My reads"
 theme = "themes/mine"              # a directory with templates/ and static/; "default" otherwise
 # url = "https://reads.example.com"  # custom domain: build target and CNAME
 
+[[site.discussions]]
+name = "Hacker News"
+url = "https://hn.algolia.com/?q={url}"
+provider = "hackernews"            # highest-scoring exact match, else the search URL
+
 [fetch]
 content = "heavy"                  # default: fetch + clean original pages; "light" trusts feeds
 max_items_per_source = 100          # bounds unusually deep first imports
@@ -181,7 +186,8 @@ automatic color mode. The feed is paginated and sorted by the source's creation 
 first. Every source, category and tag has a generated collection page under `/sources/`,
 `/categories/` and `/tags/`. An item has one category and any number of labels. Full-text search
 is precomputed at build time by [Pagefind](https://pagefind.app/) and runs instantly over titles,
-article text, categories and labels without downloading the whole archive;
+clean article prose, categories and labels without downloading the whole archive. Search records
+deliberately exclude URLs and display metadata, while a small sidecar supplies clean result cards.
 Atom (`atom.xml` and the compatibility `feed.xml`), RSS 2.0 (`rss.xml`) and JSON Feed 1.1
 (`feed.json`) re-syndicate the aggregate. Every category and tag page emits the same three
 formats from its own directory. Keyboard: `j`/`k` move, `o` opens the original, and `Enter`
@@ -197,15 +203,18 @@ history, and caches visits; it progressively falls back to ordinary links withou
 
 Theme state stays in `localStorage` without changing normal URLs. **copy state** under `/settings/`
 copies a one-time URL containing every local key/value; opening it imports the state and cleans
-the payload from the address bar. Hacker News discussion search is on by default; Reddit, X, or
-any other service can be added with `[[site.discussions]]` URL templates using `{url}` and
-`{title}`.
+the payload from the address bar. Hacker News discussion search is on by default. Providers marked
+as `hackernews` or `reddit` resolve the highest-engagement exact URL match during the build and
+highlight it; misses fall back to the configured search URL. X resolution uses its official API
+when `X_BEARER_TOKEN` is available. Any service can still be added as a plain URL template using
+`{url}` and `{title}`. Results are privately cached, so unchanged builds remain fast.
 
 It is a **PWA**: "Install" it from the browser menu and it opens as an app with its own icon
-and a search shortcut. A service worker precaches the feed, the lists and
-the newest `[site] offline_items` item pages at every build, and remembers whatever you open,
-so the reader works on the train; an "Updated — reload" toast appears when a new build is
-live. `pwa = false` turns it off (an installed worker unregisters itself on the next visit).
+and a search shortcut. A service worker precaches the feed, archive indexes, Pagefind search,
+and the newest `[site] offline_items` item pages at every build. The offline page itself lists
+those readable items without JavaScript, and pages visited later join a bounded runtime cache.
+Swup navigation shares the same offline fallback; an "Updated — reload" toast appears when a new
+build is live. `pwa = false` turns it off (an installed worker unregisters itself on the next visit).
 
 In the default `heavy` mode, each new item downloads the original page, extracts its main article
 with a Readability-style parser, then runs the result through aggr's sanitizer and Markdown
@@ -214,10 +223,11 @@ pipeline. Extraction failures safely fall back to the feed. Set `[fetch] content
 
 Each item has a clean `/items/<source>/<slug>/` page, an `original` link, and sibling `.md`,
 `.txt`, `.rst`, and `.json` representations. The page also links to the GitHub permalink pinned to
-the commit that introduced it, plus the file's history and an edit link (set `hidden: true` in the front
-matter from GitHub's editor; fetches never overwrite an existing file). Items outside the site
-window (`[site] max_items`, `max_age_days`) become 200-byte redirect stubs to their permalink,
-so old URLs keep working.
+the commit that introduced it, plus the file's history and an edit link (set `hidden: true` in the
+front matter from GitHub's editor; fetches never overwrite an existing file). `[site] max_items`
+and `max_age_days` bound only the recent home feed: every retained item stays searchable and gets
+full source, category, tag, and article pages. Optional `[store]` retention bounds the checked-out
+database without rewriting its append-only git history.
 
 ### Themes
 

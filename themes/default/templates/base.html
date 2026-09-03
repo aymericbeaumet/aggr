@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <base id="aggr-base" href="{{ page.root }}">
 <title>{% block title %}{{ site.title if page.kind == 'river' else page.title ~ ' · ' ~ site.title }}{% endblock %}</title>
@@ -26,7 +26,7 @@
 <a class="skip-link" href="#swup">skip to content</a>
 <header class="top">
   <nav class="nav" aria-label="Primary navigation">
-    <a class="brand" data-route="" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/logo.png' | url_for }}" alt="" width="20" height="20"><span class="brand-title">{{ site.title | lower }}</span></a>
+    <a class="brand" data-route="" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/favicon-32.png' | url_for }}" alt="" width="20" height="20"><span class="brand-title">{{ site.title | lower }}</span></a>
     <span class="nav-menu">
       <a class="menu-link" data-route="search/" data-kinds="search" href="{{ 'search/' | url_for }}"{% if page.kind == 'search' %} aria-current="page"{% endif %}><span class="menu-label">search</span></a>
       <span class="nav-sep" aria-hidden="true">|</span>
