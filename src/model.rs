@@ -1,7 +1,7 @@
 //! Item types shared by sources, the store, and the site, plus the pure rules that derive
 //! identities from them: dedupe keys, normalized links, file names, git blob hashes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,26 @@ impl RawItem {
     pub fn created_at(&self) -> Option<DateTime<Utc>> {
         self.published.or(self.updated)
     }
+}
+
+/// Canonical labels used in front matter, indexes, feeds and templates. Providers disagree on
+/// casing and occasionally include a presentation `#`; normalizing at the model boundary keeps
+/// one stable taxonomy while still accepting hand-written historical items at render time.
+pub fn normalize_labels(labels: impl IntoIterator<Item = impl AsRef<str>>) -> Vec<String> {
+    labels
+        .into_iter()
+        .filter_map(|label| {
+            let collapsed = label
+                .as_ref()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let normalized = collapsed.trim_start_matches('#').trim().to_lowercase();
+            (!normalized.is_empty()).then_some(normalized)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Where the Markdown body came from.
@@ -198,13 +218,21 @@ pub fn file_stem(date: DateTime<Utc>, title: &str) -> String {
     format!("{}-{slug}", date.format("%Y-%m-%d"))
 }
 
-/// Append `-2`, `-3`, … until `taken` does not contain the stem.
-pub fn unique_stem(stem: &str, taken: impl Fn(&str) -> bool) -> String {
+/// Resolve a same-day/title collision with a stable item-derived suffix. Numeric allocation makes
+/// concurrent syncs choose paths according to arrival order; content-derived names converge.
+pub fn unique_stem(stem: &str, identity: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(stem) {
         return stem.to_string();
     }
+    let hash = sha1_hex(identity);
+    for width in [8, 12, 16, hash.len()] {
+        let candidate = format!("{stem}-{}", &hash[..width]);
+        if !taken(&candidate) {
+            return candidate;
+        }
+    }
     (2..)
-        .map(|n| format!("{stem}-{n}"))
+        .map(|n| format!("{stem}-{hash}-{n}"))
         .find(|candidate| !taken(candidate))
         .expect("unbounded")
 }
@@ -259,6 +287,14 @@ mod tests {
             ..item
         };
         assert_eq!(undated.created_at(), seen);
+    }
+
+    #[test]
+    fn labels_are_lowercase_trimmed_sorted_and_unique() {
+        assert_eq!(
+            normalize_labels([" AI ", "#Rust", "rust", "Generative   AI", "", "  #  "]),
+            ["ai", "generative ai", "rust"]
+        );
     }
 
     fn date(y: i32, m: u32, d: u32) -> DateTime<Utc> {
@@ -340,8 +376,11 @@ mod tests {
     #[test]
     fn unique_stems_suffix_on_collision() {
         let taken = ["a", "a-2"];
-        assert_eq!(unique_stem("b", |s| taken.contains(&s)), "b");
-        assert_eq!(unique_stem("a", |s| taken.contains(&s)), "a-3");
+        assert_eq!(unique_stem("b", "item-b", |s| taken.contains(&s)), "b");
+        assert_eq!(
+            unique_stem("a", "item-a", |s| taken.contains(&s)),
+            format!("a-{}", &sha1_hex("item-a")[..8])
+        );
     }
 
     #[test]

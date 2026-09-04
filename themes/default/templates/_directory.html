@@ -1,0 +1,29 @@
+<form class="directory-tools" role="search">
+  <label class="sr-only" for="directory-filter">Filter {{ page.title | lower }}</label>
+  <input id="directory-filter" type="search" inputmode="search" autocomplete="off" placeholder="Filter {{ page.title | lower }}…" data-directory-filter data-page-search>
+  <span id="directory-count" class="muted directory-count" aria-live="polite">{{ entries | length }}</span>
+</form>
+<div class="directory-scroll" role="region" aria-label="{{ page.title }}" tabindex="0">
+  <table class="directory" data-directory>
+    <caption class="sr-only">{{ entries | length }} {{ page.title | lower }}</caption>
+    <thead><tr><th scope="col">name</th><th scope="col" class="num">items</th><th scope="col">latest</th></tr></thead>
+    <tbody>
+    {% for entry in entries %}
+      {% if entry.count > 0 or page.kind == 'sources' %}
+      <tr class="directory-row" data-directory-entry>
+        <td>
+          <a href="{{ entry.page | url_for }}">{{ '#' if page.kind == 'tags' }}{{ entry.name }}</a>
+          {% if page.kind == 'sources' %}
+            {% if entry.site_url %}<a class="muted" href="{{ entry.site_url }}" target="_blank" rel="noopener noreferrer" aria-label="Open {{ entry.name }} website in a new tab">↗</a>{% endif %}
+            <small class="directory-detail">{{ entry.engine }}{% if entry.category %} · {{ entry.category }}{% endif %}{% if entry.error %} · <span class="error" title="{{ entry.error.message }}">error since <time datetime="{{ entry.error.since }}" title="{{ entry.error.since }}">{{ entry.error.since | date }}</time></span>{% endif %}</small>
+          {% endif %}
+        </td>
+        <td class="num">{{ entry.count }}</td>
+        <td>{% if entry.latest %}<time datetime="{{ entry.latest }}" title="{{ entry.latest }}">{{ entry.latest | date }}</time>{% else %}—{% endif %}</td>
+      </tr>
+      {% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="empty" data-directory-empty hidden>No matching {{ page.title | lower }}.</p>

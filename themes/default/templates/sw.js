@@ -100,7 +100,7 @@ self.addEventListener("fetch", function (event) {
   if (url.pathname.indexOf(BASE) !== 0) return;
   var acceptsHtml = (request.headers.get("accept") || "").indexOf("text/html") !== -1;
   var isSwup = (request.headers.get("x-requested-with") || "").toLowerCase() === "swup";
-  var mutable = /\/(?:atom|rss|feed)\.xml$|\/feed\.json$|\/manifest\.webmanifest$|\/opensearch\.xml$|\/sitemap(?:-\d+)?\.xml$|\/robots\.txt$|\/aggr\.toml$/.test(url.pathname);
+  var mutable = /\/(?:atom|rss|feed)\.xml$|\/(?:feed|aggr)\.json$|\/manifest\.webmanifest$|\/opensearch\.xml$|\/sitemap(?:-\d+)?\.xml$|\/robots\.txt$|\/aggr\.toml$/.test(url.pathname);
   if (request.mode === "navigate" || acceptsHtml || isSwup || mutable) {
     event.respondWith(networkFirst(request, event.preloadResponse));
   } else {

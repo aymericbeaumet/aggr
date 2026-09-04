@@ -52,7 +52,6 @@ fetch every source in parallel   →  write new items into the worktree
 commit (if anything changed)     →  push, rebasing on rejection
 update refs/aggr/last-good       →  only when every source succeeded
 render the site from the pushed tip
-post the digest (if due)         →  update refs/aggr/digest/<date>
 ```
 
 - **No trace when nothing changed.** Conditional GET (`ETag` / `Last-Modified`) turns most
@@ -91,11 +90,8 @@ Refs are pointers with a meaning, visible in `git ls-remote`:
 | Ref | Points to | Set when |
 |---|---|---|
 | `refs/aggr/last-good` | the data tip | a sync ended with zero source errors |
-| `refs/aggr/digest/<yyyy-mm-dd>` | the data tip a digest was cut from | that day's digest issue was posted |
 
-`aggr build --data-ref refs/aggr/last-good` reproduces the last fully healthy site; the number
-of a digest is the number of `refs/aggr/digest/*` refs before its date plus one, and "since the
-last digest" is the diff between those two commits.
+`aggr build --data-ref refs/aggr/last-good` reproduces the last fully healthy site.
 
 ## Reproducibility
 

@@ -41,17 +41,19 @@ pub async fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
     let cache_dir = project.build_cache_dir()?;
     let store = Store::open(&data_dir);
     let now = Utc::now();
+    let generation = site::render_generation(&store.items()?, &project.config.site, now);
     let discussions = resolve_discussions(project, &store, &cache_dir, now).await?;
     let discussions_fingerprint = discussions.fingerprint();
-    let fingerprint = crate::cache::render_fingerprint(
-        &project.config,
-        &project.root,
-        config_sha.as_deref(),
-        data_sha.as_deref(),
-        base_url.as_deref(),
-        args.release,
-        Some(&discussions_fingerprint),
-    )?;
+    let fingerprint = crate::cache::render_fingerprint(crate::cache::RenderFingerprint {
+        config: &project.config,
+        project_root: &project.root,
+        config_sha: config_sha.as_deref(),
+        data_sha: data_sha.as_deref(),
+        base_url: base_url.as_deref(),
+        release: args.release,
+        discussions: Some(&discussions_fingerprint),
+        generation: &generation,
+    })?;
     if let Some(summary) = crate::cache::restore_render(&cache_dir, &fingerprint, &out)? {
         print_summary(summary, &out, base_url.as_deref(), true);
         return Ok(summary);
@@ -68,9 +70,11 @@ pub async fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
         config_sha,
         config_path: project.config_repo_path(),
         data_sha,
+        generation,
         now,
         release: args.release,
         discussions,
+        pagefind_cache: Some(cache_dir.clone()),
     };
     let summary = site::build(
         &project.config,
@@ -106,19 +110,23 @@ pub fn run_ephemeral(
     args: &BuildArgs,
     data_dir: &Path,
     out: &Path,
+    cache_dir: &Path,
     discussions: crate::discussions::ResolutionSet,
 ) -> Result<Summary> {
     let store = Store::open(data_dir);
     let now = Utc::now();
+    let generation = site::render_generation(&store.items()?, &project.config.site, now);
     let info = BuildInfo {
         out: out.to_path_buf(),
         base_url: base_url(project, args)?,
         config_sha: project.config_sha(),
         config_path: project.config_repo_path(),
         data_sha: None,
+        generation,
         now,
         release: args.release,
         discussions,
+        pagefind_cache: Some(cache_dir.to_path_buf()),
     };
     let summary = site::build(
         &project.config,
@@ -142,14 +150,7 @@ pub async fn resolve_discussions(
 ) -> Result<crate::discussions::ResolutionSet> {
     let items = store.items()?;
     let client = Arc::new(crate::http::Client::new(&project.config.fetch)?);
-    crate::discussions::resolve(
-        &project.config.site.discussions,
-        &items,
-        client,
-        cache_dir,
-        now,
-    )
-    .await
+    crate::discussions::resolve(&project.config.networks, &items, client, cache_dir, now).await
 }
 
 /// `--out`, else `[site] out`, both relative to the directory holding `aggr.toml`.

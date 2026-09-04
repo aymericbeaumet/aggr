@@ -4,7 +4,6 @@
 pub mod build;
 pub mod check;
 pub mod dev;
-pub mod digest;
 pub mod fetch;
 pub mod init;
 pub mod server;
@@ -27,11 +26,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             clap_complete::generate(shell, &mut Cli::command(), "aggr", &mut std::io::stdout());
             Ok(())
         }
-        Command::Sync(args) => sync::run(&Project::load(&cli.config)?, &args).await,
-        Command::Build(args) => build::sync_and_run(&Project::load(&cli.config)?, &args).await,
-        Command::Dev(args) => dev::run(&Project::load(&cli.config)?, &args).await,
-        Command::Digest(args) => digest::run(&Project::load(&cli.config)?, &args).await,
-        Command::Check => check::run(&Project::load(&cli.config)?).await,
+        Command::Sync(args) => sync::run(&Project::load(&cli.config).await?, &args).await,
+        Command::Build(args) => {
+            build::sync_and_run(&Project::load(&cli.config).await?, &args).await
+        }
+        Command::Dev(args) => dev::run(&Project::load(&cli.config).await?, &args).await,
+        Command::Check => check::run(&Project::load(&cli.config).await?).await,
     }
 }
 
@@ -45,8 +45,8 @@ pub struct Project {
 }
 
 impl Project {
-    pub fn load(config_path: &Path) -> Result<Self> {
-        let config = Config::load(config_path)?;
+    pub async fn load(config_path: &Path) -> Result<Self> {
+        let config = Config::load(config_path).await?;
         let sources = config.sources()?;
         let config_path = config_path
             .canonicalize()
@@ -91,13 +91,16 @@ impl Project {
 
     /// The `main` commit the config was read from, for the `Aggr-Config` trailer and the footer.
     pub fn config_sha(&self) -> Option<String> {
-        self.repo.head_sha().ok().flatten()
+        self.repo
+            .head_matches_files(&self.config.loaded_files)
+            .ok()
+            .filter(|matches| *matches)
+            .and_then(|_| self.repo.head_sha().ok().flatten())
     }
 
     pub fn config_repo_path(&self) -> Option<String> {
-        self.config_path
-            .strip_prefix(self.repo.root())
-            .ok()
+        self.repo
+            .relative_path(&self.config_path)
             .map(|path| path.to_string_lossy().replace('\\', "/"))
     }
 }

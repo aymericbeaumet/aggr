@@ -24,14 +24,6 @@ pub async fn run(project: &Project) -> Result<()> {
     if let Some(repository) = project.config.repository() {
         println!("repository: {repository}");
     }
-    if let Some(digest) = &project.config.digest {
-        println!(
-            "digest: daily at {} ({})",
-            digest.at.format("%H:%M"),
-            digest.timezone
-        );
-    }
-
     let client = Arc::new(http::Client::new(&project.config.fetch)?);
     let limit = Arc::new(Semaphore::new(project.config.fetch.concurrency));
     let mut tasks = JoinSet::new();

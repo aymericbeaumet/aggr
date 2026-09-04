@@ -17,6 +17,18 @@ pub async fn run(project: &Project, args: &SyncArgs) -> Result<()> {
     let first = worktree.head_sha()?.is_none();
     let report = fetch::run(project, &worktree, &args.fetch).await?;
 
+    if !args.fetch.dry_run && !project.config.networks.is_empty() {
+        let cache = project.build_cache_dir()?;
+        let store = crate::store::Store::open(worktree.dir());
+        if let Err(err) =
+            super::build::resolve_discussions(project, &store, &cache, chrono::Utc::now()).await
+        {
+            // Conversation links are enrichment. A provider outage must never prevent source
+            // data from being committed, and the next sync will retry from the same cache state.
+            log::warn!("discussion matching: {err:#}");
+        }
+    }
+
     if args.fetch.dry_run {
         println!("dry run: {} new item(s), nothing committed", report.added());
         return finish(&report);

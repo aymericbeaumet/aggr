@@ -11,6 +11,96 @@ use super::context::{BuildCtx, ItemCtx, SiteCtx};
 
 const XML_DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
 const SITEMAP_NAMESPACE: &str = "http://www.sitemaps.org/schemas/sitemap/0.9";
+pub const AGGR_REPOSITORY: &str = "https://github.com/aymericbeaumet/aggr";
+pub const AGGR_NETWORK: &str = "https://github.com/aymericbeaumet/aggr#network";
+pub const AGGR_INSTANCE_TYPE: &str = "https://github.com/aymericbeaumet/aggr#instance";
+const AGGR_PROFILE: &str =
+    "https://github.com/aymericbeaumet/aggr/blob/v1/docs/interoperability.md#aggr-network";
+const AGGR_SCHEMA: &str =
+    "https://raw.githubusercontent.com/aymericbeaumet/aggr/v1/docs/aggr-instance.schema.json";
+
+/// Public metadata that lets a crawler or another reader recognize and consume an aggr instance.
+/// URLs are absolute for release builds and descriptor-relative for portable local builds.
+pub fn instance_descriptor(site: &SiteCtx, build: &BuildCtx) -> Result<String> {
+    let endpoint = |path: &str| {
+        site.base_url.as_ref().map_or_else(
+            || {
+                if path.is_empty() {
+                    "./".to_string()
+                } else {
+                    path.to_string()
+                }
+            },
+            |_| site_url(site, path),
+        )
+    };
+    let config_url = site
+        .config_url
+        .clone()
+        .unwrap_or_else(|| endpoint("aggr.toml"));
+    let mut source = Map::new();
+    source.insert("config".into(), Value::String(config_url));
+    if let Some(repository) = &site.repository {
+        let repository_url = format!("https://github.com/{repository}");
+        source.insert("repository".into(), Value::String(repository_url.clone()));
+        source.insert(
+            "data".into(),
+            Value::String(format!(
+                "{repository_url}/tree/{}",
+                build.data_sha.as_deref().unwrap_or(&site.data_branch)
+            )),
+        );
+    }
+
+    let mut discovery = Map::new();
+    discovery.insert("search".into(), Value::String(endpoint("search/")));
+    if site.base_url.is_some() {
+        discovery.insert(
+            "opensearch".into(),
+            Value::String(endpoint("opensearch.xml")),
+        );
+        discovery.insert("sitemap".into(), Value::String(endpoint("sitemap.xml")));
+    }
+    if site.pwa {
+        discovery.insert(
+            "webmanifest".into(),
+            Value::String(endpoint("manifest.webmanifest")),
+        );
+    }
+
+    let mut collections = Map::new();
+    collections.insert("sources".into(), Value::String(endpoint("sources/")));
+    collections.insert("tags".into(), Value::String(endpoint("tags/")));
+    if site.has_categories {
+        collections.insert("categories".into(), Value::String(endpoint("categories/")));
+    }
+
+    serde_json::to_string_pretty(&serde_json::json!({
+        "$schema": AGGR_SCHEMA,
+        "schema_version": 1,
+        "type": "aggr-instance",
+        "profile": AGGR_PROFILE,
+        "network": AGGR_NETWORK,
+        "url": endpoint(""),
+        "name": site.title,
+        "language": site.language,
+        "updated": build.time.to_rfc3339_opts(SecondsFormat::Secs, true),
+        "generator": {
+            "name": "aggr",
+            "version": build.version,
+            "url": AGGR_REPOSITORY,
+        },
+        "source": Value::Object(source),
+        "feeds": {
+            "atom": endpoint("atom.xml"),
+            "rss": endpoint("rss.xml"),
+            "json": endpoint("feed.json"),
+        },
+        "collections": Value::Object(collections),
+        "discovery": Value::Object(discovery),
+    }))
+    .map_err(Into::into)
+}
 
 /// A ~200 byte page that sends old URLs to the item's GitHub permalink.
 #[cfg(test)]
@@ -725,9 +815,13 @@ mod tests {
             base_url: Some("https://example.test/reads/".into()),
             repository: None,
             data_branch: "aggr".into(),
+            network_url: AGGR_NETWORK,
+            instance_type_url: AGGR_INSTANCE_TYPE,
             pwa: true,
             config_url: None,
+            has_categories: true,
             discussions: Vec::new(),
+            entry_shortcuts: Vec::new(),
             params: toml::Table::new(),
         }
     }
@@ -738,6 +832,7 @@ mod tests {
             version: "1.2.3".into(),
             config_sha: None,
             data_sha: None,
+            generation: "generation".into(),
             release: true,
         }
     }
@@ -912,6 +1007,57 @@ mod tests {
         assert!(xml.contains("<Description>Search &lt;everything&gt;</Description>"));
         assert!(xml.contains("q={searchTerms}&amp;scope=all"));
         assert!(xml.contains("type=\"application/opensearchdescription+xml\" rel=\"self\""));
+    }
+
+    #[test]
+    fn instance_descriptor_exposes_network_protocols_and_provenance() {
+        let mut site = site();
+        site.repository = Some("owner/reader".into());
+        site.config_url =
+            Some("https://raw.githubusercontent.com/owner/reader/deadbeef/aggr.toml".into());
+        let descriptor: Value =
+            serde_json::from_str(&instance_descriptor(&site, &build()).unwrap()).unwrap();
+
+        assert_eq!(descriptor["schema_version"], 1);
+        assert_eq!(descriptor["type"], "aggr-instance");
+        assert_eq!(descriptor["network"], AGGR_NETWORK);
+        assert_eq!(descriptor["url"], "https://example.test/reads/");
+        assert_eq!(
+            descriptor["source"]["config"],
+            "https://raw.githubusercontent.com/owner/reader/deadbeef/aggr.toml"
+        );
+        assert_eq!(
+            descriptor["source"]["repository"],
+            "https://github.com/owner/reader"
+        );
+        assert_eq!(
+            descriptor["source"]["data"],
+            "https://github.com/owner/reader/tree/aggr"
+        );
+        assert_eq!(
+            descriptor["feeds"]["atom"],
+            "https://example.test/reads/atom.xml"
+        );
+        assert_eq!(
+            descriptor["discovery"]["sitemap"],
+            "https://example.test/reads/sitemap.xml"
+        );
+    }
+
+    #[test]
+    fn portable_instance_descriptor_uses_relative_endpoints() {
+        let mut site = site();
+        site.base_url = None;
+        site.config_url = None;
+        site.has_categories = false;
+        let descriptor: Value =
+            serde_json::from_str(&instance_descriptor(&site, &build()).unwrap()).unwrap();
+
+        assert_eq!(descriptor["url"], "./");
+        assert_eq!(descriptor["source"]["config"], "aggr.toml");
+        assert_eq!(descriptor["feeds"]["json"], "feed.json");
+        assert!(descriptor["collections"].get("categories").is_none());
+        assert!(descriptor["discovery"].get("sitemap").is_none());
     }
 
     #[test]

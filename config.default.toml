@@ -5,15 +5,17 @@
 # `${VAR}` in `url` and `headers` values expands from the environment (secrets in CI).
 
 [site]
+# Name shown in the navigation bar and feed metadata.
 title = "aggr"
-description = ""
 # BCP 47 language tag used by HTML and feeds.
 language = "en"
 # "default", or a directory relative to the repository (e.g. "themes/mine").
 theme = "default"
+# Number of entries on each generated feed, source, category, and tag page.
 items_per_page = 60
 # Recent home-feed window. Source/category/tag archives remain complete until `[store]` retention.
 max_items = 5000
+# Entries older than this leave the home feed but remain in archive pages.
 max_age_days = 365
 # Legacy compatibility knob. Source/category/tag archives now render complete pages; use
 # `[store]` retention below to bound the database itself.
@@ -30,16 +32,17 @@ pwa = true
 # Newest item pages cached ahead of time for offline reading (the feed and assets always are).
 offline_items = 100
 
-# Discussion matching is opt-in. These add per-item links, find the highest-engagement exact
-# match when possible, and otherwise fall back to search. `{url}` and `{title}` are URL-encoded.
-# [[site.discussions]]
+# Optional networks searched for conversations about each article. No matching is done by default.
+# They add per-item links, find the highest-engagement exact match when possible, and otherwise
+# fall back to search. `{url}` and `{title}` are URL-encoded.
+# [[networks]]
 # provider = "hackernews"
-# [[site.discussions]]
+# [[networks]]
 # provider = "reddit"
-# [[site.discussions]]
+# [[networks]]
 # provider = "x"
 # A custom search needs a label and URL template instead:
-# [[site.discussions]]
+# [[networks]]
 # name = "Lobsters"
 # url = "https://lobste.rs/search?q={url}"
 
@@ -53,63 +56,68 @@ branch = "aggr"
 dir = ".aggr/data"
 # Keep the raw .html next to each .md (per-source `html = false` overrides).
 html = true
+# Maximum bytes kept in each sanitized raw HTML sibling.
 html_max_bytes = 262144
-# Optional tree retention; history stays in git either way.
+# Optional tree retention; both default to unlimited and history stays in git either way.
 # max_age_days = 730
 # max_items = 20000
 
 [fetch]
+# Maximum source requests running concurrently.
 concurrency = 16
 # Concurrent original-page downloads within each source in `heavy` mode.
 article_concurrency = 4
 # Only consider this many newest entries from one source per run. This bounds first imports from
 # unusually deep feeds; everything discovered from then on remains additive.
 max_items_per_source = 100
+# Total timeout for one HTTP request, in seconds.
 timeout_secs = 20
-# `{version}` expands to the aggr version.
-user_agent = "aggr/{version} (+https://github.com/aymericbeaumet/aggr)"
+# Maximum response body accepted from a feed, discovery page, or article, in bytes.
 max_body_bytes = 10000000
+# Retries after transient HTTP failures. Retries use deterministic exponential backoff.
 retries = 2
+# Whether a remotely included config may itself name another absolute remote config. Relative
+# files and wildcards in the same remote repository are always allowed. Keep this false unless
+# every config in the transitive chain is trusted.
+allow_remote_include_chains = false
 # `heavy` downloads the original page and extracts its article; `light` reuses feed content.
 content = "heavy"
 
-# Daily digest posted as a GitHub issue (GitHub emails the assignees). Remove the section to
-# disable. `at` uses 24-hour HH:MM format; the first workflow run after it in this timezone posts
-# the day's issue.
-[digest]
-at = "08:00"
-timezone = "UTC" # IANA name
-# Placeholders: {number} {date} {count} {title}
-title = "Digest #{number} · {date} · {count} new"
-label = "digest"
-# GitHub logins to assign; defaults to the repository owner.
-assignees = []
-close_previous = true
-skip_empty = true
-max_items = 200
-
-# One table per source. Only `url` is required: aggr discovers RSS, Atom or JSON Feed from a
-# normal website URL and conservatively discovers article cards when a site has no feed.
+# One table per source. `url` follows a website; `include` imports another aggr config. They are
+# mutually exclusive. aggr discovers RSS, Atom or JSON Feed from a normal website URL and
+# conservatively discovers article cards when a site has no feed.
 # [[sources]]
 # url = "https://blog.rust-lang.org"
+# type = "feed"              # optional; the auto-discovering web source is the default
 # name = "Rust Blog"          # display name; the feed title when unset
 # slug = "rust-blog"          # directory under items/; derived from name or url when unset
-# category = "rust"
+# category = "rust"           # optional; an item belongs to at most one category
 # An item has one category and any number of labels. Source labels are merged with feed labels.
 # labels = ["programming", "rust"]
-# headers = { Authorization = "Bearer ${TOKEN}" }
-# html = true
+# headers = { Authorization = "Bearer ${TOKEN}" } # `${ENV}` values are expanded
+# html = true                # write sanitized raw HTML; defaults to `[store] html`
+# content = "heavy"          # override `[fetch] content` with `"heavy"` or `"light"`
 
-# A relative TOML URL expands source entries from another file at this position. Globs work too.
-# `category` becomes the default for included sources that do not set their own.
+# An include expands source entries from another aggr config at this position. Local and GitHub
+# wildcards work; a bare GitHub repository URL implies its aggr.toml. `category` becomes the
+# default for imported sources that do not set their own. Invalid, repeated and cyclic targets
+# warn and are skipped. Remote configs may only include relative files in their own repository
+# unless `[fetch] allow_remote_include_chains` is explicitly enabled in this root config.
 # [[sources]]
-# url = "./aggr-ai.toml"       # or "./sources/*.toml"
+# include = "./aggr-ai.toml"   # or "./sources/*.toml"
 # category = "ai"
+# [[sources]]
+# include = "https://github.com/owner/aggr-instance" # infers aggr.toml
+# GitHub includes automatically use $GITHUB_TOKEN or $GH_TOKEN when present. Cross-repository
+# private configs require a token with read access.
+# [[sources]]
+# include = "https://github.com/owner/aggr-instance/blob/main/topics/*.toml"
 
 # Another aggr repository: its data branch is mirrored and its items flow into this site.
 # [[sources]]
 # type = "aggr"
-# repo = "friend/reads"       # GitHub shorthand, or `url = "https://host/x/reads.git"`
+# repo = "friend/reads"       # GitHub shorthand; mutually exclusive with `url`
+# url = "https://host/x/reads.git" # full git URL alternative to `repo`
 # branch = "aggr"             # its data branch
 # sources = []                # only these of its source slugs; all when empty
 # limit = 200                 # newest items considered per run

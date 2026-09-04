@@ -23,7 +23,56 @@ runs:
   using: composite
   steps:
     - id: install
-      uses: $/.github/actions/install
-      with:
-        version: ${{ inputs.version }}
-        token: ${{ inputs.token }}
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        # Composite-action contexts must cross into the shell through the environment.
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_PATH: ${{ github.action_path }}
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: aymericbeaumet/aggr
+      run: |
+        set -euo pipefail
+
+        # Explicit input > exact semver action ref > VERSION beside this action > latest.
+        version="${INPUT_VERSION#v}"
+        if [ -z "$version" ] && [[ "$ACTION_REF" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          version="${ACTION_REF#v}"
+        fi
+        if [ -z "$version" ] && [ -f "$ACTION_PATH/VERSION" ]; then
+          version="$(tr -d '[:space:]' < "$ACTION_PATH/VERSION")"
+        fi
+        if [ -z "$version" ]; then
+          version="$(gh release view --repo "$REPO" --json tagName --jq .tagName)"
+          version="${version#v}"
+        fi
+
+        case "$RUNNER_OS" in
+          Linux) os=linux ;;
+          macOS) os=darwin ;;
+          Windows) os=windows ;;
+          *) echo "unsupported runner OS: $RUNNER_OS" >&2; exit 1 ;;
+        esac
+        case "$RUNNER_ARCH" in
+          X64) arch=amd64 ;;
+          ARM64) arch=arm64 ;;
+          *) echo "unsupported runner arch: $RUNNER_ARCH" >&2; exit 1 ;;
+        esac
+        if [ "$os" = windows ]; then archive="aggr-$os-$arch.zip"; else archive="aggr-$os-$arch.tar.gz"; fi
+
+        dir="$RUNNER_TEMP/aggr/bin"
+        mkdir -p "$dir"
+        cd "$RUNNER_TEMP/aggr"
+        gh release download "v$version" --repo "$REPO" --pattern "$archive" --pattern SHA256SUMS --clobber
+        expected="$(awk -v file="$archive" '$2 == file { print $1 }' SHA256SUMS)"
+        if command -v sha256sum >/dev/null 2>&1; then
+          actual="$(sha256sum "$archive" | awk '{ print $1 }')"
+        else
+          actual="$(shasum -a 256 "$archive" | awk '{ print $1 }')"
+        fi
+        [ -n "$expected" ] && [ "$actual" = "$expected" ] || { echo "checksum mismatch for $archive" >&2; exit 1; }
+        if [ "$os" = windows ]; then unzip -oq "$archive" -d bin; else tar -xzf "$archive" -C bin; fi
+
+        echo "$dir" >> "$GITHUB_PATH"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "installed aggr $version ($os-$arch)"

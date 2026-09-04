@@ -65,7 +65,7 @@ impl TestRepo {
 
     fn write_config(&self, feed_url: &str, extra: &str) {
         self.write_raw_config(&format!(
-            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\ndiscussions = []\n{extra}\n[fetch]\ncontent = \"light\"\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\nlabels = [\"example\", \"news\"]\n"
+            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n{extra}\n[fetch]\ncontent = \"light\"\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\nlabels = [\"example\", \"news\"]\n"
         ));
     }
 
@@ -227,8 +227,6 @@ fn init_writes_config_and_workflow() {
         .args(["init", "--defaults", "--force"])
         .assert()
         .success();
-    let text = std::fs::read_to_string(repo.clone.join("aggr.toml")).unwrap();
-    assert!(text.contains("[digest]"));
 }
 
 #[cfg(unix)]
@@ -561,7 +559,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(!index.contains("built <time"));
     assert!(index.contains("id=\"swup\""));
     assert!(
-        index.find("<header class=\"top\">").unwrap() < index.find("<main id=\"swup\"").unwrap(),
+        index.find("<header class=\"top\"").unwrap() < index.find("<main id=\"swup\"").unwrap(),
         "the persistent menubar must stay outside Swup's replacement container"
     );
     assert!(index.contains("assets/swup-"));
@@ -708,7 +706,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
 }
 
 #[test]
-fn check_and_digest_dry_run() {
+fn check_probes_sources() {
     let server = MockServer::start();
     server.mock(|when, then| {
         when.method(GET).path("/feed.xml");
@@ -717,7 +715,7 @@ fn check_and_digest_dry_run() {
     let repo = TestRepo::new();
     repo.write_config(
         &server.url("/feed.xml"),
-        "url = \"https://reads.example.com\"\n[digest]\nat = \"00:00\"\n",
+        "url = \"https://reads.example.com\"",
     );
     repo.aggr()
         .arg("check")
@@ -725,21 +723,6 @@ fn check_and_digest_dry_run() {
         .success()
         .stdout(predicate::str::contains("ok     demo"))
         .stdout(predicate::str::contains("2 item(s)"));
-
-    repo.aggr().arg("sync").assert().success();
-    repo.aggr()
-        .args(["digest", "--dry-run", "--force"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Digest #1 · "))
-        .stdout(predicate::str::contains("· 2 new"))
-        .stdout(predicate::str::contains("- [Hello there](https://demo.example/hello) · [source](https://reads.example.com/items/demo/2026-09-01-hello-there/) · [md](https://github.com/o/r/blob/"));
-    // Posting needs a token; without one the command fails loudly instead of silently skipping.
-    repo.aggr()
-        .args(["digest", "--force"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("GITHUB_TOKEN"));
 }
 
 #[test]
@@ -818,7 +801,7 @@ fn included_topic_files_and_automatic_html_fallback_work_end_to_end() {
     .unwrap();
     repo.write_raw_config(&format!(
         "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n\
-         [[sources]]\nurl = \"./aggr-*.toml\"\ncategory = \"ai\"\n\
+         [[sources]]\ninclude = \"./aggr-*.toml\"\ncategory = \"ai\"\n\
          [[sources]]\nurl = \"{}\"\nname = \"Demo\"\ncategory = \"demo\"\n",
         server.url("/feed.xml")
     ));

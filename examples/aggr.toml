@@ -1,15 +1,10 @@
-# A realistic starting point. For a live, forkable reader, see https://aggr.aymericbeaumet.com.
+# A larger example. For the fork-ready setup, see https://github.com/aymericbeaumet/aggr-instance.
 # Every option and its default: ../config.default.toml
 
 [site]
 title = "My reads"
-description = "A few sources, rendered from an append-only git branch."
 # Custom domain: the URL to build for, and the CNAME file GitHub Pages reads.
 # url = "https://reads.example.com"
-
-[digest]
-at = "08:00" # 24-hour HH:MM
-timezone = "Europe/Paris"
 
 [[sources]]
 url = "https://blog.rust-lang.org/feed.xml"

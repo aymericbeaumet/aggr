@@ -363,16 +363,17 @@ pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
     let markdown = converter
         .convert(&clean)
         .unwrap_or_else(|_| html_to_text(&clean));
-    tidy_markdown(&markdown)
+    tidy_markdown(&repair_generated_markdown(&markdown))
 }
 
-/// Remove a publication date that readability promoted to the first Markdown paragraph. The
-/// candidate must be a date-only block matching the stored publication day (allowing one day for
-/// source-local dates around UTC midnight), so dates that are part of the article remain intact.
-pub fn strip_leading_published_date(markdown: &str, published: Option<DateTime<Utc>>) -> String {
-    let Some(published) = published else {
-        return markdown.to_string();
-    };
+/// Remove a metadata line that readability promoted to the first Markdown paragraph. This covers
+/// a publication date (including a short suffix such as `- Link Blog`) and a source-name-only
+/// accessibility label. Normal prose containing a date remains intact.
+pub fn strip_leading_metadata(
+    markdown: &str,
+    published: Option<DateTime<Utc>>,
+    source_slug: &str,
+) -> String {
     let Some((first, rest)) = markdown.split_once("\n\n") else {
         return markdown.to_string();
     };
@@ -380,17 +381,59 @@ pub fn strip_leading_published_date(markdown: &str, published: Option<DateTime<U
         return markdown.to_string();
     }
     let plain = html_to_text(&render_markdown(first));
-    let Some(candidate) = parse_date_only(&plain) else {
-        return markdown.to_string();
-    };
-    let distance = candidate
-        .signed_duration_since(published.date_naive())
-        .num_days()
-        .unsigned_abs();
-    if distance > 1 {
+    let source_only = plain.chars().count() <= 80 && slug::slugify(plain.trim()) == source_slug;
+    let matching_date = published.is_some_and(|published| {
+        date_prefixes(&plain).any(|value| {
+            parse_date_only(value).is_some_and(|candidate| {
+                candidate
+                    .signed_duration_since(published.date_naive())
+                    .num_days()
+                    .unsigned_abs()
+                    <= 1
+            })
+        })
+    });
+    if !source_only && !matching_date {
         return markdown.to_string();
     }
     rest.trim_start_matches('\n').to_string()
+}
+
+fn date_prefixes(value: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(value.trim()).chain(
+        [" - ", " | ", " — ", " – "]
+            .into_iter()
+            .filter_map(|separator| value.split_once(separator).map(|(prefix, _)| prefix.trim())),
+    )
+}
+
+/// Fix conversion artefacts caused by accessibility labels and leading whitespace inside links.
+/// htmd intentionally trims link labels, which can otherwise turn `than <a> 54,000…</a>` into
+/// `than[54,000…](…)`.
+fn repair_generated_markdown(markdown: &str) -> String {
+    let mut value = markdown
+        .replace("\u{2060}(opens in a new window)", "")
+        .replace(" (opens in a new window)", "");
+    let bytes = value.as_bytes();
+    let mut insertions = Vec::new();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'[' || index == 0 || !bytes[index - 1].is_ascii_alphanumeric() {
+            continue;
+        }
+        let Some(close) = value[index + 1..]
+            .find("](")
+            .map(|offset| index + 1 + offset)
+        else {
+            continue;
+        };
+        if close > index + 1 {
+            insertions.push(index);
+        }
+    }
+    for index in insertions.into_iter().rev() {
+        value.insert(index, ' ');
+    }
+    value
 }
 
 fn parse_date_only(raw: &str) -> Option<NaiveDate> {
@@ -737,32 +780,67 @@ mod tests {
     }
 
     #[test]
-    fn strips_only_a_leading_date_that_matches_publication() {
+    fn strips_only_leading_metadata_that_matches_the_item() {
         use chrono::{TimeZone as _, Utc};
 
         let published = Utc.with_ymd_and_hms(2026, 9, 2, 14, 16, 42).unwrap();
         let body = "2nd September 2026\n\nAnthropic published the prompts.\n";
         assert_eq!(
-            strip_leading_published_date(body, Some(published)),
+            strip_leading_metadata(body, Some(published), "anthropic"),
             "Anthropic published the prompts.\n"
         );
         assert_eq!(
-            strip_leading_published_date(
+            strip_leading_metadata(
                 "[September 2, 2026](/archive)\n\nBody.\n",
-                Some(published)
+                Some(published),
+                "blog"
             ),
             "Body.\n"
         );
         assert_eq!(
-            strip_leading_published_date("2nd September 2025\n\nBody.\n", Some(published)),
+            strip_leading_metadata("2nd September 2025\n\nBody.\n", Some(published), "blog"),
             "2nd September 2025\n\nBody.\n"
         );
         assert_eq!(
-            strip_leading_published_date(
+            strip_leading_metadata(
                 "We met on 2nd September 2026.\n\nBody.\n",
-                Some(published)
+                Some(published),
+                "blog"
             ),
             "We met on 2nd September 2026.\n\nBody.\n"
+        );
+        assert_eq!(
+            strip_leading_metadata(
+                "3rd September 2026 - Link Blog\n\nThe actual opening.\n",
+                Some(Utc.with_ymd_and_hms(2026, 9, 3, 8, 0, 0).unwrap()),
+                "simon-willison"
+            ),
+            "The actual opening.\n"
+        );
+        assert_eq!(
+            strip_leading_metadata("OpenAI\n\nSafety starts here.\n", Some(published), "openai"),
+            "Safety starts here.\n"
+        );
+        assert_eq!(
+            strip_leading_metadata(
+                "OpenAI builds systems.\n\nBody.\n",
+                Some(published),
+                "openai"
+            ),
+            "OpenAI builds systems.\n\nBody.\n"
+        );
+    }
+
+    #[test]
+    fn markdown_repairs_accessibility_link_labels_and_word_boundaries() {
+        let html = concat!(
+            r#"<p>using more than<span></span><a href="/tasks"><span> 54,000 internal Codex tasks</span><span>"#,
+            "\u{2060}(opens in a new window)",
+            r#"</span></a> every day</p>"#
+        );
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            "using more than [54,000 internal Codex tasks](https://example.com/tasks) every day\n"
         );
     }
 

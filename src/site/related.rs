@@ -2,9 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use chrono::{DateTime, Utc};
+
 use super::context::ItemCtx;
 
 const RECOMMENDATION_COUNT: usize = 3;
+const CROSS_SOURCE_POOL: usize = 32;
+const CROSS_SOURCE_BONUS: u64 = 48;
+const RECENCY_BONUS: u64 = 36;
+const RECENCY_HALF_LIFE_HOURS: u64 = 7 * 24;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Recommendation {
@@ -14,10 +20,11 @@ pub struct Recommendation {
 }
 
 /// Resolve navigation for items sorted newest first. Suggestions follow the same weighted-index
-/// model used by established static-site generators: shared labels dominate, then category,
-/// uncommon title terms, and source. An inverted index keeps this proportional to matching
+/// model used by established static-site generators: shared labels dominate, then category and
+/// uncommon title terms. An inverted index keeps this proportional to matching
 /// features rather than comparing every pair of articles.
 pub fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
+    let newest = items.iter().map(|item| item.date).max();
     let features: Vec<Vec<String>> = items.iter().map(item_features).collect();
     let mut postings: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (index, item_features) in features.iter().enumerate() {
@@ -29,7 +36,7 @@ pub fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
     items
         .iter()
         .enumerate()
-        .map(|(index, _)| {
+        .map(|(index, item)| {
             let previous = index.checked_sub(1);
             let next = (index + 1 < items.len()).then_some(index + 1);
             let mut scores = BTreeMap::<usize, u64>::new();
@@ -40,6 +47,19 @@ pub fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
                     if candidate != index {
                         *scores.entry(candidate).or_default() += weight;
                     }
+                }
+            }
+            // Seed only a bounded recent pool rather than comparing every article with every
+            // other article. Recency decays smoothly with a seven-day half-life; a separate
+            // cross-source bonus keeps suggestions diverse while build cost stays linear.
+            for (candidate, candidate_item) in items.iter().enumerate().take(CROSS_SOURCE_POOL) {
+                if candidate == index {
+                    continue;
+                }
+                let score = scores.entry(candidate).or_default();
+                *score += newest.map_or(0, |newest| recency_bonus(newest, candidate_item.date));
+                if candidate_item.source != item.source {
+                    *score += CROSS_SOURCE_BONUS;
                 }
             }
             let mut ranked: Vec<_> = scores.into_iter().collect();
@@ -54,7 +74,7 @@ pub fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
                 .map(|(candidate, _)| candidate)
                 .take(RECOMMENDATION_COUNT)
                 .collect();
-            fill_fallback(&mut articles, items.len(), index);
+            fill_fallback(&mut articles, items, index);
             debug_assert_eq!(
                 articles.len(),
                 RECOMMENDATION_COUNT.min(items.len().saturating_sub(1))
@@ -68,13 +88,24 @@ pub fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
         .collect()
 }
 
-fn fill_fallback(articles: &mut Vec<usize>, len: usize, current: usize) {
-    for candidate in 0..len {
-        if articles.len() == RECOMMENDATION_COUNT {
-            break;
-        }
-        if candidate != current && !articles.contains(&candidate) {
-            articles.push(candidate);
+fn recency_bonus(newest: DateTime<Utc>, candidate: DateTime<Utc>) -> u64 {
+    let age = newest.signed_duration_since(candidate).num_hours().max(0) as u64;
+    RECENCY_BONUS * RECENCY_HALF_LIFE_HOURS / (RECENCY_HALF_LIFE_HOURS + age)
+}
+
+fn fill_fallback(articles: &mut Vec<usize>, items: &[ItemCtx], current: usize) {
+    for prefer_other_source in [true, false] {
+        for candidate in 0..items.len() {
+            if articles.len() == RECOMMENDATION_COUNT {
+                return;
+            }
+            let other_source = items[candidate].source != items[current].source;
+            if candidate != current
+                && other_source == prefer_other_source
+                && !articles.contains(&candidate)
+            {
+                articles.push(candidate);
+            }
         }
     }
 }
@@ -93,7 +124,6 @@ fn item_features(item: &ItemCtx) -> Vec<String> {
             features.insert(format!("category:{category}"));
         }
     }
-    features.insert(format!("source:{}", item.source));
     for token in title_terms(&item.title) {
         features.insert(format!("title:{token}"));
     }
@@ -105,8 +135,6 @@ fn feature_weight(feature: &str, documents: usize, frequency: usize) -> u64 {
         100
     } else if feature.starts_with("category:") {
         40
-    } else if feature.starts_with("source:") {
-        12
     } else {
         // Integer inverse-document-frequency: rare title terms matter more, without floating-point
         // ordering or platform-dependent output.
@@ -183,8 +211,20 @@ mod tests {
         assert_eq!(recommendations[0].next, Some(1));
         assert_eq!(recommendations[1].previous, Some(0));
         assert_eq!(recommendations[1].next, Some(2));
-        assert_eq!(recommendations[0].articles, vec![2, 3, 1]);
+        assert_eq!(recommendations[0].articles, vec![2, 1, 3]);
         assert_eq!(resolve(&items), recommendations);
+    }
+
+    #[test]
+    fn fallback_prefers_other_sources() {
+        let items = vec![
+            item("Current", "a", "one", &[], 12),
+            item("Same source", "a", "two", &[], 11),
+            item("Other one", "b", "three", &[], 10),
+            item("Other two", "c", "four", &[], 9),
+            item("Other three", "d", "five", &[], 8),
+        ];
+        assert_eq!(resolve(&items)[0].articles, vec![2, 3, 4]);
     }
 
     #[test]
@@ -209,5 +249,19 @@ mod tests {
                 3
             );
         }
+    }
+
+    #[test]
+    fn recency_bonus_has_a_seven_day_half_life() {
+        let newest = Utc.with_ymd_and_hms(2026, 9, 3, 12, 0, 0).unwrap();
+        assert_eq!(recency_bonus(newest, newest), 36);
+        assert_eq!(
+            recency_bonus(newest, newest - chrono::Duration::days(7)),
+            18
+        );
+        assert_eq!(
+            recency_bonus(newest, newest - chrono::Duration::days(21)),
+            9
+        );
     }
 }

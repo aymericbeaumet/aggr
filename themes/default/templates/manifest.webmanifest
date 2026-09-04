@@ -1,7 +1,7 @@
 {# Rendered to <site>/manifest.webmanifest; colours match style.css. #}
 {
-  "name": "Aggr",
-  "short_name": "Aggr",
+  "name": "aggr",
+  "short_name": "aggr",
   "description": {{ site.description | json }},
   "lang": {{ site.language | json }},
   "id": "./",

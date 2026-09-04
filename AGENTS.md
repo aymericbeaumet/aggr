@@ -3,7 +3,7 @@
 Git-native feed reader: a Rust CLI that turns `aggr.toml` into a static site, with every
 fetched item stored on an append-only orphan git branch. Shipped as prebuilt binaries, a
 composite GitHub Action (`action.yml`, install only) and a reusable workflow
-(`.github/workflows/aggr.yml`) that runs sync → build → Pages deploy → digest.
+(`.github/workflows/aggr.yml`) that runs sync → build → Pages deploy.
 
 ## Hard rules
 
@@ -17,8 +17,7 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
 - Stored `.html` and rendered pages are safe by construction: `content.rs` strips scripts,
   handlers and `data:`/`javascript:` URLs before storage; ammonia sanitizes before display;
   comrak renders with raw HTML off. Never serve stored HTML unsanitized.
-- No data leaves the user's repository except the fetches they configured and the GitHub API
-  calls the digest makes with `GITHUB_TOKEN`.
+- No data leaves the user's repository except the fetches they configured.
 - Rust only. Async work uses tokio (`JoinSet` + `Semaphore`); git is shelled out; rustls with
   the ring provider, installed via `http::install_crypto_provider()` before any client (tests too).
 - `config.default.toml` is the source of truth for defaults and must stay in sync with
@@ -32,7 +31,7 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
 ```
 src/main.rs, cli.rs            entry + clap types
 src/commands/*.rs              one file per subcommand; Project = config + sources + repo
-src/config.rs                  aggr.toml types, defaults, `include` files, ${ENV} expansion, validation
+src/config.rs, config/         aggr.toml types, safe local/remote include graph, ${ENV}, validation
 src/git.rs                     worktree/orphan bootstrap, commit with trailers, push+rebase, refs
 src/http.rs                    reqwest client: UA, timeouts, size cap, conditional GET, retries
 src/sources/{mod,feed,html,aggr}.rs source dispatch, automatic feed/HTML discovery, aggr engine
@@ -40,8 +39,7 @@ src/content.rs                 strip → sanitize → Markdown; html_to_text, ex
 src/model.rs                   front matter, dedupe keys, link normalization, file names, blob sha
 src/store/                     the branch tree: items, state, seen, status, retention, front matter
 src/site/                      build orchestration, template context, minijinja env, outputs
-src/digest.rs, github.rs       digest selection/grouping/refs; the few REST calls
-themes/default/                embedded theme (templates/, static/), also the digest.md template
+themes/default/                embedded theme (templates/, static/)
 tests/cli.rs                   end-to-end: bare origin + clone + httpmock + the real binary
 docs/git-model.md              the branch/ref contract; readme.md is user-facing
 ```
@@ -58,15 +56,14 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 ## Conventions
 
 - Pure functions for anything decidable (dedupe, file names, retention plans, status
-  transitions, digest selection, commit messages); IO at the edges in `commands/`, `store/`,
+  transitions, commit messages); IO at the edges in `commands/`, `store/`,
   `git.rs`. Add the unit test next to the function; add a `tests/cli.rs` scenario when git or
   the CLI surface is involved.
 - `anyhow` with `.context()`; no `unwrap` outside tests.
 - httpmock serves the first registered matching mock: `delete()` the old one before adding a
   new mock for the same path.
-- minijinja: `trim_blocks`/`lstrip_blocks` are on, autoescape follows the `.html` extension, the
-  custom formatter escapes `& < > " '` only; use inline `{{ x if cond }}` in `digest.md` rather
-  than block tags on their own line.
+- minijinja: `trim_blocks`/`lstrip_blocks` are on, autoescape follows the `.html` extension, and
+  the custom formatter escapes `& < > " '` only.
 - `themes/default/static/swup.js` is the vendored Swup 4 UMD build; keep `swup.LICENSE` beside it
   and keep navigation progressively functional without JavaScript.
 - A normal source URL is intentionally enough: keep HTML heuristics internal and remember the

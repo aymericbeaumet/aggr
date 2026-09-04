@@ -26,6 +26,26 @@ microformats2 `h-feed`/`h-entry` properties. `opensearch.xml` integrates the Pag
 browser search, while `sitemap.xml` (or a split sitemap index for large archives) exposes public
 pages to crawlers.
 
+## aggr network
+
+`aggr` is the engine. An **aggr instance** is a repository containing a workflow and root aggr
+config, together with the data branch and site they produce. Every aggr instance is independent
+and identifies itself as a member of the same aggr network. It does not register with a central
+service or send telemetry. Instead, every HTML page carries the same semantic instance type and
+network identity, links its metadata with the registered
+`service-meta` relation, and links the exact TOML that produced it with `via`.
+
+The root `aggr.json` is the stable machine entry point. It names the instance and generator,
+identifies the network, points to its pinned configuration and git data when known, and enumerates
+feeds, archives, search, sitemap, and PWA endpoints. Its versioned schema is
+[`aggr-instance.schema.json`](aggr-instance.schema.json). Schema.org JSON-LD expresses the same
+membership with `WebSite.isPartOf`, while `meta[name="generator"]` and
+`meta[name="aggr:network"]` make inexpensive crawler recognition possible. Canonical links and
+sitemaps make each publicly linked instance crawlable by ordinary search engines; the shared type,
+profile and network identifiers then let search tools recognize and consume it without executing
+JavaScript. The protocol deliberately defines identity and interoperability rather than claiming a
+central, exhaustive registry.
+
 ## Stable and portable URLs
 
 - Internal links never assume an origin root. They resolve relative to the generated page.

@@ -15,7 +15,6 @@ categories = ["command-line-utilities", "web-programming"]
 ammonia = "4"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = { version = "0.10", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 comrak = { version = "0.54", default-features = false }

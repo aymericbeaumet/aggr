@@ -18,7 +18,8 @@ use crate::content;
 use crate::git::Worktree;
 use crate::http;
 use crate::model::{
-    ContentKind, FrontMatter, RawItem, dedupe_keys, file_stem, item_dir, unique_stem,
+    ContentKind, FrontMatter, RawItem, dedupe_keys, file_stem, item_dir, normalize_labels,
+    unique_stem,
 };
 use crate::sources::{self, Fetch};
 use crate::store::{NewItem, Outcome, Store, retention};
@@ -132,7 +133,8 @@ pub async fn run_with_cache(
                 &article_failures,
                 state_policy,
             )
-            .await;
+            .await
+            .map_err(|err| sanitized_source_error(&source, &err));
             (source.slug, result)
         });
     }
@@ -196,6 +198,15 @@ pub async fn run_with_cache(
     })
 }
 
+fn sanitized_source_error(source: &Source, err: &anyhow::Error) -> anyhow::Error {
+    let mut message = format!("{err:#}");
+    if let Some(private) = source.engine.url() {
+        let replacement = source.public_url.as_deref().unwrap_or("[source URL]");
+        message = message.replace(private.as_str(), replacement);
+    }
+    anyhow::anyhow!(message)
+}
+
 /// Drop what `[store] max_age_days` / `max_items` exclude. A no-op unless one of them is set.
 fn apply_retention(store: &Store, config: &StoreConfig, now: DateTime<Utc>) -> Result<usize> {
     let limits = retention::Limits {
@@ -231,12 +242,10 @@ async fn fetch_one(
     let fetched = sources::fetch(source, &ctx).await?;
 
     let mut next_state = state.clone();
-    if let Some(url) = source.engine.url() {
-        next_state.url = url.to_string();
-    }
+    next_state.identity = source.identity.clone();
     let (report, visible_change) = match fetched {
         Fetch::Unchanged { validators } => {
-            validators.apply(&mut next_state);
+            apply_validators(validators, &mut next_state, source);
             (
                 SourceReport {
                     slug: slug.clone(),
@@ -252,9 +261,13 @@ async fn fetch_one(
             meta,
             mut items,
         } => {
-            validators.apply(&mut next_state);
+            apply_validators(validators, &mut next_state, source);
             next_state.title = meta.title.or(next_state.title);
-            next_state.site_url = meta.site_url.or(next_state.site_url);
+            next_state.site_url = meta
+                .site_url
+                .and_then(|url| url::Url::parse(&url).ok())
+                .map(|url| crate::config::public_url(&url, true))
+                .or(next_state.site_url);
             let metadata_changed =
                 next_state.title != state.title || next_state.site_url != state.site_url;
 
@@ -291,7 +304,8 @@ async fn fetch_one(
                 let mut planned = plan(&raw, source, options, content_kind);
                 if !options.refresh {
                     let dir = planned.dir.clone();
-                    planned.stem = unique_stem(&planned.stem, |stem| {
+                    let identity = keys.first().map(String::as_str).unwrap_or(&raw.link);
+                    planned.stem = unique_stem(&planned.stem, identity, |stem| {
                         store.stem_exists(&dir, stem)
                             || taken.contains(&(dir.clone(), stem.to_string()))
                     });
@@ -332,6 +346,22 @@ async fn fetch_one(
         store.write_source_state(slug, &next_state)?;
     }
     Ok(report)
+}
+
+fn apply_validators(
+    mut validators: sources::Validators,
+    state: &mut crate::store::SourceState,
+    source: &Source,
+) {
+    validators.resolved_url = if source.persist_endpoint {
+        validators
+            .resolved_url
+            .and_then(|url| url::Url::parse(&url).ok())
+            .map(|url| crate::config::public_url(&url, false))
+    } else {
+        None
+    };
+    validators.apply(state);
 }
 
 fn keep_newest(items: &mut Vec<RawItem>, limit: usize) {
@@ -465,7 +495,7 @@ fn plan(raw: &RawItem, source: &Source, options: &Options, content_kind: Content
         Some(html) => content::to_markdown(html, base.as_ref()),
         None => raw.summary.clone().unwrap_or_default(),
     };
-    let body = content::strip_leading_published_date(&body, published);
+    let body = content::strip_leading_metadata(&body, published, &source.slug);
     let (html, truncated) = match &raw.content_html {
         Some(html) if options.html && source.html => {
             let (stored, truncated) = content::storage_html(html, options.html_max_bytes);
@@ -481,14 +511,7 @@ fn plan(raw: &RawItem, source: &Source, options: &Options, content_kind: Content
         updated,
         first_seen: options.now,
         authors: raw.authors.clone(),
-        labels: source
-            .labels
-            .iter()
-            .chain(&raw.labels)
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect(),
+        labels: normalize_labels(source.labels.iter().chain(&raw.labels)),
         summary: raw.summary.clone().filter(|s| !s.trim().is_empty()),
         content: content_kind,
         html: None,
@@ -518,6 +541,9 @@ mod tests {
             name: None,
             category: None,
             labels: vec![],
+            identity: "blog".into(),
+            public_url: Some("https://blog.example/feed".into()),
+            persist_endpoint: true,
             headers: vec![],
             html: true,
             content: ContentMode::Heavy,
