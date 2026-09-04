@@ -53,10 +53,10 @@ changes, appends new items to the orphan `aggr` branch, builds the site, and dep
 Pages. Forks must enable scheduled workflows once in the Actions tab. Private repositories need a
 GitHub plan that supports private Pages; `pages: false` keeps the result as an Actions artifact.
 
-The `@v1` reference follows every compatible release automatically. A release moves that tag only
-after its matching binaries are published, so the reusable workflow and installer advance as one
-and reader repositories never need a version bump. Use an immutable `@vX.Y.Z` tag or full commit
-SHA only when you deliberately want to freeze updates.
+The `@v1` reference is a stable workflow contract. On every run it resolves the greatest published
+`v1.x.y` binary, so compatible engine releases reach every instance without changing its workflow.
+Use an immutable `@vX.Y.Z` tag and exact `version` input only when you deliberately want to freeze
+both pieces.
 
 ## Configure sources
 

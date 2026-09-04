@@ -1,7 +1,7 @@
 name: release
 
 # Tag-driven: bump `version` in Cargo.toml and VERSION, commit, `git tag vX.Y.Z`, push the tag.
-# The major tag (`v1`) is moved to the same commit so `@v1` in user workflows follows releases.
+# Stable reusable workflows resolve the newest compatible binary through their major channel.
 
 on:
   push:
@@ -21,7 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      major: ${{ steps.version.outputs.major }}
     steps:
       - uses: actions/checkout@v4
       - id: version
@@ -35,7 +34,6 @@ jobs:
             echo "tag $TAG, Cargo.toml $cargo and VERSION $file disagree"; exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "major=v${version%%.*}" >> "$GITHUB_OUTPUT"
 
   test:
     needs: verify
@@ -95,12 +93,6 @@ jobs:
             --target "$GITHUB_SHA" \
             --generate-notes \
             dist/*
-      # `uses: aymericbeaumet/aggr@v1` and `.../aggr.yml@v1` resolve through this tag.
-      - env:
-          MAJOR: ${{ needs.verify.outputs.major }}
-        run: |
-          git tag -f "$MAJOR" "$GITHUB_SHA"
-          git push -f origin "refs/tags/$MAJOR"
 
   # Skipped, not failed, on forks and until the HOMEBREW_TAP_TOKEN secret exists.
   homebrew:

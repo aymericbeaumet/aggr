@@ -60,8 +60,7 @@ jobs:
           file="$(tr -d '[:space:]' < VERSION)"
           [ "$cargo" = "$file" ] || { echo "Cargo.toml says $cargo, VERSION says $file"; exit 1; }
 
-  # Exercise the same-commit installer used by the reusable workflow. Before a version-bump commit
-  # is released, use the latest existing release so the bump can still pass CI and be tagged.
+  # Exercise the same major-channel resolution used by the stable reusable workflow.
   installer:
     runs-on: ubuntu-latest
     permissions:
@@ -73,23 +72,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_REPOSITORY: aymericbeaumet/aggr
         run: |
-          version="$(tr -d '[:space:]' < VERSION)"
-          if gh release view "v$version" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
-            echo "released=true" >> "$GITHUB_OUTPUT"
-            echo "expected=$version" >> "$GITHUB_OUTPUT"
-          else
-            latest="$(gh release view --repo "$RELEASE_REPOSITORY" --json tagName --jq .tagName)"
-            echo "released=false" >> "$GITHUB_OUTPUT"
-            echo "expected=${latest#v}" >> "$GITHUB_OUTPUT"
-          fi
-      - id: install-current
-        if: steps.release.outputs.released == 'true'
-        uses: ./
-      - id: install-latest
-        if: steps.release.outputs.released != 'true'
+          declared="$(tr -d '[:space:]' < VERSION)"
+          major="${declared%%.*}"
+          latest="$(gh release list \
+            --repo "$RELEASE_REPOSITORY" \
+            --exclude-drafts \
+            --exclude-pre-releases \
+            --limit 1000 \
+            --json tagName \
+            --jq "map(select(.tagName | test(\"^v${major}\\\\.[0-9]+\\\\.[0-9]+$\"))) | max_by(.tagName | ltrimstr(\"v\") | split(\".\") | map(tonumber)) | .tagName // empty")"
+          [ -n "$latest" ] || { echo "no published v$major release"; exit 1; }
+          echo "major=$major" >> "$GITHUB_OUTPUT"
+          echo "expected=${latest#v}" >> "$GITHUB_OUTPUT"
+      - id: install-major
         uses: ./
         with:
-          version: ${{ steps.release.outputs.expected }}
+          version: ${{ steps.release.outputs.major }}
       - env:
           EXPECTED: ${{ steps.release.outputs.expected }}
         run: |
