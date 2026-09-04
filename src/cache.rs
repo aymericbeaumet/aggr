@@ -106,6 +106,11 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     for path in config_files {
         hash_file(&mut hash, b"config", &path)?;
     }
+    let mut remote_configs = config.loaded_remote.clone();
+    remote_configs.sort();
+    for (identity, digest) in remote_configs {
+        hash_field(&mut hash, identity.as_bytes(), digest.as_bytes());
+    }
     for (index, dir) in crate::site::theme_layers(config, project_root)?
         .dirs
         .iter()
@@ -528,27 +533,38 @@ mod tests {
         std::fs::write(root.path().join("templates/index.html"), "one").unwrap();
         let mut config = crate::config::Config::parse("[site]\ntitle = \"one\"\n").unwrap();
         config.loaded_files = vec![config_path.clone()];
-        let fingerprint = |discussions| RenderFingerprint {
-            config: &config,
-            project_root: root.path(),
-            config_sha: Some("config"),
-            data_sha: Some("data"),
-            base_url: None,
-            release: false,
-            discussions,
-            generation: "generation",
-        };
-        let first = render_fingerprint(fingerprint(None)).unwrap();
+        macro_rules! fingerprint {
+            ($discussions:expr) => {
+                render_fingerprint(RenderFingerprint {
+                    config: &config,
+                    project_root: root.path(),
+                    config_sha: Some("config"),
+                    data_sha: Some("data"),
+                    base_url: None,
+                    release: false,
+                    discussions: $discussions,
+                    generation: "generation",
+                })
+                .unwrap()
+            };
+        }
+        let first = fingerprint!(None);
 
         std::fs::write(root.path().join("templates/index.html"), "two").unwrap();
-        let theme_changed = render_fingerprint(fingerprint(None)).unwrap();
+        let theme_changed = fingerprint!(None);
         assert_ne!(first, theme_changed);
 
         std::fs::write(&config_path, "[site]\ntitle = \"two\"\n").unwrap();
-        let config_changed = render_fingerprint(fingerprint(None)).unwrap();
+        let config_changed = fingerprint!(None);
         assert_ne!(theme_changed, config_changed);
 
-        let discussion_changed = render_fingerprint(fingerprint(Some("new-direct-link"))).unwrap();
-        assert_ne!(config_changed, discussion_changed);
+        config
+            .loaded_remote
+            .push(("github:o/r@main/aggr.toml".into(), "body-v1".into()));
+        let remote_changed = fingerprint!(None);
+        assert_ne!(config_changed, remote_changed);
+
+        let discussion_changed = fingerprint!(Some("new-direct-link"));
+        assert_ne!(remote_changed, discussion_changed);
     }
 }

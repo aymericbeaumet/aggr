@@ -76,12 +76,16 @@ timeout_secs = 20
 max_body_bytes = 10000000
 # Retries after transient HTTP failures. Retries use deterministic exponential backoff.
 retries = 2
+# Whether a remotely included config may itself name another absolute remote config. Relative
+# files and wildcards in the same remote repository are always allowed. Keep this false unless
+# every config in the transitive chain is trusted.
+allow_remote_include_chains = false
 # `heavy` downloads the original page and extracts its article; `light` reuses feed content.
 content = "heavy"
 
-# One table per source. A remote source uses `url`; a local source-list entry uses `include`.
-# They are mutually exclusive. aggr discovers RSS, Atom or JSON Feed from a normal website URL
-# and conservatively discovers article cards when a site has no feed.
+# One table per source. `url` follows a website; `include` imports another aggr config. They are
+# mutually exclusive. aggr discovers RSS, Atom or JSON Feed from a normal website URL and
+# conservatively discovers article cards when a site has no feed.
 # [[sources]]
 # url = "https://blog.rust-lang.org"
 # type = "feed"              # optional; the auto-discovering web source is the default
@@ -94,11 +98,20 @@ content = "heavy"
 # html = true                # write sanitized raw HTML; defaults to `[store] html`
 # content = "heavy"          # override `[fetch] content` with `"heavy"` or `"light"`
 
-# An include expands source entries from another file at this position. Globs work too.
-# `category` becomes the default for included sources that do not set their own.
+# An include expands source entries from another aggr config at this position. Local and GitHub
+# wildcards work; a bare GitHub repository URL implies its aggr.toml. `category` becomes the
+# default for imported sources that do not set their own. Invalid, repeated and cyclic targets
+# warn and are skipped. Remote configs may only include relative files in their own repository
+# unless `[fetch] allow_remote_include_chains` is explicitly enabled in this root config.
 # [[sources]]
 # include = "./aggr-ai.toml"   # or "./sources/*.toml"
 # category = "ai"
+# [[sources]]
+# include = "https://github.com/owner/aggr-config" # infers aggr.toml
+# GitHub includes automatically use $GITHUB_TOKEN or $GH_TOKEN when present. Cross-repository
+# private configs require a token with read access.
+# [[sources]]
+# include = "https://github.com/owner/aggr-config/blob/main/topics/*.toml"
 
 # Another aggr repository: its data branch is mirrored and its items flow into this site.
 # [[sources]]

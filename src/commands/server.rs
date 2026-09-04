@@ -362,7 +362,7 @@ fn watch(project: &Project, args: &DevArgs, state: DevState) -> Result<notify::R
                     .and_then(|extension| extension.to_str())
                     .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
             });
-            let result = match Project::load(&config_path) {
+            let result = match Project::load(&config_path).await {
                 Ok(project) => {
                     refresh(&project, &fetch_args, &build_args, &state, sync_sources).await
                 }

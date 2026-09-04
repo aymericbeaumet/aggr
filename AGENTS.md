@@ -31,7 +31,7 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
 ```
 src/main.rs, cli.rs            entry + clap types
 src/commands/*.rs              one file per subcommand; Project = config + sources + repo
-src/config.rs                  aggr.toml types, defaults, `include` files, ${ENV} expansion, validation
+src/config.rs, config/         aggr.toml types, safe local/remote include graph, ${ENV}, validation
 src/git.rs                     worktree/orphan bootstrap, commit with trailers, push+rebase, refs
 src/http.rs                    reqwest client: UA, timeouts, size cap, conditional GET, retries
 src/sources/{mod,feed,html,aggr}.rs source dispatch, automatic feed/HTML discovery, aggr engine

@@ -26,10 +26,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             clap_complete::generate(shell, &mut Cli::command(), "aggr", &mut std::io::stdout());
             Ok(())
         }
-        Command::Sync(args) => sync::run(&Project::load(&cli.config)?, &args).await,
-        Command::Build(args) => build::sync_and_run(&Project::load(&cli.config)?, &args).await,
-        Command::Dev(args) => dev::run(&Project::load(&cli.config)?, &args).await,
-        Command::Check => check::run(&Project::load(&cli.config)?).await,
+        Command::Sync(args) => sync::run(&Project::load(&cli.config).await?, &args).await,
+        Command::Build(args) => {
+            build::sync_and_run(&Project::load(&cli.config).await?, &args).await
+        }
+        Command::Dev(args) => dev::run(&Project::load(&cli.config).await?, &args).await,
+        Command::Check => check::run(&Project::load(&cli.config).await?).await,
     }
 }
 
@@ -43,8 +45,8 @@ pub struct Project {
 }
 
 impl Project {
-    pub fn load(config_path: &Path) -> Result<Self> {
-        let config = Config::load(config_path)?;
+    pub async fn load(config_path: &Path) -> Result<Self> {
+        let config = Config::load(config_path).await?;
         let sources = config.sources()?;
         let config_path = config_path
             .canonicalize()

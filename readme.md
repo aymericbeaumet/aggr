@@ -96,8 +96,25 @@ url = "https://openai.com/news/"
 category = "research" # an explicit category wins
 ```
 
-Includes may also be globs such as `./sources/*.toml`, and included files can include
-others. Unknown keys, missing files, duplicate source slugs, and include cycles are errors.
+Includes may be local paths/globs or remote aggr configs. A bare GitHub repository URL finds its
+`aggr.toml` automatically, and GitHub-hosted configs can use relative wildcards just like local
+ones:
+
+```toml
+[[sources]]
+include = "https://github.com/aymericbeaumet/aggr-config"
+
+[[sources]]
+include = "https://github.com/owner/reader/blob/main/topics/*.toml"
+category = "community"
+```
+
+Imports are deterministic and cycle-safe: files and equivalent source endpoints are loaded once,
+in declaration order, with the first declaration winning. Missing, malformed, and non-aggr targets
+warn and are skipped. By default, a remote config may recurse only through relative paths inside
+its own repository. The trusted root can opt into broader chains with
+`[fetch] allow_remote_include_chains = true`. GitHub requests automatically use `GITHUB_TOKEN` or
+`GH_TOKEN` when present; a private repository must grant that token read access.
 
 Custom domains, network links, headers/secrets, PWA controls, retention, themes, and all other
 options are documented directly in [`config.default.toml`](config.default.toml).

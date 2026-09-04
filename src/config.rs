@@ -1,5 +1,7 @@
 //! `aggr.toml`: on-disk schema, defaults, validation, and resolution into engine-ready sources.
 
+mod include_graph;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -25,6 +27,9 @@ pub struct Config {
     /// Root and included TOML files that produced this config; used for exact build-cache keys.
     #[serde(skip)]
     pub(crate) loaded_files: Vec<PathBuf>,
+    /// Remote config identities and content digests that produced this config.
+    #[serde(skip)]
+    pub(crate) loaded_remote: Vec<(String, String)>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +195,9 @@ pub struct FetchConfig {
     pub timeout_secs: u64,
     pub max_body_bytes: usize,
     pub retries: u32,
+    /// Permit a remotely loaded config to name another absolute remote config. Relative includes
+    /// within the same remote repository remain allowed regardless of this setting.
+    pub allow_remote_include_chains: bool,
     /// `heavy` downloads and extracts original article pages; `light` trusts feed content.
     pub content: ContentMode,
 }
@@ -203,6 +211,7 @@ impl Default for FetchConfig {
             timeout_secs: 20,
             max_body_bytes: 10_000_000,
             retries: 2,
+            allow_remote_include_chains: false,
             content: ContentMode::Heavy,
         }
     }
@@ -223,7 +232,7 @@ pub enum ContentMode {
 pub struct SourceConfig {
     #[serde(rename = "type")]
     pub kind: Option<String>,
-    /// Local TOML file or glob expanded at this position. Mutually exclusive with `url`.
+    /// Local/remote aggr config or glob expanded at this position. Mutually exclusive with `url`.
     pub include: Option<String>,
     pub url: Option<String>,
     /// Display name; the upstream feed title is used when unset.
@@ -300,16 +309,13 @@ impl Engine {
     }
 }
 
-/// A file named by a `[[sources]].include`: source entries only.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct SourceFile {
-    sources: Vec<SourceConfig>,
-}
-
 impl Config {
-    /// Parse `path` and expand local `[[sources]].include` entries in place.
-    pub fn load(path: &Path) -> Result<Self> {
+    /// Parse `path` and expand local or remote `[[sources]].include` entries in place.
+    pub async fn load(path: &Path) -> Result<Self> {
+        Self::load_with_github_api(path, None).await
+    }
+
+    async fn load_with_github_api(path: &Path, github_api: Option<Url>) -> Result<Self> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut config =
@@ -317,15 +323,16 @@ impl Config {
         let root = path
             .canonicalize()
             .with_context(|| format!("resolving {}", path.display()))?;
-        config.loaded_files.push(root.clone());
-        let mut stack = vec![root.clone()];
-        config.sources = expand_source_files(
+        let expansion = include_graph::expand(
             std::mem::take(&mut config.sources),
-            &root,
-            None,
-            &mut config.loaded_files,
-            &mut stack,
-        )?;
+            root,
+            &config.fetch,
+            github_api,
+        )
+        .await?;
+        config.sources = expansion.sources;
+        config.loaded_files = expansion.local;
+        config.loaded_remote = expansion.remote;
         Ok(config)
     }
 
@@ -379,18 +386,30 @@ impl Config {
     }
 
     pub fn resolve_sources(&self, env: &dyn Fn(&str) -> Option<String>) -> Result<Vec<Source>> {
-        let mut seen = BTreeSet::new();
+        let mut seen_slugs = BTreeSet::new();
+        let mut seen_identities = BTreeMap::<String, (usize, String)>::new();
         let mut sources = Vec::with_capacity(self.sources.len());
         for (index, raw) in self.sources.iter().enumerate() {
             let source = resolve_source(raw, self.fetch.content, env)
                 .with_context(|| format!("[[sources]] #{}: {}", index + 1, describe(raw)))?;
-            if !seen.insert(source.slug.clone()) {
+            if let Some((first, slug)) = seen_identities.get(&source.identity) {
+                log::warn!(
+                    "ignoring duplicate source [[sources]] #{} ({:?}); first declared as #{} ({:?})",
+                    index + 1,
+                    source.slug,
+                    first + 1,
+                    slug
+                );
+                continue;
+            }
+            if !seen_slugs.insert(source.slug.clone()) {
                 bail!(
                     "[[sources]] #{}: slug {:?} is used twice; set `slug` explicitly on one of them",
                     index + 1,
                     source.slug
                 );
             }
+            seen_identities.insert(source.identity.clone(), (index, source.slug.clone()));
             sources.push(source);
         }
         Ok(sources)
@@ -404,68 +423,6 @@ impl Config {
             .or_else(|| std::env::var("GITHUB_REPOSITORY").ok())
             .filter(|repo| !repo.is_empty())
     }
-}
-
-fn expand_source_files(
-    sources: Vec<SourceConfig>,
-    declaring_file: &Path,
-    inherited_category: Option<&str>,
-    loaded_files: &mut Vec<PathBuf>,
-    stack: &mut Vec<PathBuf>,
-) -> Result<Vec<SourceConfig>> {
-    let dir = declaring_file.parent().unwrap_or(Path::new("."));
-    let mut expanded = Vec::new();
-    for (index, mut source) in sources.into_iter().enumerate() {
-        let Some(pattern) = source_file_pattern(&source).map(str::to_string) else {
-            if source.category.as_deref().is_none_or(str::is_empty) {
-                source.category = inherited_category.map(str::to_string);
-            }
-            expanded.push(source);
-            continue;
-        };
-        validate_source_file_entry(&source).with_context(|| {
-            format!("[[sources]] #{} in {}", index + 1, declaring_file.display())
-        })?;
-        let category = source
-            .category
-            .as_deref()
-            .filter(|category| !category.is_empty())
-            .or(inherited_category)
-            .map(str::to_string);
-        for file in source_file_paths(dir, &pattern)? {
-            let canonical = file
-                .canonicalize()
-                .with_context(|| format!("resolving {}", file.display()))?;
-            if let Some(start) = stack.iter().position(|ancestor| ancestor == &canonical) {
-                let mut cycle: Vec<_> = stack[start..]
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect();
-                cycle.push(canonical.display().to_string());
-                bail!("source-file cycle: {}", cycle.join(" -> "));
-            }
-            let text = std::fs::read_to_string(&canonical)
-                .with_context(|| format!("reading {}", canonical.display()))?;
-            let included: SourceFile = toml::from_str(&text)
-                .with_context(|| format!("parsing {}", canonical.display()))?;
-            loaded_files.push(canonical.clone());
-            stack.push(canonical.clone());
-            let nested = expand_source_files(
-                included.sources,
-                &canonical,
-                category.as_deref(),
-                loaded_files,
-                stack,
-            );
-            stack.pop();
-            expanded.extend(nested?);
-        }
-    }
-    Ok(expanded)
-}
-
-fn source_file_pattern(source: &SourceConfig) -> Option<&str> {
-    source.include.as_deref()
 }
 
 fn validate_source_file_entry(source: &SourceConfig) -> Result<()> {
@@ -484,39 +441,12 @@ fn validate_source_file_entry(source: &SourceConfig) -> Result<()> {
         || !source.sources.is_empty()
         || source.limit.is_some();
     if has_other_key {
-        bail!("an included TOML source may only set `include` and `category`");
+        bail!("an include entry may only set `include` and `category`");
     }
     if source.include.as_deref().is_none_or(str::is_empty) {
-        bail!("`include` must name a local TOML file or glob");
+        bail!("`include` must name an aggr config path, URL, or glob");
     }
     Ok(())
-}
-
-/// Files an `include` names, relative to the declaring file, sorted. A plain path must exist; a
-/// glob must match something, so a typo never silently drops a topic.
-fn source_file_paths(dir: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
-    let full = dir.join(pattern);
-    let is_glob = pattern.contains(['*', '?', '[']);
-    if !is_glob {
-        if !full.is_file() {
-            bail!("source file {pattern:?}: {} does not exist", full.display());
-        }
-        return Ok(vec![full]);
-    }
-    let pattern_str = full.to_string_lossy();
-    let mut paths: Vec<PathBuf> = glob::glob(&pattern_str)
-        .with_context(|| format!("source file {pattern:?}: invalid glob"))?
-        .filter_map(|entry| entry.ok())
-        .filter(|path| path.is_file())
-        .collect();
-    if paths.is_empty() {
-        bail!(
-            "source file {pattern:?} matched no file under {}",
-            dir.display()
-        );
-    }
-    paths.sort();
-    Ok(paths)
 }
 
 fn describe(raw: &SourceConfig) -> String {
@@ -1013,6 +943,10 @@ mod tests {
         assert_eq!(config.fetch.timeout_secs, compiled.fetch.timeout_secs);
         assert_eq!(config.fetch.max_body_bytes, compiled.fetch.max_body_bytes);
         assert_eq!(config.fetch.retries, compiled.fetch.retries);
+        assert_eq!(
+            config.fetch.allow_remote_include_chains,
+            compiled.fetch.allow_remote_include_chains
+        );
         assert_eq!(config.fetch.content, compiled.fetch.content);
         assert_eq!(config.networks, compiled.networks);
         assert!(compiled.networks.is_empty());
@@ -1086,8 +1020,8 @@ url = "https://lobste.rs/search?q={url}"
         assert!(Config::parse("[fetch]\ncontent = \"medium\"\n").is_err());
     }
 
-    #[test]
-    fn local_toml_sources_expand_in_place_with_category_defaults() {
+    #[tokio::test]
+    async fn local_toml_sources_expand_in_place_with_category_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(
@@ -1121,7 +1055,7 @@ url = "https://lobste.rs/search?q={url}"
         )
         .unwrap();
 
-        let config = Config::load(&root.join("aggr.toml")).unwrap();
+        let config = Config::load(&root.join("aggr.toml")).await.unwrap();
         let urls: Vec<_> = config
             .sources
             .iter()
@@ -1158,38 +1092,44 @@ url = "https://lobste.rs/search?q={url}"
             "[[sources]]\ninclude = \"./missing.toml\"\n",
         )
         .unwrap();
-        let err = Config::load(&root.join("aggr.toml")).unwrap_err();
-        assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
+        let config = Config::load(&root.join("aggr.toml")).await.unwrap();
+        assert!(config.sources.is_empty(), "missing includes are ignored");
         std::fs::write(
             root.join("aggr.toml"),
             "[[sources]]\ninclude = \"./nope/*.toml\"\n",
         )
         .unwrap();
-        let err = Config::load(&root.join("aggr.toml")).unwrap_err();
-        assert!(format!("{err:#}").contains("matched no file"), "{err:#}");
+        let config = Config::load(&root.join("aggr.toml")).await.unwrap();
+        assert!(config.sources.is_empty(), "empty globs are ignored");
         std::fs::write(
             root.join("aggr.toml"),
             "[[sources]]\ninclude = \"./bad.toml\"\n",
         )
         .unwrap();
         std::fs::write(root.join("bad.toml"), "[site]\ntitle = \"x\"\n").unwrap();
-        let err = Config::load(&root.join("aggr.toml")).unwrap_err();
-        assert!(format!("{err:#}").contains("site"), "only sources: {err:#}");
+        let config = Config::load(&root.join("aggr.toml")).await.unwrap();
+        assert!(
+            config.sources.is_empty(),
+            "configs without sources are ignored"
+        );
 
         std::fs::write(
             root.join("aggr.toml"),
             "[[sources]]\ninclude = \"./aggr.toml\"\n",
         )
         .unwrap();
-        let err = Config::load(&root.join("aggr.toml")).unwrap_err();
-        assert!(format!("{err:#}").contains("source-file cycle"), "{err:#}");
+        let config = Config::load(&root.join("aggr.toml")).await.unwrap();
+        assert!(
+            config.sources.is_empty(),
+            "cycles terminate without aborting"
+        );
 
         std::fs::write(
             root.join("aggr.toml"),
             "[[sources]]\ninclude = \"./nested.toml\"\nname = \"not allowed\"\n",
         )
         .unwrap();
-        let err = Config::load(&root.join("aggr.toml")).unwrap_err();
+        let err = Config::load(&root.join("aggr.toml")).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("may only set `include` and `category`"),
             "{err:#}"
@@ -1200,11 +1140,188 @@ url = "https://lobste.rs/search?q={url}"
             "[[sources]]\ninclude = \"./nested.toml\"\nurl = \"https://example.com\"\n",
         )
         .unwrap();
-        let err = Config::load(&root.join("aggr.toml")).unwrap_err();
+        let err = Config::load(&root.join("aggr.toml")).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("`url` and `include` are mutually exclusive"),
             "{err:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn github_configs_infer_root_expand_wildcards_and_stop_remote_hops() {
+        use httpmock::Method::GET;
+        use httpmock::MockServer;
+
+        let server = MockServer::start_async().await;
+        let metadata = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/repos/owner/reading");
+                then.status(200).body(r#"{"default_branch":"main"}"#);
+            })
+            .await;
+        let remote = format!(
+            r#"
+[site]
+title = "ignored remote title"
+
+[[sources]]
+url = "https://same.example/feed"
+
+[[sources]]
+include = "./topics/*.toml"
+
+[[sources]]
+include = "{}/forbidden.toml"
+"#,
+            server.base_url()
+        );
+        let root_config = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/repos/owner/reading/contents/aggr.toml");
+                then.status(200).body(remote.clone());
+            })
+            .await;
+        let tree = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/repos/owner/reading/git/trees/main")
+                    .query_param("recursive", "1");
+                then.status(200).body(
+                    r#"{"truncated":false,"tree":[
+                        {"path":"aggr.toml","type":"blob"},
+                        {"path":"topics/b.toml","type":"blob"},
+                        {"path":"topics/a.toml","type":"blob"},
+                        {"path":"topics/subdir","type":"tree"}
+                    ]}"#,
+                );
+            })
+            .await;
+        let first = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/repos/owner/reading/contents/topics/a.toml")
+                    .query_param("ref", "main");
+                then.status(200).body(
+                    "[[sources]]\nurl = \"https://a.example/feed\"\n\
+                     [[sources]]\ninclude = \"../aggr.toml\"\n",
+                );
+            })
+            .await;
+        let second = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/repos/owner/reading/contents/topics/b.toml")
+                    .query_param("ref", "main");
+                then.status(200).body(
+                    "[[sources]]\nurl = \"https://b.example/feed\"\n\
+                     [[sources]]\nurl = \"https://same.example/feed\"\n",
+                );
+            })
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aggr.toml");
+        std::fs::write(
+            &path,
+            "[[sources]]\ninclude = \"https://github.com/owner/reading\"\ncategory = \"shared\"\n",
+        )
+        .unwrap();
+        let config = Config::load_with_github_api(
+            &path,
+            Some(Url::parse(&format!("{}/", server.base_url())).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let sources = config.sources().unwrap();
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.engine.url().unwrap().as_str())
+                .collect::<Vec<_>>(),
+            [
+                "https://same.example/feed",
+                "https://a.example/feed",
+                "https://b.example/feed",
+            ],
+            "GitHub globs are sorted, cycles terminate, forbidden hops are skipped, and the first duplicate wins"
+        );
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.category.as_deref() == Some("shared"))
+        );
+        assert_eq!(config.loaded_files.len(), 1);
+        assert_eq!(config.loaded_remote.len(), 3);
+        metadata.assert_calls_async(1).await;
+        root_config.assert_calls_async(1).await;
+        tree.assert_calls_async(1).await;
+        first.assert_calls_async(1).await;
+        second.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn the_root_can_explicitly_allow_remote_include_chains() {
+        use httpmock::Method::GET;
+        use httpmock::MockServer;
+
+        let server = MockServer::start_async().await;
+        let second_url = server.url("/second.toml");
+        let first_body = format!(
+            "[[sources]]\nurl = \"https://one.example/feed\"\n\
+             [[sources]]\ninclude = \"{second_url}\"\n"
+        );
+        let first = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/first.toml");
+                then.status(200).body(first_body.clone());
+            })
+            .await;
+        let second = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/second.toml");
+                then.status(200)
+                    .body("[[sources]]\nurl = \"https://two.example/feed\"\n");
+            })
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aggr.toml");
+
+        std::fs::write(
+            &path,
+            format!("[[sources]]\ninclude = \"{}\"\n", server.url("/first.toml")),
+        )
+        .unwrap();
+        let config = Config::load(&path).await.unwrap();
+        assert_eq!(config.sources().unwrap().len(), 1);
+        assert_eq!(second.calls_async().await, 0);
+
+        std::fs::write(
+            &path,
+            format!(
+                "[fetch]\nallow_remote_include_chains = true\n\
+                 [[sources]]\ninclude = \"{}\"\n",
+                server.url("/first.toml")
+            ),
+        )
+        .unwrap();
+        let config = Config::load(&path).await.unwrap();
+        assert_eq!(config.sources().unwrap().len(), 2);
+        assert_eq!(first.calls_async().await, 2);
+        second.assert_calls_async(1).await;
+    }
+
+    #[test]
+    fn exact_duplicate_sources_are_ignored_before_slug_collisions() {
+        let config = Config::parse(
+            "[[sources]]\nurl = \"https://example.com/feed.xml\"\nname = \"first\"\n\
+             [[sources]]\nurl = \"https://example.com/feed.xml\"\nname = \"second\"\n",
+        )
+        .unwrap();
+        let sources = config.resolve_sources(&no_env).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].name.as_deref(), Some("first"));
     }
 
     #[test]
