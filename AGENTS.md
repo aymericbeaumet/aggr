@@ -22,8 +22,9 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   the ring provider, installed via `http::install_crypto_provider()` before any client (tests too).
 - `config.default.toml` is the source of truth for defaults and must stay in sync with
   `config.rs` (it is embedded and parsed by a test).
-- `VERSION` and `Cargo.toml` `version` must agree; releases are tags `vX.Y.Z`. The release
-  workflow moves the major tag (`v1`) so `@v1` follows releases, and bumps `Formula/aggr.rb` in
+- `VERSION` and `Cargo.toml` `version` must agree; releases are tags `vX.Y.Z`. The stable reusable
+  workflow (`@v1`) selects the greatest published binary in its major channel at run time; binary
+  releases do not move the workflow tag. The release also bumps `Formula/aggr.rb` in
   `aymericbeaumet/homebrew-tap` (the formula must exist there; the action only bumps).
 
 ## Layout

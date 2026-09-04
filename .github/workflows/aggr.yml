@@ -46,10 +46,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The moving major tag advances this reusable workflow and its matching installer together.
-      # Callers keep `@v1`; each release updates that tag after its binaries are published.
+      # `@v1` is the stable workflow contract. Its major-channel input resolves the greatest
+      # published v1.x.y binary at run time, independently of workflow changes.
       - uses: aymericbeaumet/aggr@v1
         with:
+          version: 1
           token: ${{ github.token }}
 
       # The data ref is part of the key. A partial restore still helps after new items arrive;
