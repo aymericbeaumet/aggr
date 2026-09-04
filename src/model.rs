@@ -15,6 +15,8 @@ pub struct RawItem {
     pub link: String,
     pub published: Option<DateTime<Utc>>,
     pub updated: Option<DateTime<Utc>>,
+    /// When the first aggr in a replication lineage retained this item.
+    pub first_seen: Option<DateTime<Utc>>,
     pub authors: Vec<String>,
     pub labels: Vec<String>,
     /// Plain text.
@@ -25,10 +27,9 @@ pub struct RawItem {
 }
 
 impl RawItem {
-    /// Creation time supplied by the source. `updated` is the best available creation signal
-    /// for sources that expose only JSON-LD's `dateModified` (or equivalent).
+    /// Best available ordering time without conflating an aggr capture with publication.
     pub fn created_at(&self) -> Option<DateTime<Utc>> {
-        self.published.or(self.updated)
+        self.published.or(self.updated).or(self.first_seen)
     }
 }
 
@@ -74,7 +75,11 @@ pub struct FrontMatter {
     pub published: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated: Option<DateTime<Utc>>,
+    /// First capture anywhere in an aggr replication lineage.
     pub first_seen: DateTime<Utc>,
+    /// Time this copy entered the current repository, for replicated aggr items.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replicated_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -267,6 +272,12 @@ mod tests {
             ..raw.clone()
         };
         assert_eq!(updated_only.created_at(), Some(updated));
+        let seen_only = RawItem {
+            updated: None,
+            first_seen: Some(seen),
+            ..updated_only
+        };
+        assert_eq!(seen_only.created_at(), Some(seen));
 
         let item = Item {
             path: "items/x/a".into(),

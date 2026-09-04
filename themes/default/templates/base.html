@@ -7,15 +7,17 @@
 <meta name="referrer" content="strict-origin-when-cross-origin">
 <meta name="robots" content="{{ 'index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1' if page.indexable else 'noindex,follow' }}">
 <base id="aggr-base" href="{{ page.root }}">
-<title>{% block title %}aggr | {{ page.title | lower }}{% endblock %}</title>
-{% if item and item.excerpt %}<meta name="description" content="{{ item.excerpt }}">{% elif site.description %}<meta name="description" content="{{ site.description }}">{% endif %}
+<title>{% block title %}{{ page.document_title }}{% endblock %}</title>
+{% if page.description %}<meta name="description" content="{{ page.description }}">{% endif %}
 <meta name="application-name" content="aggr">
 <meta name="generator" content="aggr {{ build.version }}">
 <meta id="theme-color" name="theme-color" content="#291a1b">
+{% if site.pwa %}
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="aggr">
+{% endif %}
 <script>try{var t=localStorage.getItem('aggr:theme')||'auto';document.documentElement.dataset.theme=/^(auto|light|dark)$/.test(t)?t:'auto'}catch(e){document.documentElement.dataset.theme='auto'}</script>
 <meta name="aggr:network" content="{{ site.network_url }}">
 <meta name="aggr:instance" content="{{ 'aggr.json' | url_for }}">
@@ -23,6 +25,7 @@
 {% if site.repository %}<meta name="aggr:repository" content="https://github.com/{{ site.repository }}">{% endif %}
 <link rel="type" href="{{ site.instance_type_url }}">
 <link rel="service-meta" type="application/json" title="aggr instance metadata" href="{{ 'aggr.json' | url_for }}">
+{% if site.base_url %}<link rel="linkset" type="application/linkset+json" title="Original URL to archived snapshot links" href="{{ 'linkset.json' | url_for }}">{% endif %}
 <link rel="via" type="text/toml" title="aggr source configuration" href="{{ site.config_url or ('aggr.toml' | url_for) }}">
 {% if page.canonical_url %}<link rel="canonical" href="{{ page.canonical_url }}">{% endif %}
 {% if page.paginator %}
@@ -34,12 +37,12 @@
 <meta property="og:type" content="{{ 'article' if item else 'website' }}">
 <meta property="og:site_name" content="{{ site.title }}">
 <meta property="og:title" content="{{ page.title }}">
-{% if item and item.excerpt %}<meta property="og:description" content="{{ item.excerpt }}">{% elif site.description %}<meta property="og:description" content="{{ site.description }}">{% endif %}
+{% if page.description %}<meta property="og:description" content="{{ page.description }}">{% endif %}
 {% if page.canonical_url %}<meta property="og:url" content="{{ page.canonical_url }}">{% endif %}
 {% if site.base_url %}<meta property="og:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | url_for }}"><meta property="og:image:alt" content="{{ site.title }} app icon">{% endif %}
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="{{ page.title }}">
-{% if item and item.excerpt %}<meta name="twitter:description" content="{{ item.excerpt }}">{% elif site.description %}<meta name="twitter:description" content="{{ site.description }}">{% endif %}
+{% if page.description %}<meta name="twitter:description" content="{{ page.description }}">{% endif %}
 {% if site.base_url %}<meta name="twitter:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | url_for }}"><meta name="twitter:image:alt" content="{{ site.title }} app icon">{% endif %}
 <link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
 {% if page.feed_path is not none %}{% set feed_path = page.feed_path %}
@@ -76,9 +79,16 @@
       <a class="menu-link" data-route="preferences/" data-kinds="preferences" href="{{ 'preferences/' | url_for }}"{% if page.kind == 'preferences' %} aria-current="page"{% endif %}><span class="menu-label">preferences</span></a>
     </span>
     <span class="nav-spacer"></span>
-    <a class="config-link"{% if not site.config_url %} data-route="aggr.toml"{% endif %} href="{{ site.config_url or ('aggr.toml' | url_for) }}" target="_blank" rel="noopener noreferrer">aggr.toml ↗</a>
+    <span class="nav-actions">
+      <a id="refresh-page" class="nav-refresh" href="{{ page.path | url_for }}" data-no-swup aria-label="Refresh for new items" title="Refresh for new items"><span aria-hidden="true">↻</span></a>
+      <a class="config-link"{% if not site.config_page_url and not site.config_url %} data-route="aggr.toml"{% endif %} href="{{ site.config_page_url or site.config_url or ('aggr.toml' | url_for) }}" target="_blank" rel="noopener noreferrer">aggr.toml ↗</a>
+    </span>
   </nav>
 </header>
+<div id="connection-status" class="connection-status" role="status" aria-live="polite" aria-atomic="true" hidden>
+  <span id="connection-status-message"></span>
+  <button id="connection-retry" type="button" hidden>retry</button>
+</div>
 <span id="aggr-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></span>
 <dialog id="shortcut-help" class="shortcut-help" aria-labelledby="shortcut-help-title" aria-keyshortcuts="?" data-nosnippet>
   <form method="dialog">

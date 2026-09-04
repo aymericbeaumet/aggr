@@ -36,6 +36,8 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct SiteConfig {
     pub title: String,
+    /// Optional site summary used by HTML metadata, feeds, manifests, and discovery outputs.
+    pub description: Option<String>,
     /// BCP 47 language tag used by HTML and syndication formats.
     pub language: String,
     pub theme: String,
@@ -49,18 +51,39 @@ pub struct SiteConfig {
     /// Public URL of the site (`--release` builds). A custom domain here also writes `CNAME`.
     pub url: Option<Url>,
     pub out: PathBuf,
-    /// Emit the web app manifest and service worker (installable, works offline).
+    /// Emit install metadata and cache a bounded offline set in a secure context.
     pub pwa: bool,
     /// Newest item pages the service worker caches ahead of time for offline reading.
     pub offline_items: usize,
+    /// Optional public identity attached to the site's Schema.org metadata.
+    pub identity: Option<SiteIdentityConfig>,
     /// Free-form values exposed to templates as `site.params`.
     pub params: toml::Table,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SiteIdentityConfig {
+    #[serde(rename = "type")]
+    pub kind: SiteIdentityKind,
+    pub name: String,
+    pub url: Option<Url>,
+    #[serde(default)]
+    pub same_as: Vec<Url>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SiteIdentityKind {
+    Person,
+    Organization,
 }
 
 impl Default for SiteConfig {
     fn default() -> Self {
         Self {
             title: "aggr".into(),
+            description: None,
             language: "en".into(),
             theme: "default".into(),
             items_per_page: 60,
@@ -71,7 +94,8 @@ impl Default for SiteConfig {
             url: None,
             out: PathBuf::from("_site"),
             pwa: true,
-            offline_items: 100,
+            offline_items: 30,
+            identity: None,
             params: toml::Table::new(),
         }
     }
@@ -190,7 +214,7 @@ pub struct FetchConfig {
     pub concurrency: usize,
     /// Concurrent original-article downloads within each source in `heavy` mode.
     pub article_concurrency: usize,
-    /// Newest entries considered from one source per sync; avoids an unbounded first import.
+    /// Newest entries considered from one feed per sync; avoids an unbounded first import.
     pub max_items_per_source: usize,
     pub timeout_secs: u64,
     pub max_body_bytes: usize,
@@ -253,7 +277,7 @@ pub struct SourceConfig {
     pub branch: Option<String>,
     /// `type = "aggr"`: only take items from these of its sources (all when empty).
     pub sources: Vec<String>,
-    /// `type = "aggr"`: newest items considered per run.
+    /// `type = "aggr"`: optional newest-item limit; omitted imports every retained item.
     pub limit: Option<usize>,
 }
 
@@ -287,11 +311,10 @@ pub enum Engine {
         url: Url,
         branch: String,
         sources: Vec<String>,
-        limit: usize,
+        /// None imports every item retained by the upstream aggr.
+        limit: Option<usize>,
     },
 }
-
-pub const AGGR_SOURCE_LIMIT: usize = 200;
 
 impl Engine {
     pub fn name(&self) -> &'static str {
@@ -343,6 +366,22 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        if self
+            .site
+            .description
+            .as_deref()
+            .is_some_and(|description| description.trim().is_empty())
+        {
+            bail!("[site] description must not be empty");
+        }
+        if self
+            .site
+            .identity
+            .as_ref()
+            .is_some_and(|identity| identity.name.trim().is_empty())
+        {
+            bail!("[site.identity] name must not be empty");
+        }
         if self.site.language.trim().is_empty() || self.site.language.contains(char::is_whitespace)
         {
             bail!("[site] language must be a BCP 47 tag such as `en` or `fr-FR`");
@@ -505,9 +544,8 @@ fn resolve_source(
                 (Some(_), Some(_)) => bail!("set either `repo` or `url`, not both"),
                 (None, None) => bail!("`repo` (owner/repo) or `url` (git URL) is required"),
             };
-            let limit = raw.limit.unwrap_or(AGGR_SOURCE_LIMIT);
-            if limit == 0 {
-                bail!("`limit` must be at least 1");
+            if raw.limit == Some(0) {
+                bail!("`limit` must be at least 1; omit it to import all retained items");
             }
             for slug in &raw.sources {
                 validate_slug(slug).context("in `sources`")?;
@@ -516,7 +554,7 @@ fn resolve_source(
                 url,
                 branch: raw.branch.clone().unwrap_or_else(|| "aggr".into()),
                 sources: raw.sources.clone(),
-                limit,
+                limit: raw.limit,
             }
         }
         other => bail!("unknown source type {other:?}; known types: feed, aggr"),
@@ -913,6 +951,7 @@ mod tests {
         let config = Config::parse(DEFAULTS).unwrap();
         let compiled = Config::default();
         assert_eq!(config.site.title, compiled.site.title);
+        assert_eq!(config.site.description, compiled.site.description);
         assert_eq!(config.site.language, compiled.site.language);
         assert_eq!(config.site.theme, compiled.site.theme);
         assert_eq!(config.site.items_per_page, compiled.site.items_per_page);
@@ -924,6 +963,7 @@ mod tests {
         assert_eq!(config.site.out, compiled.site.out);
         assert_eq!(config.site.pwa, compiled.site.pwa);
         assert_eq!(config.site.offline_items, compiled.site.offline_items);
+        assert_eq!(config.site.identity, compiled.site.identity);
         assert_eq!(config.site.params, compiled.site.params);
         assert_eq!(config.store.branch, compiled.store.branch);
         assert_eq!(config.store.dir, compiled.store.dir);
@@ -954,13 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_metadata_and_user_agent_are_not_configurable() {
-        let description = Config::parse("[site]\ndescription = \"custom\"\n").unwrap_err();
-        assert!(
-            description.to_string().contains("description"),
-            "{description}"
-        );
-
+    fn generated_user_agent_is_not_configurable() {
         let user_agent = Config::parse("[fetch]\nuser_agent = \"other\"\n").unwrap_err();
         assert!(
             user_agent.to_string().contains("user_agent"),
@@ -972,6 +1006,44 @@ mod tests {
                 "aggr/{} (+https://github.com/aymericbeaumet/aggr)",
                 env!("CARGO_PKG_VERSION")
             )
+        );
+    }
+
+    #[test]
+    fn site_description_and_identity_are_configurable() {
+        let config = Config::parse(
+            r#"
+[site]
+description = "Independent reading notes and useful links."
+
+[site.identity]
+type = "person"
+name = "Ada Example"
+url = "https://example.com/ada"
+same_as = ["https://social.example/@ada"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.site.description.as_deref(),
+            Some("Independent reading notes and useful links.")
+        );
+        let identity = config.site.identity.unwrap();
+        assert_eq!(identity.kind, SiteIdentityKind::Person);
+        assert_eq!(identity.name, "Ada Example");
+        assert_eq!(identity.url.unwrap().as_str(), "https://example.com/ada");
+        assert_eq!(identity.same_as[0].as_str(), "https://social.example/@ada");
+
+        let empty_description = Config::parse("[site]\ndescription = \" \"\n").unwrap_err();
+        assert!(
+            empty_description.to_string().contains("description"),
+            "{empty_description}"
+        );
+        let empty_identity =
+            Config::parse("[site.identity]\ntype = \"organization\"\nname = \" \"\n").unwrap_err();
+        assert!(
+            empty_identity.to_string().contains("identity"),
+            "{empty_identity}"
         );
     }
 
@@ -1355,7 +1427,7 @@ include = "{}/forbidden.toml"
                 url: Url::parse("https://github.com/friend/reads").unwrap(),
                 branch: "aggr".into(),
                 sources: vec![],
-                limit: AGGR_SOURCE_LIMIT,
+                limit: None,
             }
         );
         assert_eq!(sources[1].slug, "x-reads");
@@ -1365,7 +1437,7 @@ include = "{}/forbidden.toml"
                 url: Url::parse("https://git.example.com/x/reads.git").unwrap(),
                 branch: "data".into(),
                 sources: vec!["hn".into()],
-                limit: 5,
+                limit: Some(5),
             }
         );
 

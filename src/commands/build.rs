@@ -1,4 +1,4 @@
-//! `aggr build`: render the site from the data worktree (or any ref of the data branch).
+//! `aggr build`: sync and render live data, or render a pinned data ref without a source sync.
 //! Plain builds are served from `/`; `--release` builds for the public URL and writes the CNAME.
 
 use std::path::{Path, PathBuf};
@@ -10,9 +10,11 @@ use chrono::Utc;
 use super::Project;
 use crate::cli::BuildArgs;
 
-/// Public `aggr build`: rendered output always follows a completed sync.
+/// Public `aggr build`: live data is synced first, while a pinned ref is rendered as-is.
 pub async fn sync_and_run(project: &Project, args: &BuildArgs) -> Result<()> {
-    super::sync::run(project, &crate::cli::SyncArgs::default()).await?;
+    if args.data_ref.is_none() {
+        super::sync::run(project, &crate::cli::SyncArgs::default()).await?;
+    }
     run(project, args).await.map(|_| ())
 }
 use crate::site::{self, BuildInfo, Summary};
@@ -42,7 +44,13 @@ pub async fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
     let store = Store::open(&data_dir);
     let now = Utc::now();
     let generation = site::render_generation(&store.items()?, &project.config.site, now);
-    let discussions = resolve_discussions(project, &store, &cache_dir, now).await?;
+    let discussions = if args.data_ref.is_some() {
+        // A pinned archive build is the recovery path: do not turn optional live discussion
+        // enrichment into another network dependency.
+        crate::discussions::ResolutionSet::default()
+    } else {
+        resolve_discussions(project, &store, &cache_dir, now).await?
+    };
     let discussions_fingerprint = discussions.fingerprint();
     let fingerprint = crate::cache::render_fingerprint(crate::cache::RenderFingerprint {
         config: &project.config,

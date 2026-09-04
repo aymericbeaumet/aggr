@@ -59,6 +59,7 @@ pub fn instance_descriptor(site: &SiteCtx, build: &BuildCtx) -> Result<String> {
             "opensearch".into(),
             Value::String(endpoint("opensearch.xml")),
         );
+        discovery.insert("linkset".into(), Value::String(endpoint("linkset.json")));
         discovery.insert("sitemap".into(), Value::String(endpoint("sitemap.xml")));
     }
     if site.pwa {
@@ -100,6 +101,100 @@ pub fn instance_descriptor(site: &SiteCtx, build: &BuildCtx) -> Result<String> {
         "discovery": Value::Object(discovery),
     }))
     .map_err(Into::into)
+}
+
+pub fn llms_txt(site: &SiteCtx) -> String {
+    let endpoint = |path: &str| {
+        site.base_url.as_ref().map_or_else(
+            || {
+                if path.is_empty() {
+                    "./".to_string()
+                } else {
+                    path.to_string()
+                }
+            },
+            |_| site_url(site, path),
+        )
+    };
+    let config_url = site
+        .config_url
+        .clone()
+        .unwrap_or_else(|| endpoint("aggr.toml"));
+    let mut out = format!(
+        "# {}\n\n> {}\n\n## Resources\n\n- [Site]({})\n- [Instance metadata]({})\n- [Atom feed]({})\n- [RSS feed]({})\n- [JSON Feed]({})\n- [Sources]({})\n",
+        site.title,
+        site.description,
+        endpoint(""),
+        endpoint("aggr.json"),
+        endpoint("atom.xml"),
+        endpoint("rss.xml"),
+        endpoint("feed.json"),
+        endpoint("sources/"),
+    );
+    if site.has_categories {
+        out.push_str(&format!("- [Categories]({})\n", endpoint("categories/")));
+    }
+    out.push_str(&format!(
+        "- [Tags]({})\n- [Source configuration]({config_url})\n",
+        endpoint("tags/")
+    ));
+    if site.base_url.is_some() {
+        out.push_str(&format!(
+            "- [Original URL to snapshot linkset]({})\n- [Sitemap]({})\n",
+            endpoint("linkset.json"),
+            endpoint("sitemap.xml")
+        ));
+    }
+    out
+}
+
+/// Serialize the original-to-snapshot relationships as an RFC 9264 linkset. The generated
+/// article pages remain self-canonical; this separate graph lets crawlers look up every retained
+/// readable snapshot by the exact upstream URL without pretending it is the upstream resource.
+pub fn linkset_json(site: &SiteCtx, items: &[ItemCtx]) -> Result<String> {
+    let base_url = site
+        .base_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("an RFC 9264 linkset needs an absolute public base URL"))?;
+    absolute_http_url(base_url, "linkset base URL")?;
+    let mut archived_at: std::collections::BTreeMap<&str, Vec<Value>> =
+        std::collections::BTreeMap::new();
+    let mut linkset = Vec::with_capacity(items.len() * 2);
+
+    for item in items {
+        if absolute_http_url(&item.link, "original URL").is_err() {
+            continue;
+        }
+        let local = site_url(site, &item.url);
+        archived_at
+            .entry(&item.link)
+            .or_default()
+            .push(serde_json::json!({"href": local, "type": "text/html"}));
+
+        let representation = local.trim_end_matches('/');
+        linkset.push(serde_json::json!({
+            "anchor": local,
+            "via": [{"href": item.link, "type": "text/html"}],
+            "alternate": [
+                {"href": format!("{representation}.md"), "type": "text/markdown"},
+                {"href": format!("{representation}.txt"), "type": "text/plain"},
+                {"href": format!("{representation}.rst"), "type": "text/x-rst"},
+                {"href": format!("{representation}.json"), "type": "application/ld+json"},
+            ],
+        }));
+    }
+
+    for (original, snapshots) in archived_at {
+        linkset.push(serde_json::json!({
+            "anchor": original,
+            "https://schema.org/archivedAt": snapshots,
+        }));
+    }
+    linkset.sort_by(|left, right| left["anchor"].as_str().cmp(&right["anchor"].as_str()));
+
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "linkset": linkset,
+    }))?)
 }
 
 /// A ~200 byte page that sends old URLs to the item's GitHub permalink.
@@ -527,16 +622,54 @@ pub fn sitemap(
     Ok(SitemapOutput::Index { xml, chunks })
 }
 
-pub fn item_json(site: &SiteCtx, item: &ItemCtx, markdown: &str) -> Result<String> {
+pub fn item_json(
+    site: &SiteCtx,
+    build: &BuildCtx,
+    item: &ItemCtx,
+    markdown: &str,
+) -> Result<String> {
     let local = site_url(site, &item.url);
+    let mut original = serde_json::json!({
+        "@type": "CreativeWork",
+        "@id": item.link,
+        "url": item.link,
+        "headline": item.title,
+        "archivedAt": {"@id": local},
+    });
+    if let Some(published) = item.published {
+        original["datePublished"] = Value::String(published.to_rfc3339());
+    }
+    if let Some(updated) = item.updated {
+        original["dateModified"] = Value::String(updated.to_rfc3339());
+    }
+    if !item.authors.is_empty() {
+        original["author"] = Value::Array(
+            item.authors
+                .iter()
+                .map(|name| serde_json::json!({"@type": "Person", "name": name}))
+                .collect(),
+        );
+    }
+
+    let git = build.data_sha.as_ref().map(|commit| {
+        serde_json::json!({
+            "commit": commit,
+            "path": format!("{}.md", item.path),
+            "permalink": item.permalink,
+        })
+    });
+
     Ok(serde_json::to_string_pretty(&serde_json::json!({
         "@context": "https://schema.org",
-        "@type": "BlogPosting",
-        "@id": item_uid(item),
+        "@type": ["WebPage", "ArchiveComponent"],
+        "@id": local,
         "id": item_uid(item),
         "url": local,
-        "isBasedOn": item.link,
-        "headline": item.title,
+        "name": format!("Archived snapshot: {}", item.title),
+        "dateCreated": item.replicated_at.unwrap_or(item.first_seen).to_rfc3339(),
+        "temporalCoverage": item.first_seen.to_rfc3339(),
+        "isBasedOn": {"@id": item.link},
+        "mainEntity": original,
         "external_url": item.link,
         "title": item.title,
         "source": item.source,
@@ -544,11 +677,14 @@ pub fn item_json(site: &SiteCtx, item: &ItemCtx, markdown: &str) -> Result<Strin
         "category": item.category,
         "tags": item.labels,
         "date_created": item.date.to_rfc3339(),
+        "captured_at": item.first_seen.to_rfc3339(),
+        "replicated_at": item.replicated_at.map(|date| date.to_rfc3339()),
         "date_published": item.published.map(|date| date.to_rfc3339()),
         "date_modified": item.updated.map(|date| date.to_rfc3339()),
         "authors": item.authors,
         "summary": item.summary,
         "description": item.excerpt,
+        "git": git,
         "articleBody": markdown,
         "content_html": item.body_html,
         "content_markdown": markdown,
@@ -810,6 +946,7 @@ mod tests {
         SiteCtx {
             title: "Example & Reader".into(),
             description: "Collected <carefully>".into(),
+            identity: None,
             language: "en-GB".into(),
             base_path: "/reads/".into(),
             base_url: Some("https://example.test/reads/".into()),
@@ -818,6 +955,7 @@ mod tests {
             network_url: AGGR_NETWORK,
             instance_type_url: AGGR_INSTANCE_TYPE,
             pwa: true,
+            config_page_url: None,
             config_url: None,
             has_categories: true,
             discussions: Vec::new(),
@@ -852,6 +990,7 @@ mod tests {
             published: Some(at(8)),
             updated: Some(at(9)),
             first_seen: at(10),
+            replicated_at: None,
             authors: vec!["A & B".into()],
             labels: vec!["Rust".into(), "engineering".into()],
             discussions: vec![DiscussionLinkCtx {
@@ -903,6 +1042,46 @@ mod tests {
             "<content type=\"html\">&lt;p&gt;Clean &amp;amp; &lt;strong&gt;complete&lt;/strong&gt;&lt;/p&gt;</content>"
         ));
         assert!(atom.contains("<updated>2026-09-02T09:30:00+00:00</updated>"));
+    }
+
+    #[test]
+    fn linkset_maps_exact_original_urls_to_local_snapshots() {
+        let first = item();
+        let mut second = item();
+        second.path = "items/other/a-story".into();
+        second.url = "items/other/a-story/".into();
+
+        let json: Value = serde_json::from_str(
+            &linkset_json(&site(), &[first.clone(), second]).expect("linkset"),
+        )
+        .unwrap();
+        assert_eq!(json.as_object().unwrap().len(), 1);
+        assert!(json.as_object().unwrap().contains_key("linkset"));
+        let contexts = json["linkset"].as_array().unwrap();
+        let original = contexts
+            .iter()
+            .find(|context| context["anchor"] == first.link)
+            .unwrap();
+        assert_eq!(
+            original["https://schema.org/archivedAt"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            original["https://schema.org/archivedAt"][0]["href"],
+            "https://example.test/reads/items/source/a-story/"
+        );
+        let snapshot = contexts
+            .iter()
+            .find(|context| context["anchor"] == "https://example.test/reads/items/source/a-story/")
+            .unwrap();
+        assert_eq!(snapshot["via"][0]["href"], first.link);
+        assert_eq!(
+            snapshot["alternate"][0]["href"],
+            "https://example.test/reads/items/source/a-story.md"
+        );
     }
 
     #[test]
@@ -958,21 +1137,49 @@ mod tests {
     }
 
     #[test]
-    fn item_json_is_json_ld_and_reuses_the_feed_identity() {
+    fn item_json_describes_the_snapshot_separately_from_the_original() {
         let item = item();
         let document: Value =
-            serde_json::from_str(&item_json(&site(), &item, "# Complete").unwrap()).unwrap();
+            serde_json::from_str(&item_json(&site(), &build(), &item, "# Complete").unwrap())
+                .unwrap();
         let feed: Value =
             serde_json::from_str(&json_collection(&site(), "Example", "", &[item]).unwrap())
                 .unwrap();
 
         assert_eq!(document["@context"], "https://schema.org");
-        assert_eq!(document["@type"], "BlogPosting");
+        assert_eq!(
+            document["@type"],
+            serde_json::json!(["WebPage", "ArchiveComponent"])
+        );
         assert_eq!(document["id"], feed["items"][0]["id"]);
-        assert_eq!(document["@id"], document["id"]);
+        assert_eq!(document["@id"], feed["items"][0]["url"]);
         assert_eq!(document["url"], feed["items"][0]["url"]);
-        assert_eq!(document["isBasedOn"], feed["items"][0]["external_url"]);
+        assert_eq!(
+            document["isBasedOn"]["@id"],
+            feed["items"][0]["external_url"]
+        );
+        assert_eq!(
+            document["mainEntity"]["@id"],
+            "https://upstream.test/story?a=1&b=2"
+        );
+        assert_eq!(document["mainEntity"]["archivedAt"]["@id"], document["url"]);
+        assert_eq!(document["dateCreated"], "2026-09-02T10:30:00+00:00");
         assert_eq!(document["articleBody"], "# Complete");
+    }
+
+    #[test]
+    fn item_json_does_not_mislabel_capture_time_as_publication_time() {
+        let mut item = item();
+        item.published = None;
+        item.updated = None;
+        item.replicated_at = Some(at(11));
+        let document: Value =
+            serde_json::from_str(&item_json(&site(), &build(), &item, "# Complete").unwrap())
+                .unwrap();
+
+        assert!(document["mainEntity"].get("datePublished").is_none());
+        assert_eq!(document["dateCreated"], "2026-09-02T11:30:00+00:00");
+        assert_eq!(document["temporalCoverage"], "2026-09-02T10:30:00+00:00");
     }
 
     #[test]

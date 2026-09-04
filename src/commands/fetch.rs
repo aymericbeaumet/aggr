@@ -13,7 +13,7 @@ use tokio::task::JoinSet;
 
 use super::Project;
 use crate::cli::FetchArgs;
-use crate::config::{ContentMode, Source, StoreConfig};
+use crate::config::{ContentMode, Engine, Source, StoreConfig};
 use crate::content;
 use crate::git::Worktree;
 use crate::http;
@@ -22,7 +22,7 @@ use crate::model::{
     unique_stem,
 };
 use crate::sources::{self, Fetch};
-use crate::store::{NewItem, Outcome, Store, retention};
+use crate::store::{NewItem, Outcome, SourceState, Store, retention};
 
 pub struct Report {
     pub sources: Vec<SourceReport>,
@@ -234,9 +234,10 @@ async fn fetch_one(
 ) -> Result<SourceReport> {
     let slug = &source.slug;
     let state = store.source_state(slug)?;
+    let request_state = source_request_state(&state, options.refresh);
     let ctx = sources::Context {
         client,
-        state: &state,
+        state: &request_state,
         cache_dir,
     };
     let fetched = sources::fetch(source, &ctx).await?;
@@ -276,7 +277,7 @@ async fn fetch_one(
             let mut prospective = seen.clone();
             let mut taken: HashSet<(String, String)> = HashSet::new();
             let mut added = 0;
-            keep_newest(&mut items, options.max_items_per_source);
+            apply_first_import_limit(&mut items, &source.engine, options.max_items_per_source);
             // Feeds list newest first; preserve oldest-first writes while original pages download
             // concurrently. This keeps deterministic suffixes without making heavy mode serial.
             let mut candidates = Vec::new();
@@ -348,6 +349,14 @@ async fn fetch_one(
     Ok(report)
 }
 
+fn source_request_state(state: &SourceState, refresh: bool) -> SourceState {
+    if refresh {
+        SourceState::default()
+    } else {
+        state.clone()
+    }
+}
+
 fn apply_validators(
     mut validators: sources::Validators,
     state: &mut crate::store::SourceState,
@@ -367,6 +376,14 @@ fn apply_validators(
 fn keep_newest(items: &mut Vec<RawItem>, limit: usize) {
     items.sort_by_key(|item| std::cmp::Reverse(item.created_at()));
     items.truncate(limit);
+}
+
+fn apply_first_import_limit(items: &mut Vec<RawItem>, engine: &Engine, feed_limit: usize) {
+    // Aggr sources already apply their own optional limit. With no limit, importing the full
+    // retained tree is what makes one instance a useful replica of another.
+    if matches!(engine, Engine::Feed { .. }) {
+        keep_newest(items, feed_limit);
+    }
 }
 
 #[derive(Default)]
@@ -489,7 +506,11 @@ fn plan(raw: &RawItem, source: &Source, options: &Options, content_kind: Content
     // A future-dated entry would otherwise land in a directory that does not exist yet.
     let published = raw.published.map(|date| date.min(options.now));
     let updated = raw.updated.map(|date| date.min(options.now));
-    let date = published.or(updated).unwrap_or(options.now);
+    let first_seen = raw
+        .first_seen
+        .map(|date| date.min(options.now))
+        .unwrap_or(options.now);
+    let date = published.or(updated).unwrap_or(first_seen);
     let base = url::Url::parse(&raw.link).ok();
     let body = match &raw.content_html {
         Some(html) => content::to_markdown(html, base.as_ref()),
@@ -509,7 +530,8 @@ fn plan(raw: &RawItem, source: &Source, options: &Options, content_kind: Content
         source: source.slug.clone(),
         published,
         updated,
-        first_seen: options.now,
+        first_seen,
+        replicated_at: raw.first_seen.map(|_| options.now),
         authors: raw.authors.clone(),
         labels: normalize_labels(source.labels.iter().chain(&raw.labels)),
         summary: raw.summary.clone().filter(|s| !s.trim().is_empty()),
@@ -566,6 +588,24 @@ mod tests {
     }
 
     #[test]
+    fn refresh_discards_fetch_validators_so_existing_items_can_be_reprocessed() {
+        let remembered = crate::store::SourceState {
+            identity: "blog".into(),
+            resolved_url: Some("https://blog.example/feed.xml".into()),
+            etag: Some("old-etag".into()),
+            last_modified: Some("yesterday".into()),
+            body_hash: Some("old-body".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(source_request_state(&remembered, false), remembered);
+        assert_eq!(
+            source_request_state(&remembered, true),
+            crate::store::SourceState::default()
+        );
+    }
+
+    #[test]
     fn plans_paths_from_the_published_date_and_clamps_the_future() {
         let raw = RawItem {
             title: "Hello, World!".into(),
@@ -591,6 +631,31 @@ mod tests {
         let planned = plan(&future, &source(), &options(), ContentKind::None);
         assert_eq!(planned.dir, "items/blog/2026/09");
         assert_eq!(planned.front.published, Some(options().now));
+    }
+
+    #[test]
+    fn plan_preserves_imported_first_seen_and_clamps_future_values() {
+        let first_seen = Utc.with_ymd_and_hms(2024, 3, 2, 1, 0, 0).unwrap();
+        let raw = RawItem {
+            title: "Undated imported item".into(),
+            link: "https://example.com/imported".into(),
+            first_seen: Some(first_seen),
+            ..Default::default()
+        };
+        let planned = plan(&raw, &source(), &options(), ContentKind::None);
+        assert_eq!(planned.front.first_seen, first_seen);
+        assert_eq!(planned.front.replicated_at, Some(options().now));
+        assert_eq!(planned.front.published, None);
+        assert_eq!(planned.dir, "items/blog/2024/03");
+
+        let future = RawItem {
+            first_seen: Some(Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap()),
+            ..raw
+        };
+        let planned = plan(&future, &source(), &options(), ContentKind::None);
+        assert_eq!(planned.front.first_seen, options().now);
+        assert_eq!(planned.front.replicated_at, Some(options().now));
+        assert_eq!(planned.dir, "items/blog/2026/09");
     }
 
     #[test]
@@ -655,6 +720,39 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["5", "4"]
         );
+    }
+
+    #[test]
+    fn aggr_imports_are_not_capped_by_the_feed_safety_limit() {
+        let items = (1..=5)
+            .map(|day| RawItem {
+                title: day.to_string(),
+                published: Some(Utc.with_ymd_and_hms(2026, 9, day, 0, 0, 0).unwrap()),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let mut feed_items = items.clone();
+        apply_first_import_limit(
+            &mut feed_items,
+            &Engine::Feed {
+                url: Url::parse("https://example.com/feed.xml").unwrap(),
+            },
+            2,
+        );
+        assert_eq!(feed_items.len(), 2);
+
+        let mut aggr_items = items;
+        apply_first_import_limit(
+            &mut aggr_items,
+            &Engine::Aggr {
+                url: Url::parse("https://git.example/friend/reads.git").unwrap(),
+                branch: "aggr".into(),
+                sources: vec![],
+                limit: None,
+            },
+            2,
+        );
+        assert_eq!(aggr_items.len(), 5);
     }
 
     #[tokio::test]

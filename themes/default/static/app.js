@@ -9,6 +9,12 @@
   var darkPreference = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)");
   var gotoTimer;
   var waitingForGoto = false;
+  var pendingNewEntries = [];
+  var newEntryTimer;
+  var faviconState = { original: null, badged: null, loading: false, active: false };
+  var PREFERENCE_KEYS = ["aggr:theme", "aggr:date-format"];
+  var deferredInstallPrompt;
+  var statusTimer;
 
   function $(selector, root) { return (root || document).querySelector(selector); }
   function $$(selector, root) { return Array.prototype.slice.call((root || document).querySelectorAll(selector)); }
@@ -70,6 +76,53 @@
     applyAgeBands(root);
   }
 
+  function enhanceMarginNotes(root) {
+    $$(".body", root).forEach(function (body) {
+      if (body.dataset.marginNotesEnhanced === "true") return;
+      var count = 0;
+      $$(".footnote-ref a[data-footnote-ref]", body).forEach(function (reference) {
+        var href = reference.getAttribute("href") || "";
+        if (href.charAt(0) !== "#") return;
+        var id = href.slice(1);
+        try { id = decodeURIComponent(id); } catch (error) { /* keep the literal fragment */ }
+        var definition = document.getElementById(id);
+        if (!definition || !body.contains(definition)) return;
+
+        var number = reference.textContent.trim();
+        var marginId = (reference.id || id + "-reference-" + (count + 1)) + "-note";
+        var note = el("aside", {
+          "class": "margin-note footnote-margin-note",
+          "role": "note",
+          "aria-label": "Note " + number,
+          "id": marginId
+        });
+        Array.prototype.slice.call(definition.childNodes).forEach(function (child) {
+          note.appendChild(child.cloneNode(true));
+        });
+        $$(".footnote-backref", note).forEach(function (backref) { backref.remove(); });
+        $$('[id]', note).forEach(function (node) { node.removeAttribute("id"); });
+        var marker = el("span", { "class": "margin-note-number", "text": number + ". " });
+        var firstParagraph = $("p", note);
+        if (firstParagraph) firstParagraph.insertBefore(marker, firstParagraph.firstChild);
+        else note.insertBefore(marker, note.firstChild);
+
+        reference.removeAttribute("target");
+        reference.removeAttribute("rel");
+        reference.setAttribute("aria-describedby", note.id);
+        reference.parentNode.insertAdjacentElement("afterend", note);
+        reference.addEventListener("click", function (event) {
+          if (!window.matchMedia("(min-width: 72.0625rem)").matches) return;
+          event.preventDefault();
+          note.setAttribute("tabindex", "-1");
+          note.focus({ preventScroll: true });
+        });
+        count += 1;
+      });
+      if (count) body.classList.add("has-margin-notes");
+      body.dataset.marginNotesEnhanced = "true";
+    });
+  }
+
   function ageBand(iso) {
     var age = Math.max(0, Date.now() - Date.parse(iso));
     if (age < 60 * 60 * 1000) return "fresh";
@@ -98,19 +151,157 @@
   }
 
   function externalLinks(root) {
+    var installed = isInstalled();
+    var scope = new URL(BASE);
     $$('a[href]', root).forEach(function (link) {
       try {
         var url = new URL(link.getAttribute('href'), document.baseURI);
-        if (/^https?:$/.test(url.protocol) && url.origin !== location.origin) {
-          link.target = '_blank';
-          link.rel = 'noopener noreferrer';
+        var outOfScope = url.origin !== scope.origin || url.pathname.indexOf(scope.pathname) !== 0;
+        if (/^https?:$/.test(url.protocol) && outOfScope) {
+          link.setAttribute("data-no-swup", "");
+          if (installed) link.removeAttribute("target");
+          else link.target = "_blank";
+          link.relList.add("noopener", "noreferrer");
+          var label = link.dataset.aggrExternalLabel || link.getAttribute("aria-label") || link.textContent.trim();
+          var behavior = installed ? "external site" : "opens in a new tab";
+          if (label) {
+            link.dataset.aggrExternalLabel = label;
+            link.setAttribute("aria-label", label + ", " + behavior);
+          }
         }
       } catch (error) { /* an incomplete local link */ }
     });
   }
 
+  function entryStateKey(name) {
+    return "aggr:" + name + ":" + encodeURIComponent(new URL(BASE).pathname);
+  }
+  function readSessionList(key) {
+    try {
+      var value = sessionStorage.getItem(key);
+      if (value === null) return null;
+      var parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.filter(function (item) { return typeof item === "string"; }) : null;
+    } catch (error) { return null; }
+  }
+  function readSessionValue(key) {
+    try { return sessionStorage.getItem(key); } catch (error) { return null; }
+  }
+  function writeSessionList(key, value) {
+    try { sessionStorage.setItem(key, JSON.stringify(value)); } catch (error) { /* private mode */ }
+  }
+  function writeSessionValue(key, value) {
+    try { sessionStorage.setItem(key, value); } catch (error) { /* private mode */ }
+  }
+  function uniqueEntries(entries) {
+    return entries.filter(function (entry, index) { return entries.indexOf(entry) === index; });
+  }
+  function currentRecentEntries() {
+    var entries = window.AGGR && Array.isArray(window.AGGR.entries) ? window.AGGR.entries : [];
+    var home = new URL(location.href).pathname === new URL(BASE).pathname;
+    if (KIND === "river" && home) {
+      entries = entries.concat($$(".rows:not(.search-results) .row[data-url]").map(function (row) {
+        return row.dataset.url;
+      }));
+    }
+    return uniqueEntries(entries.map(function (entry) {
+      try { return new URL(entry, BASE).href; } catch (error) { return null; }
+    }).filter(Boolean));
+  }
+  function detectNewEntries() {
+    var seenKey = entryStateKey("last-seen-entry");
+    var pendingKey = entryStateKey("new-entries");
+    var current = currentRecentEntries();
+    var previousHead = readSessionValue(seenKey);
+    var pending = readSessionList(pendingKey) || [];
+    if (previousHead && current.length) {
+      var boundary = current.indexOf(previousHead);
+      var additions = current.slice(0, boundary === -1 ? current.length : boundary);
+      pending = uniqueEntries(pending.concat(additions));
+    }
+    if (current.length) writeSessionValue(seenKey, current[0]);
+    writeSessionList(pendingKey, pending);
+    pendingNewEntries = pending;
+  }
+  function updateFavicon(active) {
+    var icon = $('link[rel~="icon"]');
+    if (!icon) return;
+    if (!faviconState.original) faviconState.original = icon.getAttribute("href");
+    faviconState.active = active;
+    if (!active) {
+      icon.setAttribute("href", faviconState.original);
+      return;
+    }
+    if (faviconState.badged) {
+      icon.setAttribute("href", faviconState.badged);
+      return;
+    }
+    if (faviconState.loading) return;
+    faviconState.loading = true;
+    var image = new Image();
+    image.onload = function () {
+      faviconState.loading = false;
+      var size = Math.max(image.naturalWidth || 0, 32);
+      var canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      var context = canvas.getContext("2d");
+      if (!context) return;
+      context.drawImage(image, 0, 0, size, size);
+      context.beginPath();
+      context.arc(size * 0.76, size * 0.24, size * 0.2, 0, Math.PI * 2);
+      context.fillStyle = "#e53935";
+      context.fill();
+      context.lineWidth = Math.max(2, size * 0.06);
+      context.strokeStyle = "#ffffff";
+      context.stroke();
+      faviconState.badged = canvas.toDataURL("image/png");
+      if (faviconState.active) icon.setAttribute("href", faviconState.badged);
+    };
+    image.onerror = function () { faviconState.loading = false; };
+    image.src = new URL(faviconState.original, document.baseURI).href;
+  }
+  function updateNewEntryIndicator(active) {
+    document.title = document.title.replace(/^●\s+/, "");
+    if (active) document.title = "● " + document.title;
+    updateFavicon(active);
+  }
+  function acknowledgeNewEntries() {
+    pendingNewEntries = [];
+    try { sessionStorage.removeItem(entryStateKey("new-entries")); } catch (error) { /* private mode */ }
+    $$(".row.is-new").forEach(function (row) { row.classList.remove("is-new"); });
+    $$(".new-marker").forEach(function (marker) { marker.remove(); });
+    updateNewEntryIndicator(false);
+  }
+  function showNewEntries(root) {
+    updateNewEntryIndicator(pendingNewEntries.length > 0);
+    if (!pendingNewEntries.length || document.visibilityState !== "visible") return;
+    var highlighted = 0;
+    $$(".rows:not(.search-results) .row[data-url]", root).forEach(function (row) {
+      var entry;
+      try { entry = new URL(row.dataset.url, BASE).href; } catch (error) { return; }
+      if (pendingNewEntries.indexOf(entry) === -1) return;
+      row.classList.add("is-new");
+      var cell = $(".cell", row);
+      if (cell && !$(".new-marker", cell)) {
+        cell.insertBefore(el("span", { "class": "new-marker", "aria-label": "New item", text: "new" }), cell.firstChild);
+      }
+      highlighted += 1;
+    });
+    if (KIND === "river" && highlighted) {
+      var announcer = $("#aggr-announcer");
+      if (announcer) announcer.textContent = highlighted + (highlighted === 1 ? " new item" : " new items");
+      clearTimeout(newEntryTimer);
+      newEntryTimer = setTimeout(function () {
+        if (KIND === "river" && document.visibilityState === "visible") acknowledgeNewEntries();
+      }, 12 * 1000);
+    }
+  }
+
   var PAGE_HEAD_SELECTOR = [
     'meta[name="description"]',
+    'meta[name="robots"]',
+    'meta[name="author"]',
     'meta[name^="aggr:"]',
     'meta[property^="og:"]',
     'meta[name^="twitter:"]',
@@ -125,6 +316,7 @@
     'link[rel="service-meta"]',
     'link[rel="type"]',
     'link[rel="via"]',
+    'link[rel="original"]',
     'script[type="application/ld+json"]'
   ].join(',');
   function syncPageHead(incoming) {
@@ -164,17 +356,21 @@
       var base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
       while (base64.length % 4) base64 += "=";
       var state = JSON.parse(decodeURIComponent(escape(atob(base64))));
-      Object.keys(state).forEach(function (key) { localStorage.setItem(key, state[key]); });
+      PREFERENCE_KEYS.forEach(function (key) {
+        if (Object.prototype.hasOwnProperty.call(state, key) && typeof state[key] === "string") {
+          localStorage.setItem(key, state[key]);
+        }
+      });
       url.searchParams.delete("aggr-state");
       history.replaceState(null, "", url);
     } catch (error) { /* malformed share URL */ }
   }
   function copyState() {
     var state = {};
-    for (var i = 0; i < localStorage.length; i += 1) {
-      var key = localStorage.key(i);
-      state[key] = localStorage.getItem(key);
-    }
+    PREFERENCE_KEYS.forEach(function (key) {
+      var value = localStorage.getItem(key);
+      if (value !== null) state[key] = value;
+    });
     var encoded = btoa(unescape(encodeURIComponent(JSON.stringify(state)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     var url = new URL(location.href);
     url.searchParams.set("aggr-state", encoded);
@@ -282,6 +478,7 @@
       var fragment = document.createDocumentFragment();
       rows.forEach(function (entry, i) { fragment.appendChild(renderResult(entry.data, entry.display, i + 1)); });
       list.replaceChildren(fragment);
+      externalLinks(list);
       list.setAttribute("aria-busy", "false");
       empty.hidden = rows.length > 0;
       empty.textContent = searched ? "No matching items." : "Type to search the most recent items.";
@@ -539,11 +736,116 @@
     }
   });
 
-  function toast(text, action, onAction) {
-    var button = el("button", { type: "button", "class": "linkish", text: action });
-    button.addEventListener("click", onAction);
-    document.body.appendChild(el("div", { "class": "toast", role: "status" }, [document.createTextNode(text), button]));
+  function isInstalled() {
+    return (window.matchMedia && (
+      window.matchMedia("(display-mode: standalone)").matches
+      || window.matchMedia("(display-mode: minimal-ui)").matches
+      || window.matchMedia("(display-mode: fullscreen)").matches
+    ))
+      || window.navigator.standalone === true;
   }
+
+  function updatePwaControls(message) {
+    var install = $("#install-app");
+    var guidance = $("#install-guidance");
+    var status = $("#pwa-status");
+    var installed = isInstalled();
+    if (guidance) {
+      guidance.textContent = installed
+        ? "aggr is running as an installed app."
+        : "Use your browser’s Install or Add to Home Screen action. A direct install button appears here when the browser provides one.";
+    }
+    if (install) install.hidden = installed || !deferredInstallPrompt;
+    if (status) status.textContent = message || "";
+  }
+
+  function wirePwaControls() {
+    var install = $("#install-app");
+    if (install && install.dataset.bound !== "true") {
+      install.dataset.bound = "true";
+      install.addEventListener("click", function () {
+        if (!deferredInstallPrompt) return;
+        var prompt = deferredInstallPrompt;
+        deferredInstallPrompt = null;
+        prompt.prompt();
+        prompt.userChoice.then(function (choice) {
+          updatePwaControls(choice.outcome === "accepted" ? "Install accepted." : "Install dismissed.");
+        }).catch(function () { updatePwaControls(); });
+      });
+    }
+    updatePwaControls();
+  }
+
+  function reloadPositionKey() { return entryStateKey("reload-position"); }
+  function rememberReloadPosition() {
+    try {
+      var active = document.activeElement;
+      var dialog = $("#shortcut-help");
+      sessionStorage.setItem(reloadPositionKey(), JSON.stringify({
+        url: location.href,
+        x: scrollX,
+        y: scrollY,
+        focus: active && active.id || "",
+        shortcutHelp: !!(dialog && dialog.open)
+      }));
+    } catch (error) { /* private mode */ }
+  }
+  function restoreReloadPosition() {
+    try {
+      var raw = sessionStorage.getItem(reloadPositionKey());
+      sessionStorage.removeItem(reloadPositionKey());
+      if (!raw) return;
+      var position = JSON.parse(raw);
+      if (position.url !== location.href) return;
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          var dialog = $("#shortcut-help");
+          if (position.shortcutHelp && dialog && dialog.showModal && !dialog.open) dialog.showModal();
+          var focus = position.focus && document.getElementById(position.focus);
+          if (focus && focus.focus) focus.focus({ preventScroll: true });
+          window.scrollTo(position.x || 0, position.y || 0);
+        });
+      });
+    } catch (error) { /* malformed or unavailable session state */ }
+  }
+
+  function showConnectionStatus(message, retry, temporary) {
+    var bar = $("#connection-status");
+    var text = $("#connection-status-message");
+    var button = $("#connection-retry");
+    if (!bar || !text || !button) return;
+    clearTimeout(statusTimer);
+    text.textContent = message;
+    button.hidden = !retry;
+    bar.hidden = false;
+    if (temporary) statusTimer = setTimeout(function () { bar.hidden = true; }, 2200);
+  }
+
+  function updateConnectionStatus() {
+    var bar = $("#connection-status");
+    if (!bar) return;
+    if (!navigator.onLine) showConnectionStatus("Offline — showing saved pages.", true, false);
+    else bar.hidden = true;
+  }
+
+  function wirePersistentControls() {
+    var refresh = $("#refresh-page");
+    if (refresh && refresh.dataset.bound !== "true") {
+      refresh.dataset.bound = "true";
+      refresh.addEventListener("click", function (event) {
+        event.preventDefault();
+        showConnectionStatus("Refreshing for new items…", false, false);
+        location.reload();
+      });
+    }
+    var retry = $("#connection-retry");
+    if (retry && retry.dataset.bound !== "true") {
+      retry.dataset.bound = "true";
+      retry.addEventListener("click", function () { location.reload(); });
+    }
+    updateConnectionStatus();
+  }
+
   function serviceWorker() {
     if (!("serviceWorker" in navigator) || location.protocol === "file:") return;
     if (!PWA) {
@@ -560,12 +862,35 @@
       return;
     }
     if (KIND === "html") return;
+    var UPDATE_INTERVAL = 60 * 1000;
     var controlled = !!navigator.serviceWorker.controller;
+    var reloading = false;
     navigator.serviceWorker.addEventListener("controllerchange", function () {
-      if (controlled) toast("Updated — ", "reload", function () { location.reload(); });
-      controlled = true;
+      var nextController = navigator.serviceWorker.controller;
+      if (controlled && nextController && !reloading) {
+        reloading = true;
+        rememberReloadPosition();
+        showConnectionStatus("Updated — refreshing…", false, false);
+        location.reload();
+      }
+      controlled = !!nextController;
     });
-    navigator.serviceWorker.register(BASE + "sw.js").catch(function () { /* insecure context */ });
+    navigator.serviceWorker.register(BASE + "sw.js", { updateViaCache: "none" }).then(function (registration) {
+      var lastCheck = Date.now();
+      function checkForUpdate() {
+        if (!navigator.onLine) return;
+        lastCheck = Date.now();
+        registration.update().catch(function () { /* offline */ });
+      }
+      setInterval(checkForUpdate, UPDATE_INTERVAL);
+      document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "visible") checkForUpdate();
+      });
+      window.addEventListener("online", checkForUpdate);
+      window.addEventListener("pageshow", function (event) {
+        if (event.persisted || Date.now() - lastCheck >= UPDATE_INTERVAL) checkForUpdate();
+      });
+    }).catch(function () { /* insecure context */ });
   }
 
   function bootPage() {
@@ -588,6 +913,8 @@
     }
     wireMenuNavigation();
     wireShortcutHelp();
+    wirePersistentControls();
+    wirePwaControls();
     var picker = $("#theme-mode");
     if (picker) picker.addEventListener("change", function () { setTheme(picker.value); });
     var datePicker = $("#date-format");
@@ -596,13 +923,35 @@
     if (copy) copy.addEventListener("click", copyState);
     themeMode();
     setDateFormat(dateFormat());
-    externalLinks($("#swup") || document);
+    enhanceMarginNotes($("#swup") || document);
+    externalLinks(document);
     fillSearch();
     fillDirectory();
+    showNewEntries($("#swup") || document);
   }
 
+  window.addEventListener("beforeinstallprompt", function (event) {
+    event.preventDefault();
+    deferredInstallPrompt = event;
+    updatePwaControls();
+  });
+  window.addEventListener("appinstalled", function () {
+    deferredInstallPrompt = null;
+    updatePwaControls("aggr was installed.");
+    externalLinks(document);
+  });
+  window.addEventListener("offline", updateConnectionStatus);
+  window.addEventListener("online", function () {
+    showConnectionStatus("Back online — checking for updates…", false, true);
+  });
+
   importState();
+  detectNewEntries();
   bootPage();
+  restoreReloadPosition();
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") showNewEntries($("#swup") || document);
+  });
   var searchLink = $(".nav [data-route='search/']");
   if (searchLink) {
     ["pointerenter", "focus", "touchstart"].forEach(function (eventName) {

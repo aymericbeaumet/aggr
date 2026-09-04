@@ -303,6 +303,7 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<RawItem> {
         link,
         published: entry.published.or(entry.updated),
         updated: entry.updated,
+        first_seen: None,
         authors: entry.authors.iter().filter_map(person_name).collect(),
         labels: entry
             .categories

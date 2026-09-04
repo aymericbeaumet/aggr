@@ -7,6 +7,8 @@
 [site]
 # Name shown in the navigation bar and feed metadata.
 title = "aggr"
+# Optional summary used in search results, social cards, feeds, and the PWA manifest.
+# description = "My independent, searchable snapshot of the feeds I follow."
 # BCP 47 language tag used by HTML and feeds.
 language = "en"
 # "default", or a directory relative to the repository (e.g. "themes/mine").
@@ -27,10 +29,17 @@ max_stubs = 20000
 # url = "https://reads.example.com"
 # Output directory of `aggr build`.
 out = "_site"
-# Web app manifest + service worker: the site installs like an app and works offline.
+# In a secure context, emit install metadata and cache a bounded offline reading set.
 pwa = true
 # Newest item pages cached ahead of time for offline reading (the feed and assets always are).
-offline_items = 100
+offline_items = 30
+
+# Optional public identity for Schema.org metadata. `type` is "person" or "organization".
+# [site.identity]
+# type = "person"
+# name = "Ada Example"
+# url = "https://example.com/ada"
+# same_as = ["https://social.example/@ada"]
 
 # Optional networks searched for conversations about each article. No matching is done by default.
 # They add per-item links, find the highest-engagement exact match when possible, and otherwise
@@ -67,8 +76,8 @@ html_max_bytes = 262144
 concurrency = 16
 # Concurrent original-page downloads within each source in `heavy` mode.
 article_concurrency = 4
-# Only consider this many newest entries from one source per run. This bounds first imports from
-# unusually deep feeds; everything discovered from then on remains additive.
+# Only consider this many newest entries from one feed per run. This bounds first imports from
+# unusually deep feeds; aggr replicas use their own optional `limit` instead.
 max_items_per_source = 100
 # Total timeout for one HTTP request, in seconds.
 timeout_secs = 20
@@ -120,5 +129,5 @@ content = "heavy"
 # url = "https://host/x/reads.git" # full git URL alternative to `repo`
 # branch = "aggr"             # its data branch
 # sources = []                # only these of its source slugs; all when empty
-# limit = 200                 # newest items considered per run
+# limit = 200                 # optional newest-item limit; omitted imports every retained item
 # category = "friends"

@@ -309,13 +309,121 @@ mod tests {
     }
 
     #[test]
+    fn embedded_theme_allows_native_vertical_overscroll() {
+        let file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(file.data.as_ref()).unwrap();
+        assert!(css.contains("overscroll-behavior-y: auto"));
+        assert!(!css.contains("overscroll-behavior-y: none"));
+    }
+
+    #[test]
+    fn embedded_theme_is_safe_and_readable_on_installed_phones() {
+        let file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(file.data.as_ref()).unwrap();
+        assert!(css.contains("--tap-target: 44px"));
+        assert!(css.contains("min-height: 100dvh"));
+        assert!(css.contains("env(safe-area-inset-left)"));
+        assert!(css.contains("env(safe-area-inset-right)"));
+        assert!(css.contains("env(safe-area-inset-bottom)"));
+        assert!(css.contains("@media (pointer: coarse)"));
+        assert!(css.contains("font-size: 16px"));
+        assert!(css.contains(".directory-scroll:focus-visible"));
+        assert!(css.contains("@media (prefers-contrast: more)"));
+        assert!(!css.contains("min-height: 24px"));
+    }
+
+    #[test]
+    fn embedded_theme_exposes_progressive_install_refresh_and_update_controls() {
+        let app_file = DefaultTheme::get("static/app.js").unwrap();
+        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
+        assert!(app.contains("beforeinstallprompt"));
+        assert!(!app.contains("Notification.requestPermission()"));
+        assert!(!app.contains("navigator.setAppBadge"));
+        assert!(app.contains("window.addEventListener(\"online\""));
+        assert!(app.contains("window.addEventListener(\"pageshow\""));
+        assert!(app.contains("link.relList.add(\"noopener\", \"noreferrer\")"));
+        assert!(app.contains("if (installed) link.removeAttribute(\"target\")"));
+        assert!(app.contains("url.pathname.indexOf(scope.pathname)"));
+        assert!(app.contains("link.setAttribute(\"data-no-swup\", \"\")"));
+        assert!(app.contains("external site"));
+        assert!(app.contains("(display-mode: minimal-ui)"));
+        assert!(!app.contains("link.rel = 'noopener noreferrer'"));
+        assert!(app.contains("var PREFERENCE_KEYS = [\"aggr:theme\", \"aggr:date-format\"]"));
+        assert!(app.contains("'link[rel=\"original\"]'"));
+        assert!(app.contains("'meta[name=\"author\"]'"));
+
+        let base_file = DefaultTheme::get("templates/base.html").unwrap();
+        let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
+        assert!(base.contains("id=\"refresh-page\""));
+        assert!(base.contains("id=\"connection-status\""));
+
+        let preferences_file = DefaultTheme::get("templates/preferences.html").unwrap();
+        let preferences = std::str::from_utf8(preferences_file.data.as_ref()).unwrap();
+        assert!(preferences.contains("id=\"install-app\""));
+        assert!(!preferences.contains("id=\"app-badges\""));
+    }
+
+    #[test]
+    fn embedded_theme_checks_for_deployments_and_reloads_automatically() {
+        let file = DefaultTheme::get("static/app.js").unwrap();
+        let script = std::str::from_utf8(file.data.as_ref()).unwrap();
+        assert!(script.contains("var UPDATE_INTERVAL = 60 * 1000"));
+        assert!(script.contains("updateViaCache: \"none\""));
+        assert!(script.contains("registration.update()"));
+        assert!(script.contains("document.visibilityState === \"visible\""));
+        assert!(script.contains("controlled && nextController && !reloading"));
+        assert!(script.contains("location.reload()"));
+        assert!(!script.contains("toast(\"Updated — \""));
+    }
+
+    #[test]
+    fn embedded_theme_marks_items_discovered_after_an_update() {
+        let script_file = DefaultTheme::get("static/app.js").unwrap();
+        let script = std::str::from_utf8(script_file.data.as_ref()).unwrap();
+        assert!(script.contains("entryStateKey(\"last-seen-entry\")"));
+        assert!(script.contains("entryStateKey(\"new-entries\")"));
+        assert!(script.contains("sessionStorage.getItem(key)"));
+        assert!(script.contains("sessionStorage.setItem(key"));
+        assert!(script.contains("current.indexOf(previousHead)"));
+        assert!(script.contains("row.classList.add(\"is-new\")"));
+        assert!(script.contains("new-marker"));
+        assert!(script.contains("canvas.toDataURL(\"image/png\")"));
+        assert!(script.contains("context.fillStyle = \"#e53935\""));
+        assert!(script.contains("document.title = \"● \" + document.title"));
+        assert!(!script.contains("navigator.setAppBadge"));
+        assert!(!script.contains("navigator.clearAppBadge"));
+
+        let css_file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
+        assert!(css.contains(".row.is-new"));
+        assert!(css.contains("@keyframes new-item-highlight"));
+        assert!(css.contains("prefers-reduced-motion: reduce"));
+    }
+
+    #[test]
+    fn embedded_theme_promotes_footnotes_to_responsive_margin_notes() {
+        let script_file = DefaultTheme::get("static/app.js").unwrap();
+        let script = std::str::from_utf8(script_file.data.as_ref()).unwrap();
+        assert!(script.contains("function enhanceMarginNotes(root)"));
+        assert!(script.contains(".footnote-ref a[data-footnote-ref]"));
+        assert!(script.contains("footnote-margin-note"));
+        assert!(script.contains(".footnote-backref"));
+        assert!(script.contains("enhanceMarginNotes($(\"#swup\") || document)"));
+
+        let css_file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
+        assert!(css.contains(".footnote-margin-note"));
+        assert!(css.contains(".has-margin-notes > .footnotes"));
+    }
+
+    #[test]
     fn embedded_theme_keeps_article_links_and_navigation_distinct() {
         let css_file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
         assert!(css.contains("--accent: #8ea1ff"));
         assert!(css.contains(".body a { color: var(--accent-strong); font-style: normal"));
         assert!(css.contains(".article-more"));
-        assert!(css.contains(".main:focus-visible { outline: none; }"));
+        assert!(css.contains(".main:focus-visible { outline: 3px solid var(--focus)"));
         assert!(css.contains("--focus:"));
         assert!(css.contains("input:focus-visible"));
         assert!(!css.contains(
@@ -360,6 +468,9 @@ mod tests {
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
         assert!(item.contains("<meta name=\"author\""));
         assert!(item.contains("for article in item.recommended_articles"));
+        assert!(item.contains("class=\"article-navigation\""));
+        assert!(!item.contains("class=\"archive-note\""));
+        assert!(!item.contains("Archived snapshot"));
         assert!(!item.contains("article-more-label"));
         assert!(!item.contains("class=\"permalinks\""));
     }

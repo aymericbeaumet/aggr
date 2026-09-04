@@ -2,11 +2,13 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-const ABOUT: &str = "Git-native feed reader: aggr.toml in, static site out, history on a branch.";
+const ABOUT: &str =
+    "Git-native feed reader and readable web archive: aggr.toml in, static site out.";
 
 const LONG_ABOUT: &str = "\
 aggr reads `aggr.toml`, fetches items from feeds and other sources, stores every item as a
-Markdown file (plus its raw HTML) on an append-only git branch, and renders a static site.
+Markdown file (plus stripped source HTML when available) on an append-only git branch, and
+renders a searchable static archive.
 
 Typical loop:
 
@@ -14,8 +16,9 @@ Typical loop:
     aggr build           # sync, then render the site into _site/
     aggr dev             # local resync + build + live-reloading server
 
-Everything the site shows comes from the data branch, so every item has a permanent URL on
-GitHub and a run that finds nothing new leaves no trace.";
+Everything the site shows comes from the data branch, so a pinned data commit can be rendered
+without refetching its sources. The storage engine uses ordinary Git; GitHub is the turnkey host,
+not a requirement. A run that finds nothing new leaves no trace.";
 
 #[derive(Debug, Parser)]
 #[command(name = "aggr", version, about = ABOUT, long_about = LONG_ABOUT)]
@@ -38,7 +41,7 @@ pub enum Command {
     Init(InitArgs),
     /// Fetch, commit to the data branch, and push. This is what CI runs.
     Sync(SyncArgs),
-    /// Sync, then render the static site into the output directory.
+    /// Sync and render, or render a pinned data ref without syncing.
     Build(BuildArgs),
     /// Sync and build in a disposable workspace, then serve with live reload.
     Dev(DevArgs),
@@ -91,7 +94,7 @@ pub struct BuildArgs {
     /// Absolute URL the site will be served from (e.g. https://user.github.io/repo/).
     #[arg(long, value_name = "URL", env = "AGGR_BASE_URL")]
     pub base_url: Option<String>,
-    /// Render from this git ref of the data branch instead of the worktree.
+    /// Render this data-branch ref without syncing, committing, or pushing.
     #[arg(long, value_name = "REF")]
     pub data_ref: Option<String>,
     /// Production build: absolute URLs from [site] url (or --base-url) and a CNAME for custom

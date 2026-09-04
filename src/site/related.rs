@@ -179,6 +179,7 @@ mod tests {
             published: Some(date),
             updated: None,
             first_seen: date,
+            replicated_at: None,
             authors: Vec::new(),
             labels: labels.iter().map(|label| (*label).into()).collect(),
             discussions: Vec::new(),

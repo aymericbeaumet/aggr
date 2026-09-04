@@ -15,13 +15,13 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use sha1::{Digest as _, Sha1};
 
-use crate::config::{Config, SiteConfig, Source};
+use crate::config::{Config, SiteConfig, SiteIdentityKind, Source};
 use crate::content;
 use crate::model::Item;
 use crate::store::{Status, Store};
 use context::{
     ArticleLinkCtx, BuildCtx, CategoryCtx, GitHubLinks, ItemCtx, ItemOptions, PageCtx,
-    PaginatorCtx, SiteCtx, SourceCtx, SourceErrorCtx,
+    PaginatorCtx, SiteCtx, SiteIdentityCtx, SourceCtx, SourceErrorCtx,
 };
 use render::{Layers, Renderer};
 
@@ -165,13 +165,57 @@ pub fn precache_paths(
             assets
                 .iter()
                 .filter(|name| {
-                    name.ends_with(".css") || name.ends_with(".js") || name.starts_with("favicon-")
+                    name.ends_with(".css")
+                        || name.ends_with(".js")
+                        || name.starts_with("favicon-")
+                        || name.starts_with("icon-")
+                        || name.starts_with("apple-touch-icon-")
                 })
                 .map(|name| format!("assets/{name}")),
         )
         .chain(item_urls.into_iter().take(offline_items))
         .map(|path| format!("{base}{path}"))
         .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct PrecacheEntry {
+    url: String,
+    revision: String,
+    required: bool,
+}
+
+/// Attach an exact content revision to every install-time resource. A new worker can copy
+/// byte-identical responses from the previous precache instead of downloading the whole offline
+/// library after every feed commit.
+fn precache_entries(root: &Path, urls: Vec<String>) -> Result<Vec<PrecacheEntry>> {
+    urls.into_iter()
+        .map(|url| {
+            let relative = url.trim_start_matches('/');
+            if relative.split('/').any(|part| part == "..") {
+                bail!("invalid precache path {url:?}");
+            }
+            let file = if relative.is_empty() {
+                root.join("index.html")
+            } else if relative.ends_with('/') {
+                root.join(relative).join("index.html")
+            } else {
+                root.join(relative)
+            };
+            let bytes = std::fs::read(&file)
+                .with_context(|| format!("reading precache resource {}", file.display()))?;
+            let required = relative.is_empty()
+                || relative == "offline.html"
+                || (relative.starts_with("items/") && relative.ends_with('/'))
+                || (relative.starts_with("assets/")
+                    && (relative.ends_with(".css") || relative.ends_with(".js")));
+            Ok(PrecacheEntry {
+                url,
+                revision: crate::model::sha1_hex(&bytes),
+                required,
+            })
+        })
         .collect()
 }
 
@@ -269,8 +313,96 @@ struct Ctx<'a> {
     schema: Option<serde_json::Value>,
 }
 
-/// Schema.org metadata is publication metadata, so it is emitted only when the build has a
-/// stable public URL. Internal navigation stays relative and the resulting tree remains movable.
+fn default_site_description(title: &str) -> String {
+    format!(
+        "Browse {title}, an independent, searchable archive of readable snapshots from followed feeds, preserved in Git with aggr."
+    )
+}
+
+fn document_title(site_title: &str, page_title: &str, kind: &str, page_number: usize) -> String {
+    match (kind, page_number) {
+        ("river", 1) => {
+            format!("{site_title} — independent web feed reader and archive | aggr")
+        }
+        ("river", page) => {
+            format!("{site_title} — independent web feed reader and archive — page {page} | aggr")
+        }
+        ("item", 1) => format!("{page_title} — archived snapshot | {site_title}"),
+        (_, 1) => format!("{page_title} | {site_title}"),
+        (_, page) => format!("{page_title} — page {page} | {site_title}"),
+    }
+}
+
+fn item_description(site: &SiteCtx, item: &ItemCtx) -> String {
+    let source = if item.domain.is_empty() {
+        item.source_name.as_str()
+    } else {
+        item.domain.as_str()
+    };
+    let context = format!(
+        "Archived readable snapshot of {} from {source}, first captured {} and preserved by {}.",
+        item.title,
+        item.first_seen.format("%Y-%m-%d"),
+        site.title
+    );
+    if item.excerpt.is_empty() {
+        context
+    } else {
+        content::excerpt(&format!("{context} {}", item.excerpt), 220)
+    }
+}
+
+/// Sitemap freshness belongs to the local archive page. A newly captured old article must not
+/// look stale merely because its upstream publication date is old.
+fn archive_modified_at(item: &ItemCtx) -> DateTime<Utc> {
+    item.published
+        .into_iter()
+        .chain(item.updated)
+        .chain(std::iter::once(item.first_seen))
+        .chain(item.replicated_at)
+        .max()
+        .unwrap_or(item.first_seen)
+}
+
+fn page_description(site: &SiteCtx, page_title: &str, kind: &str, page_number: usize) -> String {
+    let description = match kind {
+        "river" => site.description.clone(),
+        "source" => format!(
+            "Browse retained readable snapshots from {page_title} in {}, with original URLs and capture dates.",
+            site.title
+        ),
+        "category" => format!(
+            "Browse retained readable snapshots in the {page_title} category of {}.",
+            site.title
+        ),
+        "tag" => format!(
+            "Browse retained readable snapshots tagged {page_title} in {}.",
+            site.title
+        ),
+        "sources" => format!(
+            "Browse every source followed by {}, with links to each retained source archive.",
+            site.title
+        ),
+        "categories" => format!(
+            "Browse the article categories in {}, with links to every category archive.",
+            site.title
+        ),
+        "tags" => format!(
+            "Browse the article tags in {}, with links to every tagged archive.",
+            site.title
+        ),
+        "search" => format!("Search the articles and links collected in {}.", site.title),
+        _ => site.description.clone(),
+    };
+    if page_number > 1 {
+        format!("{} Page {page_number}.", description.trim_end_matches('.'))
+    } else {
+        description
+    }
+}
+
+/// Schema.org metadata describes the independent archive page and its upstream provenance, so it
+/// is emitted only when the build has a stable public URL. Internal navigation stays portable.
 fn structured_data(
     site: &SiteCtx,
     page: &PageCtx,
@@ -285,7 +417,11 @@ fn structured_data(
         .config_url
         .clone()
         .unwrap_or_else(|| format!("{site_url}aggr.toml"));
-    let website = serde_json::json!({
+    let identity_id = site
+        .identity
+        .as_ref()
+        .map(|_| format!("{site_url}#identity"));
+    let mut website = serde_json::json!({
         "@type": "WebSite",
         "@id": website_id,
         "additionalType": outputs::AGGR_INSTANCE_TYPE,
@@ -309,43 +445,56 @@ fn structured_data(
             "query-input": "required name=search_term_string"
         }
     });
+    if let Some(identity_id) = &identity_id {
+        website["creator"] = serde_json::json!({"@id": identity_id});
+        website["publisher"] = serde_json::json!({"@id": identity_id});
+    }
 
-    let page_node = if let Some(item) = item {
-        let article_id = format!("{page_url}#article");
+    let (page_node, original_node) = if let Some(item) = item {
+        let snapshot_id = format!("{page_url}#webpage");
         let authors: Vec<_> = item
             .authors
             .iter()
             .map(|name| serde_json::json!({"@type": "Person", "name": name}))
             .collect();
-        let mut article = serde_json::json!({
-            "@type": "BlogPosting",
-            "@id": article_id,
-            "url": page_url,
+        let mut original = serde_json::json!({
+            "@type": "CreativeWork",
+            "@id": item.link,
+            "url": item.link,
             "headline": item.title,
             "description": item.excerpt,
             "inLanguage": site.language,
-            "datePublished": item.published.unwrap_or(item.date).to_rfc3339(),
-            "dateModified": item.updated.unwrap_or(item.date).to_rfc3339(),
-            "mainEntityOfPage": {"@id": format!("{page_url}#webpage")},
-            "isBasedOn": item.link,
+            "archivedAt": {"@id": snapshot_id},
             "keywords": item.labels,
         });
+        if let Some(published) = item.published {
+            original["datePublished"] = serde_json::Value::String(published.to_rfc3339());
+        }
+        if let Some(updated) = item.updated {
+            original["dateModified"] = serde_json::Value::String(updated.to_rfc3339());
+        }
         if let Some(category) = &item.category {
-            article["articleSection"] = serde_json::Value::String(category.clone());
+            original["genre"] = serde_json::Value::String(category.clone());
         }
         if !authors.is_empty() {
-            article["author"] = serde_json::Value::Array(authors);
+            original["author"] = serde_json::Value::Array(authors);
         }
-        serde_json::json!({
-            "@type": "WebPage",
-            "@id": format!("{page_url}#webpage"),
-            "url": page_url,
-            "name": page.title,
-            "description": item.excerpt,
-            "inLanguage": site.language,
-            "isPartOf": {"@id": website_id},
-            "mainEntity": article,
-        })
+        (
+            serde_json::json!({
+                "@type": ["WebPage", "ArchiveComponent"],
+                "@id": snapshot_id,
+                "url": page_url,
+                "name": format!("Archived snapshot: {}", item.title),
+                "description": page.description,
+                "dateCreated": item.replicated_at.unwrap_or(item.first_seen).to_rfc3339(),
+                "temporalCoverage": item.first_seen.to_rfc3339(),
+                "inLanguage": site.language,
+                "isPartOf": {"@id": website_id},
+                "isBasedOn": {"@id": item.link},
+                "mainEntity": {"@id": item.link},
+            }),
+            Some(original),
+        )
     } else {
         let page_type = match page.kind.as_str() {
             "search" => "SearchResultsPage",
@@ -359,7 +508,7 @@ fn structured_data(
             "@id": format!("{page_url}#webpage"),
             "url": page_url,
             "name": page.title,
-            "description": site.description,
+            "description": page.description,
             "inLanguage": site.language,
             "isPartOf": {"@id": website_id},
         });
@@ -376,13 +525,15 @@ fn structured_data(
                     serde_json::json!({
                         "@type": "DataFeedItem",
                         "position": offset + index + 1,
-                        "dateCreated": item.date.to_rfc3339(),
+                        "dateCreated": item.replicated_at.unwrap_or(item.first_seen).to_rfc3339(),
                         "item": {
-                            "@type": "BlogPosting",
-                            "@id": format!("{url}#article"),
+                            "@type": ["WebPage", "ArchiveComponent"],
+                            "@id": format!("{url}#webpage"),
                             "url": url,
-                            "headline": item.title,
-                            "isBasedOn": item.link,
+                            "name": format!("Archived snapshot: {}", item.title),
+                            "dateCreated": item.replicated_at.unwrap_or(item.first_seen).to_rfc3339(),
+                            "temporalCoverage": item.first_seen.to_rfc3339(),
+                            "isBasedOn": {"@id": item.link},
                         }
                     })
                 })
@@ -394,7 +545,7 @@ fn structured_data(
                 "dataFeedElement": elements,
             });
         }
-        node
+        (node, None)
     };
 
     let network = serde_json::json!({
@@ -404,19 +555,48 @@ fn structured_data(
         "url": outputs::AGGR_REPOSITORY,
     });
 
+    let identity = site
+        .identity
+        .as_ref()
+        .zip(identity_id)
+        .map(|(identity, id)| {
+            let mut node = serde_json::json!({
+                "@type": identity.kind,
+                "@id": id,
+                "name": identity.name,
+            });
+            if let Some(url) = &identity.url {
+                node["url"] = serde_json::Value::String(url.clone());
+            }
+            if !identity.same_as.is_empty() {
+                node["sameAs"] = serde_json::json!(identity.same_as);
+            }
+            node
+        });
+
+    let mut graph = vec![network];
+    if let Some(identity) = identity {
+        graph.push(identity);
+    }
+    graph.push(website);
+    graph.push(page_node);
+    if let Some(original_node) = original_node {
+        graph.push(original_node);
+    }
+
     Some(serde_json::json!({
         "@context": "https://schema.org",
-        "@graph": [network, website, page_node],
+        "@graph": graph,
     }))
 }
 
-/// What `sw.js` sees: the cache name and the install-time fetch list.
+/// What `sw.js` sees: the cache name and the revisioned install-time fetch list.
 #[derive(Serialize)]
 struct SwCtx<'a> {
     site: &'a SiteCtx,
     build: &'a BuildCtx,
     version: String,
-    precache: Vec<String>,
+    precache: Vec<PrecacheEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,10 +627,28 @@ pub fn build(
 
     let base = base_path(info.base_url.as_deref());
     let repository = config.repository();
-    let description = format!("Latest entries from {}.", config.site.title);
+    let config_path = info.config_path.as_deref().unwrap_or("aggr.toml");
+    let description = config
+        .site
+        .description
+        .clone()
+        .unwrap_or_else(|| default_site_description(&config.site.title));
     let mut site = SiteCtx {
         title: config.site.title.clone(),
         description,
+        identity: config
+            .site
+            .identity
+            .as_ref()
+            .map(|identity| SiteIdentityCtx {
+                kind: match identity.kind {
+                    SiteIdentityKind::Person => "Person",
+                    SiteIdentityKind::Organization => "Organization",
+                },
+                name: identity.name.clone(),
+                url: identity.url.as_ref().map(ToString::to_string),
+                same_as: identity.same_as.iter().map(ToString::to_string).collect(),
+            }),
         language: config.site.language.clone(),
         base_path: base.clone(),
         base_url: info.base_url.clone().map(|url| ensure_trailing_slash(&url)),
@@ -459,11 +657,16 @@ pub fn build(
         network_url: outputs::AGGR_NETWORK,
         instance_type_url: outputs::AGGR_INSTANCE_TYPE,
         pwa: config.site.pwa,
+        config_page_url: repository.as_deref().and_then(|repository| {
+            info.config_sha
+                .as_deref()
+                .map(|sha| format!("https://github.com/{repository}/blob/{sha}/{config_path}"))
+        }),
         config_url: repository.as_deref().and_then(|repository| {
             info.config_sha.as_deref().map(|sha| {
                 format!(
                     "https://raw.githubusercontent.com/{repository}/{sha}/{}",
-                    info.config_path.as_deref().unwrap_or("aggr.toml")
+                    config_path
                 )
             })
         }),
@@ -607,9 +810,12 @@ pub fn build(
          -> Result<()> {
             let pagination = paginate(prefix, list.len(), per_page);
             for pager in &pagination {
+                let page_number = pager.context.current_index;
                 let page = PageCtx {
                     kind: kind.to_string(),
                     title: title.to_string(),
+                    document_title: document_title(&site.title, title, kind, page_number),
+                    description: page_description(&site, title, kind, page_number),
                     indexable: true,
                     path: pager.path.clone(),
                     root: relative_root(&pager.path),
@@ -621,10 +827,7 @@ pub fn build(
                 if let Some(url) = &page.canonical_url {
                     sitemap_urls.push(outputs::SitemapUrl::new(
                         url,
-                        page_items
-                            .iter()
-                            .map(|item| item.updated.unwrap_or(item.date))
-                            .max(),
+                        page_items.iter().map(archive_modified_at).max(),
                     ));
                 }
                 let schema = structured_data(&site, &page, page_items, None);
@@ -709,10 +912,7 @@ pub fn build(
         }
     }
 
-    let archive_updated = archive_items
-        .iter()
-        .map(|item| item.updated.unwrap_or(item.date))
-        .max();
+    let archive_updated = archive_items.iter().map(archive_modified_at).max();
     let taxonomy_indexes = ["sources/", "tags/"]
         .into_iter()
         .chain(site.has_categories.then_some("categories/"));
@@ -730,9 +930,15 @@ pub fn build(
                   html: Option<&str>,
                   page_items: Option<&[ItemCtx]>|
      -> Result<String> {
+        let page_number = 1;
         let page = PageCtx {
             kind: kind.to_string(),
             title: title.to_string(),
+            document_title: document_title(&site.title, title, kind, page_number),
+            description: item.map_or_else(
+                || page_description(&site, title, kind, page_number),
+                |item| item_description(&site, item),
+            ),
             indexable: !matches!(kind, "search" | "preferences" | "404" | "offline"),
             path: path.to_string(),
             root: relative_root(path),
@@ -856,12 +1062,12 @@ pub fn build(
         )?;
         write(
             &representation.with_extension("json"),
-            outputs::item_json(&site, &ctx, &item.body)?.as_bytes(),
+            outputs::item_json(&site, &build_ctx, &ctx, &item.body)?.as_bytes(),
         )?;
         if let Some(url) = canonical_url(&site, &ctx.url) {
             sitemap_urls.push(outputs::SitemapUrl::new(
                 url,
-                Some(ctx.updated.unwrap_or(ctx.date)),
+                Some(archive_modified_at(&ctx)),
             ));
         }
     }
@@ -891,6 +1097,7 @@ pub fn build(
         &out.join("aggr.json"),
         outputs::instance_descriptor(&site, &build_ctx)?.as_bytes(),
     )?;
+    write(&out.join("llms.txt"), outputs::llms_txt(&site).as_bytes())?;
     write_collection_feeds(
         out,
         &site,
@@ -918,6 +1125,10 @@ pub fn build(
         &archive_feed_items,
     )?;
     if let Some(root) = site.base_url.as_deref() {
+        write(
+            &out.join("linkset.json"),
+            outputs::linkset_json(&site, &archive_items)?.as_bytes(),
+        )?;
         let default_search_description = format!("Search {}", site.title);
         let search_description = if site.description.is_empty() {
             &default_search_description
@@ -1019,13 +1230,16 @@ pub fn build(
                 site: &site,
                 build: &build_ctx,
                 version: cache_version(&build_ctx),
-                precache: precache_paths(
-                    "",
-                    lists,
-                    &assets,
-                    archive_items.iter().map(|i| i.url.clone()),
-                    config.site.offline_items,
-                ),
+                precache: precache_entries(
+                    out,
+                    precache_paths(
+                        "",
+                        lists,
+                        &assets,
+                        archive_items.iter().map(|i| i.url.clone()),
+                        config.site.offline_items,
+                    ),
+                )?,
             },
         )?;
         write(&out.join("sw.js"), sw.as_bytes())?;
@@ -1464,6 +1678,34 @@ mod tests {
     }
 
     #[test]
+    fn precache_entries_revision_every_resource_and_require_the_app_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("assets")).unwrap();
+        std::fs::create_dir_all(dir.path().join("items/a/1")).unwrap();
+        std::fs::write(dir.path().join("index.html"), "home").unwrap();
+        std::fs::write(dir.path().join("offline.html"), "offline").unwrap();
+        std::fs::write(dir.path().join("assets/style-a.css"), "css").unwrap();
+        std::fs::write(dir.path().join("items/a/1/index.html"), "item").unwrap();
+
+        let entries = precache_entries(
+            dir.path(),
+            vec![
+                "".into(),
+                "offline.html".into(),
+                "assets/style-a.css".into(),
+                "items/a/1/".into(),
+            ],
+        )
+        .unwrap();
+        assert!(entries[0].required);
+        assert!(entries[1].required);
+        assert!(entries[2].required);
+        assert!(entries[3].required);
+        assert_eq!(entries[0].revision, crate::model::sha1_hex(b"home"));
+        assert_eq!(entries[3].revision, crate::model::sha1_hex(b"item"));
+    }
+
+    #[test]
     fn oversized_pagefind_precache_keeps_only_its_runtime() {
         let dir = tempfile::tempdir().unwrap();
         let pagefind = dir.path().join("pagefind");
@@ -1637,6 +1879,7 @@ mod tests {
         );
         assert!(!newest.contains("data-previous-url="), "{newest}");
         assert_eq!(newest.matches("class=\"article-more-link\"").count(), 3);
+        assert_eq!(newest.matches("article-navigation-link").count(), 2);
         assert!(!newest.contains("article-more-label"), "{newest}");
 
         let second =
@@ -1644,6 +1887,7 @@ mod tests {
         assert!(second.contains("data-previous-url=\"items/blog/2026-09-06-post-5/\""));
         assert!(second.contains("data-next-url=\"items/blog/2026-09-04-post-3/\""));
         assert_eq!(second.matches("class=\"article-more-link\"").count(), 3);
+        assert_eq!(second.matches("article-navigation-link").count(), 3);
 
         for day in 1..=6 {
             let page = std::fs::read_to_string(out.join(format!(
@@ -1748,10 +1992,18 @@ mod tests {
                 .unwrap();
         assert_eq!(manifest["name"], "aggr");
         assert_eq!(manifest["short_name"], "aggr");
-        assert_eq!(manifest["description"], "Latest entries from Demo <site>.");
+        assert_eq!(
+            manifest["description"],
+            "Browse Demo <site>, an independent, searchable archive of readable snapshots from followed feeds, preserved in Git with aggr."
+        );
         assert_eq!(manifest["start_url"], "./");
         assert_eq!(manifest["scope"], "./");
         assert_eq!(manifest["display"], "standalone");
+        assert_eq!(
+            manifest["display_override"],
+            serde_json::json!(["standalone", "minimal-ui"])
+        );
+        assert_eq!(manifest["background_color"], "#f5f6fa");
         assert_eq!(manifest["icons"].as_array().unwrap().len(), 4);
         assert!(
             manifest["icons"][0]["src"]
@@ -1777,6 +2029,7 @@ mod tests {
                 .unwrap();
             let png = std::fs::read(path).unwrap();
             assert!(png.starts_with(b"\x89PNG"), "{icon} is not a PNG");
+            assert_eq!(png.get(25), Some(&2), "{icon} must be an opaque RGB PNG");
         }
 
         let sw = std::fs::read_to_string(out.join("sw.js")).unwrap();
@@ -1798,7 +2051,16 @@ mod tests {
         );
         assert!(sw.contains("navigationPreload.enable"));
         assert!(sw.contains("x-requested-with"));
-        assert!(sw.contains("caches.match(request, { ignoreSearch: true })"));
+        assert!(sw.contains("function firstCached(request, choices, index)"));
+        assert!(!sw.contains("caches.match("));
+        assert!(sw.contains("var REQUIRED_URLS ="));
+        assert!(sw.contains("var REVISIONS = CACHE_NAMESPACE + \"revisions-\" + VERSION"));
+        assert!(sw.contains("if (!response || !response.ok)"));
+        assert!(sw.contains("migratePrecacheAssets"));
+        assert!(sw.contains("migrateLegacyRuntime"));
+        assert!(sw.contains("var LEGACY_RUNTIME = CACHE_NAMESPACE + \"runtime\""));
+        assert!(sw.contains("var ASSETS = CACHE_NAMESPACE + \"assets\""));
+        assert!(sw.contains("feed|aggr|linkset"), "{sw}");
         assert!(sw.contains("\"offline.html\""));
         assert!(sw.contains("\"sources/blog/\""));
         // Newest two of three: posts 2 and 1, not 0.
@@ -1816,19 +2078,31 @@ mod tests {
         assert!(offline.contains("pwa: true"));
         let river = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(
-            river.contains("<title>aggr | demo &lt;site&gt;</title>"),
+            river.contains(
+                "<title>Demo &lt;site&gt; — independent web feed reader and archive | aggr</title>"
+            ),
+            "{river}"
+        );
+        assert!(
+            river.contains("<meta name=\"application-name\" content=\"aggr\">"),
+            "{river}"
+        );
+        assert!(
+            river.contains("<meta name=\"apple-mobile-web-app-title\" content=\"aggr\">"),
             "{river}"
         );
         assert!(
             river.contains(
-                "<meta name=\"description\" content=\"Latest entries from Demo &lt;site&gt;.\">"
+                "<meta name=\"description\" content=\"Browse Demo &lt;site&gt;, an independent, searchable archive of readable snapshots from followed feeds, preserved in Git with aggr.\">"
             ),
             "{river}"
         );
         assert!(river.contains("type=\"application/ld+json\""), "{river}");
+        assert!(!river.contains("#identity"), "{river}");
         assert!(river.contains("https://schema.org"), "{river}");
         assert!(river.contains("rel=\"search\""), "{river}");
         assert!(river.contains("rel=\"service-meta\""), "{river}");
+        assert!(river.contains("rel=\"linkset\""), "{river}");
         assert!(river.contains("rel=\"type\""), "{river}");
         assert!(river.contains("name=\"aggr:network\""), "{river}");
         assert!(
@@ -1873,6 +2147,22 @@ mod tests {
             descriptor["feeds"]["json"],
             "https://u.github.io/repo/feed.json"
         );
+        assert_eq!(
+            descriptor["discovery"]["linkset"],
+            "https://u.github.io/repo/linkset.json"
+        );
+        let linkset: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("linkset.json")).unwrap()).unwrap();
+        let original = linkset["linkset"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|context| context["anchor"] == "https://blog.example/2")
+            .unwrap();
+        assert_eq!(
+            original["https://schema.org/archivedAt"][0]["href"],
+            "https://u.github.io/repo/items/blog/2026-09-03-post-2/"
+        );
         assert!(out.join("sources/blog/atom.xml").is_file());
         assert!(out.join("sources/blog/rss.xml").is_file());
         assert!(out.join("sources/blog/feed.json").is_file());
@@ -1905,7 +2195,180 @@ mod tests {
             item.contains("<link rel=\"via\" href=\"https://blog.example/2\">"),
             "{item}"
         );
+        assert!(
+            item.contains("<link rel=\"original\" href=\"https://blog.example/2\">"),
+            "{item}"
+        );
+        assert!(!item.contains("class=\"archive-note\""), "{item}");
+        assert!(!item.contains("Git record <code>"), "{item}");
+        assert!(item.contains("class=\"article-navigation\""), "{item}");
         assert!(item.contains("isBasedOn"), "{item}");
+        assert!(item.contains("ArchiveComponent"), "{item}");
+        assert!(item.contains("archivedAt"), "{item}");
+        assert!(!item.contains("BlogPosting"), "{item}");
+    }
+
+    #[test]
+    fn seo_metadata_is_configurable_unique_and_identifies_the_publisher() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(
+            dir.path(),
+            2,
+            r#"description = "Independent reading notes and useful links."
+items_per_page = 1
+repository = "owner/reader"
+
+[site.identity]
+type = "person"
+name = "Ada Example"
+url = "https://example.com/ada"
+same_as = ["https://social.example/@ada"]
+"#,
+        );
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+
+        let home = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(
+            home.contains(
+                "<title>Demo &lt;site&gt; — independent web feed reader and archive | aggr</title>"
+            ),
+            "{home}"
+        );
+        assert!(
+            home.contains(
+                "<meta name=\"description\" content=\"Independent reading notes and useful links.\">"
+            ),
+            "{home}"
+        );
+
+        let second = std::fs::read_to_string(out.join("page/2/index.html")).unwrap();
+        assert!(
+            second.contains(
+                "<title>Demo &lt;site&gt; — independent web feed reader and archive — page 2 | aggr</title>"
+            ),
+            "{second}"
+        );
+        assert!(
+            second.contains(
+                "<meta name=\"description\" content=\"Independent reading notes and useful links Page 2.\">"
+            ),
+            "{second}"
+        );
+        let source = std::fs::read_to_string(out.join("sources/blog/index.html")).unwrap();
+        assert!(
+            source.contains(
+                "<meta name=\"description\" content=\"Browse retained readable snapshots from blog in Demo &lt;site&gt;, with original URLs and capture dates.\">"
+            ),
+            "{source}"
+        );
+        let item =
+            std::fs::read_to_string(out.join("items/blog/2026-09-02-post-1/index.html")).unwrap();
+        assert!(
+            item.contains("<title>Post 1 — archived snapshot | Demo &lt;site&gt;</title>"),
+            "{item}"
+        );
+        assert!(
+            item.contains("Archived readable snapshot of Post 1 from blog.example, first captured 2026-09-02 and preserved by Demo &lt;site&gt;."),
+            "{item}"
+        );
+
+        let schema_start = "<script type=\"application/ld+json\">";
+        let schema = home
+            .split_once(schema_start)
+            .and_then(|(_, rest)| rest.split_once("</script>"))
+            .map(|(json, _)| serde_json::from_str::<serde_json::Value>(json).unwrap())
+            .unwrap();
+        let graph = schema["@graph"].as_array().unwrap();
+        let identity = graph.iter().find(|node| node["@type"] == "Person").unwrap();
+        assert_eq!(identity["name"], "Ada Example");
+        assert_eq!(identity["url"], "https://example.com/ada");
+        assert_eq!(identity["sameAs"][0], "https://social.example/@ada");
+        let website = graph
+            .iter()
+            .find(|node| node["@type"] == "WebSite")
+            .unwrap();
+        assert_eq!(website["creator"]["@id"], identity["@id"]);
+        assert_eq!(website["publisher"]["@id"], identity["@id"]);
+
+        let llms = std::fs::read_to_string(out.join("llms.txt")).unwrap();
+        assert!(llms.starts_with("# Demo <site>\n\n> Independent reading notes"));
+        assert!(llms.contains("[Instance metadata](https://u.github.io/repo/aggr.json)"));
+        assert!(llms.contains("[Sitemap](https://u.github.io/repo/sitemap.xml)"));
+        assert!(
+            llms.contains(
+                "[Original URL to snapshot linkset](https://u.github.io/repo/linkset.json)"
+            )
+        );
+        assert!(llms.contains("[Source configuration](https://raw.githubusercontent.com/"));
+        assert!(!llms.contains("[Categories]"), "{llms}");
+    }
+
+    #[test]
+    fn sitemap_uses_local_capture_time_for_a_newly_archived_old_article() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let mut item = store.items().unwrap().remove(0);
+        item.front.replicated_at = Some(day(15));
+        let stem = item.path.rsplit('/').next().unwrap();
+        let item_dir = item.path.rsplit_once('/').unwrap().0;
+        store
+            .write_item(crate::store::NewItem {
+                dir: item_dir,
+                stem,
+                front: &item.front,
+                body: &item.body,
+                html: None,
+            })
+            .unwrap();
+
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let sitemap = std::fs::read_to_string(out.join("sitemap.xml")).unwrap();
+        let entry = sitemap
+            .split("<url>")
+            .find(|entry| entry.contains("items/blog/2026-09-01-post-0/"))
+            .unwrap();
+        assert!(
+            entry.contains("<lastmod>2026-09-15T00:00:00Z</lastmod>"),
+            "{entry}"
+        );
+        let page =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
+        assert!(page.contains("first captured"), "{page}");
+        assert!(
+            page.contains("\"dateCreated\":\"2026-09-15T00:00:00+00:00\""),
+            "{page}"
+        );
+        assert!(!page.contains("replicated here"), "{page}");
+        assert!(!page.contains("class=\"archive-note\""), "{page}");
+    }
+
+    #[test]
+    fn config_navigation_uses_github_page_while_metadata_keeps_raw_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(
+            dir.path(),
+            1,
+            "repository = \"owner/reader\"\npwa = false\n",
+        );
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+
+        let home = std::fs::read_to_string(out.join("index.html")).unwrap();
+        let sha = "c".repeat(40);
+        assert!(
+            home.contains(&format!(
+                "href=\"https://github.com/owner/reader/blob/{sha}/aggr.toml\""
+            )),
+            "{home}"
+        );
+        assert!(
+            home.contains(&format!(
+                "name=\"aggr:source\" content=\"https://raw.githubusercontent.com/owner/reader/{sha}/aggr.toml\""
+            )),
+            "{home}"
+        );
     }
 
     #[test]
@@ -1936,6 +2399,8 @@ mod tests {
         }
         let river = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(!river.contains("rel=\"manifest\""));
+        assert!(!river.contains("mobile-web-app-capable"));
+        assert!(!river.contains("apple-mobile-web-app-capable"));
         assert!(river.contains("pwa: false"));
     }
 }

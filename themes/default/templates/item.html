@@ -2,6 +2,7 @@
 {% block head %}
 {% set representation = item.url | trim('/') %}
 <link rel="via" href="{{ item.link }}">
+<link rel="original" href="{{ item.link }}">
 <link rel="alternate" type="text/markdown" title="Markdown" href="{{ (representation ~ '.md') | url_for }}">
 <link rel="alternate" type="text/plain" title="Plain text" href="{{ (representation ~ '.txt') | url_for }}">
 <link rel="alternate" type="text/x-rst" title="reStructuredText" href="{{ (representation ~ '.rst') | url_for }}">
@@ -33,6 +34,11 @@
   <p class="empty">This source publishes titles only — <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer">open the original</a>.</p>
   {% endif %}
   <div class="body e-content">{{ item.body_html | safe }}</div>
+  <nav class="article-navigation" aria-label="Article navigation">
+    <span class="article-navigation-side">{% if item.previous_article %}<a class="article-navigation-link" rel="prev" href="{{ item.previous_article.url | url_for }}">← newer</a>{% endif %}</span>
+    <a class="article-navigation-link article-navigation-home" rel="home" href="{{ '' | url_for }}">feed</a>
+    <span class="article-navigation-side">{% if item.next_article %}<a class="article-navigation-link" rel="next" href="{{ item.next_article.url | url_for }}">older →</a>{% endif %}</span>
+  </nav>
   {% if item.recommended_articles %}
   <footer class="article-footer">
     <nav class="article-more" aria-label="More articles">

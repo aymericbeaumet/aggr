@@ -222,6 +222,13 @@ fn init_writes_config_and_workflow() {
         .success()
         .stdout(predicate::str::contains("wrote aggr.toml"));
     assert!(repo.clone.join(".github/workflows/aggr.yml").exists());
+    let workflow = std::fs::read_to_string(repo.clone.join(".github/workflows/aggr.yml")).unwrap();
+    assert!(workflow.contains("\"**/*.toml\""), "{workflow}");
+    assert!(!workflow.contains("branches: [main]"), "{workflow}");
+    assert!(
+        workflow.contains("github.ref_name == github.event.repository.default_branch"),
+        "{workflow}"
+    );
     repo.aggr().arg("init").assert().failure();
     repo.aggr()
         .args(["init", "--defaults", "--force"])
@@ -570,7 +577,14 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(!index.contains("&#x2f;"));
     let item = site.join("items/demo/2026-09-01-hello-there");
     let page = std::fs::read_to_string(item.join("index.html")).unwrap();
-    assert!(!page.contains("https://github.com/o/r/blob/"), "{page}");
+    assert_eq!(
+        page.matches("https://github.com/o/r/blob/").count(),
+        1,
+        "{page}"
+    );
+    assert!(page.contains("/aggr.toml\" target=\"_blank\""), "{page}");
+    assert!(!page.contains("Git record <code>"), "{page}");
+    assert!(page.contains("class=\"article-navigation\""), "{page}");
     assert!(!page.contains("alert("), "{page}");
     let representation = site.join("items/demo/2026-09-01-hello-there");
     assert!(representation.with_extension("md").exists());
@@ -581,6 +595,15 @@ fn build_renders_the_site_and_release_needs_a_url() {
             .unwrap();
     assert_eq!(json["title"], "Hello there");
     assert_eq!(json["source"], "demo");
+    assert_eq!(
+        json["@type"],
+        serde_json::json!(["WebPage", "ArchiveComponent"])
+    );
+    assert_eq!(json["mainEntity"]["@id"], "https://demo.example/hello");
+    assert_eq!(
+        json["git"]["path"],
+        "items/demo/2026/09/2026-09-01-hello-there.md"
+    );
     assert!(!item.join("html.html").exists());
     assert!(page.contains(">original</a>"), "{page}");
     let category = page.find(">demo</a>").unwrap();
@@ -703,6 +726,71 @@ fn build_renders_the_site_and_release_needs_a_url() {
         .assert()
         .success();
     assert!(repo.clone.join("elsewhere/index.html").exists());
+}
+
+#[test]
+fn build_data_ref_is_offline_and_side_effect_free() {
+    let server = MockServer::start();
+    let mut feed = server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200).body(FEED);
+    });
+    let repo = TestRepo::new();
+    repo.write_raw_config(&format!(
+        "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n\
+         [fetch]\ncontent = \"light\"\nretries = 0\n\
+         [[sources]]\nurl = \"{}\"\nname = \"Demo\"\n",
+        server.url("/feed.xml")
+    ));
+
+    repo.aggr().arg("sync").assert().success();
+    let pinned = repo.origin_rev("refs/heads/aggr").unwrap();
+
+    feed.delete();
+    let mut newer = server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200).body(FEED_WITH_THIRD);
+    });
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo: +1"));
+    let latest = repo.origin_rev("refs/heads/aggr").unwrap();
+    assert_ne!(pinned, latest);
+
+    newer.delete();
+    let offline = server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(503);
+    });
+    let log_before = repo.origin_log("refs/heads/aggr");
+
+    repo.aggr()
+        .args([
+            "build",
+            "--data-ref",
+            pinned.as_str(),
+            "--out",
+            "pinned-site",
+        ])
+        .assert()
+        .success();
+
+    offline.assert_calls(0);
+    assert_eq!(
+        repo.origin_rev("refs/heads/aggr").as_deref(),
+        Some(latest.as_str())
+    );
+    assert_eq!(
+        repo.origin_rev("refs/aggr/last-good").as_deref(),
+        Some(latest.as_str())
+    );
+    assert_eq!(repo.origin_log("refs/heads/aggr"), log_before);
+    let index = std::fs::read_to_string(repo.clone.join("pinned-site/index.html")).unwrap();
+    assert!(index.contains("Hello there"), "{index}");
+    assert!(index.contains("Second"), "{index}");
+    assert!(!index.contains("Third"), "{index}");
 }
 
 #[test]

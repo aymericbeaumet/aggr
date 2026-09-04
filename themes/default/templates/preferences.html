@@ -16,12 +16,24 @@
     </section>
     <section class="preferences-group copy-preferences" aria-labelledby="copy-state-heading">
       <h2 id="copy-state-heading">Copy state</h2>
-      <p class="muted">Copy every local preference into a shareable URL. Opening it on another device imports the state once without keeping it in the address.</p>
+      <p class="muted">Copy the theme and date format into a shareable URL. Opening it on another device imports those preferences once without keeping them in the address.</p>
       <div class="copy-action">
         <button id="copy-state" type="button">copy state URL</button>
         <span id="copy-state-status" class="muted" role="status" aria-live="polite"></span>
       </div>
     </section>
+    {% if site.pwa %}
+    <section class="preferences-group" aria-labelledby="installed-app-heading">
+      <h2 id="installed-app-heading">Installed app</h2>
+      <p class="muted">The app shell, home feed, and newest configured entries are cached for offline reading. While running, aggr checks for deployments once a minute and checks again when you return or reconnect. Pull down where supported, or use the header refresh button anywhere.</p>
+      <p id="install-guidance" class="muted">Use your browser’s Install or Add to Home Screen action. A direct install button appears here when the browser provides one.</p>
+      <div class="preference-actions">
+        <button id="install-app" type="button" hidden>install aggr</button>
+        <span id="pwa-status" class="muted" role="status" aria-live="polite"></span>
+      </div>
+      <small class="muted pwa-limit">New-item highlights and the title/favicon dot stay local to this tab. A static site cannot wake a closed or suspended app with background push.</small>
+    </section>
+    {% endif %}
   </div>
 </section>
 {% endblock %}

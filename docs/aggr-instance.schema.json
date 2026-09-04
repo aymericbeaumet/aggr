@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/aymericbeaumet/aggr/v1/docs/aggr-instance.schema.json",
   "title": "aggr instance descriptor",
-  "description": "Discovery metadata emitted at /aggr.json by an aggr instance (workflow plus root aggr config).",
+  "description": "Discovery metadata emitted at /aggr.json by a Git-backed aggr static archive.",
   "type": "object",
   "required": [
     "schema_version",

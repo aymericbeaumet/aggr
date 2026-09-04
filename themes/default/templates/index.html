@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-{% if page.kind == 'river' %}<h1 class="sr-only">{{ site.title }} feed</h1>{% endif %}
+{% if page.kind == 'river' %}<h1 class="sr-only">{{ site.title }} — independent web feed reader and archive</h1>{% endif %}
 {% if page.kind != 'river' or (source and source.error) %}<div class="listhead">
   <h1>
     {% if page.kind == 'source' and source %}

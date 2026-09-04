@@ -12,6 +12,8 @@ use crate::model::{ContentKind, Item, normalize_labels};
 pub struct SiteCtx {
     pub title: String,
     pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<SiteIdentityCtx>,
     pub language: String,
     /// Path prefix every site link is built on, always starting and ending with `/`.
     pub base_path: String,
@@ -25,6 +27,9 @@ pub struct SiteCtx {
     pub instance_type_url: &'static str,
     /// Whether `manifest.webmanifest` and `sw.js` are built (`[site] pwa`).
     pub pwa: bool,
+    /// Browser-facing GitHub page for the source config when the build commit is known.
+    pub config_page_url: Option<String>,
+    /// Raw source config URL used by machine-readable discovery metadata.
     pub config_url: Option<String>,
     /// Whether the build has at least one non-empty category archive.
     pub has_categories: bool,
@@ -32,6 +37,16 @@ pub struct SiteCtx {
     /// First nine feed entries, available to global `g 1` … `g 9` shortcuts.
     pub entry_shortcuts: Vec<String>,
     pub params: toml::Table,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SiteIdentityCtx {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub same_as: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,6 +77,8 @@ pub struct PageCtx {
     /// `preferences`, `404`, or `offline`.
     pub kind: String,
     pub title: String,
+    pub document_title: String,
+    pub description: String,
     /// Whether crawlers should index this page. Search, preferences, offline and error shells
     /// remain useful to people and link discovery, but are not useful search results.
     pub indexable: bool,
@@ -102,7 +119,7 @@ pub struct PaginatorCtx {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ItemCtx {
-    /// `items/<source>/<yyyy>/<mm>/<stem>` — the identity used by localStorage and search.
+    /// `items/<source>/<yyyy>/<mm>/<stem>` — the identity used by tab state and search.
     pub path: String,
     /// Flat site path of the item page, e.g. `items/rust-blog/2026-09-02-hello/`.
     pub url: String,
@@ -118,6 +135,7 @@ pub struct ItemCtx {
     pub published: Option<DateTime<Utc>>,
     pub updated: Option<DateTime<Utc>>,
     pub first_seen: DateTime<Utc>,
+    pub replicated_at: Option<DateTime<Utc>>,
     pub authors: Vec<String>,
     pub labels: Vec<String>,
     pub discussions: Vec<DiscussionLinkCtx>,
@@ -252,6 +270,7 @@ impl ItemCtx {
             published: item.front.published,
             updated: item.front.updated,
             first_seen: item.front.first_seen,
+            replicated_at: item.front.replicated_at,
             authors: item.front.authors.clone(),
             labels: normalize_labels(&item.front.labels),
             discussions: options

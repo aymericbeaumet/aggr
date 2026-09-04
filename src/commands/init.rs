@@ -30,11 +30,12 @@ pub const WORKFLOW: &str = "\
 name: aggr
 on:
   schedule: [{ cron: \"*/30 * * * *\" }]
-  push: { branches: [main], paths: [\"*.toml\", themes/**, templates/**, static/**] }
+  push: { paths: [\"*.toml\", \"**/*.toml\", themes/**, templates/**, static/**] }
   workflow_dispatch:
 permissions: { contents: write, pages: write, id-token: write }
 jobs:
   aggr:
+    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
     uses: aymericbeaumet/aggr/.github/workflows/aggr.yml@v1
 ";
 
@@ -79,6 +80,28 @@ mod tests {
     #[test]
     fn the_shipped_snippets_are_valid() {
         crate::config::Config::parse(MINIMAL_CONFIG).unwrap();
+        let workflow: serde_json::Value = serde_yaml_ng::from_str(WORKFLOW).unwrap();
+        let push = &workflow["on"]["push"];
+        assert!(
+            push.get("branches").is_none(),
+            "the default branch is resolved from the event instead of being hardcoded"
+        );
+        assert_eq!(
+            push["paths"],
+            serde_json::json!([
+                "*.toml",
+                "**/*.toml",
+                "themes/**",
+                "templates/**",
+                "static/**"
+            ])
+        );
+        assert_eq!(
+            workflow["jobs"]["aggr"]["if"],
+            "github.event_name != 'push' || github.ref_name == github.event.repository.default_branch"
+        );
+        assert!(workflow["on"].get("schedule").is_some());
+        assert!(workflow["on"].get("workflow_dispatch").is_some());
         assert!(
             WORKFLOW.lines().count() <= 10,
             "the workflow must stay tiny"

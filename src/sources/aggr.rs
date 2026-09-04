@@ -1,6 +1,7 @@
 //! `type = "aggr"`: another aggr repository as a source. Its data branch is mirrored with a
-//! depth-1 clone (no history needed) and its newest items are re-published here. Items keep
-//! their original link, so a feed both sites follow still dedupes to one entry.
+//! depth-1 clone (no history needed) and its retained items are re-published here, optionally
+//! bounded to the newest entries. Items keep their original link, so a feed both sites follow
+//! still dedupes to one entry.
 
 use std::path::{Path, PathBuf};
 
@@ -19,7 +20,7 @@ pub async fn fetch(
     url: &Url,
     branch: &str,
     only: &[String],
-    limit: usize,
+    limit: Option<usize>,
     _source: &Source,
     ctx: &Context<'_>,
 ) -> Result<Fetch> {
@@ -74,8 +75,13 @@ pub async fn fetch(
     })
 }
 
-/// Newest `limit` items of the mirrored tree, optionally restricted to some of its sources.
-pub fn read_items(store: &Store, via: &str, only: &[String], limit: usize) -> Result<Vec<RawItem>> {
+/// Retained items in the mirrored tree, optionally restricted by source and newest-first limit.
+pub fn read_items(
+    store: &Store,
+    via: &str,
+    only: &[String],
+    limit: Option<usize>,
+) -> Result<Vec<RawItem>> {
     let mut items = store.items()?;
     items.retain(|item| {
         !item.front.hidden && (only.is_empty() || only.contains(&item.front.source))
@@ -85,7 +91,9 @@ pub fn read_items(store: &Store, via: &str, only: &[String], limit: usize) -> Re
             .cmp(&a.created_at())
             .then_with(|| b.path.cmp(&a.path))
     });
-    items.truncate(limit);
+    if let Some(limit) = limit {
+        items.truncate(limit);
+    }
     items
         .iter()
         .map(|item| {
@@ -104,14 +112,25 @@ pub fn convert(item: &Item, html: Option<String>, via: &str) -> RawItem {
         (!body.is_empty()).then(|| content::render_markdown(body))
     });
     let mut extra = front.extra.clone();
+    let origin = extra
+        .get("via")
+        .cloned()
+        .unwrap_or_else(|| Value::String(via.to_string()));
+    let origin_source = extra
+        .get("via_source")
+        .cloned()
+        .unwrap_or_else(|| Value::String(front.source.clone()));
+    extra.entry("origin".into()).or_insert(origin);
+    extra.entry("origin_source".into()).or_insert(origin_source);
     extra.insert("via".into(), Value::String(via.to_string()));
     extra.insert("via_source".into(), Value::String(front.source.clone()));
     RawItem {
         id: Some(format!("{via}#{}", item.path)),
         title: front.title.clone(),
         link: front.link.clone(),
-        published: front.published.or(Some(front.first_seen)),
+        published: front.published,
         updated: front.updated,
+        first_seen: Some(front.first_seen),
         authors: front.authors.clone(),
         labels: front.labels.clone(),
         summary: front.summary.clone(),
@@ -181,8 +200,17 @@ mod tests {
             Some("https://github.com/friend/reads#items/hn/2026/09/2026-09-02-hello")
         );
         assert_eq!(raw.link, "https://example.com/hello");
-        assert_eq!(raw.published, Some(item().front.first_seen));
+        assert_eq!(raw.published, None);
+        assert_eq!(raw.first_seen, Some(item().front.first_seen));
         assert!(raw.content_html.unwrap().contains("<strong>bold</strong>"));
+        assert_eq!(
+            raw.extra.get("origin"),
+            Some(&Value::String("https://github.com/friend/reads".into()))
+        );
+        assert_eq!(
+            raw.extra.get("origin_source"),
+            Some(&Value::String("hn".into()))
+        );
         assert_eq!(
             raw.extra.get("via"),
             Some(&Value::String("https://github.com/friend/reads".into()))
@@ -194,6 +222,46 @@ mod tests {
 
         let with_html = convert(&item(), Some("<p>raw</p>".into()), "x");
         assert_eq!(with_html.content_html.as_deref(), Some("<p>raw</p>"));
+    }
+
+    #[test]
+    fn repeated_imports_keep_the_first_origin_and_capture_time() {
+        let first_via = "https://git.example/first/reads";
+        let second_via = "https://git.example/second/reads";
+        let first = convert(&item(), None, first_via);
+        let replicated = Item {
+            path: "items/friends/2026/09/2026-09-02-hello".into(),
+            front: FrontMatter {
+                title: first.title,
+                link: first.link,
+                source: "friends".into(),
+                published: first.published,
+                updated: first.updated,
+                first_seen: first.first_seen.unwrap(),
+                extra: first.extra,
+                ..Default::default()
+            },
+            body: "Body".into(),
+        };
+
+        let second = convert(&replicated, None, second_via);
+        assert_eq!(second.first_seen, Some(item().front.first_seen));
+        assert_eq!(
+            second.extra.get("origin"),
+            Some(&Value::String(first_via.into()))
+        );
+        assert_eq!(
+            second.extra.get("origin_source"),
+            Some(&Value::String("hn".into()))
+        );
+        assert_eq!(
+            second.extra.get("via"),
+            Some(&Value::String(second_via.into()))
+        );
+        assert_eq!(
+            second.extra.get("via_source"),
+            Some(&Value::String("friends".into()))
+        );
     }
 
     #[test]
@@ -232,11 +300,11 @@ mod tests {
                 })
                 .unwrap();
         }
-        let all = read_items(&store, "v", &[], 10).unwrap();
+        let all = read_items(&store, "v", &[], None).unwrap();
         assert_eq!(all.len(), 3);
         assert!(all[0].id.as_deref().unwrap().ends_with("2026-09-03-x"));
-        let only_b = read_items(&store, "v", &["b".into()], 10).unwrap();
+        let only_b = read_items(&store, "v", &["b".into()], None).unwrap();
         assert_eq!(only_b.len(), 1);
-        assert_eq!(read_items(&store, "v", &[], 2).unwrap().len(), 2);
+        assert_eq!(read_items(&store, "v", &[], Some(2)).unwrap().len(), 2);
     }
 }

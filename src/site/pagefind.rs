@@ -1,6 +1,6 @@
-//! A purpose-built Pagefind index. Only titles and cleaned article prose affect ranking. Display
-//! metadata travels in Pagefind's result chunks with zero runtime weight, avoiding a second,
-//! whole-corpus request before the first result can render.
+//! A purpose-built Pagefind index. Titles, exact/normalized original URLs, and cleaned article
+//! prose are searchable. Display metadata travels in result chunks with zero runtime weight,
+//! avoiding a second whole-corpus request before the first result can render.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -77,13 +77,24 @@ impl SearchDocument {
         let mut sort = BTreeMap::new();
         sort.insert("date".into(), item.date.to_rfc3339());
 
+        let prose = crate::content::html_to_text(&crate::content::render_markdown(markdown));
+        let normalized = crate::model::normalize_link(&item.link);
+        let lookup = if normalized == item.link {
+            format!("Archived original URL: {}", item.link)
+        } else {
+            format!(
+                "Archived original URL: {}\nNormalized URL alias: {normalized}",
+                item.link
+            )
+        };
+
         Self {
             // Relative records are independently portable; both Pagefind's default API and
             // aggr's UI can mount the generated directory beneath any path.
             url: item.url.trim_start_matches('/').to_string(),
-            // Markdown syntax, link targets, and raw HTML are intentionally absent from the
-            // digest handed to Pagefind. Its generated snippet is always human prose.
-            content: crate::content::html_to_text(&crate::content::render_markdown(markdown)),
+            // Embedded link targets and raw HTML stay out of the digest. The one intentional URL
+            // is upstream identity, allowing a pasted article URL to find its local snapshot.
+            content: format!("{lookup}\n\n{prose}"),
             meta,
             filters,
             sort,
@@ -243,6 +254,7 @@ mod tests {
             published: None,
             updated: None,
             first_seen: Utc.with_ymd_and_hms(2026, 9, 3, 10, 0, 0).unwrap(),
+            replicated_at: None,
             authors: vec!["Person".into()],
             labels: vec!["rust".into()],
             discussions: vec![DiscussionLinkCtx {
@@ -267,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn searchable_record_excludes_urls_and_display_metadata() {
+    fn searchable_record_indexes_original_url_but_excludes_embedded_link_targets() {
         let document = SearchDocument::new(
             &item(),
             "Human prose about Ferris. [useful label](https://noise.example/hidden)",
@@ -275,7 +287,13 @@ mod tests {
         assert_eq!(document.url, "items/blog/post/");
         assert!(document.content.contains("Human prose about Ferris"));
         assert!(document.content.contains("useful label"));
-        assert!(!document.content.contains("https://"));
+        assert!(document.content.contains(&item().link));
+        assert!(
+            document
+                .content
+                .contains("https://secret.example/path?token=noise")
+        );
+        assert!(!document.content.contains("https://noise.example/hidden"));
         assert_eq!(document.meta.len(), 4);
         assert_eq!(document.meta["title"], "Useful result");
         assert_eq!(document.meta["source"], "Blog blog secret.example");

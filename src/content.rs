@@ -53,6 +53,11 @@ const BLOCK_ELEMENTS: &[&str] = &[
     "tr",
     "ul",
 ];
+/// Inline wrappers commonly used as CSS layout children. Readability keeps these elements but not
+/// the CSS `gap` or grid columns that visually separated directly adjacent siblings.
+const LAYOUT_INLINE_ELEMENTS: &[&str] = &["a", "label", "span", "time"];
+const FOOTNOTE_REF_START: char = '\u{e000}';
+const FOOTNOTE_REF_END: char = '\u{e001}';
 /// Attributes that carry URLs and therefore may smuggle `data:` payloads.
 const URL_ATTRIBUTES: &[&str] = &[
     "src",
@@ -350,7 +355,9 @@ pub fn sanitize(html: &str, base: Option<&Url>) -> String {
 /// [`sanitize`] then htmd. Trailing whitespace trimmed, exactly one trailing newline, runs of
 /// blank lines collapsed to one.
 pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
-    let clean = sanitize(html, base);
+    let passive = strip_active_content(html);
+    let normalized = normalize_extracted_controls(&passive);
+    let clean = sanitize(&restore_inline_layout_boundaries(&normalized.html), base);
     let converter = htmd::HtmlToMarkdown::builder()
         .options(htmd::options::Options {
             bullet_list_marker: htmd::options::BulletListMarker::Dash,
@@ -363,7 +370,435 @@ pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
     let markdown = converter
         .convert(&clean)
         .unwrap_or_else(|_| html_to_text(&clean));
-    tidy_markdown(&repair_generated_markdown(&markdown))
+    let markdown = tidy_markdown(&repair_generated_markdown(&markdown));
+    let markdown = restore_footnote_references(markdown, normalized.footnotes.len());
+    append_footnotes(markdown, &normalized.footnotes, base, &converter)
+}
+
+struct NormalizedHtml {
+    html: String,
+    footnotes: Vec<String>,
+}
+
+/// Turn presentation-only controls retained by Readability into durable document semantics.
+/// Sidenotes become ordinary Markdown footnotes later in the pipeline; expand/collapse controls
+/// are discarded because Readability has already retained their complete content.
+fn normalize_extracted_controls(html: &str) -> NormalizedHtml {
+    let mut normalized = String::with_capacity(html.len());
+    let mut footnotes = Vec::new();
+    let mut suppressed_spans = Vec::new();
+    let mut position = 0;
+
+    while position < html.len() {
+        let Some(tag_start) = html[position..].find('<').map(|offset| position + offset) else {
+            normalized.push_str(&html[position..]);
+            break;
+        };
+        normalized.push_str(&html[position..tag_start]);
+        if let Some(index) = suppressed_spans
+            .iter()
+            .position(|(start, _)| *start == tag_start)
+        {
+            let (_, end) = suppressed_spans.swap_remove(index);
+            position = end;
+            continue;
+        }
+
+        let Some(tag) = parse_tag(&html[tag_start..]) else {
+            normalized.push('<');
+            position = tag_start + 1;
+            continue;
+        };
+        let Some(tag_len) = tag.end else {
+            normalized.push_str(&html[tag_start..]);
+            break;
+        };
+        let tag_end = tag_start + tag_len;
+        let tag_html = &html[tag_start..tag_end];
+
+        if !tag.closing && tag.name == "label" {
+            if let Some(sidenote) = sidenote_at(html, tag_start)
+                && !suppressed_spans
+                    .iter()
+                    .any(|(start, _)| *start == sidenote.span_start)
+            {
+                footnotes.push(sidenote.content.to_string());
+                suppressed_spans.push((sidenote.span_start, sidenote.span_end));
+                normalized.push(FOOTNOTE_REF_START);
+                normalized.push_str(&footnotes.len().to_string());
+                normalized.push(FOOTNOTE_REF_END);
+                position = sidenote.reference_end;
+                continue;
+            }
+            if let Some((_, inner_end, end)) = element_bounds(html, tag_start, "label")
+                && is_expand_control(tag_html, &html[tag_end..inner_end])
+            {
+                position = end;
+                continue;
+            }
+        }
+
+        if !tag.closing && tag.name == "input" && is_hidden_expand_input(tag_html) {
+            position = tag_end;
+            continue;
+        }
+
+        normalized.push_str(tag_html);
+        position = tag_end;
+    }
+
+    NormalizedHtml {
+        html: normalized,
+        footnotes,
+    }
+}
+
+fn restore_footnote_references(mut markdown: String, count: usize) -> String {
+    for number in 1..=count {
+        markdown = markdown.replace(
+            &format!("{FOOTNOTE_REF_START}{number}{FOOTNOTE_REF_END}"),
+            &format!("[^{number}]"),
+        );
+    }
+    markdown
+}
+
+struct SidenoteMatch<'a> {
+    reference_end: usize,
+    span_start: usize,
+    span_end: usize,
+    content: &'a str,
+}
+
+/// Pair a numbered sidenote label with its matching span in the same containing block. The span
+/// may follow intervening main prose because CSS can move it into the margin independently of its
+/// source position.
+fn sidenote_at(html: &str, label_start: usize) -> Option<SidenoteMatch<'_>> {
+    let label = parse_tag(&html[label_start..])?;
+    let label_end = label_start + label.end?;
+    let label_html = &html[label_start..label_end];
+    let target = attribute_value(label_html, "for")?;
+    let number = attribute_value(label_html, "data-n");
+    if !target.starts_with("fn-") && !has_class(label_html, "sidenote-number") {
+        return None;
+    }
+
+    let (_, label_inner_end, after_label) = element_bounds(html, label_start, "label")?;
+    if !html_to_text(&html[label_end..label_inner_end])
+        .trim()
+        .is_empty()
+    {
+        return None;
+    }
+
+    let mut reference_end = after_label;
+    let mut next = skip_html_whitespace(html, reference_end);
+    if html[next..].starts_with('<')
+        && let Some(input) = parse_tag(&html[next..])
+        && !input.closing
+        && input.name == "input"
+    {
+        let input_end = next + input.end?;
+        let input_html = &html[next..input_end];
+        let belongs_to_note = attribute_value(input_html, "id") == Some(target)
+            || has_class(input_html, "margin-toggle");
+        if !belongs_to_note {
+            return None;
+        }
+        reference_end = input_end;
+        next = skip_html_whitespace(html, input_end);
+    }
+
+    let (span_start, content_start, content_end, span_end) =
+        find_sidenote_span(html, next, number)?;
+    Some(SidenoteMatch {
+        reference_end,
+        span_start,
+        span_end,
+        content: &html[content_start..content_end],
+    })
+}
+
+fn find_sidenote_span(
+    html: &str,
+    mut position: usize,
+    number: Option<&str>,
+) -> Option<(usize, usize, usize, usize)> {
+    while let Some(tag_start) = html[position..].find('<').map(|offset| position + offset) {
+        let tag = parse_tag(&html[tag_start..])?;
+        let tag_end = tag_start + tag.end?;
+        let tag_html = &html[tag_start..tag_end];
+        if !tag.closing && tag.name == "span" {
+            let matches = match number {
+                Some(number) => attribute_value(tag_html, "data-n") == Some(number),
+                None => has_class(tag_html, "sidenote"),
+            };
+            if matches {
+                let (content_start, content_end, span_end) =
+                    element_bounds(html, tag_start, "span")?;
+                return Some((tag_start, content_start, content_end, span_end));
+            }
+        }
+        if BLOCK_ELEMENTS.contains(&tag.name.as_str()) && !matches!(tag.name.as_str(), "br" | "hr")
+        {
+            return None;
+        }
+        position = tag_end;
+    }
+    None
+}
+
+fn is_expand_control(tag: &str, inner: &str) -> bool {
+    if has_class(tag, "ex-more") {
+        return true;
+    }
+    attribute_value(tag, "for").is_some_and(|target| target.ends_with("-more"))
+        && opening_element_count(inner, "span") >= 2
+}
+
+fn is_hidden_expand_input(tag: &str) -> bool {
+    has_class(tag, "ex-toggle")
+        || (attribute_value(tag, "type")
+            .is_some_and(|value| value.eq_ignore_ascii_case("checkbox"))
+            && attribute_value(tag, "id").is_some_and(|id| id.ends_with("-more")))
+}
+
+fn opening_element_count(html: &str, name: &str) -> usize {
+    let mut count = 0;
+    let mut position = 0;
+    while let Some(tag_start) = html[position..].find('<').map(|offset| position + offset) {
+        let Some(tag) = parse_tag(&html[tag_start..]) else {
+            position = tag_start + 1;
+            continue;
+        };
+        let Some(tag_len) = tag.end else {
+            break;
+        };
+        if !tag.closing && tag.name == name {
+            count += 1;
+        }
+        position = tag_start + tag_len;
+    }
+    count
+}
+
+/// `(opening tag end, closing tag start, closing tag end)` for an element, accounting for nested
+/// elements with the same name.
+fn element_bounds(html: &str, start: usize, name: &str) -> Option<(usize, usize, usize)> {
+    let opening = parse_tag(&html[start..])?;
+    if opening.closing || opening.self_closing || opening.name != name {
+        return None;
+    }
+    let opening_end = start + opening.end?;
+    let mut depth = 1;
+    let mut position = opening_end;
+
+    while let Some(tag_start) = html[position..].find('<').map(|offset| position + offset) {
+        let Some(tag) = parse_tag(&html[tag_start..]) else {
+            position = tag_start + 1;
+            continue;
+        };
+        let tag_end = tag_start + tag.end?;
+        if tag.name == name {
+            if tag.closing {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((opening_end, tag_start, tag_end));
+                }
+            } else if !tag.self_closing {
+                depth += 1;
+            }
+        }
+        position = tag_end;
+    }
+    None
+}
+
+fn skip_html_whitespace(html: &str, mut position: usize) -> usize {
+    while html
+        .as_bytes()
+        .get(position)
+        .is_some_and(u8::is_ascii_whitespace)
+    {
+        position += 1;
+    }
+    position
+}
+
+fn attribute_value<'a>(tag: &'a str, wanted: &str) -> Option<&'a str> {
+    let bytes = tag.as_bytes();
+    let mut position = 1;
+    if bytes.get(position) == Some(&b'/') {
+        position += 1;
+    }
+    while position < bytes.len() && is_name_byte(bytes[position]) {
+        position += 1;
+    }
+
+    while position < bytes.len() {
+        while position < bytes.len()
+            && (bytes[position].is_ascii_whitespace() || bytes[position] == b'/')
+        {
+            position += 1;
+        }
+        if bytes.get(position) == Some(&b'>') {
+            break;
+        }
+        let name_start = position;
+        while position < bytes.len()
+            && !bytes[position].is_ascii_whitespace()
+            && !b"=>/".contains(&bytes[position])
+        {
+            position += 1;
+        }
+        if name_start == position {
+            position += 1;
+            continue;
+        }
+        let name = &tag[name_start..position];
+        while position < bytes.len() && bytes[position].is_ascii_whitespace() {
+            position += 1;
+        }
+        if bytes.get(position) != Some(&b'=') {
+            continue;
+        }
+        position += 1;
+        while position < bytes.len() && bytes[position].is_ascii_whitespace() {
+            position += 1;
+        }
+        let (value_start, value_end) = match bytes.get(position) {
+            Some(quote @ (b'"' | b'\'')) => {
+                position += 1;
+                let start = position;
+                while position < bytes.len() && bytes[position] != *quote {
+                    position += 1;
+                }
+                let end = position;
+                position = (position + 1).min(bytes.len());
+                (start, end)
+            }
+            _ => {
+                let start = position;
+                while position < bytes.len()
+                    && !bytes[position].is_ascii_whitespace()
+                    && bytes[position] != b'>'
+                {
+                    position += 1;
+                }
+                (start, position)
+            }
+        };
+        if name.eq_ignore_ascii_case(wanted) {
+            return Some(&tag[value_start..value_end]);
+        }
+    }
+    None
+}
+
+fn has_class(tag: &str, class: &str) -> bool {
+    attribute_value(tag, "class").is_some_and(|classes| {
+        classes
+            .split_ascii_whitespace()
+            .any(|candidate| candidate == class)
+    })
+}
+
+fn append_footnotes(
+    mut markdown: String,
+    footnotes: &[String],
+    base: Option<&Url>,
+    converter: &htmd::HtmlToMarkdown,
+) -> String {
+    if footnotes.is_empty() {
+        return markdown;
+    }
+    markdown = markdown.trim_end().to_string();
+
+    for (index, footnote) in footnotes.iter().enumerate() {
+        markdown.push_str("\n\n");
+        let clean = sanitize(&restore_inline_layout_boundaries(footnote), base);
+        let converted = converter
+            .convert(&clean)
+            .unwrap_or_else(|_| html_to_text(&clean));
+        let converted = tidy_markdown(&repair_generated_markdown(&converted));
+        let mut lines = converted.trim_end().lines();
+        markdown.push_str(&format!("[^{}]:", index + 1));
+        if let Some(first) = lines.next() {
+            markdown.push(' ');
+            markdown.push_str(first);
+        }
+        for line in lines {
+            markdown.push('\n');
+            if !line.is_empty() {
+                markdown.push_str("    ");
+                markdown.push_str(line);
+            }
+        }
+    }
+    markdown.push('\n');
+    markdown
+}
+
+/// Restore separators that were supplied by the origin page's CSS rather than its text nodes.
+/// Directly adjacent links are usually action/button rows, so retain their visual separation with
+/// a line break. Other adjacent layout wrappers need a space to avoid merging dates, labels, and
+/// footnote text into neighboring words after the wrappers are discarded by the converter.
+fn restore_inline_layout_boundaries(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+
+    while position < html.len() {
+        let Some(tag_start) = html[position..].find('<').map(|offset| position + offset) else {
+            out.push_str(&html[position..]);
+            break;
+        };
+        out.push_str(&html[position..tag_start]);
+
+        let Some(tag) = parse_tag(&html[tag_start..]) else {
+            out.push('<');
+            position = tag_start + 1;
+            continue;
+        };
+        let Some(tag_len) = tag.end else {
+            out.push_str(&html[tag_start..]);
+            break;
+        };
+        let after_tag = tag_start + tag_len;
+        out.push_str(&html[tag_start..after_tag]);
+        position = after_tag;
+
+        if !tag.closing || !LAYOUT_INLINE_ELEMENTS.contains(&tag.name.as_str()) {
+            continue;
+        }
+        let Some(next) = parse_tag(&html[position..]) else {
+            continue;
+        };
+        if next.closing || !LAYOUT_INLINE_ELEMENTS.contains(&next.name.as_str()) {
+            continue;
+        }
+        let Some(next_len) = next.end else {
+            continue;
+        };
+        let next_content = position + next_len;
+        let boundary_already_spaced = html[..tag_start]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
+            || html[next_content..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace);
+        if boundary_already_spaced {
+            continue;
+        }
+        if tag.name == "a" && next.name == "a" {
+            out.push_str("<br>");
+        } else {
+            out.push(' ');
+        }
+    }
+
+    out
 }
 
 /// Remove a metadata line that readability promoted to the first Markdown paragraph. This covers
@@ -412,6 +847,7 @@ fn date_prefixes(value: &str) -> impl Iterator<Item = &str> {
 /// `than[54,000…](…)`.
 fn repair_generated_markdown(markdown: &str) -> String {
     let mut value = markdown
+        .replace(" \u{2060}(opens in a new window)", "")
         .replace("\u{2060}(opens in a new window)", "")
         .replace(" (opens in a new window)", "");
     let bytes = value.as_bytes();
@@ -511,10 +947,29 @@ pub fn render_markdown(markdown: &str) -> String {
     options.extension.footnotes = true;
     options.render.r#unsafe = false;
     options.render.escape = true;
-    comrak::markdown_to_html(markdown, &options).replace(
-        "<a href=\"",
-        "<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"",
-    )
+    let html = comrak::markdown_to_html(markdown, &options);
+    add_link_navigation_attributes(&html)
+}
+
+/// Article links open separately, while fragment links such as footnote references and backrefs
+/// must navigate within the current document.
+fn add_link_navigation_attributes(html: &str) -> String {
+    const LINK_OPEN: &str = "<a href=\"";
+    const EXTERNAL_LINK_OPEN: &str = "<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"";
+
+    let mut out = String::with_capacity(html.len());
+    let mut remaining = html;
+    while let Some(index) = remaining.find(LINK_OPEN) {
+        out.push_str(&remaining[..index]);
+        remaining = &remaining[index + LINK_OPEN.len()..];
+        out.push_str(if remaining.starts_with('#') {
+            LINK_OPEN
+        } else {
+            EXTERNAL_LINK_OPEN
+        });
+    }
+    out.push_str(remaining);
+    out
 }
 
 /// Plain text of an HTML fragment: tags stripped, entities decoded, whitespace collapsed.
@@ -845,6 +1300,113 @@ mod tests {
     }
 
     #[test]
+    fn markdown_preserves_boundaries_between_semantic_inline_siblings() {
+        let html = r#"<p><time>5/11</time><span>First observed event.</span></p>
+<p><a href="/revision"><time>2026-06-21 10:35:01</time> <span>OECDDec29Agent</span><span>open in the wiki</span></a></p>
+<p>Sentence.<label for="note"></label><span data-n="3">Note in the margin.</span></p>
+<p><span>Show the whole post</span><span>Show less</span></p>"#;
+
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            concat!(
+                "5/11 First observed event.\n\n",
+                "[2026-06-21 10:35:01 OECDDec29Agent open in the wiki]",
+                "(https://example.com/revision)\n\n",
+                "Sentence. Note in the margin.\n\n",
+                "Show the whole post Show less\n",
+            )
+        );
+    }
+
+    #[test]
+    fn markdown_puts_adjacent_action_links_on_separate_lines() {
+        let html = r#"<p><a href="/explorer">Open the data explorer</a><a href="/download">Download all the data</a></p>"#;
+
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            concat!(
+                "[Open the data explorer](https://example.com/explorer)\\\n",
+                "[Download all the data](https://example.com/download)\n",
+            )
+        );
+    }
+
+    #[test]
+    fn markdown_converts_readability_sidenotes_to_footnotes() {
+        let html = r#"<p>Before.<label for="fn-later" data-n="8"></label><input type="checkbox" id="fn-later"><span class="sidenote" data-n="8"><b>Note:</b> read the <a href="/source">source</a>.</span> After.</p>
+<p>Second<label for="fn-earlier" data-n="2"></label><span data-n="2">Another note.</span></p>"#;
+
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            concat!(
+                "Before.[^1] After.\n\n",
+                "Second[^2]\n\n",
+                "[^1]: **Note:** read the [source](https://example.com/source).\n\n",
+                "[^2]: Another note.\n",
+            )
+        );
+    }
+
+    #[test]
+    fn markdown_indents_multiblock_sidenotes_as_one_footnote() {
+        let html = r#"<p>Body<label for="fn-detail" data-n="1"></label><span data-n="1"><p>First paragraph.</p><p>Second paragraph with <em>emphasis</em>.</p></span></p>"#;
+
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            concat!(
+                "Body[^1]\n\n",
+                "[^1]: First paragraph.\n\n",
+                "    Second paragraph with *emphasis*.\n",
+            )
+        );
+    }
+
+    #[test]
+    fn markdown_pairs_a_sidenote_after_intervening_prose_in_the_same_block() {
+        let html = r#"<p>Lead<label for="fn-delayed" data-n="27"></label> Main prose ends here.<span data-n="27">Deferred note.</span><label for="fn-next" data-n="28"></label><span data-n="28">Next note.</span> Tail.</p>"#;
+
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            concat!(
+                "Lead[^1] Main prose ends here.[^2] Tail.\n\n",
+                "[^1]: Deferred note.\n\n",
+                "[^2]: Next note.\n",
+            )
+        );
+    }
+
+    #[test]
+    fn markdown_does_not_recover_sidenotes_from_active_content() {
+        let html = r#"<p>Safe.</p><script><label for="fn-hidden" data-n="1"></label><span data-n="1">Hidden script text.</span></script>"#;
+        assert_eq!(to_markdown(html, Some(&base())), "Safe.\n");
+    }
+
+    #[test]
+    fn markdown_discards_expand_controls_but_keeps_complete_content() {
+        let html = r#"<figure>
+<a class="ex-head" href="/revision"><time>2026-06-21 10:35:01</time> <span class="who">Agent</span><span class="ex-open">open in the wiki</span></a>
+<input type="checkbox" id="example-more">
+<pre class="ex-body"><span>Complete post body.</span></pre>
+<label for="example-more"><span>Show the whole post</span><span>Show less</span></label>
+</figure>"#;
+        let markdown = to_markdown(html, Some(&base()));
+
+        assert!(
+            markdown.contains("2026-06-21 10:35:01 Agent open in the wiki"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("Complete post body."), "{markdown}");
+        assert!(!markdown.contains("Show the whole post"), "{markdown}");
+        assert!(!markdown.contains("Show less"), "{markdown}");
+    }
+
+    #[test]
+    fn inline_boundary_repair_respects_existing_content_whitespace() {
+        let html = "<pre><span>left </span><span> right</span></pre>";
+        assert_eq!(restore_inline_layout_boundaries(html), html);
+    }
+
+    #[test]
     fn render_markdown_supports_gfm_and_scrubs_html() {
         let html = render_markdown("| a | b |\n|---|---|\n| 1 | 2 |\n\n- [x] done\n- [ ] todo\n");
         assert!(html.contains("<table>"), "{html}");
@@ -859,6 +1421,11 @@ mod tests {
         let html = render_markdown("[external](https://example.com)");
         assert!(html.contains(r#"target="_blank""#), "{html}");
         assert!(html.contains(r#"rel="noopener noreferrer""#), "{html}");
+
+        let html = render_markdown("Body[^1]\n\n[^1]: Footnote.\n");
+        assert!(html.contains("<a href=\"#fn-1\""), "{html}");
+        assert!(html.contains("<a href=\"#fnref-1\""), "{html}");
+        assert!(!html.contains(r##"target="_blank" rel="noopener noreferrer" href="#"##));
     }
 
     #[test]
