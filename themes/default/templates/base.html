@@ -61,6 +61,10 @@
 {% block head %}{% endblock %}
 </head>
 <body data-kind="{{ page.kind }}">
+<div id="pull-refresh" class="pull-refresh" role="status" aria-live="polite" aria-atomic="true" aria-hidden="true" data-nosnippet>
+  <span class="pull-refresh-icon" aria-hidden="true">↓</span>
+  <span id="pull-refresh-label">Pull to refresh</span>
+</div>
 <a class="skip-link" href="#swup">skip to content</a>
 <header class="top" data-nosnippet>
   <nav class="nav" aria-label="Primary navigation">

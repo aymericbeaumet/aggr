@@ -15,6 +15,13 @@
   var PREFERENCE_KEYS = ["aggr:theme", "aggr:date-format"];
   var deferredInstallPrompt;
   var statusTimer;
+  var PULL_THRESHOLD = 84;
+  var PULL_MAX = 72;
+  var PULL_HOLD = 48;
+  var pullRefreshState = "idle";
+  var pullStartX = 0;
+  var pullStartY = 0;
+  var pullResetTimer;
 
   function $(selector, root) { return (root || document).querySelector(selector); }
   function $$(selector, root) { return Array.prototype.slice.call((root || document).querySelectorAll(selector)); }
@@ -828,6 +835,83 @@
     else bar.hidden = true;
   }
 
+  function setPullRefreshState(next, distance) {
+    var root = document.documentElement;
+    var indicator = $("#pull-refresh");
+    var label = $("#pull-refresh-label");
+    var changed = pullRefreshState !== next;
+    pullRefreshState = next;
+    if (next === "idle") {
+      delete root.dataset.pullState;
+      root.style.removeProperty("--pull-distance");
+      if (indicator) indicator.setAttribute("aria-hidden", "true");
+      return;
+    }
+    root.dataset.pullState = next;
+    root.style.setProperty("--pull-distance", Math.max(0, distance || 0) + "px");
+    if (indicator) indicator.setAttribute("aria-hidden", "false");
+    if (!changed || !label) return;
+    if (next === "armed") label.textContent = "Release to refresh";
+    else if (next === "refreshing") label.textContent = "Refreshing…";
+    else label.textContent = "Pull to refresh";
+  }
+
+  function settlePullRefresh() {
+    if (pullRefreshState === "idle" || pullRefreshState === "refreshing") return;
+    clearTimeout(pullResetTimer);
+    setPullRefreshState("settling", 0);
+    pullResetTimer = setTimeout(function () {
+      setPullRefreshState("idle", 0);
+    }, 190);
+  }
+
+  function wireTouchPullRefresh() {
+    var root = document.documentElement;
+    if (root.dataset.pullRefreshBound === "true") return;
+    if (!PWA || !(navigator.maxTouchPoints > 0 || "ontouchstart" in window)) return;
+    root.dataset.pullRefreshBound = "true";
+
+    document.addEventListener("touchstart", function (event) {
+      if (pullRefreshState === "refreshing" || event.touches.length !== 1) return;
+      if (window.scrollY > 0 || $("dialog[open]")) return;
+      clearTimeout(pullResetTimer);
+      pullStartX = event.touches[0].clientX;
+      pullStartY = event.touches[0].clientY;
+      setPullRefreshState("tracking", 0);
+    }, { passive: true });
+
+    document.addEventListener("touchmove", function (event) {
+      if (["tracking", "pulling", "armed"].indexOf(pullRefreshState) === -1) return;
+      if (event.touches.length !== 1 || window.scrollY > 0) {
+        settlePullRefresh();
+        return;
+      }
+      var deltaX = Math.abs(event.touches[0].clientX - pullStartX);
+      var deltaY = event.touches[0].clientY - pullStartY;
+      if (deltaY <= 0 || deltaX > deltaY) {
+        settlePullRefresh();
+        return;
+      }
+      if (deltaY < 6) return;
+      event.preventDefault();
+      var distance = Math.min(PULL_MAX, Math.round(deltaY * 0.55));
+      if (deltaY >= PULL_THRESHOLD) setPullRefreshState("armed", distance);
+      else setPullRefreshState("pulling", distance);
+    }, { passive: false });
+
+    document.addEventListener("touchend", function () {
+      if (pullRefreshState === "armed") {
+        clearTimeout(pullResetTimer);
+        setPullRefreshState("refreshing", PULL_HOLD);
+        showConnectionStatus("Refreshing for new items…", false, false);
+        setTimeout(function () { location.reload(); }, 140);
+      } else {
+        settlePullRefresh();
+      }
+    }, { passive: true });
+    document.addEventListener("touchcancel", settlePullRefresh, { passive: true });
+  }
+
   function wirePersistentControls() {
     var refresh = $("#refresh-page");
     if (refresh && refresh.dataset.bound !== "true") {
@@ -914,6 +998,7 @@
     wireMenuNavigation();
     wireShortcutHelp();
     wirePersistentControls();
+    wireTouchPullRefresh();
     wirePwaControls();
     var picker = $("#theme-mode");
     if (picker) picker.addEventListener("change", function () { setTheme(picker.value); });

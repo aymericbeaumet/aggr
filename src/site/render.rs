@@ -317,6 +317,38 @@ mod tests {
     }
 
     #[test]
+    fn embedded_theme_implements_touch_pull_to_refresh() {
+        let app_file = DefaultTheme::get("static/app.js").unwrap();
+        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
+        assert!(app.contains("var PULL_THRESHOLD"));
+        assert!(app.contains("var pullRefreshState = \"idle\""));
+        assert!(app.contains("document.addEventListener(\"touchstart\""));
+        assert!(app.contains("document.addEventListener(\"touchmove\""));
+        assert!(app.contains("{ passive: false }"));
+        assert!(app.contains("event.preventDefault()"));
+        assert!(app.contains("setPullRefreshState(\"armed\""));
+        assert!(app.contains("setPullRefreshState(\"refreshing\""));
+
+        let base_file = DefaultTheme::get("templates/base.html").unwrap();
+        let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
+        assert!(base.contains("id=\"pull-refresh\""));
+        assert!(base.contains("id=\"pull-refresh-label\""));
+
+        let css_file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
+        assert!(css.contains("--pull-distance"));
+        assert!(css.contains("html[data-pull-state=\"pulling\"]"));
+        assert!(css.contains("html[data-pull-state=\"armed\"]"));
+    }
+
+    #[test]
+    fn release_workflow_advances_the_major_channel() {
+        let workflow = include_str!("../../.github/workflows/release.yml");
+        assert!(workflow.contains("major=\"v${VERSION%%.*}\""));
+        assert!(workflow.contains("git push --force origin \"refs/tags/$major\""));
+    }
+
+    #[test]
     fn embedded_theme_is_safe_and_readable_on_installed_phones() {
         let file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(file.data.as_ref()).unwrap();
