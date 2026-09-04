@@ -316,6 +316,11 @@ mod tests {
         assert!(css.contains(".body a { color: var(--accent-strong); font-style: normal"));
         assert!(css.contains(".article-more"));
         assert!(css.contains(".main:focus-visible { outline: none; }"));
+        assert!(css.contains("--focus:"));
+        assert!(css.contains("input:focus-visible"));
+        assert!(!css.contains(
+            "input:focus-visible, select:focus-visible {\n  outline: 3px solid var(--accent-strong)"
+        ));
 
         let script_file = DefaultTheme::get("static/app.js").unwrap();
         let script = std::str::from_utf8(script_file.data.as_ref()).unwrap();
@@ -326,7 +331,8 @@ mod tests {
         assert!(script.contains("[\"ArrowRight\", \"l\", \"j\"]"));
         assert!(!script.contains("var selected ="));
         assert!(!script.contains("event.key === \"o\""));
-        assert!(!script.contains("event.key === \"Enter\""));
+        assert!(script.contains("openFirstResult"));
+        assert!(script.contains("focusPageSearch"));
         assert!(script.contains("wireMenuNavigation"));
         assert!(script.contains("event.key === \"?\""));
         assert!(script.contains("f: \"\", i: \"\", \"/\": \"search/\", c: \"categories/\""));
@@ -341,11 +347,18 @@ mod tests {
         assert!(base.contains("Keyboard shortcuts"));
         assert!(base.contains("data-route=\"preferences/\""));
         assert!(base.contains("Open feed entry"));
+        assert!(base.contains("<kbd>1–9</kbd>"));
+        assert!(base.contains("rel=\"service-meta\""));
+        assert!(base.contains("rel=\"type\""));
+        assert!(base.contains("name=\"aggr:network\""));
+        assert!(base.contains("max-image-preview:large"));
+        assert!(base.contains("data-nosnippet"));
         assert!(!base.contains("data-route=\"settings/\""));
         assert!(!base.contains("id=\"shortcut-lists\""));
 
         let item_file = DefaultTheme::get("templates/item.html").unwrap();
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
+        assert!(item.contains("<meta name=\"author\""));
         assert!(item.contains("for article in item.recommended_articles"));
         assert!(!item.contains("article-more-label"));
         assert!(!item.contains("class=\"permalinks\""));

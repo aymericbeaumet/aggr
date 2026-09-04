@@ -9,6 +9,7 @@
   --accent: #8ea1ff;
   --accent-strong: #4054c7;
   --warm: #a44f2a;
+  --focus: #b65f3b;
   --link: #111318;
   --danger: #b33a32;
   --code: #eceef7;
@@ -28,6 +29,7 @@ html[data-theme="dark"] {
     --accent: #8ea1ff;
     --accent-strong: #b4beff;
     --warm: #e99a70;
+    --focus: #efa078;
     --link: #f7f7fa;
     --danger: #ff8a80;
     --code: #222632;
@@ -38,7 +40,7 @@ html[data-theme="dark"] {
   html:not([data-theme]), html[data-theme="auto"] {
     --bg: #11131a; --panel: #181b24; --fg: #e6e8f0; --muted: #aab0be;
     --faint: #303442; --accent: #8ea1ff; --accent-strong: #b4beff;
-    --warm: #e99a70; --link: #f7f7fa; --danger: #ff8a80; --code: #222632;
+    --warm: #e99a70; --focus: #efa078; --link: #f7f7fa; --danger: #ff8a80; --code: #222632;
     --nav-bg: #1d1213; --nav-fg: #fff4ed;
   }
 }
@@ -68,9 +70,15 @@ body {
 ::selection { background: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--fg); }
 a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
-a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible {
-  outline: 3px solid var(--accent-strong);
+a:focus-visible, button:focus-visible {
+  outline: 3px solid var(--focus);
   outline-offset: 2px;
+}
+input:focus-visible, select:focus-visible {
+  border-color: var(--focus);
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+  box-shadow: none;
 }
 button, input, select { accent-color: var(--accent); }
 code, pre, kbd { font-family: var(--mono); font-size: 0.92em; }

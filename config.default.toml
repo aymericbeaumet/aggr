@@ -107,11 +107,11 @@ content = "heavy"
 # include = "./aggr-ai.toml"   # or "./sources/*.toml"
 # category = "ai"
 # [[sources]]
-# include = "https://github.com/owner/aggr-config" # infers aggr.toml
+# include = "https://github.com/owner/aggr-instance" # infers aggr.toml
 # GitHub includes automatically use $GITHUB_TOKEN or $GH_TOKEN when present. Cross-repository
 # private configs require a token with read access.
 # [[sources]]
-# include = "https://github.com/owner/aggr-config/blob/main/topics/*.toml"
+# include = "https://github.com/owner/aggr-instance/blob/main/topics/*.toml"
 
 # Another aggr repository: its data branch is mirrored and its items flow into this site.
 # [[sources]]

@@ -146,8 +146,9 @@ pub fn precache_paths(
     item_urls: impl IntoIterator<Item = String>,
     offline_items: usize,
 ) -> Vec<String> {
-    const SHELLS: [&str; 7] = [
+    const SHELLS: [&str; 8] = [
         "",
+        "aggr.json",
         "sources/",
         "search/",
         "preferences/",
@@ -279,13 +280,26 @@ fn structured_data(
     let site_url = site.base_url.as_deref()?;
     let page_url = page.canonical_url.as_deref()?;
     let website_id = format!("{site_url}#website");
+    let descriptor_url = format!("{site_url}aggr.json");
+    let config_url = site
+        .config_url
+        .clone()
+        .unwrap_or_else(|| format!("{site_url}aggr.toml"));
     let website = serde_json::json!({
         "@type": "WebSite",
         "@id": website_id,
+        "additionalType": outputs::AGGR_INSTANCE_TYPE,
         "url": site_url,
         "name": site.title,
         "description": site.description,
         "inLanguage": site.language,
+        "isPartOf": {"@id": outputs::AGGR_NETWORK},
+        "isBasedOn": config_url,
+        "subjectOf": {
+            "@type": "DigitalDocument",
+            "url": descriptor_url,
+            "encodingFormat": "application/json"
+        },
         "potentialAction": {
             "@type": "SearchAction",
             "target": {
@@ -383,9 +397,16 @@ fn structured_data(
         node
     };
 
+    let network = serde_json::json!({
+        "@type": "CreativeWorkSeries",
+        "@id": outputs::AGGR_NETWORK,
+        "name": "aggr network",
+        "url": outputs::AGGR_REPOSITORY,
+    });
+
     Some(serde_json::json!({
         "@context": "https://schema.org",
-        "@graph": [website, page_node],
+        "@graph": [network, website, page_node],
     }))
 }
 
@@ -435,6 +456,8 @@ pub fn build(
         base_url: info.base_url.clone().map(|url| ensure_trailing_slash(&url)),
         repository: repository.clone(),
         data_branch: config.store.branch.clone(),
+        network_url: outputs::AGGR_NETWORK,
+        instance_type_url: outputs::AGGR_INSTANCE_TYPE,
         pwa: config.site.pwa,
         config_url: repository.as_deref().and_then(|repository| {
             info.config_sha.as_deref().map(|sha| {
@@ -587,6 +610,7 @@ pub fn build(
                 let page = PageCtx {
                     kind: kind.to_string(),
                     title: title.to_string(),
+                    indexable: true,
                     path: pager.path.clone(),
                     root: relative_root(&pager.path),
                     canonical_url: canonical_url(&site, &pager.path),
@@ -709,6 +733,7 @@ pub fn build(
         let page = PageCtx {
             kind: kind.to_string(),
             title: title.to_string(),
+            indexable: !matches!(kind, "search" | "preferences" | "404" | "offline"),
             path: path.to_string(),
             root: relative_root(path),
             canonical_url: canonical_url(&site, path),
@@ -861,6 +886,10 @@ pub fn build(
     write(
         &out.join("feed.json"),
         outputs::json_collection(&site, &site.title, "", &root_feed_items)?.as_bytes(),
+    )?;
+    write(
+        &out.join("aggr.json"),
+        outputs::instance_descriptor(&site, &build_ctx)?.as_bytes(),
     )?;
     write_collection_feeds(
         out,
@@ -1417,6 +1446,7 @@ mod tests {
             1,
         );
         assert_eq!(paths[0], "/repo/");
+        assert!(paths.contains(&"/repo/aggr.json".to_string()));
         assert!(paths.contains(&"/repo/offline.html".to_string()));
         assert!(paths.contains(&"/repo/preferences/".to_string()));
         assert!(!paths.contains(&"/repo/settings/".to_string()));
@@ -1798,6 +1828,13 @@ mod tests {
         assert!(river.contains("type=\"application/ld+json\""), "{river}");
         assert!(river.contains("https://schema.org"), "{river}");
         assert!(river.contains("rel=\"search\""), "{river}");
+        assert!(river.contains("rel=\"service-meta\""), "{river}");
+        assert!(river.contains("rel=\"type\""), "{river}");
+        assert!(river.contains("name=\"aggr:network\""), "{river}");
+        assert!(
+            river.contains("name=\"robots\" content=\"index,follow,"),
+            "{river}"
+        );
         assert!(river.contains("rel=\"apple-touch-icon\""));
         assert!(river.contains("name=\"theme-color\""));
         assert!(river.contains("href=\"sources/\""), "{river}");
@@ -1806,6 +1843,36 @@ mod tests {
         assert!(out.join("preferences/index.html").is_file());
         assert!(!out.join("settings/index.html").exists());
         assert!(out.join("pagefind/pagefind.js").is_file());
+        for path in [
+            "search/index.html",
+            "preferences/index.html",
+            "offline.html",
+            "404.html",
+        ] {
+            let utility = std::fs::read_to_string(out.join(path)).unwrap();
+            assert!(
+                utility.contains("name=\"robots\" content=\"noindex,follow\""),
+                "{path}: {utility}"
+            );
+        }
+        let descriptor: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("aggr.json")).unwrap()).unwrap();
+        assert_eq!(descriptor["type"], "aggr-instance");
+        assert_eq!(
+            descriptor["network"],
+            "https://github.com/aymericbeaumet/aggr#network"
+        );
+        assert_eq!(descriptor["url"], "https://u.github.io/repo/");
+        assert!(
+            descriptor["source"]["config"]
+                .as_str()
+                .is_some_and(|url| url.ends_with("/aggr.toml")),
+            "{descriptor}"
+        );
+        assert_eq!(
+            descriptor["feeds"]["json"],
+            "https://u.github.io/repo/feed.json"
+        );
         assert!(out.join("sources/blog/atom.xml").is_file());
         assert!(out.join("sources/blog/rss.xml").is_file());
         assert!(out.join("sources/blog/feed.json").is_file());

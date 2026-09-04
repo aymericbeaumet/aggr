@@ -7,19 +7,25 @@ an app. aggr takes a small `aggr.toml`, discovers feeds from ordinary website UR
 items as Markdown on an append-only branch, and publishes a self-contained static reader. There is
 no server, database, account, or tracking layer to maintain.
 
+`aggr` is the engine. An **aggr instance** is a repository containing its workflow and root aggr
+config, together with the data branch and site they produce. Instances are independent and publish
+a common network identity, making every publicly linked instance recognizable to search engines
+and other tools.
+
 What you get:
 
 - a responsive, installable PWA with offline reading and instant Swup navigation;
 - build-time Pagefind full-text search over clean article prose;
 - a recent feed plus complete source, category, and `#tag` archives;
 - Atom, RSS 2.0, and JSON Feed streams for the reader and every source/category/tag;
-- self-describing HTML, OpenSearch, and sitemaps so browsers, crawlers, and other readers can plug in;
+- self-describing HTML, OpenSearch, sitemaps, and an `aggr.json` network descriptor so browsers,
+  crawlers, and other readers can plug in;
 - original-page extraction by default, with a lightweight feed-content mode when preferred;
 - permanent `github.com/…/blob/<commit>/…` Markdown URLs for every saved item;
 
 The fastest start is the working
-[aggr-config repository](https://github.com/aymericbeaumet/aggr-config):
-**[fork it](https://github.com/aymericbeaumet/aggr-config/fork)**, enable Actions, edit
+[aggr-instance repository](https://github.com/aymericbeaumet/aggr-instance):
+**[fork it](https://github.com/aymericbeaumet/aggr-instance/fork)**, enable Actions, edit
 `aggr.toml`, and run the workflow. Your reader can be online in seconds. Any public reader can
 then serve as a useful starting point for the next person.
 
@@ -102,7 +108,7 @@ ones:
 
 ```toml
 [[sources]]
-include = "https://github.com/aymericbeaumet/aggr-config"
+include = "https://github.com/aymericbeaumet/aggr-instance"
 
 [[sources]]
 include = "https://github.com/owner/reader/blob/main/topics/*.toml"

@@ -559,7 +559,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(!index.contains("built <time"));
     assert!(index.contains("id=\"swup\""));
     assert!(
-        index.find("<header class=\"top\">").unwrap() < index.find("<main id=\"swup\"").unwrap(),
+        index.find("<header class=\"top\"").unwrap() < index.find("<main id=\"swup\"").unwrap(),
         "the persistent menubar must stay outside Swup's replacement container"
     );
     assert!(index.contains("assets/swup-"));

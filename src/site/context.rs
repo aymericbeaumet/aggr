@@ -19,6 +19,10 @@ pub struct SiteCtx {
     pub base_url: Option<String>,
     pub repository: Option<String>,
     pub data_branch: String,
+    /// Canonical identity shared by every generated aggr instance.
+    pub network_url: &'static str,
+    /// Machine-readable semantic type for an aggr instance.
+    pub instance_type_url: &'static str,
     /// Whether `manifest.webmanifest` and `sw.js` are built (`[site] pwa`).
     pub pwa: bool,
     pub config_url: Option<String>,
@@ -58,6 +62,9 @@ pub struct PageCtx {
     /// `preferences`, `404`, or `offline`.
     pub kind: String,
     pub title: String,
+    /// Whether crawlers should index this page. Search, preferences, offline and error shells
+    /// remain useful to people and link discovery, but are not useful search results.
+    pub indexable: bool,
     /// Site path of this page, e.g. `sources/rust-blog/`.
     pub path: String,
     /// Relative path from this page back to the output root (`../../`).

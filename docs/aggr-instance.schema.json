@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/aymericbeaumet/aggr/v1/docs/aggr-instance.schema.json",
+  "title": "aggr instance descriptor",
+  "description": "Discovery metadata emitted at /aggr.json by an aggr instance (workflow plus root aggr config).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "type",
+    "profile",
+    "network",
+    "url",
+    "name",
+    "language",
+    "updated",
+    "generator",
+    "source",
+    "feeds",
+    "collections",
+    "discovery"
+  ],
+  "properties": {
+    "$schema": { "type": "string", "format": "uri" },
+    "schema_version": { "const": 1 },
+    "type": { "const": "aggr-instance" },
+    "profile": { "type": "string", "format": "uri" },
+    "network": {
+      "const": "https://github.com/aymericbeaumet/aggr#network"
+    },
+    "url": { "type": "string", "format": "uri-reference" },
+    "name": { "type": "string", "minLength": 1 },
+    "language": { "type": "string", "minLength": 2 },
+    "updated": { "type": "string", "format": "date-time" },
+    "generator": {
+      "type": "object",
+      "required": ["name", "version", "url"],
+      "properties": {
+        "name": { "const": "aggr" },
+        "version": { "type": "string" },
+        "url": { "type": "string", "format": "uri" }
+      },
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "required": ["config"],
+      "properties": {
+        "config": { "type": "string", "format": "uri-reference" },
+        "repository": { "type": "string", "format": "uri" },
+        "data": { "type": "string", "format": "uri" }
+      },
+      "additionalProperties": false
+    },
+    "feeds": { "$ref": "#/$defs/links" },
+    "collections": { "$ref": "#/$defs/links" },
+    "discovery": { "$ref": "#/$defs/links" }
+  },
+  "$defs": {
+    "links": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "format": "uri-reference"
+      }
+    }
+  },
+  "additionalProperties": false
+}

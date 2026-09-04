@@ -6,7 +6,7 @@
   <div class="page-body">
     <form class="search-controls" id="search-form" role="search">
       <label class="sr-only" for="q">Search titles and full text</label>
-      <input id="q" name="q" type="search" placeholder="Search titles and full text…" autofocus autocomplete="off" aria-controls="list" spellcheck="false">
+      <input id="q" name="q" type="search" placeholder="Search titles and full text…" autofocus autocomplete="off" aria-controls="list" spellcheck="false" data-page-search>
       {% if site.has_categories %}<label class="sr-only" for="category-filter">Filter by category</label>
       <select id="category-filter" name="category"><option value="">all categories</option>{% for category in categories %}<option value="{{ category.slug }}">{{ category.name }} ({{ category.count }})</option>{% endfor %}</select>{% endif %}
       <label class="sr-only" for="tag-filter">Filter by tag</label>

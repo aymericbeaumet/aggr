@@ -1,8 +1,8 @@
-<div class="directory-tools">
+<form class="directory-tools" role="search">
   <label class="sr-only" for="directory-filter">Filter {{ page.title | lower }}</label>
-  <input id="directory-filter" type="search" inputmode="search" autocomplete="off" placeholder="Filter {{ page.title | lower }}…" data-directory-filter>
+  <input id="directory-filter" type="search" inputmode="search" autocomplete="off" placeholder="Filter {{ page.title | lower }}…" data-directory-filter data-page-search>
   <span id="directory-count" class="muted directory-count" aria-live="polite">{{ entries | length }}</span>
-</div>
+</form>
 <div class="directory-scroll" role="region" aria-label="{{ page.title }}" tabindex="0">
   <table class="directory" data-directory>
     <caption class="sr-only">{{ entries | length }} {{ page.title | lower }}</caption>

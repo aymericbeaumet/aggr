@@ -12,6 +12,7 @@
 {% if item.updated %}<meta property="article:modified_time" content="{{ item.updated }}">{% endif %}
 {% if item.category %}<meta property="article:section" content="{{ item.category }}">{% endif %}
 {% for label in item.labels %}<meta property="article:tag" content="{{ label }}">{% endfor %}
+{% for author in item.authors %}<meta name="author" content="{{ author }}">{% endfor %}
 {% endblock %}
 {% block content %}
 <article class="item h-entry" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}"{% if item.previous_article %} data-previous-url="{{ item.previous_article.url | url_for }}"{% endif %}{% if item.next_article %} data-next-url="{{ item.next_article.url | url_for }}"{% endif %}>

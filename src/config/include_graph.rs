@@ -645,14 +645,14 @@ mod tests {
     #[test]
     fn github_repository_and_paths_are_inferred() {
         let repo = github_location(
-            &Url::parse("https://github.com/aymericbeaumet/aggr-config").unwrap(),
+            &Url::parse("https://github.com/aymericbeaumet/aggr-instance").unwrap(),
             None,
         )
         .unwrap()
         .unwrap();
         assert_eq!(repo.path, "aggr.toml");
         assert_eq!(repo.repo.owner, "aymericbeaumet");
-        assert_eq!(repo.repo.name, "aggr-config");
+        assert_eq!(repo.repo.name, "aggr-instance");
         assert_eq!(repo.repo.reference, None);
 
         let tree = github_location(

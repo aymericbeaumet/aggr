@@ -1,4 +1,4 @@
-# A larger example. For the fork-ready setup, see https://github.com/aymericbeaumet/aggr-config.
+# A larger example. For the fork-ready setup, see https://github.com/aymericbeaumet/aggr-instance.
 # Every option and its default: ../config.default.toml
 
 [site]

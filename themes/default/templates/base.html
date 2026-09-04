@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="strict-origin-when-cross-origin">
+<meta name="robots" content="{{ 'index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1' if page.indexable else 'noindex,follow' }}">
 <base id="aggr-base" href="{{ page.root }}">
 <title>{% block title %}aggr | {{ page.title | lower }}{% endblock %}</title>
 {% if item and item.excerpt %}<meta name="description" content="{{ item.excerpt }}">{% elif site.description %}<meta name="description" content="{{ site.description }}">{% endif %}
@@ -16,6 +17,13 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="aggr">
 <script>try{var t=localStorage.getItem('aggr:theme')||'auto';document.documentElement.dataset.theme=/^(auto|light|dark)$/.test(t)?t:'auto'}catch(e){document.documentElement.dataset.theme='auto'}</script>
+<meta name="aggr:network" content="{{ site.network_url }}">
+<meta name="aggr:instance" content="{{ 'aggr.json' | url_for }}">
+<meta name="aggr:source" content="{{ site.config_url or ('aggr.toml' | url_for) }}">
+{% if site.repository %}<meta name="aggr:repository" content="https://github.com/{{ site.repository }}">{% endif %}
+<link rel="type" href="{{ site.instance_type_url }}">
+<link rel="service-meta" type="application/json" title="aggr instance metadata" href="{{ 'aggr.json' | url_for }}">
+<link rel="via" type="text/toml" title="aggr source configuration" href="{{ site.config_url or ('aggr.toml' | url_for) }}">
 {% if page.canonical_url %}<link rel="canonical" href="{{ page.canonical_url }}">{% endif %}
 {% if page.paginator %}
 <link rel="first" href="{{ page.paginator.first | url_for }}">
@@ -51,7 +59,7 @@
 </head>
 <body data-kind="{{ page.kind }}">
 <a class="skip-link" href="#swup">skip to content</a>
-<header class="top">
+<header class="top" data-nosnippet>
   <nav class="nav" aria-label="Primary navigation">
     <a class="brand" data-route="" rel="home" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/favicon-32.png' | url_for }}" alt="" width="20" height="20"><span class="brand-title">{{ site.title | lower }}</span></a>
     <span class="nav-menu">
@@ -72,7 +80,7 @@
   </nav>
 </header>
 <span id="aggr-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></span>
-<dialog id="shortcut-help" class="shortcut-help" aria-labelledby="shortcut-help-title" aria-keyshortcuts="?">
+<dialog id="shortcut-help" class="shortcut-help" aria-labelledby="shortcut-help-title" aria-keyshortcuts="?" data-nosnippet>
   <form method="dialog">
     <header class="shortcut-help-head">
       <h2 id="shortcut-help-title">Keyboard shortcuts</h2>
@@ -82,13 +90,14 @@
       <section aria-labelledby="shortcut-anywhere">
         <h3 id="shortcut-anywhere">Anywhere</h3>
         <dl class="shortcut-list">
-          <div><dt class="key-alternatives"><span><kbd>⌘</kbd><kbd>K</kbd></span><small>or</small><span><kbd>Ctrl</kbd><kbd>K</kbd></span><small>or</small><kbd>/</kbd><small>or</small><span><kbd>g</kbd><kbd>/</kbd></span></dt><dd>Search</dd></div>
+          <div><dt class="key-alternatives"><span><kbd>⌘</kbd><kbd>K</kbd></span><small>or</small><span><kbd>Ctrl</kbd><kbd>K</kbd></span><small>or</small><span><kbd>g</kbd><kbd>/</kbd></span></dt><dd>Global search</dd></div>
+          <div><dt><kbd>/</kbd></dt><dd>Search this page</dd></div>
           <div><dt class="key-alternatives"><span><kbd>g</kbd><kbd>f</kbd></span><small>or</small><span><kbd>g</kbd><kbd>i</kbd></span></dt><dd>Feed</dd></div>
           {% if site.has_categories %}<div><dt><kbd>g</kbd><kbd>c</kbd></dt><dd>Categories</dd></div>{% endif %}
           <div><dt><kbd>g</kbd><kbd>t</kbd></dt><dd>Tags</dd></div>
           <div><dt><kbd>g</kbd><kbd>s</kbd></dt><dd>Sources</dd></div>
           <div><dt><kbd>g</kbd><kbd>p</kbd></dt><dd>Preferences</dd></div>
-          <div><dt><kbd>g</kbd><kbd>1</kbd>–<kbd>9</kbd></dt><dd>Open feed entry</dd></div>
+          <div><dt><kbd>g</kbd><kbd>1–9</kbd></dt><dd>Open feed entry</dd></div>
           <div><dt><kbd>?</kbd></dt><dd>Show this help</dd></div>
         </dl>
       </section>
@@ -108,7 +117,7 @@
 <span id="aggr-page" data-root="{{ page.root }}" data-kind="{{ page.kind }}" hidden></span>
 {% block content %}{% endblock %}
 </main>
-<footer class="footer"><a href="https://github.com/aymericbeaumet/aggr" target="_blank" rel="noopener noreferrer">built with aggr</a></footer>
+<footer class="footer" data-nosnippet><a href="https://github.com/aymericbeaumet/aggr" target="_blank" rel="noopener noreferrer">built with aggr</a></footer>
 <script src="{{ 'assets/swup.js' | url_for }}" defer></script>
 <script src="{{ 'assets/app.js' | url_for }}" defer></script>
 </body>
