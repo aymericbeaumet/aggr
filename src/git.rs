@@ -92,6 +92,29 @@ impl Repo {
         rev_parse(&self.root, "HEAD")
     }
 
+    /// Whether every file is tracked at `HEAD` with exactly the bytes aggr loaded. This prevents
+    /// dirty or untracked config from being attributed to an unrelated commit permalink.
+    pub fn head_matches_files(&self, files: &[PathBuf]) -> Result<bool> {
+        if self.head_sha()?.is_none() {
+            return Ok(false);
+        }
+        for file in files {
+            let Some(relative) = self.relative_path(file) else {
+                return Ok(false);
+            };
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let object = format!("HEAD:{relative}");
+            let Some(committed) = git_ok(&self.root, &["cat-file", "blob", &object])? else {
+                return Ok(false);
+            };
+            let loaded = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+            if committed.stdout != loaded {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub fn has_remote(&self, name: &str) -> Result<bool> {
         let out = git(&self.root, &["remote"])?;
         Ok(stdout(&out).lines().any(|line| line == name))
@@ -104,15 +127,23 @@ impl Repo {
             self.root.join(dir)
         };
         let remote_ref = format!("origin/{branch}");
+        let local_ref = format!("refs/heads/{branch}");
+        let has_local_branch = rev_parse(&self.root, &local_ref)?.is_some();
 
         if self.has_remote("origin")? {
             // The remote branch does not exist before the first sync; that is not an error.
-            if git_ok(&self.root, &["fetch", "origin", branch])?.is_none() {
+            let refspec = format!("refs/heads/{branch}:refs/remotes/origin/{branch}");
+            let mut args = vec!["fetch", "--no-tags"];
+            if !has_local_branch {
+                args.extend(["--depth=1", "origin", refspec.as_str()]);
+            } else {
+                args.extend(["origin", refspec.as_str()]);
+            }
+            if git_ok(&self.root, &args)?.is_none() {
                 log::debug!("origin/{branch} does not exist yet");
             }
         }
         let has_remote_branch = rev_parse(&self.root, &remote_ref)?.is_some();
-        let has_local_branch = rev_parse(&self.root, &format!("refs/heads/{branch}"))?.is_some();
 
         let worktree = Worktree {
             dir: dir.clone(),
@@ -162,7 +193,7 @@ impl Repo {
     /// Append the worktree directory to `.git/info/exclude` so it never shows up in `git status`
     /// on the main checkout, without touching the user's `.gitignore`.
     pub fn exclude(&self, dir: &Path) -> Result<()> {
-        let Some(rel) = self.relative(dir) else {
+        let Some(rel) = self.relative_path(dir) else {
             return Ok(());
         };
         let rel = rel.to_string_lossy().replace('\\', "/");
@@ -196,7 +227,7 @@ impl Repo {
     /// `dir` relative to the root, or `None` when it lies outside the repository. The root
     /// comes from `git rev-parse` (`C:/…`, `/private/tmp/…`) while callers hand over paths
     /// built from `canonicalize()` (`\\?\C:\…`), so the canonical root is tried as well.
-    fn relative(&self, dir: &Path) -> Option<PathBuf> {
+    pub(crate) fn relative_path(&self, dir: &Path) -> Option<PathBuf> {
         if let Ok(rel) = dir.strip_prefix(&self.root) {
             return Some(rel.to_path_buf());
         }
@@ -311,87 +342,25 @@ impl Worktree {
         unreachable!("push loop returns or bails")
     }
 
+    /// Advance an auxiliary ref without ever moving it backwards. Local compare-and-swap catches
+    /// races in one checkout; the non-forced push lets the remote enforce the same ancestry.
     pub fn update_ref(&self, name: &str, sha: &str) -> Result<()> {
-        git(&self.dir, &["update-ref", name, sha])?;
+        let old = rev_parse(&self.dir, name)?;
+        if let Some(old) = old.as_deref()
+            && old != sha
+            && git_ok(&self.dir, &["merge-base", "--is-ancestor", old, sha])?.is_none()
+        {
+            bail!("ref {name} cannot move backwards from {old} to {sha}");
+        }
+        let expected =
+            old.unwrap_or_else(|| zero_oid(&self.dir).unwrap_or_else(|_| "0".repeat(40)));
+        git(&self.dir, &["update-ref", name, sha, &expected])?;
         if self.has_origin()? {
-            let refspec = format!("+{sha}:{name}");
+            let refspec = format!("{sha}:{name}");
             git(&self.dir, &["push", "-q", "origin", &refspec])
                 .with_context(|| format!("pushing {name}"))?;
         }
         Ok(())
-    }
-
-    /// `(name, sha)` for every ref matching `pattern` (e.g. `refs/aggr/digest/*`), sorted by name.
-    /// Reads the remote when there is one: CI checkouts never fetch `refs/aggr/*`.
-    pub fn list_refs(&self, pattern: &str) -> Result<Vec<(String, String)>> {
-        let mut refs: Vec<(String, String)> = if self.has_origin()? {
-            let out = git(&self.dir, &["ls-remote", "--refs", "origin", pattern])?;
-            stdout(&out)
-                .lines()
-                .filter_map(|line| {
-                    let (sha, name) = line.split_once('\t')?;
-                    Some((name.to_string(), sha.to_string()))
-                })
-                .collect()
-        } else {
-            let out = git(
-                &self.dir,
-                &["for-each-ref", "--format=%(refname) %(objectname)", pattern],
-            )?;
-            stdout(&out)
-                .lines()
-                .filter_map(|line| {
-                    let (name, sha) = line.split_once(' ')?;
-                    Some((name.to_string(), sha.to_string()))
-                })
-                .collect()
-        };
-        refs.sort();
-        Ok(refs)
-    }
-
-    /// Make `sha` available locally, fetching it from origin if needed. GitHub allows fetching
-    /// any reachable commit by sha; other hosts may not, hence the `bool`.
-    pub fn ensure_commit(&self, sha: &str) -> Result<bool> {
-        if rev_parse(&self.dir, sha)?.is_some() {
-            return Ok(true);
-        }
-        if !self.has_origin()? {
-            return Ok(false);
-        }
-        let _ = git_ok(&self.dir, &["fetch", "-q", "origin", sha]);
-        Ok(rev_parse(&self.dir, sha)?.is_some())
-    }
-
-    /// Files added between two commits under `path`, in tree order.
-    pub fn added_files(&self, from: &str, to: &str, path: &str) -> Result<Vec<String>> {
-        let range = format!("{from}..{to}");
-        let out = git(
-            &self.dir,
-            &[
-                "diff",
-                "--name-only",
-                "--diff-filter=A",
-                "-z",
-                &range,
-                "--",
-                path,
-            ],
-        )?;
-        Ok(String::from_utf8_lossy(&out.stdout)
-            .split('\0')
-            .filter(|name| !name.is_empty())
-            .map(str::to_string)
-            .collect())
-    }
-
-    /// Committer time of `rev`.
-    pub fn commit_time(&self, rev: &str) -> Result<chrono::DateTime<chrono::Utc>> {
-        let out = git(&self.dir, &["log", "-1", "--format=%cI", rev])?;
-        let text = stdout(&out);
-        chrono::DateTime::parse_from_rfc3339(&text)
-            .map(|date| date.with_timezone(&chrono::Utc))
-            .with_context(|| format!("parsing commit time {text:?}"))
     }
 
     /// A detached checkout of `rev` in a temporary directory, removed on drop. For rendering the
@@ -474,7 +443,8 @@ pub fn remote_tip(url: &str, branch: &str) -> Result<Option<String>> {
 /// another aggr repository's data branch without any history.
 pub fn mirror(url: &str, branch: &str, dir: &Path) -> Result<String> {
     if dir.join(".git").exists() {
-        git(dir, &["fetch", "-q", "--depth=1", "origin", branch])
+        // Fetch from the effective URL but never save credentials from it in `.git/config`.
+        git(dir, &["fetch", "-q", "--depth=1", url, branch])
             .with_context(|| format!("fetching {branch} from {url}"))?;
         git(dir, &["reset", "-q", "--hard", "FETCH_HEAD"])?;
     } else {
@@ -496,7 +466,19 @@ pub fn mirror(url: &str, branch: &str, dir: &Path) -> Result<String> {
         )
         .with_context(|| format!("cloning {branch} from {url}"))?;
     }
+    if let Some(public) = redacted_remote(url) {
+        git(dir, &["remote", "set-url", "origin", &public])?;
+    }
     rev_parse(dir, "HEAD")?.context("mirror has no commit")
+}
+
+fn redacted_remote(raw: &str) -> Option<String> {
+    let mut url = url::Url::parse(raw).ok()?;
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
 }
 
 /// Replay local commits on top of `onto`. During a rebase "theirs" is the commit being replayed,
@@ -547,6 +529,11 @@ fn identity_args(dir: &Path) -> Result<Vec<String>> {
 fn rev_parse(dir: &Path, rev: &str) -> Result<Option<String>> {
     let spec = format!("{rev}^{{commit}}");
     Ok(git_ok(dir, &["rev-parse", "--verify", "-q", &spec])?.map(|out| stdout(&out)))
+}
+
+fn zero_oid(dir: &Path) -> Result<String> {
+    let format = stdout(&git(dir, &["rev-parse", "--show-object-format"])?);
+    Ok("0".repeat(if format == "sha256" { 64 } else { 40 }))
 }
 
 fn command(dir: &Path, args: &[&str]) -> Command {
@@ -746,6 +733,37 @@ mod tests {
         fs::create_dir(&sub).unwrap();
         assert_eq!(Repo::discover(&sub).unwrap().root(), repo.root());
         assert!(Repo::discover(_tmp.path()).is_err());
+    }
+
+    #[test]
+    fn config_provenance_requires_exact_tracked_bytes() {
+        let (_tmp, repo) = fixture();
+        let config = repo.root().join("aggr.toml");
+        assert!(
+            repo.head_matches_files(std::slice::from_ref(&config))
+                .unwrap()
+        );
+
+        fs::write(&config, "[site]\ntitle = \"dirty\"\n").unwrap();
+        assert!(
+            !repo
+                .head_matches_files(std::slice::from_ref(&config))
+                .unwrap()
+        );
+
+        let untracked = repo.root().join("sources.toml");
+        fs::write(&untracked, "[[sources]]\nurl = \"https://example.com\"\n").unwrap();
+        assert!(!repo.head_matches_files(&[untracked]).unwrap());
+        assert!(
+            !repo
+                .head_matches_files(&[_tmp.path().join("outside.toml")])
+                .unwrap()
+        );
+        assert_eq!(
+            repo.relative_path(&repo.root().join("nested/aggr.toml")),
+            Some(PathBuf::from("nested/aggr.toml"))
+        );
+        assert_eq!(repo.relative_path(&_tmp.path().join("outside.toml")), None);
     }
 
     #[test]
@@ -1081,7 +1099,7 @@ mod tests {
         );
         assert_eq!(wt.rev_parse("refs/aggr/nope").unwrap(), None);
 
-        // Pointers move freely, including backwards.
+        // Pointers advance but never regress.
         fs::write(wt.dir().join("b.txt"), "b\n").unwrap();
         let sha2 = wt
             .commit(&CommitMessage {
@@ -1091,8 +1109,9 @@ mod tests {
             .unwrap()
             .unwrap();
         wt.update_ref("refs/aggr/last-good", &sha2).unwrap();
-        wt.update_ref("refs/aggr/last-good", &sha).unwrap();
-        assert!(ls_remote(&tmp).contains(&format!("{sha}\trefs/aggr/last-good")));
+        let err = wt.update_ref("refs/aggr/last-good", &sha).unwrap_err();
+        assert!(err.to_string().contains("cannot move backwards"), "{err:#}");
+        assert!(ls_remote(&tmp).contains(&format!("{sha2}\trefs/aggr/last-good")));
     }
 
     #[test]

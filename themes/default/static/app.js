@@ -217,6 +217,7 @@
   }
 
   var pagefind;
+  var pagefindData = new Map();
   function loadPagefind() {
     if (!pagefind) {
       pagefind = import(new URL("pagefind/pagefind.js", BASE).href).then(async function (api) {
@@ -229,8 +230,8 @@
             pageLength: 0.35,
             termSaturation: 0.8,
             metaWeights: {
-              title: 9,
-              source: 3,
+              title: 12,
+              source: 2,
               date: 0,
               aggr_display: 0
             }
@@ -251,6 +252,11 @@
       return JSON.parse(new TextDecoder().decode(bytes));
     } catch (error) { return {}; }
   }
+  function resultData(result) {
+    var key = result.id || result.url;
+    if (!pagefindData.has(key)) pagefindData.set(key, result.data());
+    return pagefindData.get(key);
+  }
   function fillSearch() {
     var list = $("#list");
     var input = $("#q");
@@ -263,7 +269,11 @@
     var status = $("#search-status");
     var empty = $("#empty");
     var initialQuery = new URL(location.href).searchParams.get("q");
+    var initialUrl = new URL(location.href);
     if (!input.value && initialQuery) input.value = initialQuery;
+    if (category && initialUrl.searchParams.has("category")) category.value = initialUrl.searchParams.get("category");
+    if (initialUrl.searchParams.has("tag")) tag.value = initialUrl.searchParams.get("tag");
+    if (initialUrl.searchParams.get("sort") === "newest") sort.value = "newest";
     var generation = 0;
     function show(rows, total, searched) {
       var fragment = document.createDocumentFragment();
@@ -282,7 +292,7 @@
       var current = ++generation;
       var query = input.value.trim();
       var filters = {};
-      if (category.value) filters.category = category.value;
+      if (category && category.value) filters.category = category.value;
       if (tag.value) filters.tag = tag.value;
       var searched = !!query || !!Object.keys(filters).length;
       if (!searched) { show([], 0, false); return; }
@@ -292,20 +302,20 @@
         var options = { filters: filters };
         if (sort.value === "newest") options.sort = { date: "desc" };
         var found = query && api.debouncedSearch
-          ? await api.debouncedSearch(query, options, 45)
+          ? await api.debouncedSearch(query, options, 25)
           : await api.search(query || null, options);
         if (!found || current !== generation) return;
         var results = found.results.slice(0, 40);
         var first = results.slice(0, 12);
         var rows = await Promise.all(first.map(async function (result) {
-          var data = await result.data();
+          var data = await resultData(result);
           return { data: data, display: searchDisplay(data) };
         }));
         if (current !== generation) return;
         show(rows, found.results.length, true);
         if (results.length > first.length) {
           var rest = await Promise.all(results.slice(first.length).map(async function (result) {
-            var data = await result.data();
+            var data = await resultData(result);
             return { data: data, display: searchDisplay(data) };
           }));
           if (current === generation) show(rows.concat(rest), found.results.length, true);
@@ -317,23 +327,55 @@
         }
       }
     }
-    function schedule() {
+    function updateLocation() {
       var url = new URL(location.href);
       var query = input.value.trim();
       if (query) url.searchParams.set("q", query);
       else url.searchParams.delete("q");
+      if (category && category.value) url.searchParams.set("category", category.value);
+      else url.searchParams.delete("category");
+      if (tag.value) url.searchParams.set("tag", tag.value);
+      else url.searchParams.delete("tag");
+      if (sort.value === "newest") url.searchParams.set("sort", "newest");
+      else url.searchParams.delete("sort");
       history.replaceState(history.state, "", url);
+    }
+    function schedule() {
+      updateLocation();
       render();
     }
     count.style.visibility = "hidden";
     input.addEventListener("focus", loadPagefind, { once: true });
     input.addEventListener("input", schedule);
-    category.addEventListener("change", render);
-    tag.addEventListener("change", render);
-    sort.addEventListener("change", render);
+    if (category) category.addEventListener("change", schedule);
+    tag.addEventListener("change", schedule);
+    sort.addEventListener("change", schedule);
     if (form) form.addEventListener("submit", function (event) { event.preventDefault(); render(); });
     if (document.activeElement === input) loadPagefind();
-    if (input.value.trim() || category.value || tag.value) render();
+    if (input.value.trim() || (category && category.value) || tag.value) render();
+  }
+
+  function fillDirectory() {
+    var input = $("[data-directory-filter]");
+    var table = $("[data-directory]");
+    if (!input || !table || input.dataset.bound === "true") return;
+    input.dataset.bound = "true";
+    var rows = $$('[data-directory-entry]', table);
+    var count = $("#directory-count");
+    var empty = $("[data-directory-empty]");
+    function filter() {
+      var tokens = input.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+      var visible = 0;
+      rows.forEach(function (row) {
+        var haystack = row.textContent.toLocaleLowerCase();
+        var match = tokens.every(function (token) { return haystack.indexOf(token) !== -1; });
+        row.hidden = !match;
+        if (match) visible += 1;
+      });
+      if (count) count.textContent = String(visible);
+      if (empty) empty.hidden = visible !== 0;
+    }
+    input.addEventListener("input", filter);
   }
 
   function navigate(target) {
@@ -377,10 +419,21 @@
     if (!waitingForGoto) return false;
     waitingForGoto = false;
     clearTimeout(gotoTimer);
-    var routes = { f: "", c: "categories/", t: "tags/", s: "sources/", p: "preferences/" };
-    if (!Object.prototype.hasOwnProperty.call(routes, key)) return false;
-    navigate(new URL(routes[key], BASE).href);
-    return true;
+    var routes = { f: "", i: "", "/": "search/", c: "categories/", t: "tags/", s: "sources/", p: "preferences/" };
+    if (!(window.AGGR && window.AGGR.hasCategories)) delete routes.c;
+    if (Object.prototype.hasOwnProperty.call(routes, key)) {
+      navigate(new URL(routes[key], BASE).href);
+      return true;
+    }
+    if (/^[1-9]$/.test(key)) {
+      var entries = (window.AGGR && window.AGGR.entries) || [];
+      var entry = entries[Number(key) - 1];
+      if (entry) {
+        navigate(new URL(entry, BASE).href);
+        return true;
+      }
+    }
+    return false;
   }
   function isEditing(target) {
     return target instanceof Element && !!target.closest("input, textarea, select, button, a, [contenteditable=true]");
@@ -390,6 +443,14 @@
     if (["ArrowLeft", "h", "k"].indexOf(normalized) !== -1) return "previous";
     if (["ArrowRight", "l", "j"].indexOf(normalized) !== -1) return "next";
     return null;
+  }
+  function articleScroll(event) {
+    if (KIND !== "item" || event.altKey || event.metaKey || isEditing(event.target)) return false;
+    var key = event.key.toLowerCase();
+    if (key !== "d" && key !== "u") return false;
+    var distance = Math.max(180, Math.min(420, window.innerHeight * 0.42));
+    window.scrollBy(0, key === "d" ? distance : -distance);
+    return true;
   }
   document.addEventListener("keydown", function (event) {
     if (!event.altKey && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -404,6 +465,10 @@
         if (window.swup) window.swup.navigate(search);
         else location.href = search;
       }
+      return;
+    }
+    if (articleScroll(event)) {
+      event.preventDefault();
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey || isEditing(event.target)) return;
@@ -505,6 +570,7 @@
     setDateFormat(dateFormat());
     externalLinks($("#swup") || document);
     fillSearch();
+    fillDirectory();
   }
 
   importState();

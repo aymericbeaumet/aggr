@@ -302,7 +302,8 @@ mod tests {
     fn embedded_theme_only_recolors_the_24_hour_boundary() {
         let file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(file.data.as_ref()).unwrap();
-        assert!(css.contains(".row:not(.age-h24) + .row.age-h24"));
+        assert!(css.contains(".row:not(.age-h24):has(+ .row.age-h24)"));
+        assert!(css.contains("border-bottom-color: color-mix"));
         assert!(!css.contains("age-boundary.age-h1"));
         assert!(!css.contains("age-boundary.age-h3"));
     }
@@ -314,7 +315,7 @@ mod tests {
         assert!(css.contains("--accent: #8ea1ff"));
         assert!(css.contains(".body a { color: var(--accent-strong); font-style: normal"));
         assert!(css.contains(".article-more"));
-        assert!(css.contains(".main[data-navigation-focus]:focus-visible { outline: none; }"));
+        assert!(css.contains(".main:focus-visible { outline: none; }"));
 
         let script_file = DefaultTheme::get("static/app.js").unwrap();
         let script = std::str::from_utf8(script_file.data.as_ref()).unwrap();
@@ -328,13 +329,18 @@ mod tests {
         assert!(!script.contains("event.key === \"Enter\""));
         assert!(script.contains("wireMenuNavigation"));
         assert!(script.contains("event.key === \"?\""));
-        assert!(script.contains("f: \"\", c: \"categories/\", t: \"tags/\""));
+        assert!(script.contains("f: \"\", i: \"\", \"/\": \"search/\", c: \"categories/\""));
+        assert!(script.contains("window.innerHeight * 0.42"));
+        assert!(script.contains("window.scrollBy(0,"));
+        assert!(script.contains("window.AGGR.entries"));
+        assert!(script.contains("fillDirectory"));
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
         assert!(base.contains("id=\"shortcut-help\""));
         assert!(base.contains("Keyboard shortcuts"));
         assert!(base.contains("data-route=\"preferences/\""));
+        assert!(base.contains("Open feed entry"));
         assert!(!base.contains("data-route=\"settings/\""));
         assert!(!base.contains("id=\"shortcut-lists\""));
 

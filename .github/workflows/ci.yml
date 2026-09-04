@@ -84,10 +84,10 @@ jobs:
           fi
       - id: install-current
         if: steps.release.outputs.released == 'true'
-        uses: $/.github/actions/install
+        uses: ./
       - id: install-latest
         if: steps.release.outputs.released != 'true'
-        uses: $/.github/actions/install
+        uses: ./
         with:
           version: ${{ steps.release.outputs.expected }}
       - env:

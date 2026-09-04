@@ -70,11 +70,20 @@ pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+/// Stable identity sent by every aggr-owned HTTP client. Keeping this out of the configuration
+/// makes source diagnostics useful and ensures publishers can identify the exact release.
+pub fn user_agent() -> String {
+    format!(
+        "aggr/{} (+https://github.com/aymericbeaumet/aggr)",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 impl Client {
     pub fn new(config: &FetchConfig) -> Result<Self> {
         install_crypto_provider();
         let inner = reqwest::Client::builder()
-            .user_agent(config.user_agent())
+            .user_agent(user_agent())
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(config.timeout_secs))
             .redirect(reqwest::redirect::Policy::limited(10))
@@ -88,10 +97,6 @@ impl Client {
             retries: config.retries,
             hosts: HostLimiter::new(Duration::ZERO),
         })
-    }
-
-    pub fn raw(&self) -> &reqwest::Client {
-        &self.inner
     }
 
     pub async fn get(&self, request: Request<'_>) -> Result<Response> {
@@ -306,6 +311,22 @@ mod tests {
             })
             .await
             .unwrap();
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn identifies_aggr_and_its_version() {
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/identity")
+                    .header("user-agent", user_agent());
+                then.status(200).body("ok");
+            })
+            .await;
+        let url = Url::parse(&server.url("/identity")).unwrap();
+        client().get(Request::get(&url)).await.unwrap();
         mock.assert_async().await;
     }
 

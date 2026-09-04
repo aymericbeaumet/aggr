@@ -16,13 +16,12 @@ What you get:
 - self-describing HTML, OpenSearch, and sitemaps so browsers, crawlers, and other readers can plug in;
 - original-page extraction by default, with a lightweight feed-content mode when preferred;
 - permanent `github.com/…/blob/<commit>/…` Markdown URLs for every saved item;
-- optional daily digests delivered as GitHub issues.
 
-See the result at <https://aggr.aymericbeaumet.com>. The matching
-[starter repository](https://github.com/aymericbeaumet/aggr.aymericbeaumet.com) is intentionally
-ready to fork: **[fork it](https://github.com/aymericbeaumet/aggr.aymericbeaumet.com/fork)**,
-enable Actions, edit `aggr.toml`, and run the workflow. Your reader can be online in seconds, and
-any public reader can become the next person's starting point.
+The fastest start is the working
+[aggr-config repository](https://github.com/aymericbeaumet/aggr-config):
+**[fork it](https://github.com/aymericbeaumet/aggr-config/fork)**, enable Actions, edit
+`aggr.toml`, and run the workflow. Your reader can be online in seconds. Any public reader can
+then serve as a useful starting point for the next person.
 
 ## Start from scratch
 
@@ -48,10 +47,10 @@ changes, appends new items to the orphan `aggr` branch, builds the site, and dep
 Pages. Forks must enable scheduled workflows once in the Actions tab. Private repositories need a
 GitHub plan that supports private Pages; `pages: false` keeps the result as an Actions artifact.
 
-The `@v1` reference follows every compatible release automatically. Its installer is loaded from
-the reusable workflow's exact commit, so the workflow and binary cannot drift and reader
-repositories never need a version bump. Use an immutable `@vX.Y.Z` tag or full commit SHA only when
-you deliberately want to freeze updates.
+The `@v1` reference follows every compatible release automatically. A release moves that tag only
+after its matching binaries are published, so the reusable workflow and installer advance as one
+and reader repositories never need a version bump. Use an immutable `@vX.Y.Z` tag or full commit
+SHA only when you deliberately want to freeze updates.
 
 ## Configure sources
 
@@ -77,13 +76,13 @@ conservative article discovery. In the default heavy content mode it downloads e
 and extracts the main article with a Readability-style parser; use `content = "light"` on a source
 to trust its feed content instead.
 
-Split a growing collection by using a relative TOML file as a source. Its position is preserved,
+Split a growing collection by including a TOML file as a source. Its position is preserved,
 and the category on the entry becomes the default for sources that do not set their own:
 
 ```toml
 # aggr.toml
 [[sources]]
-url = "./aggr-ai.toml"
+include = "./aggr-ai.toml"
 category = "ai"
 ```
 
@@ -97,18 +96,10 @@ url = "https://openai.com/news/"
 category = "research" # an explicit category wins
 ```
 
-Relative TOML URLs may also be globs such as `./sources/*.toml`, and included files can include
+Includes may also be globs such as `./sources/*.toml`, and included files can include
 others. Unknown keys, missing files, duplicate source slugs, and include cycles are errors.
 
-For a daily GitHub-issue digest, add:
-
-```toml
-[digest]
-at = "08:00"             # 24-hour HH:MM format
-timezone = "Europe/Paris"
-```
-
-Custom domains, discussion links, headers/secrets, PWA controls, retention, themes, and all other
+Custom domains, network links, headers/secrets, PWA controls, retention, themes, and all other
 options are documented directly in [`config.default.toml`](config.default.toml).
 
 ## Use the CLI
@@ -120,7 +111,6 @@ options are documented directly in [`config.default.toml`](config.default.toml).
 | `aggr build [--release] [--out DIR]` | Sync, then build the static site. Exact build inputs are cached. |
 | `aggr dev [--release] [--port 7319]` | Sync and build in an isolated system cache, serve entirely from memory, watch dependencies, and live-reload. It never commits, pushes, or pollutes the repository. |
 | `aggr check` | Validate the config and probe every source. |
-| `aggr digest [--dry-run] [--force]` | Post the daily digest issue when due. |
 | `aggr completions <SHELL>` | Generate shell completions. |
 
 `aggr sync` remains callable on its own and is also the required first stage of `build` and `dev`.

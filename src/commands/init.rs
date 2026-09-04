@@ -15,10 +15,6 @@ pub const MINIMAL_CONFIG: &str = "\
 title = \"My reads\"
 # url = \"https://reads.example.com\"   # custom domain: also writes the CNAME file
 
-[digest]
-at = \"08:00\"                          # daily GitHub issue; 24-hour HH:MM
-timezone = \"UTC\"                      # IANA name
-
 [[sources]]
 url = \"https://blog.rust-lang.org/feed.xml\"
 category = \"rust\"
@@ -36,7 +32,7 @@ on:
   schedule: [{ cron: \"*/30 * * * *\" }]
   push: { branches: [main], paths: [\"*.toml\", themes/**, templates/**, static/**] }
   workflow_dispatch:
-permissions: { contents: write, pages: write, id-token: write, issues: write }
+permissions: { contents: write, pages: write, id-token: write }
 jobs:
   aggr:
     uses: aymericbeaumet/aggr/.github/workflows/aggr.yml@v1
@@ -87,7 +83,6 @@ mod tests {
             WORKFLOW.lines().count() <= 10,
             "the workflow must stay tiny"
         );
-        assert!(WORKFLOW.contains("issues: write"));
     }
 
     #[test]

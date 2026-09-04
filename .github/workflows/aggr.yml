@@ -6,9 +6,8 @@ name: aggr
 #     aggr:
 #       uses: aymericbeaumet/aggr/.github/workflows/aggr.yml@v1
 #
-# Fetches every source, appends new items to the data branch, renders the site, deploys it to
-# GitHub Pages and posts the daily digest issue. The caller must grant
-# `contents: write, pages: write, id-token: write, issues: write`.
+# Fetches every source, appends new items to the data branch, renders the site, and deploys it to
+# GitHub Pages. The caller must grant `contents: write, pages: write, id-token: write`.
 
 on:
   workflow_call:
@@ -19,10 +18,6 @@ on:
         default: aggr.toml
       pages:
         description: Deploy the site to GitHub Pages. Off, the site is only kept as a run artifact.
-        type: boolean
-        default: true
-      digest:
-        description: Post the daily digest issue when `[digest]` is configured and one is due.
         type: boolean
         default: true
     outputs:
@@ -41,7 +36,6 @@ jobs:
       contents: write
       pages: write
       id-token: write
-      issues: write
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -52,9 +46,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # `$` resolves inside aggr at this reusable workflow's exact commit, even when the caller is
-      # another repository. The workflow and binary therefore always advance together under `@v1`.
-      - uses: $/.github/actions/install
+      # The moving major tag advances this reusable workflow and its matching installer together.
+      # Callers keep `@v1`; each release updates that tag after its binaries are published.
+      - uses: aymericbeaumet/aggr@v1
         with:
           token: ${{ github.token }}
 
@@ -127,9 +121,3 @@ jobs:
       - id: deploy
         if: inputs.pages
         uses: actions/deploy-pages@v4
-
-      - if: inputs.digest
-        run: aggr digest
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          AGGR_BASE_URL: ${{ steps.pages.outputs.base_url }}

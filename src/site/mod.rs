@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
+use sha1::{Digest as _, Sha1};
 
-use crate::config::{Config, Source};
+use crate::config::{Config, SiteConfig, Source};
 use crate::content;
 use crate::model::Item;
 use crate::store::{Status, Store};
@@ -35,10 +36,13 @@ pub struct BuildInfo {
     /// Repository-relative path of the root config file.
     pub config_path: Option<String>,
     pub data_sha: Option<String>,
+    pub generation: String,
     pub now: DateTime<Utc>,
     /// Production build: absolute URLs from `base_url`, CNAME for custom domains.
     pub release: bool,
     pub discussions: crate::discussions::ResolutionSet,
+    /// Search-index cache shared across template-only rebuilds.
+    pub pagefind_cache: Option<PathBuf>,
 }
 
 /// Which items belong on the recent home feed. `stubbed` is retained for configuration and
@@ -177,11 +181,40 @@ pub fn cache_version(build: &BuildCtx) -> String {
         sha.map_or("local", |sha| &sha[..sha.len().min(12)])
     }
     format!(
-        "{}-{}-{}",
+        "{}-{}-{}-{}",
         build.version,
         short(build.data_sha.as_deref()),
-        short(build.config_sha.as_deref())
+        short(build.config_sha.as_deref()),
+        short(Some(&build.generation))
     )
+}
+
+/// Fingerprint of data that can affect rendered output, including age bands and the home-feed
+/// cutoff. It changes only at a semantic boundary, so repeated builds stay instant while an
+/// unchanged repository can never keep a stale 24-hour marker or expired river entry.
+pub fn render_generation(items: &[Item], site: &SiteConfig, now: DateTime<Utc>) -> String {
+    fn field(hash: &mut Sha1, bytes: &[u8]) {
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    let cutoff = now - Duration::days(i64::from(site.max_age_days));
+    let mut ordered: Vec<_> = items.iter().filter(|item| !item.front.hidden).collect();
+    ordered.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut hash = Sha1::new();
+    for item in ordered {
+        field(&mut hash, item.path.as_bytes());
+        field(
+            &mut hash,
+            &serde_json::to_vec(&item.front).unwrap_or_default(),
+        );
+        field(&mut hash, item.body.as_bytes());
+        field(
+            &mut hash,
+            context::age_band(now, item.created_at()).as_bytes(),
+        );
+        field(&mut hash, &[u8::from(item.created_at() >= cutoff)]);
+    }
+    hex::encode(hash.finalize())
 }
 
 /// `https://user.github.io/repo/` → `/repo/`; anything unparsable → `/`.
@@ -393,12 +426,8 @@ pub fn build(
 
     let base = base_path(info.base_url.as_deref());
     let repository = config.repository();
-    let description = if config.site.description.trim().is_empty() {
-        format!("Latest entries from {}.", config.site.title)
-    } else {
-        config.site.description.clone()
-    };
-    let site = SiteCtx {
+    let description = format!("Latest entries from {}.", config.site.title);
+    let mut site = SiteCtx {
         title: config.site.title.clone(),
         description,
         language: config.site.language.clone(),
@@ -415,9 +444,9 @@ pub fn build(
                 )
             })
         }),
+        has_categories: false,
         discussions: config
-            .site
-            .discussions
+            .networks
             .iter()
             .map(|d| context::DiscussionLinkCtx {
                 name: context::compact_name(&d.name),
@@ -426,6 +455,7 @@ pub fn build(
                 score: None,
             })
             .collect(),
+        entry_shortcuts: Vec::new(),
         params: config.site.params.clone(),
     };
     let build_ctx = BuildCtx {
@@ -433,6 +463,7 @@ pub fn build(
         version: env!("CARGO_PKG_VERSION").to_string(),
         config_sha: info.config_sha.clone(),
         data_sha: info.data_sha.clone(),
+        generation: info.generation.clone(),
         release: info.release,
     };
     let links = repository.as_deref().map(|repository| GitHubLinks {
@@ -448,7 +479,8 @@ pub fn build(
     let mut all_items = store.items()?;
     all_items.retain(|item| !item.front.hidden);
     for item in &mut all_items {
-        item.body = content::strip_leading_published_date(&item.body, item.front.published);
+        item.body =
+            content::strip_leading_metadata(&item.body, item.front.published, &item.front.source);
     }
     all_items.sort_by(|a, b| {
         b.created_at()
@@ -491,7 +523,7 @@ pub fn build(
                 category,
                 links: links.as_ref(),
                 excerpt,
-                discussions: &config.site.discussions,
+                discussions: &config.networks,
                 resolutions: &info.discussions,
                 now: info.now,
             },
@@ -519,6 +551,11 @@ pub fn build(
         .iter()
         .map(|&index| archive_items[index].clone())
         .collect();
+    site.entry_shortcuts = river_items
+        .iter()
+        .take(9)
+        .map(|item| item.url.clone())
+        .collect();
     let stored_by_path: BTreeMap<&str, &Item> = all_items
         .iter()
         .map(|item| (item.path.as_str(), item))
@@ -529,6 +566,7 @@ pub fn build(
         terms: categories,
         members: category_members,
     } = taxonomy_index(&archive_items, Taxonomy::Categories);
+    site.has_categories = !categories.is_empty();
     let TaxonomyIndex {
         terms: tags,
         members: tag_members,
@@ -651,7 +689,10 @@ pub fn build(
         .iter()
         .map(|item| item.updated.unwrap_or(item.date))
         .max();
-    for path in ["sources/", "categories/", "tags/"] {
+    let taxonomy_indexes = ["sources/", "tags/"]
+        .into_iter()
+        .chain(site.has_categories.then_some("categories/"));
+    for path in taxonomy_indexes {
         if let Some(url) = canonical_url(&site, path) {
             sitemap_urls.push(outputs::SitemapUrl::new(url, archive_updated));
         }
@@ -708,19 +749,22 @@ pub fn build(
         )?
         .as_bytes(),
     )?;
-    write(
-        &out.join("categories/index.html"),
-        simple(
-            "categories",
-            "Categories",
-            "categories/",
-            "taxonomy.html",
-            None,
-            None,
-            None,
-        )?
-        .as_bytes(),
-    )?;
+    if site.has_categories {
+        write(
+            &out.join("categories/index.html"),
+            simple(
+                "categories",
+                "Categories",
+                "categories/",
+                "taxonomy.html",
+                None,
+                None,
+                None,
+            )?
+            .as_bytes(),
+        )?;
+        pages += 1;
+    }
     write(
         &out.join("tags/index.html"),
         simple("tags", "Tags", "tags/", "taxonomy.html", None, None, None)?.as_bytes(),
@@ -755,7 +799,7 @@ pub fn build(
         &out.join("404.html"),
         simple("404", "Not found", "", "404.html", None, None, None)?.as_bytes(),
     )?;
-    pages += 6;
+    pages += 5;
 
     for (ctx, item) in archive_items.iter().zip(&all_items) {
         let mut ctx = ctx.clone();
@@ -826,14 +870,16 @@ pub fn build(
         "sources/",
         &archive_feed_items,
     )?;
-    write_collection_feeds(
-        out,
-        &site,
-        &build_ctx,
-        &format!("{} categories", site.title),
-        "categories/",
-        &archive_feed_items,
-    )?;
+    if site.has_categories {
+        write_collection_feeds(
+            out,
+            &site,
+            &build_ctx,
+            &format!("{} categories", site.title),
+            "categories/",
+            &archive_feed_items,
+        )?;
+    }
     write_collection_feeds(
         out,
         &site,
@@ -891,7 +937,12 @@ pub fn build(
     }
     let assets = renderer.write_static(out)?;
 
-    pagefind::build(out, &search_documents, &site.language)?;
+    pagefind::build_cached(
+        out,
+        &search_documents,
+        &site.language,
+        info.pagefind_cache.as_deref(),
+    )?;
 
     if config.site.pwa {
         let offline_items = &archive_items[..archive_items.len().min(config.site.offline_items)];
@@ -927,8 +978,10 @@ pub fn build(
             .chain(categories.iter().map(|c| c.page.clone()))
             .chain(tags.iter().map(|tag| tag.page.clone()))
             .take(config.site.offline_items.clamp(32, 256));
-        let lists = ["categories/".to_string(), "tags/".to_string()]
+        let taxonomy_lists = ["tags/".to_string()]
             .into_iter()
+            .chain(site.has_categories.then(|| "categories/".to_string()));
+        let lists = taxonomy_lists
             .chain(scoped_lists)
             .chain(pagefind_precache_paths(out)?);
         let sw = renderer.render(
@@ -1000,7 +1053,7 @@ fn source_contexts(
         entry.0 += 1;
         entry.1 = entry.1.max(Some(item.created_at()));
     }
-    sources
+    let mut contexts = sources
         .iter()
         .map(|source| {
             let state = store.source_state(&source.slug)?;
@@ -1017,7 +1070,7 @@ fn source_contexts(
                 page: format!("sources/{}/", source.slug),
                 slug: source.slug.clone(),
                 name,
-                url: source.engine.url().map(|url| url.to_string()),
+                url: source.public_url.clone(),
                 site_url: state.site_url.clone(),
                 category: source.category.clone(),
                 engine: source.engine.name().to_string(),
@@ -1029,7 +1082,14 @@ fn source_contexts(
                 }),
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    contexts.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.slug.cmp(&b.slug))
+    });
+    Ok(contexts)
 }
 
 #[derive(Clone, Copy)]
@@ -1075,15 +1135,27 @@ fn taxonomy_index(items: &[ItemCtx], taxonomy: Taxonomy) -> TaxonomyIndex {
         Taxonomy::Categories => "categories",
         Taxonomy::Tags => "tags",
     };
-    let terms = names
+    let mut terms: Vec<_> = names
         .into_iter()
         .map(|(slug, name)| CategoryCtx {
             page: format!("{root}/{slug}/"),
             count: members.get(&slug).map_or(0, Vec::len),
+            latest: members
+                .get(&slug)
+                .into_iter()
+                .flatten()
+                .map(|&index| items[index].date)
+                .max(),
             name,
             slug,
         })
         .collect();
+    terms.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.slug.cmp(&b.slug))
+    });
     TaxonomyIndex { terms, members }
 }
 
@@ -1390,9 +1462,13 @@ mod tests {
             version: "0".into(),
             config_sha: Some("c".repeat(40)),
             data_sha: None,
+            generation: "g".repeat(40),
             release: false,
         };
-        assert_eq!(cache_version(&build), format!("0-local-{}", "c".repeat(12)));
+        assert_eq!(
+            cache_version(&build),
+            format!("0-local-{}-{}", "c".repeat(12), "g".repeat(12))
+        );
         let later = BuildCtx {
             data_sha: Some("d".repeat(40)),
             time: day(3),
@@ -1404,6 +1480,45 @@ mod tests {
             ..build.clone()
         };
         assert_eq!(cache_version(&rebuilt), cache_version(&build));
+    }
+
+    #[test]
+    fn render_generation_changes_only_at_visible_time_boundaries() {
+        let at = day(3);
+        let item = |path: &str, published| Item {
+            path: path.into(),
+            front: crate::model::FrontMatter {
+                title: path.into(),
+                link: format!("https://example.com/{path}"),
+                source: "example".into(),
+                published: Some(published),
+                first_seen: published,
+                ..Default::default()
+            },
+            body: "body".into(),
+        };
+        let site = SiteConfig {
+            max_age_days: 2,
+            ..Default::default()
+        };
+
+        let stable = item("stable", at - Duration::hours(30));
+        assert_eq!(
+            render_generation(std::slice::from_ref(&stable), &site, at),
+            render_generation(&[stable], &site, at + Duration::minutes(10))
+        );
+
+        let age_boundary = item("age", at - Duration::minutes(59));
+        assert_ne!(
+            render_generation(std::slice::from_ref(&age_boundary), &site, at),
+            render_generation(&[age_boundary], &site, at + Duration::minutes(2))
+        );
+
+        let cutoff = item("cutoff", at - Duration::hours(47) - Duration::minutes(59));
+        assert_ne!(
+            render_generation(std::slice::from_ref(&cutoff), &site, at),
+            render_generation(&[cutoff], &site, at + Duration::minutes(2))
+        );
     }
 
     /// A store with `count` items of one source, newest last, and a matching config.
@@ -1447,20 +1562,18 @@ mod tests {
             config_sha: Some("c".repeat(40)),
             config_path: Some("aggr.toml".into()),
             data_sha: Some("d".repeat(40)),
+            generation: "fixture".into(),
             now: day(20),
             release: false,
             discussions: crate::discussions::ResolutionSet::default(),
+            pagefind_cache: None,
         }
     }
 
     #[test]
     fn old_items_stay_browsable_in_source_archives() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, sources, store) = fixture(
-            dir.path(),
-            1,
-            "max_age_days = 5\npwa = false\ndiscussions = []\n",
-        );
+        let (config, sources, store) = fixture(dir.path(), 1, "max_age_days = 5\npwa = false\n");
         let out = dir.path().join("out");
         let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
         assert_eq!(summary.items, 1);
@@ -1482,11 +1595,7 @@ mod tests {
     #[test]
     fn item_pages_show_three_unlabelled_article_suggestions() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, sources, store) = fixture(
-            dir.path(),
-            6,
-            "max_age_days = 30\npwa = false\ndiscussions = []\n",
-        );
+        let (config, sources, store) = fixture(dir.path(), 6, "max_age_days = 30\npwa = false\n");
         let out = dir.path().join("out");
         build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
 
@@ -1523,11 +1632,7 @@ mod tests {
     #[test]
     fn build_cleans_leading_publication_dates_from_existing_items() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, sources, store) = fixture(
-            dir.path(),
-            1,
-            "max_age_days = 30\npwa = false\ndiscussions = []\n",
-        );
+        let (config, sources, store) = fixture(dir.path(), 1, "max_age_days = 30\npwa = false\n");
         let mut item = store.items().unwrap().remove(0);
         item.body = "1st September 2026\n\nActual opening.\n".into();
         let stem = item.path.rsplit('/').next().unwrap();
@@ -1556,11 +1661,7 @@ mod tests {
     #[test]
     fn middle_pages_link_to_adjacent_and_edge_pages() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, sources, store) = fixture(
-            dir.path(),
-            5,
-            "items_per_page = 1\npwa = false\ndiscussions = []\n",
-        );
+        let (config, sources, store) = fixture(dir.path(), 5, "items_per_page = 1\npwa = false\n");
         let out = dir.path().join("out");
         build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
 
@@ -1602,14 +1703,21 @@ mod tests {
         let out = dir.path().join("out");
         let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
         assert_eq!(summary.items, 3);
-        // River, the source page, the six fixed pages, the offline page.
-        assert_eq!(summary.pages, 1 + 1 + 6 + 1);
+        // River, the source page, five fixed pages, and the offline page. No category output is
+        // emitted when no retained item has a category.
+        assert_eq!(summary.pages, 1 + 1 + 5 + 1);
+        assert!(!out.join("categories").exists());
+        let home = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(!home.contains("href=\"categories/\""), "{home}");
+        assert!(!home.contains("<dd>Categories</dd>"), "{home}");
+        let search = std::fs::read_to_string(out.join("search/index.html")).unwrap();
+        assert!(!search.contains("id=\"category-filter\""), "{search}");
 
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(out.join("manifest.webmanifest")).unwrap())
                 .unwrap();
-        assert_eq!(manifest["name"], "Aggr");
-        assert_eq!(manifest["short_name"], "Aggr");
+        assert_eq!(manifest["name"], "aggr");
+        assert_eq!(manifest["short_name"], "aggr");
         assert_eq!(manifest["description"], "Latest entries from Demo <site>.");
         assert_eq!(manifest["start_url"], "./");
         assert_eq!(manifest["scope"], "./");
@@ -1643,10 +1751,11 @@ mod tests {
 
         let sw = std::fs::read_to_string(out.join("sw.js")).unwrap();
         let version = format!(
-            "{}-{}-{}",
+            "{}-{}-{}-{}",
             env!("CARGO_PKG_VERSION"),
             "d".repeat(12),
-            "c".repeat(12)
+            "c".repeat(12),
+            "fixture"
         );
         assert!(sw.contains(&format!("var VERSION = {version:?};")), "{sw}");
         assert!(sw.contains("new URL(\"./\", self.registration.scope)"));
@@ -1754,7 +1863,7 @@ mod tests {
         let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
         let out = dir.path().join("out");
         let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
-        assert_eq!(summary.pages, 1 + 1 + 6);
+        assert_eq!(summary.pages, 1 + 1 + 5);
         for name in ["manifest.webmanifest", "sw.js", "offline.html"] {
             assert!(!out.join(name).exists(), "{name} was written");
         }

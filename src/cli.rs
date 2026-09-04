@@ -42,8 +42,6 @@ pub enum Command {
     Build(BuildArgs),
     /// Sync and build in a disposable workspace, then serve with live reload.
     Dev(DevArgs),
-    /// Post the daily digest issue on GitHub when one is due.
-    Digest(DigestArgs),
     /// Validate the configuration and probe every source.
     Check,
     /// Generate shell completions.
@@ -85,7 +83,7 @@ pub struct SyncArgs {
     pub fetch_only: bool,
 }
 
-#[derive(Debug, Args, Default)]
+#[derive(Debug, Args, Default, Clone)]
 pub struct BuildArgs {
     /// Output directory.
     #[arg(long, value_name = "DIR")]
@@ -104,8 +102,12 @@ pub struct BuildArgs {
 
 #[derive(Debug, Args, Default)]
 pub struct DevArgs {
-    #[command(flatten)]
-    pub build: BuildArgs,
+    /// Absolute URL used to exercise a release build locally (defaults to [site] url).
+    #[arg(long, value_name = "URL", env = "AGGR_BASE_URL")]
+    pub base_url: Option<String>,
+    /// Build exactly as production while retaining dev's isolated cache and live reload.
+    #[arg(long)]
+    pub release: bool,
     #[command(flatten)]
     pub fetch: FetchArgs,
     /// Port to listen on.
@@ -113,17 +115,15 @@ pub struct DevArgs {
     pub port: u16,
 }
 
-#[derive(Debug, Args, Default)]
-pub struct DigestArgs {
-    /// Absolute URL of the site, for the local source links (defaults to [site] url).
-    #[arg(long, value_name = "URL", env = "AGGR_BASE_URL")]
-    pub base_url: Option<String>,
-    /// Print the issue instead of posting it.
-    #[arg(long)]
-    pub dry_run: bool,
-    /// Post even if today's digest exists or the scheduled time has not come.
-    #[arg(long)]
-    pub force: bool,
+impl DevArgs {
+    pub(crate) fn build_args(&self) -> BuildArgs {
+        BuildArgs {
+            out: None,
+            base_url: self.base_url.clone(),
+            data_ref: None,
+            release: self.release,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -137,7 +137,9 @@ mod tests {
             panic!("expected dev");
         };
         assert_eq!(dev.port, 7319);
-        assert!(dev.build.release);
+        assert!(dev.release);
+        assert!(Cli::try_parse_from(["aggr", "dev", "--out", "_site"]).is_err());
+        assert!(Cli::try_parse_from(["aggr", "dev", "--data-ref", "HEAD"]).is_err());
 
         let after_subcommand =
             Cli::try_parse_from(["aggr", "dev", "--config", "/tmp/reader/aggr.toml"]).unwrap();

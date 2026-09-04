@@ -19,8 +19,8 @@ pub struct Config {
     pub site: SiteConfig,
     pub store: StoreConfig,
     pub fetch: FetchConfig,
-    /// Present → a daily digest is posted as a GitHub issue.
-    pub digest: Option<DigestConfig>,
+    /// Optional networks searched at build time for conversations about each item.
+    pub networks: Vec<NetworkConfig>,
     pub sources: Vec<SourceConfig>,
     /// Root and included TOML files that produced this config; used for exact build-cache keys.
     #[serde(skip)]
@@ -31,7 +31,6 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct SiteConfig {
     pub title: String,
-    pub description: String,
     /// BCP 47 language tag used by HTML and syndication formats.
     pub language: String,
     pub theme: String,
@@ -49,8 +48,6 @@ pub struct SiteConfig {
     pub pwa: bool,
     /// Newest item pages the service worker caches ahead of time for offline reading.
     pub offline_items: usize,
-    /// Links that search for conversations about an item. `{url}` and `{title}` are replaced.
-    pub discussions: Vec<DiscussionLinkConfig>,
     /// Free-form values exposed to templates as `site.params`.
     pub params: toml::Table,
 }
@@ -59,7 +56,6 @@ impl Default for SiteConfig {
     fn default() -> Self {
         Self {
             title: "aggr".into(),
-            description: String::new(),
             language: "en".into(),
             theme: "default".into(),
             items_per_page: 60,
@@ -71,44 +67,43 @@ impl Default for SiteConfig {
             out: PathBuf::from("_site"),
             pwa: true,
             offline_items: 100,
-            discussions: Vec::new(),
             params: toml::Table::new(),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscussionLinkConfig {
+pub struct NetworkConfig {
     pub name: String,
     pub url: String,
     /// Optional build-time lookup. A failure always falls back to `url`.
-    pub provider: Option<DiscussionProvider>,
+    pub provider: Option<NetworkProvider>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawDiscussionLinkConfig {
+struct RawNetworkConfig {
     #[serde(default)]
-    provider: Option<DiscussionProvider>,
+    provider: Option<NetworkProvider>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     url: Option<String>,
 }
 
-impl<'de> Deserialize<'de> for DiscussionLinkConfig {
+impl<'de> Deserialize<'de> for NetworkConfig {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        let raw = RawDiscussionLinkConfig::deserialize(deserializer)?;
+        let raw = RawNetworkConfig::deserialize(deserializer)?;
         if let Some(provider) = raw.provider {
             if raw.name.is_some() || raw.url.is_some() {
                 return Err(serde::de::Error::custom(
-                    "a built-in discussion accepts only `provider`; use `name` + `url` for a custom one",
+                    "a built-in network accepts only `provider`; use `name` + `url` for a custom one",
                 ));
             }
-            return Ok(provider.discussion());
+            return Ok(provider.network());
         }
         match (raw.name, raw.url) {
             (Some(name), Some(url)) if !name.trim().is_empty() && !url.trim().is_empty() => {
@@ -119,7 +114,7 @@ impl<'de> Deserialize<'de> for DiscussionLinkConfig {
                 })
             }
             _ => Err(serde::de::Error::custom(
-                "set `provider` for a built-in discussion, or both `name` and `url` for a custom one",
+                "set `provider` for a built-in network, or both `name` and `url` for a custom one",
             )),
         }
     }
@@ -127,21 +122,21 @@ impl<'de> Deserialize<'de> for DiscussionLinkConfig {
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
-pub enum DiscussionProvider {
+pub enum NetworkProvider {
     #[serde(alias = "hn")]
     HackerNews,
     Reddit,
     X,
 }
 
-impl DiscussionProvider {
-    fn discussion(self) -> DiscussionLinkConfig {
+impl NetworkProvider {
+    fn network(self) -> NetworkConfig {
         let (name, url) = match self {
             Self::HackerNews => ("Hacker News", "https://hn.algolia.com/?q={url}"),
             Self::Reddit => ("Reddit", "https://www.reddit.com/search/?q=url%3A{url}"),
             Self::X => ("X", "https://x.com/search?q={url}"),
         };
-        DiscussionLinkConfig {
+        NetworkConfig {
             name: name.into(),
             url: url.into(),
             provider: Some(self),
@@ -193,8 +188,6 @@ pub struct FetchConfig {
     /// Newest entries considered from one source per sync; avoids an unbounded first import.
     pub max_items_per_source: usize,
     pub timeout_secs: u64,
-    /// `{version}` expands to the aggr version.
-    pub user_agent: String,
     pub max_body_bytes: usize,
     pub retries: u32,
     /// `heavy` downloads and extracts original article pages; `light` trusts feed content.
@@ -208,7 +201,6 @@ impl Default for FetchConfig {
             article_concurrency: 4,
             max_items_per_source: 100,
             timeout_secs: 20,
-            user_agent: "aggr/{version} (+https://github.com/aymericbeaumet/aggr)".into(),
             max_body_bytes: 10_000_000,
             retries: 2,
             content: ContentMode::Heavy,
@@ -224,50 +216,6 @@ pub enum ContentMode {
     Light,
 }
 
-impl FetchConfig {
-    pub fn user_agent(&self) -> String {
-        self.user_agent
-            .replace("{version}", env!("CARGO_PKG_VERSION"))
-    }
-}
-
-/// Daily digest posted as a GitHub issue; GitHub's own notifications deliver it by email.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-pub struct DigestConfig {
-    /// Local time of day (24-hour `HH:MM`) after which the first run posts the digest.
-    pub at: chrono::NaiveTime,
-    /// IANA timezone used only for the digest schedule.
-    pub timezone: chrono_tz::Tz,
-    /// Issue title, with `{number}`, `{date}`, `{count}` and `{title}` placeholders.
-    pub title: String,
-    /// Label put on every digest issue (created on first use).
-    pub label: String,
-    /// GitHub logins to assign; assigning is what triggers a notification. Defaults to the
-    /// repository owner.
-    pub assignees: Vec<String>,
-    /// Close the previous digest issue when posting a new one.
-    pub close_previous: bool,
-    /// Skip the day entirely when nothing new arrived.
-    pub skip_empty: bool,
-    pub max_items: usize,
-}
-
-impl Default for DigestConfig {
-    fn default() -> Self {
-        Self {
-            at: chrono::NaiveTime::from_hms_opt(8, 0, 0).expect("valid time"),
-            timezone: chrono_tz::UTC,
-            title: "Digest #{number} · {date} · {count} new".into(),
-            label: "digest".into(),
-            assignees: Vec::new(),
-            close_previous: true,
-            skip_empty: true,
-            max_items: 200,
-        }
-    }
-}
-
 /// One `[[sources]]` table as written by the user. Engine-specific keys are validated when the
 /// table is resolved, so an unknown key names the offending source.
 #[derive(Debug, Default, Deserialize)]
@@ -275,6 +223,8 @@ impl Default for DigestConfig {
 pub struct SourceConfig {
     #[serde(rename = "type")]
     pub kind: Option<String>,
+    /// Local TOML file or glob expanded at this position. Mutually exclusive with `url`.
+    pub include: Option<String>,
     pub url: Option<String>,
     /// Display name; the upstream feed title is used when unset.
     pub name: Option<String>,
@@ -305,6 +255,12 @@ pub struct Source {
     pub name: Option<String>,
     pub category: Option<String>,
     pub labels: Vec<String>,
+    /// Hash of the unexpanded fetch inputs. Safe to commit even when a URL references a secret.
+    pub identity: String,
+    /// Human-facing URL with credentials and sensitive query values removed.
+    pub public_url: Option<String>,
+    /// False when a resolved endpoint might contain an expanded secret and must stay off git.
+    pub persist_endpoint: bool,
     pub headers: Vec<(String, String)>,
     pub html: bool,
     pub content: ContentMode,
@@ -344,7 +300,7 @@ impl Engine {
     }
 }
 
-/// A file named by a relative `.toml` source URL: source entries only.
+/// A file named by a `[[sources]].include`: source entries only.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct SourceFile {
@@ -352,7 +308,7 @@ struct SourceFile {
 }
 
 impl Config {
-    /// Parse `path` and expand relative `.toml` source URLs in place.
+    /// Parse `path` and expand local `[[sources]].include` entries in place.
     pub fn load(path: &Path) -> Result<Self> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -407,12 +363,10 @@ impl Config {
         {
             bail!("[site] repository must be `owner/repo`, got {repo:?}");
         }
-        if let Some(digest) = &self.digest {
-            if digest.label.trim().is_empty() {
-                bail!("[digest] label must not be empty");
-            }
-            if digest.max_items == 0 {
-                bail!("[digest] max_items must be at least 1");
+        for (index, source) in self.sources.iter().enumerate() {
+            if source.include.is_some() {
+                validate_source_file_entry(source)
+                    .with_context(|| format!("[[sources]] #{}", index + 1))?;
             }
         }
         Ok(())
@@ -511,16 +465,13 @@ fn expand_source_files(
 }
 
 fn source_file_pattern(source: &SourceConfig) -> Option<&str> {
-    let raw = source.url.as_deref()?;
-    let path = Path::new(raw);
-    (source.kind.is_none()
-        && path.is_relative()
-        && !raw.contains("://")
-        && (raw.ends_with(".toml") || raw.contains(['*', '?', '['])))
-    .then_some(raw)
+    source.include.as_deref()
 }
 
 fn validate_source_file_entry(source: &SourceConfig) -> Result<()> {
+    if source.url.is_some() {
+        bail!("`url` and `include` are mutually exclusive");
+    }
     let has_other_key = source.kind.is_some()
         || source.name.is_some()
         || source.slug.is_some()
@@ -533,13 +484,16 @@ fn validate_source_file_entry(source: &SourceConfig) -> Result<()> {
         || !source.sources.is_empty()
         || source.limit.is_some();
     if has_other_key {
-        bail!("a local TOML source may only set `url` and `category`");
+        bail!("an included TOML source may only set `include` and `category`");
+    }
+    if source.include.as_deref().is_none_or(str::is_empty) {
+        bail!("`include` must name a local TOML file or glob");
     }
     Ok(())
 }
 
-/// Files a local TOML source URL names, relative to the declaring file, sorted. A plain path must
-/// exist; a glob must match something, so a typo never silently drops a topic.
+/// Files an `include` names, relative to the declaring file, sorted. A plain path must exist; a
+/// glob must match something, so a typo never silently drops a topic.
 fn source_file_paths(dir: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
     let full = dir.join(pattern);
     let is_glob = pattern.contains(['*', '?', '[']);
@@ -570,6 +524,7 @@ fn describe(raw: &SourceConfig) -> String {
         .clone()
         .or_else(|| raw.name.clone())
         .or_else(|| raw.url.clone())
+        .or_else(|| raw.include.clone())
         .unwrap_or_else(|| "<empty>".into())
 }
 
@@ -578,7 +533,11 @@ fn resolve_source(
     default_content: ContentMode,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Source> {
+    if raw.include.is_some() {
+        bail!("`include` entries must be loaded from an aggr.toml file before resolving sources");
+    }
     let kind = raw.kind.as_deref().unwrap_or("feed");
+    let identity = source_identity(raw, kind);
     let aggr_keys = [
         ("repo", raw.repo.is_some()),
         ("branch", raw.branch.is_some()),
@@ -657,16 +616,81 @@ fn resolve_source(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    let effective_url = engine.url();
+    let persist_endpoint = !configured_url_is_sensitive(raw.url.as_deref());
     Ok(Source {
         slug,
         name: raw.name.clone().filter(|name| !name.is_empty()),
         category: raw.category.clone().filter(|category| !category.is_empty()),
         labels: raw.labels.clone(),
+        identity,
+        public_url: effective_url.map(|url| public_url(url, !persist_endpoint)),
+        persist_endpoint,
         headers,
         html: raw.html.unwrap_or(true),
         content: raw.content.unwrap_or(default_content),
         engine,
     })
+}
+
+fn source_identity(raw: &SourceConfig, kind: &str) -> String {
+    let headers = raw
+        .headers
+        .iter()
+        .map(|(name, value)| format!("{name}:{value}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::model::sha1_hex(format!(
+        "source-v2\0{kind}\0{}\0{}\0{}\0{}\0{headers}",
+        raw.url.as_deref().unwrap_or_default(),
+        raw.repo.as_deref().unwrap_or_default(),
+        raw.branch.as_deref().unwrap_or_default(),
+        raw.sources.join(",")
+    ))
+}
+
+fn configured_url_is_sensitive(raw: Option<&str>) -> bool {
+    let Some(raw) = raw else { return false };
+    if raw.contains("${") {
+        return true;
+    }
+    Url::parse(raw).is_ok_and(|url| {
+        !url.username().is_empty()
+            || url.password().is_some()
+            || url
+                .query_pairs()
+                .any(|(key, _)| sensitive_query_key(key.as_ref()))
+    })
+}
+
+fn sensitive_query_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    ["token", "key", "secret", "signature", "password", "auth"]
+        .iter()
+        .any(|needle| key == *needle || key.ends_with(&format!("_{needle}")))
+}
+
+/// URL safe for generated pages and committed state. A source containing `${ENV}` has every
+/// query value removed because aggr cannot infer which arbitrary parameter carries the secret.
+pub fn public_url(url: &Url, strip_query: bool) -> String {
+    let mut clean = url.clone();
+    let _ = clean.set_username("");
+    let _ = clean.set_password(None);
+    clean.set_fragment(None);
+    if strip_query {
+        clean.set_query(None);
+    } else {
+        let pairs: Vec<_> = clean
+            .query_pairs()
+            .filter(|(key, _)| !sensitive_query_key(key.as_ref()))
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        clean.set_query(None);
+        if !pairs.is_empty() {
+            clean.query_pairs_mut().extend_pairs(pairs);
+        }
+    }
+    clean.to_string()
 }
 
 fn http_url(raw: &SourceConfig, env: &dyn Fn(&str) -> Option<String>) -> Result<Url> {
@@ -676,7 +700,11 @@ fn http_url(raw: &SourceConfig, env: &dyn Fn(&str) -> Option<String>) -> Result<
         .filter(|url| !url.is_empty())
         .context("`url` is required")?;
     let url = expand_env(url, env)?;
-    let url = Url::parse(&url).with_context(|| format!("invalid url {url:?}"))?;
+    let url = Url::parse(&url).map_err(|_| {
+        anyhow::anyhow!(
+            "url {url:?} must be an absolute http(s) URL; use `include = \"./file.toml\"` for local source files"
+        )
+    })?;
     if !matches!(url.scheme(), "http" | "https") {
         bail!("url {url} must use http or https");
     }
@@ -791,6 +819,7 @@ mod tests {
         let sources = config.resolve_sources(&no_env).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].slug, "example-com");
+        assert_eq!(sources[0].name, None);
         assert_eq!(sources[0].engine.name(), "web");
         assert!(sources[0].html);
     }
@@ -924,89 +953,124 @@ mod tests {
     }
 
     #[test]
+    fn expanded_url_secrets_never_enter_source_identity_or_public_url() {
+        let config = Config::parse(
+            "[[sources]]\nurl = \"https://reader:${TOKEN}@example.com/feed?access=${TOKEN}\"\n",
+        )
+        .unwrap();
+        let sources = config
+            .resolve_sources(&|name| (name == "TOKEN").then(|| "sentinel-secret".into()))
+            .unwrap();
+        let source = &sources[0];
+        assert!(!source.identity.contains("sentinel-secret"));
+        assert_eq!(
+            source.public_url.as_deref(),
+            Some("https://example.com/feed")
+        );
+        assert!(!source.persist_endpoint);
+        assert!(
+            source
+                .engine
+                .url()
+                .unwrap()
+                .as_str()
+                .contains("sentinel-secret")
+        );
+    }
+
+    #[test]
     fn shipped_defaults_match_compiled_defaults() {
         let config = Config::parse(DEFAULTS).unwrap();
         let compiled = Config::default();
         assert_eq!(config.site.title, compiled.site.title);
+        assert_eq!(config.site.language, compiled.site.language);
         assert_eq!(config.site.theme, compiled.site.theme);
         assert_eq!(config.site.items_per_page, compiled.site.items_per_page);
         assert_eq!(config.site.max_items, compiled.site.max_items);
         assert_eq!(config.site.max_age_days, compiled.site.max_age_days);
         assert_eq!(config.site.max_stubs, compiled.site.max_stubs);
+        assert_eq!(config.site.repository, compiled.site.repository);
+        assert_eq!(config.site.url, compiled.site.url);
         assert_eq!(config.site.out, compiled.site.out);
+        assert_eq!(config.site.pwa, compiled.site.pwa);
+        assert_eq!(config.site.offline_items, compiled.site.offline_items);
+        assert_eq!(config.site.params, compiled.site.params);
         assert_eq!(config.store.branch, compiled.store.branch);
         assert_eq!(config.store.dir, compiled.store.dir);
         assert_eq!(config.store.html, compiled.store.html);
         assert_eq!(config.store.html_max_bytes, compiled.store.html_max_bytes);
+        assert_eq!(config.store.max_age_days, compiled.store.max_age_days);
+        assert_eq!(config.store.max_items, compiled.store.max_items);
         assert_eq!(config.fetch.concurrency, compiled.fetch.concurrency);
         assert_eq!(
             config.fetch.article_concurrency,
             compiled.fetch.article_concurrency
         );
+        assert_eq!(
+            config.fetch.max_items_per_source,
+            compiled.fetch.max_items_per_source
+        );
         assert_eq!(config.fetch.timeout_secs, compiled.fetch.timeout_secs);
-        assert_eq!(config.fetch.user_agent, compiled.fetch.user_agent);
         assert_eq!(config.fetch.max_body_bytes, compiled.fetch.max_body_bytes);
         assert_eq!(config.fetch.retries, compiled.fetch.retries);
         assert_eq!(config.fetch.content, compiled.fetch.content);
-        assert_eq!(config.site.discussions, compiled.site.discussions);
-        assert!(compiled.site.discussions.is_empty());
-        assert_eq!(config.digest, Some(DigestConfig::default()));
+        assert_eq!(config.networks, compiled.networks);
+        assert!(compiled.networks.is_empty());
         assert!(config.sources.is_empty());
     }
 
     #[test]
-    fn discussion_matching_is_opt_in_with_provider_shorthand() {
+    fn generated_metadata_and_user_agent_are_not_configurable() {
+        let description = Config::parse("[site]\ndescription = \"custom\"\n").unwrap_err();
+        assert!(
+            description.to_string().contains("description"),
+            "{description}"
+        );
+
+        let user_agent = Config::parse("[fetch]\nuser_agent = \"other\"\n").unwrap_err();
+        assert!(
+            user_agent.to_string().contains("user_agent"),
+            "{user_agent}"
+        );
+        assert_eq!(
+            crate::http::user_agent(),
+            format!(
+                "aggr/{} (+https://github.com/aymericbeaumet/aggr)",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+    }
+
+    #[test]
+    fn network_matching_is_opt_in_with_provider_shorthand() {
         let config = Config::parse(
             r#"
-[[site.discussions]]
+[[networks]]
 provider = "hackernews"
 
-[[site.discussions]]
+[[networks]]
 provider = "reddit"
 
-[[site.discussions]]
+[[networks]]
 name = "Lobsters"
 url = "https://lobste.rs/search?q={url}"
 "#,
         )
         .unwrap();
-        assert_eq!(config.site.discussions.len(), 3);
-        assert_eq!(
-            config.site.discussions[0],
-            DiscussionProvider::HackerNews.discussion()
-        );
-        assert_eq!(
-            config.site.discussions[1],
-            DiscussionProvider::Reddit.discussion()
-        );
-        assert_eq!(config.site.discussions[2].name, "Lobsters");
-        assert_eq!(config.site.discussions[2].provider, None);
+        assert_eq!(config.networks.len(), 3);
+        assert_eq!(config.networks[0], NetworkProvider::HackerNews.network());
+        assert_eq!(config.networks[1], NetworkProvider::Reddit.network());
+        assert_eq!(config.networks[2].name, "Lobsters");
+        assert_eq!(config.networks[2].provider, None);
 
         for invalid in [
-            "[[site.discussions]]\nprovider = \"hackernews\"\nname = \"HN\"\n",
-            "[[site.discussions]]\nname = \"Lobsters\"\n",
-            "[[site.discussions]]\nurl = \"https://example.com/{url}\"\n",
+            "[[networks]]\nprovider = \"hackernews\"\nname = \"HN\"\n",
+            "[[networks]]\nname = \"Lobsters\"\n",
+            "[[networks]]\nurl = \"https://example.com/{url}\"\n",
+            "[[site.discussions]]\nprovider = \"hackernews\"\n",
         ] {
             assert!(Config::parse(invalid).is_err(), "accepted {invalid:?}");
         }
-    }
-
-    #[test]
-    fn parses_digest_time_and_timezone() {
-        let config =
-            Config::parse("[digest]\nat = \"07:30\"\ntimezone = \"Europe/Paris\"\n").unwrap();
-        assert_eq!(
-            config.digest.as_ref().unwrap().timezone,
-            chrono_tz::Europe::Paris
-        );
-        assert_eq!(
-            config.digest.as_ref().unwrap().at,
-            chrono::NaiveTime::from_hms_opt(7, 30, 0).unwrap()
-        );
-        assert!(Config::parse("[site]\ntimezone = \"UTC\"\n").is_err());
-        assert!(Config::parse("[digest]\ntimezone = \"Mars/Olympus\"\n").is_err());
-        assert!(Config::parse("[digest]\nat = \"25:00\"\n").is_err());
-        assert!(Config::parse("").unwrap().digest.is_none());
     }
 
     #[test]
@@ -1029,15 +1093,15 @@ url = "https://lobste.rs/search?q={url}"
         std::fs::write(
             root.join("aggr.toml"),
             "[[sources]]\nurl = \"https://a.b/feed\"\n\
-             [[sources]]\nurl = \"./aggr-ai.toml\"\ncategory = \"ai\"\n\
-             [[sources]]\nurl = \"./topics/*.toml\"\n",
+             [[sources]]\ninclude = \"./aggr-ai.toml\"\ncategory = \"ai\"\n\
+             [[sources]]\ninclude = \"./topics/*.toml\"\n",
         )
         .unwrap();
         std::fs::write(
             root.join("aggr-ai.toml"),
             "[[sources]]\nurl = \"https://ai.example/feed\"\n\
              [[sources]]\nurl = \"https://ml.example/feed\"\ncategory = \"ml\"\n\
-             [[sources]]\nurl = \"./nested.toml\"\n",
+             [[sources]]\ninclude = \"./nested.toml\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -1091,21 +1155,21 @@ url = "https://lobste.rs/search?q={url}"
 
         std::fs::write(
             root.join("aggr.toml"),
-            "[[sources]]\nurl = \"./missing.toml\"\n",
+            "[[sources]]\ninclude = \"./missing.toml\"\n",
         )
         .unwrap();
         let err = Config::load(&root.join("aggr.toml")).unwrap_err();
         assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
         std::fs::write(
             root.join("aggr.toml"),
-            "[[sources]]\nurl = \"./nope/*.toml\"\n",
+            "[[sources]]\ninclude = \"./nope/*.toml\"\n",
         )
         .unwrap();
         let err = Config::load(&root.join("aggr.toml")).unwrap_err();
         assert!(format!("{err:#}").contains("matched no file"), "{err:#}");
         std::fs::write(
             root.join("aggr.toml"),
-            "[[sources]]\nurl = \"./bad.toml\"\n",
+            "[[sources]]\ninclude = \"./bad.toml\"\n",
         )
         .unwrap();
         std::fs::write(root.join("bad.toml"), "[site]\ntitle = \"x\"\n").unwrap();
@@ -1114,7 +1178,7 @@ url = "https://lobste.rs/search?q={url}"
 
         std::fs::write(
             root.join("aggr.toml"),
-            "[[sources]]\nurl = \"./aggr.toml\"\n",
+            "[[sources]]\ninclude = \"./aggr.toml\"\n",
         )
         .unwrap();
         let err = Config::load(&root.join("aggr.toml")).unwrap_err();
@@ -1122,12 +1186,33 @@ url = "https://lobste.rs/search?q={url}"
 
         std::fs::write(
             root.join("aggr.toml"),
-            "[[sources]]\nurl = \"./nested.toml\"\nname = \"not allowed\"\n",
+            "[[sources]]\ninclude = \"./nested.toml\"\nname = \"not allowed\"\n",
         )
         .unwrap();
         let err = Config::load(&root.join("aggr.toml")).unwrap_err();
         assert!(
-            format!("{err:#}").contains("may only set `url` and `category`"),
+            format!("{err:#}").contains("may only set `include` and `category`"),
+            "{err:#}"
+        );
+
+        std::fs::write(
+            root.join("aggr.toml"),
+            "[[sources]]\ninclude = \"./nested.toml\"\nurl = \"https://example.com\"\n",
+        )
+        .unwrap();
+        let err = Config::load(&root.join("aggr.toml")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("`url` and `include` are mutually exclusive"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn relative_urls_are_never_treated_as_includes() {
+        let config = Config::parse("[[sources]]\nurl = \"./aggr-ai.toml\"\n").unwrap();
+        let err = config.resolve_sources(&no_env).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("use `include = \"./file.toml\"`"),
             "{err:#}"
         );
     }

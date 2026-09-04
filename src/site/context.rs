@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::model::{ContentKind, Item};
+use crate::model::{ContentKind, Item, normalize_labels};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SiteCtx {
@@ -22,7 +22,11 @@ pub struct SiteCtx {
     /// Whether `manifest.webmanifest` and `sw.js` are built (`[site] pwa`).
     pub pwa: bool,
     pub config_url: Option<String>,
+    /// Whether the build has at least one non-empty category archive.
+    pub has_categories: bool,
     pub discussions: Vec<DiscussionLinkCtx>,
+    /// First nine feed entries, available to global `g 1` … `g 9` shortcuts.
+    pub entry_shortcuts: Vec<String>,
     pub params: toml::Table,
 }
 
@@ -42,6 +46,9 @@ pub struct BuildCtx {
     pub version: String,
     pub config_sha: Option<String>,
     pub data_sha: Option<String>,
+    /// Content + semantic-time fingerprint used to version offline caches exactly when output
+    /// can change without a new data commit.
+    pub generation: String,
     pub release: bool,
 }
 
@@ -154,6 +161,7 @@ pub struct CategoryCtx {
     pub name: String,
     pub slug: String,
     pub count: usize,
+    pub latest: Option<DateTime<Utc>>,
     pub page: String,
 }
 
@@ -238,7 +246,7 @@ impl ItemCtx {
             updated: item.front.updated,
             first_seen: item.front.first_seen,
             authors: item.front.authors.clone(),
-            labels: item.front.labels.clone(),
+            labels: normalize_labels(&item.front.labels),
             discussions: options
                 .discussions
                 .iter()
@@ -280,6 +288,8 @@ pub struct ArticleLinkCtx {
     pub title: String,
     pub url: String,
     pub domain: String,
+    pub source: String,
+    pub date: DateTime<Utc>,
 }
 
 impl From<&ItemCtx> for ArticleLinkCtx {
@@ -288,6 +298,8 @@ impl From<&ItemCtx> for ArticleLinkCtx {
             title: item.title.clone(),
             url: item.url.clone(),
             domain: item.domain.clone(),
+            source: item.source.clone(),
+            date: item.date,
         }
     }
 }
@@ -297,7 +309,7 @@ pub struct ItemOptions<'a> {
     pub category: Option<&'a str>,
     pub links: Option<&'a GitHubLinks<'a>>,
     pub excerpt: String,
-    pub discussions: &'a [crate::config::DiscussionLinkConfig],
+    pub discussions: &'a [crate::config::NetworkConfig],
     pub resolutions: &'a crate::discussions::ResolutionSet,
     pub now: DateTime<Utc>,
 }

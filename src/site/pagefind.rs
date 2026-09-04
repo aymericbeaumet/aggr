@@ -8,10 +8,14 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use pagefind::api::PagefindIndex;
 use serde::Serialize;
+use sha1::{Digest as _, Sha1};
 
 use super::context::ItemCtx;
 
-#[derive(Debug, Clone)]
+const CACHE_NAMESPACE: &str = "pagefind-v1";
+const CACHE_KEY: &str = ".aggr-pagefind-key";
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchDocument {
     pub url: String,
     pub content: String,
@@ -90,7 +94,34 @@ impl SearchDocument {
 /// Pagefind's API is async and uses blocking workers internally. Site generation is deliberately
 /// synchronous, so isolate its small runtime on a thread; this also works when `aggr build` is
 /// already running inside the CLI's multithreaded Tokio runtime.
-pub fn build(out: &Path, documents: &[SearchDocument], language: &str) -> Result<()> {
+#[cfg(test)]
+fn build(out: &Path, documents: &[SearchDocument], language: &str) -> Result<()> {
+    build_cached(out, documents, language, None)
+}
+
+/// Restore an identical index even when page templates changed. Search content and display
+/// metadata are the complete input, so this cache remains independent from rendered HTML.
+pub fn build_cached(
+    out: &Path,
+    documents: &[SearchDocument],
+    language: &str,
+    cache_root: Option<&Path>,
+) -> Result<()> {
+    let fingerprint = fingerprint(documents, language)?;
+    if let Some(cache_root) = cache_root
+        && restore(cache_root, &fingerprint, out)?
+    {
+        log::debug!("restored Pagefind index from cache");
+        return Ok(());
+    }
+    build_uncached(out, documents, language)?;
+    if let Some(cache_root) = cache_root {
+        store(cache_root, &fingerprint, out)?;
+    }
+    Ok(())
+}
+
+fn build_uncached(out: &Path, documents: &[SearchDocument], language: &str) -> Result<()> {
     let site = out.to_path_buf();
     let documents = documents.to_vec();
     let language = language.to_string();
@@ -123,6 +154,71 @@ pub fn build(out: &Path, documents: &[SearchDocument], language: &str) -> Result
     })
     .join()
     .map_err(|_| anyhow::anyhow!("Pagefind indexing thread panicked"))?
+}
+
+fn fingerprint(documents: &[SearchDocument], language: &str) -> Result<String> {
+    let mut hash = Sha1::new();
+    hash.update(b"aggr-pagefind-v1\0");
+    hash.update(include_str!("pagefind.rs").as_bytes());
+    hash.update([0]);
+    hash.update(language.as_bytes());
+    for document in documents {
+        hash.update([0xff]);
+        hash.update(serde_json::to_vec(document).context("fingerprinting Pagefind record")?);
+    }
+    Ok(hex::encode(hash.finalize()))
+}
+
+fn restore(cache_root: &Path, fingerprint: &str, out: &Path) -> Result<bool> {
+    let cached = cache_root.join(CACHE_NAMESPACE);
+    if std::fs::read_to_string(cached.join(CACHE_KEY))
+        .ok()
+        .is_none_or(|key| key != fingerprint)
+        || !cached.join("site/pagefind.js").is_file()
+    {
+        return Ok(false);
+    }
+    let destination = out.join("pagefind");
+    if destination.exists() {
+        std::fs::remove_dir_all(&destination)
+            .with_context(|| format!("clearing {}", destination.display()))?;
+    }
+    crate::cache::copy_tree(&cached.join("site"), &destination)?;
+    Ok(true)
+}
+
+fn store(cache_root: &Path, fingerprint: &str, out: &Path) -> Result<()> {
+    std::fs::create_dir_all(cache_root)
+        .with_context(|| format!("creating {}", cache_root.display()))?;
+    let scratch = tempfile::Builder::new()
+        .prefix("pagefind-")
+        .tempdir_in(cache_root)
+        .context("creating Pagefind cache staging directory")?;
+    let staged = scratch.path().join(CACHE_NAMESPACE);
+    crate::cache::copy_tree(&out.join("pagefind"), &staged.join("site"))?;
+    crate::cache::write(&staged.join(CACHE_KEY), fingerprint.as_bytes())?;
+
+    let current = cache_root.join(CACHE_NAMESPACE);
+    let previous = cache_root.join(format!(".{CACHE_NAMESPACE}.previous"));
+    if previous.exists() {
+        std::fs::remove_dir_all(&previous)
+            .with_context(|| format!("clearing {}", previous.display()))?;
+    }
+    if current.exists() {
+        std::fs::rename(&current, &previous)
+            .with_context(|| format!("moving {} aside", current.display()))?;
+    }
+    if let Err(error) = std::fs::rename(&staged, &current) {
+        if previous.exists() {
+            let _ = std::fs::rename(&previous, &current);
+        }
+        return Err(error).with_context(|| format!("caching Pagefind at {}", current.display()));
+    }
+    if previous.exists() {
+        std::fs::remove_dir_all(&previous)
+            .with_context(|| format!("clearing {}", previous.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -203,5 +299,26 @@ mod tests {
         build(dir.path(), &[document], "fr").unwrap();
         assert!(dir.path().join("pagefind/pagefind.js").is_file());
         assert!(!dir.path().join("search-meta.json").exists());
+    }
+
+    #[test]
+    fn restores_an_unchanged_index_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let document = SearchDocument::new(&item(), "Only this prose is searchable.");
+
+        build_cached(&first, std::slice::from_ref(&document), "en", Some(&cache)).unwrap();
+        std::fs::write(cache.join(CACHE_NAMESPACE).join("site/proof"), "cached").unwrap();
+        build_cached(&second, &[document], "en", Some(&cache)).unwrap();
+
+        assert!(second.join("pagefind/pagefind.js").is_file());
+        assert_eq!(
+            std::fs::read_to_string(second.join("pagefind/proof")).unwrap(),
+            "cached"
+        );
     }
 }

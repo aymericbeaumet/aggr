@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use url::Url;
 
-use crate::config::{DiscussionLinkConfig, DiscussionProvider};
+use crate::config::{NetworkConfig, NetworkProvider};
 use crate::http;
 use crate::model::{Item, normalize_link, sha1_hex};
 
@@ -21,7 +21,8 @@ const CACHE_NAMESPACE: &str = "discussions-v1";
 const MAX_LOOKUPS: usize = 100;
 const CONCURRENCY: usize = 8;
 const FOUND_TTL: Duration = Duration::hours(24);
-const EMPTY_TTL: Duration = Duration::hours(6);
+const EMPTY_BASE_DELAY: Duration = Duration::minutes(30);
+const EMPTY_MAX_DELAY: Duration = Duration::days(7);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Found {
@@ -33,7 +34,7 @@ pub struct Found {
 pub struct ResolutionSet(BTreeMap<String, Found>);
 
 impl ResolutionSet {
-    pub fn get(&self, provider: DiscussionProvider, link: &str) -> Option<&Found> {
+    pub fn get(&self, provider: NetworkProvider, link: &str) -> Option<&Found> {
         self.0.get(&key(provider, link))
     }
 
@@ -41,7 +42,7 @@ impl ResolutionSet {
         sha1_hex(serde_json::to_vec(&self.0).unwrap_or_default())
     }
 
-    fn insert(&mut self, provider: DiscussionProvider, link: &str, found: Found) {
+    fn insert(&mut self, provider: NetworkProvider, link: &str, found: Found) {
         self.0.insert(key(provider, link), found);
     }
 }
@@ -50,6 +51,9 @@ impl ResolutionSet {
 struct CacheEntry {
     checked_at: DateTime<Utc>,
     found: Option<Found>,
+    /// Consecutive exact-match misses. Old cache entries deserialize as zero and retry once.
+    #[serde(default)]
+    misses: u32,
 }
 
 enum Lookup {
@@ -60,13 +64,14 @@ enum Lookup {
 }
 
 struct Job {
-    provider: DiscussionProvider,
+    provider: NetworkProvider,
     link: String,
     cache: PathBuf,
+    previous_misses: u32,
 }
 
 pub async fn resolve(
-    configs: &[DiscussionLinkConfig],
+    configs: &[NetworkConfig],
     items: &[Item],
     client: Arc<http::Client>,
     cache_root: &Path,
@@ -99,11 +104,12 @@ pub async fn resolve(
                 continue;
             }
             let cache = cache_path(&cache_root, provider, &item.front.link);
-            if let Some(entry) = read_cache(&cache)
-                && cache_is_fresh(&entry, now)
+            let cached = read_cache(&cache);
+            if let Some(entry) = cached.as_ref()
+                && cache_is_fresh(entry, now)
             {
-                if let Some(found) = entry.found {
-                    out.insert(provider, &item.front.link, found);
+                if let Some(found) = &entry.found {
+                    out.insert(provider, &item.front.link, found.clone());
                 }
                 continue;
             }
@@ -112,6 +118,7 @@ pub async fn resolve(
                     provider,
                     link: item.front.link.clone(),
                     cache,
+                    previous_misses: cached.map_or(0, |entry| entry.misses),
                 });
             }
         }
@@ -137,6 +144,7 @@ pub async fn resolve(
                     &CacheEntry {
                         checked_at: now,
                         found: Some(found.clone()),
+                        misses: 0,
                     },
                 ) {
                     log::debug!("discussion cache: {err:#}");
@@ -149,6 +157,7 @@ pub async fn resolve(
                     &CacheEntry {
                         checked_at: now,
                         found: None,
+                        misses: job.previous_misses.saturating_add(1),
                     },
                 ) {
                     log::debug!("discussion cache: {err:#}");
@@ -165,11 +174,11 @@ pub async fn resolve(
     Ok(out)
 }
 
-fn key(provider: DiscussionProvider, link: &str) -> String {
+fn key(provider: NetworkProvider, link: &str) -> String {
     format!("{}:{}", provider.as_str(), normalize_link(link))
 }
 
-fn cache_path(root: &Path, provider: DiscussionProvider, link: &str) -> PathBuf {
+fn cache_path(root: &Path, provider: NetworkProvider, link: &str) -> PathBuf {
     root.join(provider.as_str())
         .join(format!("{}.json", sha1_hex(normalize_link(link))))
 }
@@ -181,11 +190,7 @@ fn read_cache(path: &Path) -> Option<CacheEntry> {
 }
 
 fn write_cache(path: &Path, entry: &CacheEntry) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    std::fs::write(path, serde_json::to_vec(entry)?)
+    crate::cache::write(path, &serde_json::to_vec(entry)?)
         .with_context(|| format!("writing {}", path.display()))
 }
 
@@ -193,16 +198,31 @@ fn cache_is_fresh(entry: &CacheEntry, now: DateTime<Utc>) -> bool {
     let ttl = if entry.found.is_some() {
         FOUND_TTL
     } else {
-        EMPTY_TTL
+        empty_retry_delay(entry.misses)
     };
     now.signed_duration_since(entry.checked_at) < ttl
 }
 
-async fn lookup(provider: DiscussionProvider, link: &str, client: &http::Client) -> Result<Lookup> {
+/// Deterministic exponential retry: 30m, 1h, 2h, …, capped at seven days. A zero count comes
+/// from the old cache schema and expires immediately so it enters the new schedule.
+fn empty_retry_delay(misses: u32) -> Duration {
+    if misses == 0 {
+        return Duration::zero();
+    }
+    let exponent = misses.saturating_sub(1).min(31);
+    let minutes = EMPTY_BASE_DELAY
+        .num_minutes()
+        .checked_shl(exponent)
+        .unwrap_or(i64::MAX)
+        .min(EMPTY_MAX_DELAY.num_minutes());
+    Duration::minutes(minutes)
+}
+
+async fn lookup(provider: NetworkProvider, link: &str, client: &http::Client) -> Result<Lookup> {
     match provider {
-        DiscussionProvider::HackerNews => hacker_news(link, client).await,
-        DiscussionProvider::Reddit => reddit(link, client).await,
-        DiscussionProvider::X => x(link, client).await,
+        NetworkProvider::HackerNews => hacker_news(link, client).await,
+        NetworkProvider::Reddit => reddit(link, client).await,
+        NetworkProvider::X => x(link, client).await,
     }
 }
 
@@ -421,11 +441,12 @@ mod tests {
     }
 
     #[test]
-    fn cache_ttl_is_shorter_for_a_miss() {
+    fn misses_retry_on_a_deterministic_exponential_schedule() {
         let now = Utc::now();
-        let miss = CacheEntry {
-            checked_at: now - Duration::hours(7),
+        let first_miss = CacheEntry {
+            checked_at: now - Duration::minutes(29),
             found: None,
+            misses: 1,
         };
         let hit = CacheEntry {
             checked_at: now - Duration::hours(7),
@@ -433,9 +454,33 @@ mod tests {
                 url: "https://example.com".into(),
                 score: 1,
             }),
+            misses: 0,
         };
-        assert!(!cache_is_fresh(&miss, now));
+        assert!(cache_is_fresh(&first_miss, now));
+        assert!(!cache_is_fresh(
+            &CacheEntry {
+                checked_at: now - Duration::minutes(30),
+                ..first_miss
+            },
+            now
+        ));
         assert!(cache_is_fresh(&hit, now));
+        assert_eq!(empty_retry_delay(1), Duration::minutes(30));
+        assert_eq!(empty_retry_delay(2), Duration::hours(1));
+        assert_eq!(empty_retry_delay(3), Duration::hours(2));
+        assert_eq!(empty_retry_delay(32), Duration::days(7));
+    }
+
+    #[test]
+    fn old_negative_cache_entries_retry_immediately() {
+        let now = Utc::now();
+        let entry: CacheEntry = serde_json::from_value(serde_json::json!({
+            "checked_at": now,
+            "found": null
+        }))
+        .unwrap();
+        assert_eq!(entry.misses, 0);
+        assert!(!cache_is_fresh(&entry, now));
     }
 
     #[test]
@@ -483,7 +528,7 @@ mod tests {
     fn resolution_fingerprint_is_stable_and_lookup_uses_normalized_urls() {
         let mut first = ResolutionSet::default();
         first.insert(
-            DiscussionProvider::HackerNews,
+            NetworkProvider::HackerNews,
             "http://www.example.com/a/?utm_source=x",
             Found {
                 url: "https://news.ycombinator.com/item?id=1".into(),
@@ -492,7 +537,7 @@ mod tests {
         );
         assert_eq!(
             first
-                .get(DiscussionProvider::HackerNews, "https://example.com/a")
+                .get(NetworkProvider::HackerNews, "https://example.com/a")
                 .unwrap()
                 .score,
             5

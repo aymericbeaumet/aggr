@@ -135,7 +135,11 @@ pub fn human_url(url: &Url) -> String {
 
 /// Directory name for a mirror: readable prefix plus a hash so two URLs never collide.
 pub fn mirror_key(remote: &str, branch: &str) -> PathBuf {
-    let readable: String = remote
+    let public = Url::parse(remote)
+        .ok()
+        .map(|url| human_url(&url))
+        .unwrap_or_else(|| "repo".into());
+    let readable: String = public
         .trim_end_matches('/')
         .rsplit('/')
         .next()

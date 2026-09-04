@@ -23,7 +23,7 @@
       {% if item.published %}<span>· published <time class="dt-published" datetime="{{ item.published }}" title="{{ item.published }}">{{ item.published | date('%Y-%m-%d %H:%M') }}</time></span>{% endif %}
       {% if item.updated and item.updated != item.published %}<span>· updated <time class="dt-updated" datetime="{{ item.updated }}" title="{{ item.updated }}">{{ item.updated | date }}</time></span>{% endif %}
       {% if item.category %}<span>· <a class="p-category" rel="tag" href="{{ ('categories/' ~ (item.category | slug) ~ '/') | url_for }}">{{ item.category }}</a></span>{% endif %}
-      {% for label in item.labels %}<span>· <a class="tag p-category" rel="tag" href="{{ ('tags/' ~ (label | slug) ~ '/') | url_for }}">#{{ label }}</a></span>{% endfor %}
+      {% if item.labels %}<span>· <span class="item-tags">{% for label in item.labels %}<a class="tag p-category" rel="tag" href="{{ ('tags/' ~ (label | slug) ~ '/') | url_for }}">#{{ label }}</a>{% endfor %}</span></span>{% endif %}
       <span>· <a class="u-bookmark-of" href="{{ item.link }}" target="_blank" rel="external noopener noreferrer via">original</a></span>
       {% for discussion in item.discussions %}<span>· <a class="discussion{% if discussion.found %} is-found{% endif %}" href="{{ discussion.url }}" target="_blank" rel="noopener noreferrer"{% if discussion.found %} aria-label="{{ discussion.name }}, matching discussion found{% if discussion.score is not none %}, score {{ discussion.score }}{% endif %}"{% endif %}>{{ discussion.name }}</a></span>{% endfor %}
     </div>
@@ -38,7 +38,7 @@
       {% for article in item.recommended_articles %}
       <a class="article-more-link" href="{{ article.url | url_for }}">
         <span class="article-more-title">{{ article.title }}</span>
-        {% if article.domain %}<span class="article-more-domain">{{ article.domain }}</span>{% endif %}
+        <span class="article-more-domain">{% if article.domain %}{{ article.domain }} · {% endif %}<time datetime="{{ article.date }}" title="{{ article.date }}">{{ article.date | date }}</time></span>
       </a>
       {% endfor %}
     </nav>

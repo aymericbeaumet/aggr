@@ -727,7 +727,9 @@ mod tests {
             data_branch: "aggr".into(),
             pwa: true,
             config_url: None,
+            has_categories: true,
             discussions: Vec::new(),
+            entry_shortcuts: Vec::new(),
             params: toml::Table::new(),
         }
     }
@@ -738,6 +740,7 @@ mod tests {
             version: "1.2.3".into(),
             config_sha: None,
             data_sha: None,
+            generation: "generation".into(),
             release: true,
         }
     }

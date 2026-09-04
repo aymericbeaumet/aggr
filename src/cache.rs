@@ -1,6 +1,7 @@
 //! Cache locations and namespaces. Build/CI state belongs to the repository; dev state belongs
 //! to the operating system's standard cache directory and is isolated per configuration file.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -36,15 +37,28 @@ pub fn dev(config_path: &Path) -> Result<PathBuf> {
 
 /// Exact key for reusable rendered output. The data commit, effective config files, layered theme,
 /// output URL and embedded defaults all participate; wall-clock time deliberately does not.
-pub fn render_fingerprint(
-    config: &crate::config::Config,
-    project_root: &Path,
-    config_sha: Option<&str>,
-    data_sha: Option<&str>,
-    base_url: Option<&str>,
-    release: bool,
-    discussions: Option<&str>,
-) -> Result<String> {
+pub struct RenderFingerprint<'a> {
+    pub config: &'a crate::config::Config,
+    pub project_root: &'a Path,
+    pub config_sha: Option<&'a str>,
+    pub data_sha: Option<&'a str>,
+    pub base_url: Option<&'a str>,
+    pub release: bool,
+    pub discussions: Option<&'a str>,
+    pub generation: &'a str,
+}
+
+pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
+    let RenderFingerprint {
+        config,
+        project_root,
+        config_sha,
+        data_sha,
+        base_url,
+        release,
+        discussions,
+        generation,
+    } = input;
     let mut hash = Sha1::new();
     hash_field(&mut hash, b"schema", b"render-v2");
     hash_field(&mut hash, b"version", env!("CARGO_PKG_VERSION").as_bytes());
@@ -80,6 +94,7 @@ pub fn render_fingerprint(
         b"discussions",
         discussions.unwrap_or("").as_bytes(),
     );
+    hash_field(&mut hash, b"generation", generation.as_bytes());
     hash_field(
         &mut hash,
         b"repository",
@@ -235,7 +250,7 @@ fn hash_tree(hash: &mut Sha1, kind: &str, root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     for entry in walkdir::WalkDir::new(from).min_depth(1) {
         let entry = entry.with_context(|| format!("walking {}", from.display()))?;
         let relative = entry
@@ -406,10 +421,19 @@ fn write_if_missing(path: &Path, bytes: &[u8]) -> Result<()> {
     write(path, bytes)
 }
 
-fn write(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("cache file has a parent directory")?;
     std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
+    let mut file = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("creating a temporary file under {}", parent.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("writing temporary file for {}", path.display()))?;
+    file.flush()
+        .with_context(|| format!("flushing temporary file for {}", path.display()))?;
+    file.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -504,53 +528,27 @@ mod tests {
         std::fs::write(root.path().join("templates/index.html"), "one").unwrap();
         let mut config = crate::config::Config::parse("[site]\ntitle = \"one\"\n").unwrap();
         config.loaded_files = vec![config_path.clone()];
-        let first = render_fingerprint(
-            &config,
-            root.path(),
-            Some("config"),
-            Some("data"),
-            None,
-            false,
-            None,
-        )
-        .unwrap();
+        let fingerprint = |discussions| RenderFingerprint {
+            config: &config,
+            project_root: root.path(),
+            config_sha: Some("config"),
+            data_sha: Some("data"),
+            base_url: None,
+            release: false,
+            discussions,
+            generation: "generation",
+        };
+        let first = render_fingerprint(fingerprint(None)).unwrap();
 
         std::fs::write(root.path().join("templates/index.html"), "two").unwrap();
-        let theme_changed = render_fingerprint(
-            &config,
-            root.path(),
-            Some("config"),
-            Some("data"),
-            None,
-            false,
-            None,
-        )
-        .unwrap();
+        let theme_changed = render_fingerprint(fingerprint(None)).unwrap();
         assert_ne!(first, theme_changed);
 
         std::fs::write(&config_path, "[site]\ntitle = \"two\"\n").unwrap();
-        let config_changed = render_fingerprint(
-            &config,
-            root.path(),
-            Some("config"),
-            Some("data"),
-            None,
-            false,
-            None,
-        )
-        .unwrap();
+        let config_changed = render_fingerprint(fingerprint(None)).unwrap();
         assert_ne!(theme_changed, config_changed);
 
-        let discussion_changed = render_fingerprint(
-            &config,
-            root.path(),
-            Some("config"),
-            Some("data"),
-            None,
-            false,
-            Some("new-direct-link"),
-        )
-        .unwrap();
+        let discussion_changed = render_fingerprint(fingerprint(Some("new-direct-link"))).unwrap();
         assert_ne!(config_changed, discussion_changed);
     }
 }

@@ -6,6 +6,7 @@ pub mod retention;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -30,8 +31,10 @@ pub struct Store {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SourceState {
-    /// URL configured by the user. A change invalidates the discovered endpoint below.
-    pub url: String,
+    /// Hash of unexpanded fetch inputs. A change invalidates the discovered endpoint below while
+    /// literal credentials and `${ENV}` values never enter the append-only history.
+    #[serde(alias = "url")]
+    pub identity: String,
     /// Feed endpoint discovered from a website, or the final page URL for HTML fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_url: Option<String>,
@@ -212,10 +215,13 @@ impl Store {
     pub fn write_item(&self, item: NewItem<'_>) -> Result<()> {
         let dir = self.root.join(item.dir);
         let md = dir.join(format!("{}.md", item.stem));
-        write(&md, &frontmatter::render(item.front, item.body)?)?;
+        // Markdown is the item pair's visibility marker: write the optional sibling first, then
+        // atomically publish the `.md`. A crash can leave an ignored orphan HTML file, never a
+        // Markdown record pointing at a partial companion.
         if let Some(html) = item.html {
             write(&dir.join(format!("{}.html", item.stem)), html)?;
         }
+        write(&md, &frontmatter::render(item.front, item.body)?)?;
         Ok(())
     }
 
@@ -294,6 +300,16 @@ impl Store {
 fn write(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)
+            .with_context(|| format!("creating a temporary file under {}", parent.display()))?;
+        file.write_all(content.as_bytes())
+            .with_context(|| format!("writing temporary file for {}", path.display()))?;
+        file.flush()
+            .with_context(|| format!("flushing temporary file for {}", path.display()))?;
+        file.persist(path)
+            .map_err(|err| err.error)
+            .with_context(|| format!("replacing {}", path.display()))?;
+        return Ok(());
     }
     fs::write(path, content).with_context(|| format!("writing {}", path.display()))
 }
@@ -361,7 +377,7 @@ mod tests {
         let store = Store::open(dir.path());
         assert_eq!(store.source_state("x").unwrap(), SourceState::default());
         let state = SourceState {
-            url: "https://a.b/feed".into(),
+            identity: "source-hash".into(),
             etag: Some("\"abc\"".into()),
             ..Default::default()
         };
@@ -432,6 +448,13 @@ mod tests {
         assert_eq!(
             store.read_html(&items[0].path).unwrap().as_deref(),
             Some("<p>Body</p>")
+        );
+        assert!(
+            walkdir::WalkDir::new(dir.path())
+                .min_depth(1)
+                .into_iter()
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().starts_with(".tmp"))
         );
     }
 

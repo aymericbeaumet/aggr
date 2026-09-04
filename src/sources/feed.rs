@@ -11,12 +11,12 @@ use crate::http::{Request, Response};
 use crate::model::{RawItem, sha1_hex};
 
 pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
-    let remembered = (ctx.state.url == url.as_str())
+    let remembered = (ctx.state.identity == source.identity)
         .then_some(ctx.state.resolved_url.as_deref())
         .flatten()
         .and_then(|url| Url::parse(url).ok());
     let endpoint = remembered.as_ref().unwrap_or(url);
-    let previous = if ctx.state.url == url.as_str() {
+    let previous = if ctx.state.identity == source.identity {
         Validators::from_state(ctx.state)
     } else {
         Validators::default()
@@ -499,11 +499,15 @@ line two</content>
     }
 
     fn source(url: Url) -> Source {
+        let public_url = url.to_string();
         Source {
             slug: "site".into(),
             name: None,
             category: None,
             labels: vec![],
+            identity: "site-v1".into(),
+            public_url: Some(public_url),
+            persist_endpoint: true,
             headers: vec![],
             html: true,
             content: crate::config::ContentMode::Light,
@@ -550,7 +554,7 @@ line two</content>
             Some(server.url("/feed.xml").as_str())
         );
         validators.apply(&mut state);
-        state.url = configured.to_string();
+        state.identity = source.identity.clone();
         first_feed.delete_async().await;
 
         let conditional = server

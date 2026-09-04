@@ -154,7 +154,8 @@ pub async fn run_with_reload(
         let _ = shutdown_tx.send(tokio::signal::ctrl_c().await);
     });
     tokio::task::yield_now().await;
-    let base = crate::site::base_path(build::base_url(project, &args.build)?.as_deref());
+    let build_args = args.build_args();
+    let base = crate::site::base_path(build::base_url(project, &build_args)?.as_deref());
     let listener = bind(args.port).await?;
     let url = format!("http://127.0.0.1:{}{base}", listener.local_addr()?.port());
     println!("aggr dev: {url}");
@@ -180,7 +181,7 @@ pub async fn run_with_reload(
         reload,
     };
     let initializing = async {
-        match refresh(project, &args.fetch, &args.build, &state, true).await {
+        match refresh(project, &args.fetch, &build_args, &state, true).await {
             Ok(rebuilt) => {
                 println!("ready: {url}");
                 if rebuilt {
@@ -232,17 +233,21 @@ async fn refresh(
         true
     };
     let store = crate::store::Store::open(&state.data);
-    let discussions = build::resolve_discussions(project, &store, &state.cache, Utc::now()).await?;
+    let now = Utc::now();
+    let generation = crate::site::render_generation(&store.items()?, &project.config.site, now);
+    let discussions = build::resolve_discussions(project, &store, &state.cache, now).await?;
     let discussions_fingerprint = discussions.fingerprint();
-    let fingerprint = crate::cache::render_fingerprint(
-        &project.config,
-        &project.root,
-        project.config_sha().as_deref(),
-        None,
-        base_url.as_deref(),
-        build_args.release,
-        Some(&discussions_fingerprint),
-    )?;
+    let config_sha = project.config_sha();
+    let fingerprint = crate::cache::render_fingerprint(crate::cache::RenderFingerprint {
+        config: &project.config,
+        project_root: &project.root,
+        config_sha: config_sha.as_deref(),
+        data_sha: None,
+        base_url: base_url.as_deref(),
+        release: build_args.release,
+        discussions: Some(&discussions_fingerprint),
+        generation: &generation,
+    })?;
     if !visible_change && dev_key_matches(&state.cached, &fingerprint) {
         println!("dev build already current");
         return Ok(false);
@@ -255,9 +260,10 @@ async fn refresh(
         build_args,
         &state.data,
         &state.staging,
+        &state.cache,
         discussions,
     )?;
-    std::fs::write(state.staging.join(DEV_KEY_FILE), fingerprint)
+    crate::cache::write(&state.staging.join(DEV_KEY_FILE), fingerprint.as_bytes())
         .context("writing the dev build fingerprint")?;
     state
         .site
@@ -336,12 +342,7 @@ fn watch(project: &Project, args: &DevArgs, state: DevState) -> Result<notify::R
     }
 
     let config_path = project.config_path.clone();
-    let build_args = crate::cli::BuildArgs {
-        out: args.build.out.clone(),
-        base_url: args.build.base_url.clone(),
-        data_ref: args.build.data_ref.clone(),
-        release: args.build.release,
-    };
+    let build_args = args.build_args();
     let fetch_args = args.fetch.clone();
     tokio::spawn(async move {
         while let Some(event) = changes.recv().await {

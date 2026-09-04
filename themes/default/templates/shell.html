@@ -7,13 +7,13 @@
     <form class="search-controls" id="search-form" role="search">
       <label class="sr-only" for="q">Search titles and full text</label>
       <input id="q" name="q" type="search" placeholder="Search titles and full text…" autofocus autocomplete="off" aria-controls="list" spellcheck="false">
-      <label class="sr-only" for="category-filter">Filter by category</label>
-      <select id="category-filter" name="category"><option value="">all categories</option>{% for category in categories %}<option value="{{ category.slug }}">{{ category.name }} ({{ category.count }})</option>{% endfor %}</select>
+      {% if site.has_categories %}<label class="sr-only" for="category-filter">Filter by category</label>
+      <select id="category-filter" name="category"><option value="">all categories</option>{% for category in categories %}<option value="{{ category.slug }}">{{ category.name }} ({{ category.count }})</option>{% endfor %}</select>{% endif %}
       <label class="sr-only" for="tag-filter">Filter by tag</label>
       <select id="tag-filter" name="tag"><option value="">all tags</option>{% for tag in tags %}<option value="{{ tag.slug }}">#{{ tag.name }} ({{ tag.count }})</option>{% endfor %}</select>
       <label class="sr-only" for="search-sort">Sort results</label>
       <select id="search-sort" name="sort"><option value="relevance">relevance</option><option value="newest">newest</option></select>
-      <output id="count" class="search-count muted" for="q category-filter tag-filter search-sort" aria-hidden="true">0</output>
+      <output id="count" class="search-count muted" for="q{{ ' category-filter' if site.has_categories }} tag-filter search-sort" aria-hidden="true">0</output>
       <span id="search-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
     </form>
     <ol class="rows search-results h-feed" id="list" role="list" data-shell="{{ page.kind }}" aria-label="Search results"></ol>
