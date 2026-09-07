@@ -1090,14 +1090,8 @@ mod tests {
             Some("child")
         );
         assert_eq!(
-            source.local_feed.as_deref(),
-            Some(
-                dir.path()
-                    .join("news.json")
-                    .canonicalize()
-                    .unwrap()
-                    .as_path()
-            )
+            source.local_feed.as_ref().unwrap().canonicalize().unwrap(),
+            dir.path().join("news.json").canonicalize().unwrap()
         );
         assert_eq!(expansion.local.len(), 4);
     }

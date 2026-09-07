@@ -262,7 +262,8 @@ mod tests {
 
     #[test]
     fn declared_legacy_xml_encodings_and_utf16_are_supported() {
-        let url = Url::parse("file:///tmp/feed.xml").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let url = Url::from_file_path(directory.path().join("feed.xml")).unwrap();
         let bytes = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><rss version=\"2.0\"><channel><title>Caf\xe9</title><link>https://example.org/</link><description>News</description></channel></rss>";
         assert!(!parse_bytes(bytes, &url).unwrap().collection);
         let text =
@@ -375,16 +376,15 @@ url = [" https://a.example/\nhttps://b.example/ ", "https://c.example/"]
 
     #[test]
     fn local_feeds_register_the_document_path() {
-        let url = Url::parse("file:///tmp/news.json").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("news.json");
+        let url = Url::from_file_path(&path).unwrap();
         let sources = parse_sources(
             r#"{"version":"https://jsonfeed.org/version/1.1","title":"JSON","items":[]}"#,
             Some(&url),
         )
         .unwrap();
-        assert_eq!(
-            sources[0].local_feed.as_deref(),
-            Some(std::path::Path::new("/tmp/news.json"))
-        );
+        assert_eq!(sources[0].local_feed.as_deref(), Some(path.as_path()));
         assert_eq!(sources[0].url, None);
     }
 

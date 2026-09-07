@@ -1007,10 +1007,12 @@ labels = ["#Rust", "RUST", "Generative AI"]
 
     #[test]
     fn local_feed_slug_fallback_never_contains_parent_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("private/reader/feeds/news.xml");
         for name in [None, Some(""), Some("   "), Some("!!!")] {
             let config = Config {
                 sources: vec![SourceConfig {
-                    local_feed: Some(PathBuf::from("/private/home/reader/feeds/news.xml")),
+                    local_feed: Some(path.clone()),
                     name: name.map(str::to_owned),
                     ..Default::default()
                 }],
