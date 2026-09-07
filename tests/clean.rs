@@ -50,7 +50,8 @@ impl Fixture {
     }
 
     fn dev(&self, config: &Path) -> PathBuf {
-        let hash = hex::encode(Sha1::digest(config.to_string_lossy().as_bytes()));
+        let identity = config.to_string_lossy().replace('\\', "/");
+        let hash = hex::encode(Sha1::digest(identity.as_bytes()));
         let name = slug::slugify(
             config
                 .parent()
