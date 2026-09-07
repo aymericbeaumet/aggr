@@ -64,8 +64,13 @@ pub async fn run(project: &Project, args: &SyncArgs) -> Result<()> {
         PushOutcome::NoRemote => log::info!("no origin remote; skipping push"),
     }
     if let Some(head) = worktree.head_sha()? {
-        if report.errors() == 0 {
-            worktree.update_ref(LAST_GOOD, &head)?;
+        if report.errors() == 0
+            && let Err(err) = worktree.update_ref(LAST_GOOD, &head)
+        {
+            log::warn!(
+                "data saved successfully; recovery pointer {LAST_GOOD} could not be updated: {err}. Continuing with the current data snapshot"
+            );
+            log::debug!("recovery pointer update: {err:#}");
         }
         println!("{head}");
     }

@@ -419,13 +419,14 @@ pub fn status_code(err: &anyhow::Error) -> Option<u16> {
     err.downcast_ref::<HttpStatus>().map(|status| status.0)
 }
 
-/// Worth another attempt: 5xx, 429, or a connection/timeout failure.
+/// Worth another attempt: 5xx, 429, or a request/body transport failure.
 fn is_transient(err: &anyhow::Error) -> bool {
     if let Some(HttpStatus(code, _)) = err.downcast_ref::<HttpStatus>() {
         return *code >= 500 || *code == 429;
     }
-    err.downcast_ref::<reqwest::Error>()
-        .is_some_and(|e| e.is_timeout() || e.is_connect() || e.is_request())
+    err.downcast_ref::<reqwest::Error>().is_some_and(|e| {
+        e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() || e.is_decode()
+    })
 }
 
 /// Reserves the next slot for a host under a short lock, then sleeps outside it so other hosts
@@ -741,6 +742,64 @@ mod tests {
         let err = client().get(Request::get(&url)).await.unwrap_err();
         assert!(err.to_string().contains("HTTP 503"), "{err}");
         assert_eq!(mock.calls_async().await, 2, "one retry");
+    }
+
+    async fn interrupted_body_server(
+        responses: Vec<&'static [u8]>,
+    ) -> (Url, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!(
+            "http://{}/article",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let task = tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![];
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(stream.read_u8().await.unwrap());
+                }
+                stream.write_all(response).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+        (url, task)
+    }
+
+    #[tokio::test]
+    async fn retries_interrupted_and_undecodable_bodies_without_keeping_partial_content() {
+        for first in [
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\npartial"[..],
+            &b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbad"[..],
+        ] {
+            let (url, server) = interrupted_body_server(vec![
+                first,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ncomplete",
+            ]).await;
+            let result = client().get(Request::get(&url)).await;
+            server.abort();
+            let Response::Ok(body) = result.unwrap() else {
+                panic!("expected a body");
+            };
+            assert_eq!(body.text(), "complete");
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_body_retries_are_bounded() {
+        let (url, server) = interrupted_body_server(vec![
+            b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\npartial",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\npartial",
+        ])
+        .await;
+        let error = client().get(Request::get(&url)).await.unwrap_err();
+        assert!(error.to_string().contains("reading body"), "{error:#}");
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

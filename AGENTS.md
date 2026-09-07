@@ -14,6 +14,8 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   to `.git/info/exclude`.
 - One failing source never fails the run; only config errors, git/IO errors and "every source
   failed" exit non-zero. Source errors surface through `status.toml` on transitions only.
+  After the data branch is saved, an auxiliary recovery-pointer failure warns without blocking
+  publication; never force-push an unrelated or newer pointer to make it succeed.
 - Stored `.html` and rendered pages are safe by construction: `content.rs` strips scripts,
   handlers and `data:`/`javascript:` URLs before storage; ammonia sanitizes before display;
   comrak renders with raw HTML off. Never serve stored HTML unsanitized.

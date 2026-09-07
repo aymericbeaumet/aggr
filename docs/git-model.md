@@ -62,6 +62,9 @@ The original URL and first capture time (`first_seen`) live in each Markdown fil
 A copied aggr item also records `replicated_at`, the time it entered the current repository. A
 heavy source attempts to extract the original article; if that request or extraction fails, aggr
 keeps the feed body, summary, or metadata it has rather than failing an otherwise healthy source.
+Recoverable article failures appear in debug logs (`-vv`). An HTTP 401 or 403 affects only that
+URL; an HTTP 429 pauses further article requests to that origin for the run. Interrupted response
+bodies use the configured bounded retries before falling back to feed content.
 
 ## What a run does
 
@@ -78,7 +81,9 @@ render the static site           →  from the selected data commit
   is the build stamp.
 - **Status transitions only.** `status.toml` is written when a source starts or stops failing, not
   on every failing run. One failing source never fails the run; only every source failing,
-  configuration errors, and Git/IO errors make sync exit non-zero.
+  configuration errors, and data Git/IO errors make sync exit non-zero. After data is saved,
+  an auxiliary recovery-pointer failure is reported as a warning and does not block rendering
+  or deployment of the current snapshot.
 - **Push, never force.** A rejected push is followed by a fetch and rebase onto `origin/aggr`.
   `seen.txt` files union-merge through `.gitattributes`, while regenerated state files keep the
   current run's result. A history that cannot be rebased is a hard error with recovery instructions,
@@ -125,6 +130,11 @@ Refs are pointers with a meaning, visible through standard Git:
 | Ref | Points to | Set when |
 |---|---|---|
 | `refs/aggr/last-good` | the data tip | a sync ended with zero source errors |
+
+Pointer pushes fetch missing history and retry when a shallow checkout cannot establish ancestry.
+A newer pointer published by another run is retained. An unrelated pointer is left unchanged and
+reported as a warning; aggr never force-pushes it. In that case `--data-ref refs/aggr/last-good`
+still selects the older history, while normal builds use the current data branch.
 
 ## Recovery and reproducibility
 
