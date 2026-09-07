@@ -62,7 +62,7 @@ function fetchEntry(entry) {
     setTimeout(function () { controller.abort(); }, PRECACHE_TIMEOUT);
     signal = controller.signal;
   }
-  return fetch(new Request(entry.url, { cache: "reload" }), { signal: signal }).then(function (response) {
+  return fetch(new Request(entry.url, { cache: "reload" }), { signal: signal, priority: "low" }).then(function (response) {
     if (!response || !response.ok) {
       throw new Error("could not precache " + entry.url);
     }
@@ -84,13 +84,18 @@ function storeEntry(cache, revisions, revisionCaches, entry) {
 }
 
 function populate(cache, revisions, revisionCaches, entries, strict) {
-  var chunk = entries.slice(0, 12);
-  if (!chunk.length) return Promise.resolve();
-  return Promise.all(chunk.map(function (entry) {
-    var stored = storeEntry(cache, revisions, revisionCaches, entry);
-    return strict ? stored : stored.catch(function () { return null; });
-  })).then(function () {
-    return populate(cache, revisions, revisionCaches, entries.slice(12), strict);
+  var next = 0;
+  var failure = null;
+  function download() {
+    if (next >= entries.length || failure) return Promise.resolve();
+    return storeEntry(cache, revisions, revisionCaches, entries[next++])
+      .catch(function (error) { if (strict) failure = error; })
+      .then(download);
+  }
+  // Keep each slot busy independently; a slow image should not stall eleven completed downloads.
+  // Settle in-flight writes before rejecting so failed-install cleanup cannot race those writes.
+  return Promise.all(Array.from({ length: Math.min(entries.length, 12) }, download)).then(function () {
+    if (failure) throw failure;
   });
 }
 
@@ -256,9 +261,10 @@ self.addEventListener("activate", function (event) {
   );
 });
 
-function timeout(ms) {
-  return new Promise(function (_, reject) {
-    setTimeout(function () { reject(new Error("timeout")); }, ms);
+function withTimeout(promise, ms) {
+  return new Promise(function (resolve, reject) {
+    var timer = setTimeout(function () { reject(new Error("timeout")); }, ms);
+    promise.then(resolve, reject).finally(function () { clearTimeout(timer); });
   });
 }
 
@@ -288,7 +294,7 @@ function firstCached(request, choices, index) {
 
 // A late successful response still refreshes the page cache after the timeout has returned a
 // saved copy to the user. Navigation preload rejection falls back to a normal network request.
-function networkFirst(request, preload, event) {
+function refreshPage(request, preload, event) {
   var network = Promise.resolve(preload).catch(function () { return null; })
     .then(function (response) { return response || fetch(request); })
     .then(function (response) {
@@ -299,7 +305,11 @@ function networkFirst(request, preload, event) {
     return remember(PAGES, PAGE_MAX, request, response);
   }).catch(function () { return null; });
   event.waitUntil(saved);
-  return Promise.race([network, timeout(NETWORK_TIMEOUT)]).catch(function () {
+  return network;
+}
+
+function pageFallback(request, network) {
+  return withTimeout(network, NETWORK_TIMEOUT).catch(function () {
     return firstCached(request, [
       { name: PAGES, ignoreSearch: true },
       { name: PRECACHE, ignoreSearch: true }
@@ -313,16 +323,34 @@ function networkFirst(request, preload, event) {
   });
 }
 
+function networkFirst(request, preload, event) {
+  return pageFallback(request, refreshPage(request, preload, event));
+}
+
+// Cached HTML is already readable: refresh it without putting a mobile round trip on the
+// navigation path. Activation removes runtime copies replaced by the new deployment.
+function pageFirst(request, preload, event) {
+  var network = refreshPage(request, preload, event);
+  return firstCached(request, [
+    { name: PAGES, ignoreSearch: true },
+    { name: PRECACHE, ignoreSearch: true }
+  ], 0).then(function (cached) {
+    return cached || pageFallback(request, network);
+  });
+}
+
 function cacheFirst(request, name, maximum, ignorePrecacheSearch, event) {
-  var saved;
+  var fetched = false;
   var response = firstCached(request, [
     { name: PRECACHE, ignoreSearch: !!ignorePrecacheSearch },
     { name: name }
   ], 0).then(function (cached) {
-    return cached || fetch(request);
+    if (cached) return cached;
+    fetched = true;
+    return fetch(request);
   });
-  saved = response.then(function (value) {
-    return remember(name, maximum, request, value);
+  var saved = response.then(function (value) {
+    return fetched ? remember(name, maximum, request, value) : null;
   }).catch(function () { return null; });
   event.waitUntil(saved);
   return response;
@@ -338,8 +366,13 @@ self.addEventListener("fetch", function (event) {
   var isSwup = (request.headers.get("x-requested-with") || "").toLowerCase() === "swup";
   var mutable = /\/(?:atom|rss|feed)\.xml$|\/(?:feed|aggr|linkset)\.json$|\/manifest\.webmanifest$|\/opensearch\.xml$|\/sitemap(?:-\d+)?\.xml$|\/robots\.txt$|\/(?:aggr\.toml|llms\.txt)$/.test(url.pathname);
   var articleRepresentation = url.pathname.indexOf(BASE + "items/") === 0 && /\.(?:md|txt|rst|json)$/.test(url.pathname);
-  if (request.mode === "navigate" || acceptsHtml || isSwup || mutable || articleRepresentation) {
+  if (mutable || articleRepresentation) {
     event.respondWith(networkFirst(request, event.preloadResponse, event));
+  } else if (request.mode === "navigate" || acceptsHtml || isSwup) {
+    var reload = request.cache === "reload" || request.cache === "no-cache";
+    event.respondWith(reload
+      ? networkFirst(request, event.preloadResponse, event)
+      : pageFirst(request, event.preloadResponse, event));
   } else if (isImageAsset(url)) {
     event.respondWith(cacheFirst(request, IMAGES, IMAGE_MAX, true, event));
   } else if (url.pathname.indexOf(BASE + "assets/") === 0) {

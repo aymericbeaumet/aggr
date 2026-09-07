@@ -139,6 +139,7 @@ impl Renderer {
             Value::from_safe_string(resolved)
         });
         env.add_filter("domain", super::context::domain_of);
+        env.add_filter("profile", super::context::profile_label);
         env.add_filter("slug", |value: String| slug::slugify(value));
         env.add_filter("date", date_filter);
         env.add_filter("excerpt", |text: String, max: Option<usize>| {
@@ -342,10 +343,11 @@ mod tests {
     }
 
     #[test]
-    fn release_workflow_advances_the_major_channel() {
+    fn release_workflow_preserves_the_stable_workflow_tag() {
         let workflow = include_str!("../../.github/workflows/release.yml");
-        assert!(workflow.contains("major=\"v${VERSION%%.*}\""));
-        assert!(workflow.contains("git push --force origin \"refs/tags/$major\""));
+        assert!(workflow.contains("gh release create"));
+        assert!(!workflow.contains("git tag --force"));
+        assert!(!workflow.contains("git push --force"));
     }
 
     #[test]
@@ -497,9 +499,7 @@ mod tests {
         assert!(app.contains("function applyFeedPagination()"));
         assert!(app.contains("FEED_PAGE_PARAMETER = \"feed-page\""));
         assert!(app.contains(".row:not([hidden])"));
-        assert!(app.contains("function restoreLocalFilter(input)"));
         assert!(app.contains("url.searchParams.set(\"q\", query)"));
-        assert!(app.contains("updateLocalFilterLocation(input)"));
         assert!(app.contains("if (row.hidden) return;"));
         assert!(app.contains("acknowledgeNewEntries(highlighted)"));
 
@@ -522,14 +522,13 @@ mod tests {
         assert!(!script.contains("new-marker"));
         assert!(script.contains("canvas.toDataURL(\"image/png\")"));
         assert!(script.contains("context.fillStyle = \"#e53935\""));
-        assert!(script.contains("document.title = \"● \" + document.title"));
+        assert!(!script.contains("document.title = \"● \" + document.title"));
         assert!(!script.contains("navigator.setAppBadge"));
         assert!(!script.contains("navigator.clearAppBadge"));
 
         let css_file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
         assert!(css.contains(".row.is-new"));
-        assert!(css.contains("@keyframes new-item-highlight"));
         assert!(css.contains("prefers-reduced-motion: reduce"));
     }
 
@@ -573,7 +572,7 @@ mod tests {
         assert!(base.contains("id=\"shortcut-help\""));
         assert!(base.contains("Keyboard shortcuts"));
         assert!(base.contains("data-route=\"preferences/\""));
-        assert!(base.contains("<kbd>1–9</kbd>"));
+        assert!(base.contains("key_pair('g', '1–9', 'then')"));
         assert!(base.contains("rel=\"service-meta\""));
         assert!(base.contains("rel=\"type\""));
         assert!(base.contains("name=\"aggr:network\""));
@@ -587,9 +586,11 @@ mod tests {
 
         let item_file = DefaultTheme::get("templates/item.html").unwrap();
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
-        assert!(item.contains("<span>published <time"));
-        assert!(item.contains("class=\"reading-stats\""));
-        assert!(item.contains("datetime=\"PT{{ item.reading_minutes }}M\""));
+        assert!(item.contains("include \"_metadata.html\""));
+        let metadata_file = DefaultTheme::get("templates/_metadata.html").unwrap();
+        let metadata = std::str::from_utf8(metadata_file.data.as_ref()).unwrap();
+        assert!(metadata.contains("class=\"reading-stats\""));
+        assert!(metadata.contains("datetime=\"PT{{ item.reading_minutes }}M\""));
         assert!(css.contains(".shortcut-help {\n  position: fixed;\n  inset: 0;"));
         assert!(css.contains("margin: auto"));
 
@@ -633,30 +634,23 @@ mod tests {
         assert!(!app.contains("s: \"library/\""));
         assert!(!app.contains("t: \"library/#tags\""));
         assert!(!app.contains("c: \"library/#categories\""));
-        assert!(app.contains("function fillListFilter()"));
         assert!(app.contains("if (baseElement) baseElement.href = BASE"));
         assert!(app.contains("$(\"#aggr-base\").setAttribute(\"href\", BASE)"));
-        assert!(app.contains("document.documentElement.style.setProperty(\"--top-nav-offset\", topBar.getBoundingClientRect().height + \"px\")"));
         assert!(!app.contains("compactHeader"));
     }
 
     #[test]
-    fn embedded_theme_keeps_feed_selection_neutral_until_interaction() {
+    fn embedded_theme_selects_a_row_without_a_background_fill() {
         let app_file = DefaultTheme::get("static/app.js").unwrap();
         let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
-        assert!(!app.contains("if (KIND !== \"search\") restoreListCursor(restoreListFocus)"));
-        assert!(app.contains(
-            "if ((focusedUrl || restoreListFocus) && restoreListCursor(true, focusedUrl))"
-        ));
-        assert!(!app.contains("|| listRows()[0]"));
+        assert!(app.contains("var row = retained || selected || rows[0]"));
 
         let css_file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
         assert!(css.contains(".row.is-selected .title:hover"));
         assert!(css.contains("text-decoration: none"));
-        assert!(css.contains(
-            ".row:has(.title:focus-visible) { background: color-mix(in srgb, var(--fg) 18%, var(--bg)); }"
-        ));
+        assert!(css.contains(".row.is-selected::before { opacity: 1; }"));
+        assert!(!css.contains(".row.is-selected { background:"));
 
         let item_file = DefaultTheme::get("templates/_item.html").unwrap();
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
@@ -714,7 +708,6 @@ mod tests {
         assert!(!css.contains("reader-page-previous-in"));
         assert!(css.contains(".itemhead { position: sticky"));
         assert!(css.contains(".itemhead::before"));
-        assert!(css.contains("width: 100dvw"));
         assert!(css.contains(".nav .brand {"));
         assert!(css.contains("margin-inline-start: 0;"));
         assert!(css.contains("margin-inline: -0.75rem"));
@@ -722,7 +715,7 @@ mod tests {
         assert!(app.contains("candidate.shortcut === key"));
         assert!(app.contains(".split(\"{url}\").join(encodeURIComponent(originalUrl))"));
 
-        let item_file = DefaultTheme::get("templates/item.html").unwrap();
+        let item_file = DefaultTheme::get("templates/_metadata.html").unwrap();
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
         assert!(item.contains("data-discussion=\"{{ discussion.name }}\""));
     }

@@ -1,15 +1,16 @@
 //! Shared fetch stage for sync/build/dev: every source runs in parallel and writes only its own
-//! directory. The store's dedupe keys decide what is new; nothing in this module touches git.
+//! directory. Source-local keys and shared URL reservations decide what is new; no git operations.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt as _, stream};
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
 
 use super::Project;
@@ -21,7 +22,7 @@ use crate::http;
 use crate::media;
 use crate::model::{
     ContentKind, FrontMatter, RawItem, dedupe_keys, file_stem, item_dir, normalize_labels,
-    unique_stem,
+    normalize_link, unique_stem,
 };
 use crate::preview;
 use crate::sources::{self, Fetch};
@@ -72,11 +73,13 @@ impl Report {
 
 #[derive(Clone)]
 struct Options {
+    archived_links: Arc<SharedLinks>,
     dry_run: bool,
     refresh: bool,
     html: bool,
     html_max_bytes: usize,
     article_concurrency: usize,
+    preparation_limit: Arc<Semaphore>,
     max_items_per_source: usize,
     preview_fetcher: Arc<preview::Fetcher>,
     media_fetcher: Arc<media::Fetcher>,
@@ -105,12 +108,18 @@ pub async fn run_with_cache(
     let selected: Vec<Source> = project.sources.clone();
     let store = Arc::new(Store::open(worktree.dir()));
     let client = Arc::new(http::Client::new(&project.config.fetch)?);
+    let index_store = store.clone();
+    let known_links = tokio::task::spawn_blocking(move || archived_links(&index_store))
+        .await
+        .context("indexing archived article URLs")??;
     let options = Options {
+        archived_links: Arc::new(SharedLinks::new(known_links)),
         dry_run: args.dry_run,
         refresh: args.refresh,
         html: project.config.store.html,
         html_max_bytes: project.config.store.html_max_bytes,
         article_concurrency: project.config.fetch.article_concurrency,
+        preparation_limit: Arc::new(Semaphore::new(2)),
         max_items_per_source: project.config.fetch.max_items_per_source,
         preview_fetcher: Arc::new(preview::Fetcher::new()?),
         media_fetcher: Arc::new(media::Fetcher::new(
@@ -132,6 +141,7 @@ pub async fn run_with_cache(
             limit.clone(),
         );
         tasks.spawn(async move {
+            let started = Instant::now();
             let _permit = limit.acquire_owned().await;
             let article_failures = ArticleFailures::default();
             let result = fetch_one(
@@ -148,13 +158,13 @@ pub async fn run_with_cache(
             )
             .await
             .map_err(|err| sanitized_source_error(&source, &err));
-            (source.slug, result)
+            (source.slug, result, started.elapsed())
         });
     }
 
     let mut reports = Vec::new();
     while let Some(joined) = tasks.join_next().await {
-        let (slug, result) = joined.context("a fetch task panicked")?;
+        let (slug, result, elapsed) = joined.context("a fetch task panicked")?;
         let report = match result {
             Ok(report) => report,
             Err(err) => {
@@ -167,6 +177,10 @@ pub async fn run_with_cache(
                 }
             }
         };
+        println!(
+            "{}",
+            source_progress(&report, elapsed, reports.len() + 1, project.sources.len())
+        );
         reports.push(report);
     }
     let order: BTreeMap<&str, usize> = project
@@ -188,14 +202,6 @@ pub async fn run_with_cache(
         store.write_status(&status)?;
     }
 
-    for report in &reports {
-        match &report.outcome {
-            Outcome::Error(message) => println!("{}: error: {message}", report.slug),
-            Outcome::Ok if report.unchanged => println!("{}: unchanged", report.slug),
-            Outcome::Ok => println!("{}: +{}", report.slug, report.added),
-        }
-    }
-
     let removed = if args.dry_run {
         0
     } else {
@@ -209,6 +215,24 @@ pub async fn run_with_cache(
         status_changed,
         removed,
     })
+}
+
+fn source_progress(
+    report: &SourceReport,
+    elapsed: Duration,
+    completed: usize,
+    total: usize,
+) -> String {
+    let outcome = match &report.outcome {
+        Outcome::Error(message) => format!("error: {message}"),
+        Outcome::Ok if report.unchanged => "unchanged".into(),
+        Outcome::Ok => format!("+{}", report.added),
+    };
+    format!(
+        "{}: {outcome} ({:.1}s; {completed}/{total} sources complete)",
+        report.slug,
+        elapsed.as_secs_f64()
+    )
 }
 
 fn sanitized_source_error(source: &Source, err: &anyhow::Error) -> anyhow::Error {
@@ -455,16 +479,108 @@ struct FetchOneContext<'a> {
     state_policy: StatePolicy,
 }
 
+fn archived_links(store: &Store) -> Result<HashSet<String>> {
+    Ok(store
+        .items()?
+        .into_iter()
+        .map(|item| normalize_link(&item.front.link))
+        .filter(|link| !link.is_empty())
+        .collect())
+}
+
+#[derive(Default)]
+struct SharedLinks {
+    state: Mutex<LinkState>,
+    changed: Notify,
+}
+
+#[derive(Default)]
+struct LinkState {
+    committed: HashSet<String>,
+    reserved: HashSet<String>,
+}
+
+impl SharedLinks {
+    fn new(committed: HashSet<String>) -> Self {
+        Self {
+            state: Mutex::new(LinkState {
+                committed,
+                ..Default::default()
+            }),
+            changed: Notify::new(),
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, LinkState> {
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+#[derive(Default)]
+struct LinkTransaction {
+    shared: Option<Arc<SharedLinks>>,
+    reserved: HashSet<String>,
+}
+
+impl LinkTransaction {
+    async fn reserve(&mut self, shared: &Arc<SharedLinks>, wanted: HashSet<String>) {
+        loop {
+            let changed = shared.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let mut state = shared.state();
+                if wanted.is_disjoint(&state.reserved) {
+                    self.reserved = wanted.difference(&state.committed).cloned().collect();
+                    state.reserved.extend(self.reserved.iter().cloned());
+                    self.shared = Some(shared.clone());
+                    return;
+                }
+            }
+            changed.await;
+        }
+    }
+
+    fn duplicate(&self, link: &str) -> bool {
+        !link.is_empty() && !self.reserved.contains(link)
+    }
+
+    fn commit(self) {
+        if let Some(shared) = &self.shared {
+            shared
+                .state()
+                .committed
+                .extend(self.reserved.iter().cloned());
+        }
+    }
+}
+
+impl Drop for LinkTransaction {
+    fn drop(&mut self) {
+        if let Some(shared) = &self.shared {
+            {
+                let mut state = shared.state();
+                for link in &self.reserved {
+                    state.reserved.remove(link);
+                }
+            }
+            shared.changed.notify_waiters();
+        }
+    }
+}
+
 async fn fetch_one(source: &Source, context: FetchOneContext<'_>) -> Result<SourceReport> {
+    let mut links = LinkTransaction::default();
     let mut transaction = (!context.options.dry_run)
         .then(|| SourceTransaction::new(context.store_root))
         .transpose()?;
-    let result = fetch_one_inner(source, context, transaction.as_mut()).await;
+    let result = fetch_one_inner(source, context, transaction.as_mut(), &mut links).await;
     match result {
         Ok(report) => {
             if let Some(transaction) = transaction {
                 transaction.commit();
             }
+            links.commit();
             Ok(report)
         }
         Err(error) => {
@@ -484,6 +600,7 @@ async fn fetch_one_inner(
     source: &Source,
     context: FetchOneContext<'_>,
     mut transaction: Option<&mut SourceTransaction>,
+    links: &mut LinkTransaction,
 ) -> Result<SourceReport> {
     let FetchOneContext {
         store,
@@ -545,33 +662,70 @@ async fn fetch_one_inner(
             let mut taken: HashSet<(String, String)> = HashSet::new();
             let mut added = 0;
             apply_first_import_limit(&mut items, &source.engine, options.max_items_per_source);
-            // Feeds list newest first; preserve oldest-first writes while original pages download
-            // concurrently. This keeps deterministic suffixes without making heavy mode serial.
+            // Assign paths in feed order before downloading so completion order cannot change
+            // collision suffixes or make a slow article hold up later downloads.
             let mut candidates = Vec::new();
-            for raw in items.into_iter().rev() {
-                let keys = dedupe_keys(&raw);
-                let known = keys.iter().any(|key| prospective.contains(key));
-                if known && !options.refresh {
-                    continue;
+            {
+                let archived = options.archived_links.state();
+                for raw in items.into_iter().rev() {
+                    let keys = dedupe_keys(&raw);
+                    let known = keys.iter().any(|key| prospective.contains(key));
+                    if known && !options.refresh {
+                        continue;
+                    }
+                    if !known && archived.committed.contains(&normalize_link(&raw.link)) {
+                        continue;
+                    }
+                    if !known {
+                        prospective.extend(keys.iter().cloned());
+                    }
+                    let existing_path = known
+                        .then(|| keys.iter().find_map(|key| existing_paths.get(key)).cloned())
+                        .flatten();
+                    if known && options.refresh && existing_path.is_none() {
+                        log::debug!(
+                            "skipping refresh for retained/deleted or unidentifiable item: {}",
+                            raw.link
+                        );
+                        continue;
+                    }
+                    candidates.push((raw, keys, known, existing_path));
                 }
-                if !known {
-                    prospective.extend(keys.iter().cloned());
-                }
-                let existing_path = known
-                    .then(|| keys.iter().find_map(|key| existing_paths.get(key)).cloned())
-                    .flatten();
-                if known && options.refresh && existing_path.is_none() {
-                    log::debug!(
-                        "skipping refresh for retained/deleted or unidentifiable item: {}",
-                        raw.link
-                    );
-                    continue;
-                }
-                candidates.push((raw, keys, known, existing_path));
             }
+            // Reserve the whole source together to avoid cycles between overlapping feeds.
+            // Disjoint sources keep downloading concurrently, with bounded article buffers.
+            let wanted = candidates
+                .iter()
+                .filter(|(_, _, known, _)| !known)
+                .map(|(raw, ..)| normalize_link(&raw.link))
+                .filter(|link| !link.is_empty())
+                .collect();
+            links.reserve(&options.archived_links, wanted).await;
+            candidates.retain(|(raw, _, known, _)| {
+                *known || !links.duplicate(&normalize_link(&raw.link))
+            });
+            let candidates = candidates
+                .into_iter()
+                .map(|(raw, keys, known, existing_path)| {
+                    let date = raw.created_at().unwrap_or(options.now).min(options.now);
+                    let dir = item_dir(slug, date);
+                    let stem = file_stem(date, &raw.title);
+                    let stem = if existing_path.is_none() && !options.refresh {
+                        let identity = keys.first().map(String::as_str).unwrap_or(&raw.link);
+                        unique_stem(&stem, identity, |stem| {
+                            store.stem_exists(&dir, stem)
+                                || taken.contains(&(dir.clone(), stem.to_string()))
+                        })
+                    } else {
+                        stem
+                    };
+                    taken.insert((dir, stem.clone()));
+                    (raw, keys, known, existing_path, stem)
+                })
+                .collect::<Vec<_>>();
             let mut enriched = stream::iter(candidates)
-                .map(|(raw, keys, known, existing_path)| async move {
-                    let raw = hydrate_new_mirror_companions(
+                .map(|(raw, keys, known, existing_path, stem)| async move {
+                    let mut raw = hydrate_new_mirror_companions(
                         raw,
                         known,
                         options.dry_run,
@@ -579,21 +733,61 @@ async fn fetch_one_inner(
                         source.images,
                     )
                     .await;
+                    if source.previews
+                        && let Ok(url) = url::Url::parse(&raw.link)
+                        && let Some(thumbnail) = sources::youtube::thumbnail(&url)
+                        && !raw
+                            .preview_candidates
+                            .iter()
+                            .any(|candidate| candidate.url == thumbnail)
+                    {
+                        raw.preview_candidates.push(preview::Candidate {
+                            url: thumbnail,
+                            alt: Some(raw.title.clone()),
+                        });
+                    }
                     let (mut raw, kind) =
                         heavy_content(&raw, source, client, cache_dir, article_failures).await;
                     if known {
                         raw.preview = None;
                         raw.images.clear();
-                    } else if !matches!(source.engine, Engine::Aggr { .. }) {
+                    }
+                    if !matches!(source.engine, Engine::Aggr { .. }) {
+                        let stored = existing_path
+                            .as_deref()
+                            .map(|path| store.read_item(path))
+                            .transpose()?;
+                        let has_stored_images = stored
+                            .as_ref()
+                            .is_some_and(|item| !item.front.images.is_empty());
                         if source.images
+                            && (!known || options.refresh && !has_stored_images)
+                            && raw.images.is_empty()
+                            && let Ok(base) = url::Url::parse(&raw.link)
+                            && let Some(poster) = options
+                                .media_fetcher
+                                .fetch_first(&sources::youtube::poster_candidates(&base), source)
+                                .await
+                        {
+                            raw.images.push(poster);
+                        }
+                        if (!known || options.refresh && !has_stored_images)
+                            && source.images
                             && raw.images.is_empty()
                             && let Some(html) = raw.content_html.as_deref()
                             && let Ok(base) = url::Url::parse(&raw.link)
                         {
-                            let candidates = media::body_candidates(html, &base);
+                            let candidates =
+                                media::article_candidates(html, &raw.preview_candidates, &base);
                             raw.images = options.media_fetcher.fetch(&candidates, source).await;
                         }
+                        let has_stored_preview = if let Some(item) = stored.as_ref() {
+                            store.read_preview(item)?.is_some()
+                        } else {
+                            false
+                        };
                         if source.previews
+                            && (!known || options.refresh && !has_stored_preview)
                             && raw.preview.is_none()
                             && let Ok(base) = url::Url::parse(&raw.link)
                         {
@@ -608,21 +802,15 @@ async fn fetch_one_inner(
                                 .await;
                         }
                     }
-                    (raw, kind, keys, known, existing_path)
+                    let (raw, mut planned) = prepare_item(raw, source, options, kind).await?;
+                    planned.stem = stem;
+                    Ok::<_, anyhow::Error>((raw, planned, keys, known, existing_path))
                 })
-                .buffered(options.article_concurrency);
-            while let Some((raw, content_kind, keys, known, existing_path)) = enriched.next().await
-            {
-                let mut planned = plan(&raw, source, options, content_kind);
+                .buffer_unordered(options.article_concurrency);
+            while let Some(result) = enriched.next().await {
+                let (raw, mut planned, keys, known, existing_path) = result?;
                 if let Some(existing_path) = existing_path.as_deref() {
                     use_existing_path(&mut planned, existing_path)?;
-                } else if !options.refresh {
-                    let dir = planned.dir.clone();
-                    let identity = keys.first().map(String::as_str).unwrap_or(&raw.link);
-                    planned.stem = unique_stem(&planned.stem, identity, |stem| {
-                        store.stem_exists(&dir, stem)
-                            || taken.contains(&(dir.clone(), stem.to_string()))
-                    });
                 }
                 if planned.html.is_some() {
                     planned.front.html = Some(format!("{}.html", planned.stem));
@@ -667,7 +855,6 @@ async fn fetch_one_inner(
                         images: &raw.images,
                     })?;
                 }
-                taken.insert((planned.dir, planned.stem));
                 if !known {
                     new_keys.extend(keys);
                 }
@@ -821,7 +1008,11 @@ async fn heavy_content(
     } else {
         ContentKind::None
     };
-    if source.content == ContentMode::Light || matches!(source.engine, Engine::Aggr { .. }) {
+    if source.content == ContentMode::Light
+        || matches!(source.engine, Engine::Aggr { .. })
+        || (raw.content_html.is_some()
+            && source.engine.url().is_some_and(sources::qwen::is_blog_url))
+    {
         return (raw.clone(), fallback);
     }
     let Ok(url) = url::Url::parse(&raw.link) else {
@@ -836,16 +1027,21 @@ async fn heavy_content(
         let cache = crate::cache::ArticleCache::new(cache_dir);
         let headers = http::source_headers(source, &url);
         let cached = cache.load(&url, headers)?;
-        let response = client
-            .get(http::Request {
-                url: &url,
-                headers,
-                etag: cached.as_ref().and_then(|entry| entry.etag.as_deref()),
-                last_modified: cached
-                    .as_ref()
-                    .and_then(|entry| entry.last_modified.as_deref()),
-            })
-            .await;
+        let request = client.get(http::Request {
+            url: &url,
+            headers,
+            etag: cached.as_ref().and_then(|entry| entry.etag.as_deref()),
+            last_modified: cached
+                .as_ref()
+                .and_then(|entry| entry.last_modified.as_deref()),
+        });
+        let response = if sources::youtube::is_video_url(&url) {
+            tokio::time::timeout(std::time::Duration::from_secs(8), request)
+                .await
+                .context("YouTube page request timed out")?
+        } else {
+            request.await
+        };
         let response = match response {
             Ok(http::Response::Ok(body)) => cache.store(&url, headers, &body)?,
             Ok(http::Response::NotModified) => {
@@ -863,7 +1059,7 @@ async fn heavy_content(
             anyhow::bail!("original page is not HTML");
         }
         let page = response.html_text();
-        if source.previews {
+        if source.previews || source.images {
             page_candidates = preview::html_candidate_groups(&page, &response.final_url);
         }
         match crate::threads::expand(&page, &response.final_url, source, client, &cache).await {
@@ -879,8 +1075,16 @@ async fn heavy_content(
         if let Some(extracted) = cache.extracted(&extraction_key, &response.final_url)? {
             return Ok(extracted);
         }
-        let extracted = content::extract_article_async(page, response.final_url.clone()).await?;
-        cache.store_extracted(&extraction_key, &response.final_url, &extracted)?;
+        let extracted = if sources::youtube::is_video_url(&url) {
+            sources::youtube::extract(&page, &url, raw.content_html.as_deref(), client).await
+        } else {
+            content::extract_article_async(page, response.final_url.clone()).await?
+        };
+        if !sources::youtube::is_video_url(&url)
+            || extracted.html != raw.content_html.as_deref().unwrap_or_default()
+        {
+            cache.store_extracted(&extraction_key, &response.final_url, &extracted)?;
+        }
         Ok(extracted)
     }
     .await;
@@ -888,7 +1092,7 @@ async fn heavy_content(
         Ok(extracted) => {
             let mut enriched = raw.clone();
             enriched.content_html = Some(extracted.html);
-            if source.previews {
+            if source.previews || source.images {
                 enriched.preview_candidates = preview::ordered_article_candidates(
                     &preview_candidates,
                     page_candidates,
@@ -968,6 +1172,29 @@ struct Planned {
     html: Option<String>,
 }
 
+async fn prepare_item(
+    raw: RawItem,
+    source: &Source,
+    options: &Options,
+    kind: ContentKind,
+) -> Result<(RawItem, Planned)> {
+    let permit = options
+        .preparation_limit
+        .clone()
+        .acquire_owned()
+        .await
+        .context("article preparation was closed")?;
+    let source = source.clone();
+    let options = options.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let planned = plan(&raw, &source, &options, kind);
+        (raw, planned)
+    })
+    .await
+    .context("preparing article content")
+}
+
 fn plan(raw: &RawItem, source: &Source, options: &Options, content_kind: ContentKind) -> Planned {
     // A future-dated entry would otherwise land in a directory that does not exist yet.
     let published = raw.published.map(|date| date.min(options.now));
@@ -982,7 +1209,7 @@ fn plan(raw: &RawItem, source: &Source, options: &Options, content_kind: Content
         Some(html) => content::to_markdown(html, base.as_ref()),
         None => raw.summary.clone().unwrap_or_default(),
     };
-    let body = content::strip_leading_metadata(&body, published, &source.slug);
+    let body = content::strip_article_metadata(&body, published, &source.slug);
     let (html, truncated) = match &raw.content_html {
         Some(html) if options.html && source.html => {
             let (stored, truncated) = content::storage_html(html, options.html_max_bytes);
@@ -1242,11 +1469,13 @@ mod tests {
 
     fn options() -> Options {
         Options {
+            archived_links: Arc::default(),
             dry_run: false,
             refresh: false,
             html: true,
             html_max_bytes: 1000,
             article_concurrency: 4,
+            preparation_limit: Arc::new(Semaphore::new(2)),
             max_items_per_source: 200,
             preview_fetcher: Arc::new(preview::Fetcher::new().unwrap()),
             media_fetcher: Arc::new(
@@ -1323,6 +1552,269 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slow_first_article_does_not_block_later_downloads_or_change_filenames() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+        crate::http::install_crypto_provider();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let release_first = Arc::new(Semaphore::new(0));
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let gate = release_first.clone();
+        let articles = tokio::spawn(async move {
+            let mut responses = JoinSet::new();
+            for _ in 0..3 {
+                let (socket, _) = listener.accept().await.unwrap();
+                let requests = requests.clone();
+                let gate = gate.clone();
+                responses.spawn(async move {
+                    let mut socket = BufReader::new(socket);
+                    let mut line = String::new();
+                    socket.read_line(&mut line).await.unwrap();
+                    let path = line.split_whitespace().nth(1).unwrap().to_string();
+                    loop {
+                        line.clear();
+                        socket.read_line(&mut line).await.unwrap();
+                        if line == "\r\n" { break; }
+                    }
+                    requests.send(path.clone()).unwrap();
+                    if path == "/first" {
+                        let _permit = gate.acquire().await.unwrap();
+                    }
+                    let body = format!("<article><h1>Same</h1><p>This is the complete article for {path}, with enough original readable text to preserve its contents.</p><p>The next paragraph supplies further relevant detail for this article.</p></article>");
+                    socket.get_mut().write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                });
+            }
+            while responses.join_next().await.is_some() {}
+        });
+        let server = MockServer::start_async().await;
+        server.mock_async(|when, then| {
+            when.path("/feed");
+            then.status(200).header("content-type", "application/feed+json").json_body(serde_json::json!({
+                "version": "https://jsonfeed.org/version/1.1", "title": "Slow article test",
+                "items": ([("third", 3), ("second", 2), ("first", 1)].into_iter().map(|(path, hour)| serde_json::json!({
+                    "id": path, "title": "Same", "url": format!("{base}/{path}"),
+                    "date_published": format!("2026-09-01T0{hour}:00:00Z"), "content_text": "Excerpt"
+                })).collect::<Vec<_>>())
+            }));
+        }).await;
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path());
+        let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let configured = Source {
+            images: false,
+            engine: Engine::Feed {
+                url: Url::parse(&server.url("/feed")).unwrap(),
+            },
+            ..source()
+        };
+        let test_options = Options {
+            article_concurrency: 2,
+            ..options()
+        };
+        let failures = ArticleFailures::default();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(
+                fetch_one(
+                    &configured,
+                    FetchOneContext {
+                        store: &store,
+                        store_root: root.path(),
+                        client: &client,
+                        cache_dir: cache.path(),
+                        options: &test_options,
+                        article_failures: &failures,
+                        state_policy: StatePolicy::PersistentBranch,
+                    }
+                ),
+                async {
+                    while let Some(path) = received.recv().await {
+                        if path == "/third" {
+                            release_first.add_permits(1);
+                            return;
+                        }
+                    }
+                    panic!("third article was never requested");
+                }
+            )
+        })
+        .await;
+        articles.abort();
+        let (report, ()) =
+            result.expect("third article must start while the first is still blocked");
+        assert_eq!(report.unwrap().added, 3);
+        let stored = store.items().unwrap();
+        let first = stored
+            .iter()
+            .find(|item| item.front.link.ends_with("/first"))
+            .unwrap();
+        assert!(first.path.ends_with("/2026-09-01-same"), "{}", first.path);
+        assert_eq!(
+            stored
+                .iter()
+                .map(|item| &item.path)
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn link_reservations_wait_only_for_overlap_and_retry_after_rollback() {
+        use futures_util::FutureExt as _;
+
+        let shared = Arc::new(SharedLinks::default());
+        let mut first = LinkTransaction::default();
+        first.reserve(&shared, HashSet::from(["a".into()])).await;
+        let mut disjoint = LinkTransaction::default();
+        disjoint
+            .reserve(&shared, HashSet::from(["b".into()]))
+            .now_or_never()
+            .expect("unrelated articles must remain concurrent");
+        disjoint.commit();
+        let waiting_shared = shared.clone();
+        let waiting = tokio::spawn(async move {
+            let mut next = LinkTransaction::default();
+            next.reserve(&waiting_shared, HashSet::from(["a".into(), "b".into()]))
+                .await;
+            assert!(!next.duplicate("a"));
+            assert!(next.duplicate("b"));
+            next.commit();
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        drop(first);
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            shared.state().committed,
+            HashSet::from(["a".into(), "b".into()])
+        );
+        assert!(shared.state().reserved.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_sources_store_a_shared_article_once_and_duplicates_leave_no_trace() {
+        crate::http::install_crypto_provider();
+        let server = MockServer::start_async().await;
+        for (path, id, link) in [
+            (
+                "/publisher",
+                "publisher-id",
+                "https://www.example.com/article/",
+            ),
+            (
+                "/aggregator",
+                "hn-id",
+                "http://example.com/article?utm_source=hn#comments",
+            ),
+        ] {
+            server
+                .mock_async(|when, then| {
+                    when.path(path);
+                    then.status(200)
+                        .header("content-type", "application/feed+json")
+                        .json_body(serde_json::json!({
+                            "version": "https://jsonfeed.org/version/1.1",
+                            "title": id,
+                            "items": [{"id": id, "title": id, "url": link, "content_text": "Body"}]
+                        }));
+                })
+                .await;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path());
+        let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let configured = |slug: &str| Source {
+            slug: slug.into(),
+            content: ContentMode::Light,
+            images: false,
+            engine: Engine::Feed {
+                url: Url::parse(&server.url(format!("/{slug}"))).unwrap(),
+            },
+            ..source()
+        };
+        let publisher = configured("publisher");
+        let aggregator = configured("aggregator");
+        let test_options = options();
+        let failures = ArticleFailures::default();
+        let context = FetchOneContext {
+            store: &store,
+            store_root: root.path(),
+            client: &client,
+            cache_dir: cache.path(),
+            options: &test_options,
+            article_failures: &failures,
+            state_policy: StatePolicy::PersistentBranch,
+        };
+        let dry_options = Options {
+            dry_run: true,
+            ..options()
+        };
+        let dry_context = FetchOneContext {
+            options: &dry_options,
+            ..context
+        };
+        let (first, second) = tokio::join!(
+            fetch_one(&publisher, dry_context),
+            fetch_one(&aggregator, dry_context)
+        );
+        assert_eq!(first.unwrap().added + second.unwrap().added, 1);
+        assert!(store.items().unwrap().is_empty());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        let (first, second) = tokio::join!(
+            fetch_one(&publisher, context),
+            fetch_one(&aggregator, context)
+        );
+        assert_eq!(first.unwrap().added + second.unwrap().added, 1);
+        let archived = store.items().unwrap();
+        assert_eq!(archived.len(), 1);
+        let skipped = if archived[0].front.source == publisher.slug {
+            &aggregator
+        } else {
+            &publisher
+        };
+        assert!(!root.path().join("sources").join(&skipped.slug).exists());
+        let next_options = Options {
+            archived_links: Arc::new(SharedLinks::new(archived_links(&store).unwrap())),
+            ..options()
+        };
+        let next_context = FetchOneContext {
+            options: &next_options,
+            ..context
+        };
+        assert_eq!(fetch_one(skipped, next_context).await.unwrap().added, 0);
+        assert!(!root.path().join("sources").join(&skipped.slug).exists());
+        let owner = if skipped.slug == publisher.slug {
+            &aggregator
+        } else {
+            &publisher
+        };
+        let refresh_options = Options {
+            refresh: true,
+            ..next_options.clone()
+        };
+        assert_eq!(
+            fetch_one(
+                owner,
+                FetchOneContext {
+                    options: &refresh_options,
+                    ..context
+                }
+            )
+            .await
+            .unwrap()
+            .added,
+            1
+        );
+        assert_eq!(store.items().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn failed_source_rolls_back_earlier_items_and_seen_state() {
         crate::http::install_crypto_provider();
         let server = MockServer::start_async().await;
@@ -1373,7 +1865,10 @@ mod tests {
             url: Url::parse(&server.url("/feed.json")).unwrap(),
         };
 
-        let test_options = options();
+        let test_options = Options {
+            article_concurrency: 1,
+            ..options()
+        };
         let failures = ArticleFailures::default();
         let error = match fetch_one(
             &configured,
@@ -1405,7 +1900,26 @@ mod tests {
         );
         assert!(!root.path().join("sources/blog/seen.txt").exists());
         assert!(invalid.is_file());
-        feed.assert_calls_async(1).await;
+        assert!(test_options.archived_links.state().committed.is_empty());
+        assert!(test_options.archived_links.state().reserved.is_empty());
+        configured.slug = "working".into();
+        let retry = fetch_one(
+            &configured,
+            FetchOneContext {
+                store: &store,
+                store_root: root.path(),
+                client: &client,
+                cache_dir: cache.path(),
+                options: &test_options,
+                article_failures: &failures,
+                state_policy: StatePolicy::PersistentBranch,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(retry.added, 2);
+        assert_eq!(store.items().unwrap().len(), 2);
+        feed.assert_calls_async(2).await;
     }
 
     #[test]
@@ -1475,6 +1989,25 @@ mod tests {
             plan(&raw, &source(), &options(), ContentKind::Extracted).body,
             "The actual opening.\n"
         );
+    }
+
+    #[test]
+    fn plan_cleans_boundary_metadata_for_feed_extracted_and_summary_content() {
+        for kind in [ContentKind::Feed, ContentKind::Extracted, ContentKind::None] {
+            let raw = RawItem {
+                title: "Article".into(),
+                link: "https://publisher.example/article".into(),
+                content_html: (kind != ContentKind::None).then(|| {
+                    "<p>Actual article.</p><p>[<a href=\"#comments\">0 comments</a>]</p>".into()
+                }),
+                summary: Some("Actual article.\n\n[0 comments]\n".into()),
+                ..Default::default()
+            };
+            assert_eq!(
+                plan(&raw, &source(), &options(), kind).body,
+                "Actual article.\n"
+            );
+        }
     }
 
     #[test]
@@ -1556,6 +2089,70 @@ mod tests {
             2,
         );
         assert_eq!(aggr_items.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn light_youtube_videos_keep_feed_content_without_waiting_for_a_page_request() {
+        use futures_util::FutureExt as _;
+
+        crate::http::install_crypto_provider();
+        let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        for link in [
+            "https://www.youtube.com/watch?v=video",
+            "https://youtu.be/video",
+        ] {
+            let raw = RawItem {
+                title: "Video".into(),
+                link: link.into(),
+                content_html: Some("<p>Video description</p>".into()),
+                ..Default::default()
+            };
+            let mut light = source();
+            light.content = ContentMode::Light;
+            let (kept, kind) = heavy_content(
+                &raw,
+                &light,
+                &client,
+                cache.path(),
+                &ArticleFailures::default(),
+            )
+            .now_or_never()
+            .expect("YouTube metadata must not await an article request");
+            assert_eq!(kind, ContentKind::Feed);
+            assert_eq!(kept.content_html, raw.content_html);
+        }
+        assert_eq!(fs::read_dir(cache.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn qwen_full_api_articles_do_not_request_javascript_shells() {
+        use futures_util::FutureExt as _;
+        crate::http::install_crypto_provider();
+        let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let mut source = source();
+        source.content = ContentMode::Heavy;
+        source.engine = Engine::Feed {
+            url: Url::parse("https://qwen.ai/blog").unwrap(),
+        };
+        let raw = RawItem {
+            link: "https://qwen.ai/blog?id=release".into(),
+            content_html: Some("<p>The complete API article.</p>".into()),
+            ..Default::default()
+        };
+        let (kept, kind) = heavy_content(
+            &raw,
+            &source,
+            &client,
+            cache.path(),
+            &ArticleFailures::default(),
+        )
+        .now_or_never()
+        .expect("full Qwen API content must not await a page request");
+        assert_eq!(kind, ContentKind::Feed);
+        assert_eq!(kept.content_html, raw.content_html);
+        assert_eq!(fs::read_dir(cache.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]

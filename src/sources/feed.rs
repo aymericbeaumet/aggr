@@ -1,6 +1,8 @@
 //! RSS / Atom / JSON Feed via feed-rs, with conditional GET and a body-hash short circuit.
 
-use anyhow::{Context as _, Result};
+use std::io::Read;
+
+use anyhow::{Context as _, Result, bail};
 use feed_rs::model::{Entry, Feed, Link, Text};
 use url::Url;
 
@@ -11,6 +13,9 @@ use crate::http::{Request, Response};
 use crate::model::{RawItem, sha1_hex};
 
 pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
+    if url.scheme() == "file" {
+        return fetch_local(url, source, ctx).await;
+    }
     let remembered = (ctx.state.identity == source.identity)
         .then_some(ctx.state.resolved_url.as_deref())
         .flatten()
@@ -38,6 +43,83 @@ pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetc
         }
     };
     interpret(response, source, ctx, previous).await
+}
+
+async fn fetch_local(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
+    let path = url
+        .to_file_path()
+        .map_err(|()| anyhow::anyhow!("invalid local feed path: {url}"))?;
+    let max_body_bytes = ctx.client.max_body_bytes();
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let file = std::fs::File::open(&path).context("opening local feed")?;
+        let mut bytes = Vec::new();
+        file.take((max_body_bytes as u64).saturating_add(1))
+            .read_to_end(&mut bytes)
+            .context("reading local feed")?;
+        if bytes.len() > max_body_bytes {
+            bail!("body exceeds {max_body_bytes} bytes");
+        }
+        Ok(bytes)
+    })
+    .await
+    .context("reading local feed")??;
+    let validators = Validators {
+        body_hash: Some(sha1_hex(&bytes)),
+        resolved_url: Some(url.to_string()),
+        ..Default::default()
+    };
+    if ctx.state.identity == source.identity && validators.body_hash == ctx.state.body_hash {
+        return Ok(Fetch::Unchanged { validators });
+    }
+    let feed = parse(&bytes, url)?;
+    let base = local_document_base(&feed).unwrap_or_else(|| url.clone());
+    let feed = if base == *url {
+        feed
+    } else {
+        parse(&bytes, &base)?
+    };
+    let site_url = pick_link(&feed.links)
+        .filter(|link| link.rel.as_deref() != Some("self") && is_web_url(&link.href))
+        .map(|link| link.href.clone());
+    let mut result = changed(feed, &base, validators, &bytes);
+    if let Fetch::Changed { meta, items, .. } = &mut result {
+        meta.site_url = site_url;
+        items.retain(|item| is_web_url(&item.link));
+        for item in items {
+            let thumbnail = item
+                .extra
+                .remove("thumbnail")
+                .and_then(|value| value.as_str().and_then(|value| base.join(value).ok()))
+                .filter(|url| is_web_url(url.as_str()));
+            if let Some(thumbnail) = thumbnail {
+                item.extra
+                    .insert("thumbnail".into(), thumbnail.to_string().into());
+            }
+            item.preview_candidates
+                .retain(|candidate| is_web_url(&candidate.url));
+        }
+    }
+    Ok(result)
+}
+
+fn is_web_url(value: &str) -> bool {
+    Url::parse(value).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+fn local_document_base(feed: &Feed) -> Option<Url> {
+    // A saved feed's public endpoint preserves relative article and image links.
+    feed.links
+        .iter()
+        .filter(|link| {
+            is_web_url(&link.href)
+                && matches!(link.rel.as_deref(), None | Some("self" | "alternate"))
+        })
+        .min_by_key(|link| match link.rel.as_deref() {
+            Some("self") => 0,
+            None | Some("alternate") => 1,
+            _ => 2,
+        })
+        .and_then(|link| Url::parse(&link.href).ok())
 }
 
 async fn fetch_fresh(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
@@ -292,6 +374,9 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<RawItem> {
         .join(&link)
         .map(|url| url.to_string())
         .unwrap_or(link);
+    if Url::parse(&link).is_ok_and(|url| super::youtube::is_short_url(&url)) {
+        return None;
+    }
     let title = entry
         .title
         .as_ref()
@@ -299,6 +384,16 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<RawItem> {
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| untitled(&link));
 
+    let video_description = Url::parse(&link)
+        .is_ok_and(|url| super::youtube::is_video_url(&url))
+        .then(|| {
+            entry
+                .media
+                .iter()
+                .filter_map(|media| media.description.as_ref())
+                .find(|description| !description.content.trim().is_empty())
+        })
+        .flatten();
     let content_html = entry
         .content
         .as_ref()
@@ -320,13 +415,31 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<RawItem> {
                 .filter(|summary| is_html(summary))
                 .map(|summary| summary.content.clone())
         })
-        .filter(|html| !html.trim().is_empty());
+        .filter(|html| !html.trim().is_empty())
+        .or_else(|| {
+            video_description.map(|description| {
+                if is_html(description) {
+                    description.content.clone()
+                } else {
+                    text_to_html(&description.content)
+                }
+            })
+        });
 
     let summary = entry
         .summary
         .as_ref()
         .map(text_of)
-        .filter(|text| !text.is_empty());
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            video_description.map(|description| {
+                if is_html(description) {
+                    text_of(description)
+                } else {
+                    description.content.clone()
+                }
+            })
+        });
 
     let mut extra = std::collections::BTreeMap::new();
     if let Some(thumbnail) = entry
@@ -515,6 +628,35 @@ line two</content>
     }
 
     #[test]
+    fn youtube_uses_media_description_and_drops_shorts() {
+        let xml = r#"<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/">
+          <title>Videos</title>
+          <entry>
+            <id>yt:video:long</id><title>Full video</title>
+            <link href="https://www.youtube.com/watch?v=long"/>
+            <media:group><media:description type="plain">A &lt; B &amp; C
+
+Second paragraph.</media:description></media:group>
+          </entry>
+          <entry>
+            <id>yt:video:short</id><title>Short video</title>
+            <link href="https://www.youtube.com/shorts/short"/>
+          </entry>
+        </feed>"#;
+        let (_, items) = parse(xml, "https://example.com/feed.xml");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Full video");
+        assert_eq!(
+            items[0].content_html.as_deref(),
+            Some("<p>A &lt; B &amp; C</p>\n<p>Second paragraph.</p>")
+        );
+        assert_eq!(
+            items[0].summary.as_deref(),
+            Some("A < B & C\n\nSecond paragraph.")
+        );
+    }
+
+    #[test]
     fn converts_rss() {
         let (meta, items) = parse(RSS, "https://example.com/feed.xml");
         assert_eq!(meta.title.as_deref(), Some("Example & Co"));
@@ -592,6 +734,223 @@ line two</content>
             content: crate::config::ContentMode::Light,
             engine: crate::config::Engine::Feed { url },
         }
+    }
+
+    #[tokio::test]
+    async fn local_feed_documents_share_parsing_and_body_hash_validation() {
+        let directory = tempfile::tempdir().unwrap();
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let json = r#"{"version":"https://jsonfeed.org/version/1.1","title":"JSON","home_page_url":"https://example.com/","feed_url":"https://example.com/feed.json","items":[{"id":"post","url":"https://example.com/post","content_text":"Body","image":"/image.jpg"}]}"#;
+        for (name, body, expected_count) in [
+            ("rss.xml", RSS, 2),
+            ("atom.xml", ATOM, 1),
+            ("feed.json", json, 1),
+        ] {
+            let path = directory.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            let url = Url::from_file_path(&path).unwrap();
+            let source = source(url.clone());
+            let mut state = crate::store::SourceState::default();
+            let first = fetch(
+                &url,
+                &source,
+                &Context {
+                    client: &client,
+                    state: &state,
+                    cache_dir: directory.path(),
+                },
+            )
+            .await
+            .unwrap();
+            let Fetch::Changed {
+                validators,
+                items,
+                meta,
+            } = first
+            else {
+                panic!("expected local feed items")
+            };
+            assert_eq!(items.len(), expected_count);
+            assert_eq!(meta.site_url.as_deref(), Some("https://example.com/"));
+            assert!(
+                items
+                    .iter()
+                    .all(|item| item.link.starts_with("https://example.com/"))
+            );
+            assert_eq!(validators.body_hash, Some(sha1_hex(body.as_bytes())));
+            assert_eq!(validators.resolved_url.as_deref(), Some(url.as_str()));
+            if name == "feed.json" {
+                assert_eq!(
+                    items[0].preview_candidates[0].url,
+                    "https://example.com/image.jpg"
+                );
+            }
+            validators.apply(&mut state);
+            state.identity = source.identity.clone();
+            let second = fetch(
+                &url,
+                &source,
+                &Context {
+                    client: &client,
+                    state: &state,
+                    cache_dir: directory.path(),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(second, Fetch::Unchanged { .. }));
+            std::fs::write(
+                &path,
+                body.replace("Example", "Changed")
+                    .replace("Atom", "Changed")
+                    .replace("JSON", "Changed"),
+            )
+            .unwrap();
+            let third = fetch(
+                &url,
+                &source,
+                &Context {
+                    client: &client,
+                    state: &state,
+                    cache_dir: directory.path(),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(third, Fetch::Changed { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn local_feed_without_public_base_drops_filesystem_article_links() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("feed.xml");
+        let body = RSS.replace("<link>https://example.com/</link>", "");
+        std::fs::write(&path, body).unwrap();
+        let url = Url::from_file_path(&path).unwrap();
+        let source = source(url.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let state = crate::store::SourceState::default();
+        let Fetch::Changed { items, meta, .. } = fetch(
+            &url,
+            &source,
+            &Context {
+                client: &client,
+                state: &state,
+                cache_dir: directory.path(),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected local feed items")
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].link, "https://example.com/first");
+        assert!(meta.site_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn local_feed_without_public_base_drops_filesystem_media_links() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("feed.xml");
+        let body = ATOM
+            .replace(
+                "<link rel=\"self\" href=\"https://example.com/feed.xml\"/>",
+                "",
+            )
+            .replace(
+                "<link rel=\"alternate\" type=\"text/html\" href=\"https://example.com/\"/>",
+                "",
+            )
+            .replace("https://example.com/a.jpg", "image.jpg");
+        std::fs::write(&path, body).unwrap();
+        let url = Url::from_file_path(&path).unwrap();
+        let source = source(url.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let state = crate::store::SourceState::default();
+        let Fetch::Changed { items, .. } = fetch(
+            &url,
+            &source,
+            &Context {
+                client: &client,
+                state: &state,
+                cache_dir: directory.path(),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected local feed items")
+        };
+        assert_eq!(items.len(), 1);
+        assert!(!items[0].extra.contains_key("thumbnail"));
+        assert!(items[0].preview_candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_feed_read_errors_do_not_expose_filesystem_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing.xml");
+        let url = Url::from_file_path(&path).unwrap();
+        let source = source(url.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let state = crate::store::SourceState::default();
+        let error = fetch(
+            &url,
+            &source,
+            &Context {
+                client: &client,
+                state: &state,
+                cache_dir: directory.path(),
+            },
+        )
+        .await
+        .err()
+        .expect("missing local file must fail");
+        let message = format!("{error:#}");
+        assert!(message.contains("opening local feed"));
+        assert!(!message.contains(directory.path().to_str().unwrap()));
+        assert!(!message.contains("file://"));
+    }
+
+    #[test]
+    fn local_document_base_prefers_the_public_feed_endpoint() {
+        let url = Url::parse("file:///tmp/feed.xml").unwrap();
+        let atom = ATOM.replace(
+            "https://example.com/feed.xml",
+            "https://example.com/news/feed.xml",
+        );
+        let feed = super::parse(atom.as_bytes(), &url).unwrap();
+        assert_eq!(
+            local_document_base(&feed).unwrap().as_str(),
+            "https://example.com/news/feed.xml"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_feed_documents_enforce_the_configured_body_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("feed.xml");
+        std::fs::write(&path, RSS).unwrap();
+        let url = Url::from_file_path(&path).unwrap();
+        let source = source(url.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig {
+            max_body_bytes: 64,
+            ..Default::default()
+        })
+        .unwrap();
+        let state = crate::store::SourceState::default();
+        let result = fetch(
+            &url,
+            &source,
+            &Context {
+                client: &client,
+                state: &state,
+                cache_dir: directory.path(),
+            },
+        )
+        .await;
+        let error = result.err().expect("oversized local feed must fail");
+        assert!(format!("{error:#}").contains("body exceeds 64 bytes"));
     }
 
     #[test]

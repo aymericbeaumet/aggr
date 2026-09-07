@@ -226,16 +226,25 @@ pub async fn run_with_reload(
     // manual edit.
     let pending_watcher = prepare_watch(&project, &state)?;
     let initializing = async {
-        match refresh(project.clone(), &args.fetch, &build_args, &state, true).await {
-            Ok(rebuilt) => {
-                println!("ready: {url}");
-                if rebuilt {
-                    let _ = state.reload.send(());
-                }
-            }
-            Err(err) => eprintln!("initial build failed: {err:#}"),
+        match refresh(project.clone(), &args.fetch, &build_args, &state, false).await {
+            Ok(_) => println!("cached articles ready: {url}"),
+            Err(err) => eprintln!("cached build failed: {err:#}"),
         }
-        let _watcher = pending_watcher.start(&project, args, state);
+        let project = match Project::load(&project.config_path).await {
+            Ok(resolved) => {
+                let resolved = Arc::new(resolved);
+                match refresh(resolved.clone(), &args.fetch, &build_args, &state, true).await {
+                    Ok(_) => println!("ready: {url}"),
+                    Err(err) => eprintln!("initial build failed: {err:#}"),
+                }
+                resolved
+            }
+            Err(err) => {
+                eprintln!("initial source resolution failed: {err:#}");
+                project.clone()
+            }
+        };
+        let _watcher = pending_watcher.start(project, args, state)?;
         std::future::pending::<Result<()>>().await
     };
     let result = tokio::select! {
@@ -258,7 +267,6 @@ async fn refresh(
     state: &DevState,
     sync_sources: bool,
 ) -> Result<bool> {
-    let base_url = build::base_url(&project, build_args)?;
     let worktree = Worktree::ephemeral(state.data.clone());
     let visible_change = if sync_sources {
         let report = sync::run_dev(&project, &worktree, fetch_args, &state.cache).await?;
@@ -278,8 +286,66 @@ async fn refresh(
         false
     };
     let store = crate::store::Store::open(&state.data);
+    let discussions =
+        crate::discussions::cached(&project.config.networks, &store.items()?, &state.cache);
+    if sync_sources {
+        render_with_discussion_refresh(
+            project.clone(),
+            build_args,
+            state,
+            discussions,
+            visible_change,
+            build::resolve_discussions(&project, &store, &state.cache, Utc::now()),
+        )
+        .await
+    } else {
+        render_snapshot(project, build_args, state, discussions, visible_change).await
+    }
+}
+
+async fn render_with_discussion_refresh(
+    project: Arc<Project>,
+    build_args: &BuildArgs,
+    state: &DevState,
+    cached: crate::discussions::ResolutionSet,
+    visible_change: bool,
+    fresh: impl std::future::Future<Output = Result<crate::discussions::ResolutionSet>>,
+) -> Result<bool> {
+    let previous = cached.fingerprint();
+    let rebuilt =
+        render_snapshot(project.clone(), build_args, state, cached, visible_change).await?;
+    if !project
+        .config
+        .networks
+        .iter()
+        .any(|network| network.provider.is_some())
+    {
+        return Ok(rebuilt);
+    }
+    println!("articles ready; refreshing discussion links in the background…");
+    let discussions = match fresh.await {
+        Ok(discussions) => discussions,
+        Err(error) => {
+            log::warn!("discussion refresh: {error:#}");
+            return Ok(rebuilt);
+        }
+    };
+    if discussions.fingerprint() == previous {
+        return Ok(rebuilt);
+    }
+    let enriched = render_snapshot(project, build_args, state, discussions, false).await?;
+    Ok(rebuilt || enriched)
+}
+
+async fn render_snapshot(
+    project: Arc<Project>,
+    build_args: &BuildArgs,
+    state: &DevState,
+    discussions: crate::discussions::ResolutionSet,
+    visible_change: bool,
+) -> Result<bool> {
+    let base_url = build::base_url(&project, build_args)?;
     let now = Utc::now();
-    let discussions = build::resolve_discussions(&project, &store, &state.cache, now).await?;
     let build_args = build_args.clone();
     let data = state.data.clone();
     let cache = state.cache.clone();
@@ -315,6 +381,7 @@ async fn refresh(
             .site
             .replace_from(&state.staging, &state.cached)
             .await?;
+        let _ = state.reload.send(());
     }
     Ok(rebuilt)
 }
@@ -423,20 +490,26 @@ fn prepare_watch(project: &Project, state: &DevState) -> Result<PendingWatcher> 
 }
 
 impl PendingWatcher {
-    fn start(self, project: &Project, args: &DevArgs, state: DevState) -> DevWatcher {
+    fn start(self, project: Arc<Project>, args: &DevArgs, state: DevState) -> Result<DevWatcher> {
         let Self {
             watcher,
             events,
             mut changes,
             paths,
         } = self;
-        let config_path = project.config_path.clone();
+        let next_paths = WatchPaths::new(&project, &state)?;
+        let watcher = if next_paths != paths {
+            create_watcher(&events, &next_paths)?
+        } else {
+            watcher
+        };
         let build_args = args.build_args();
         let fetch_args = args.fetch.clone();
         let task = tokio::spawn(async move {
             // Kept in the task so aborting it synchronously drops the native watcher too.
             let mut active_watcher = watcher;
-            let mut active_paths = paths;
+            let mut active_paths = next_paths;
+            let mut active_project = project;
             while let Some(event) = changes.recv().await {
                 let Ok(event) = event else { continue };
                 if !rebuild_event(event.kind) {
@@ -469,28 +542,34 @@ impl PendingWatcher {
                     .iter()
                     .any(|path| active_paths.configs.contains(path));
                 let result: Result<bool> = async {
-                    let project = Arc::new(Project::load(&config_path).await?);
+                    let project = reload_project(active_project.clone(), sync_sources).await?;
                     let next_paths = WatchPaths::new(&project, &state)?;
                     if next_paths != active_paths {
                         let next_watcher = create_watcher(&events, &next_paths)?;
                         active_watcher = next_watcher;
                         active_paths = next_paths;
                     }
+                    active_project = project.clone();
                     refresh(project, &fetch_args, &build_args, &state, sync_sources).await
                 }
                 .await;
                 match result {
-                    Ok(true) => {
-                        println!("reloaded");
-                        let _ = state.reload.send(());
-                    }
+                    Ok(true) => println!("reloaded"),
                     Ok(false) => println!("already current"),
                     Err(err) => eprintln!("build failed: {err:#}"),
                 }
             }
             drop(active_watcher);
         });
-        DevWatcher { task }
+        Ok(DevWatcher { task })
+    }
+}
+
+async fn reload_project(project: Arc<Project>, config_changed: bool) -> Result<Arc<Project>> {
+    if config_changed {
+        Ok(Arc::new(Project::load(&project.config_path).await?))
+    } else {
+        Ok(project)
     }
 }
 
@@ -872,6 +951,225 @@ mod tests {
         assert_eq!(site.response("/", "/").await.unwrap().1, b"second");
         assert!(site.response("/", "/404.html").await.is_none());
         assert_eq!(site.response("/", "/search.json").await.unwrap().1, b"[]");
+    }
+
+    #[tokio::test]
+    async fn theme_refresh_preserves_resolved_remote_sources_without_probing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(tmp.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let server = httpmock::MockServer::start_async().await;
+        let collection = server
+            .mock_async(|when, then| {
+                when.path("/subscriptions.opml");
+                then.status(200).body(format!(
+                    "<opml version=\"2.0\"><body><outline xmlUrl=\"{}/feed\"/></body></opml>",
+                    server.base_url(),
+                ));
+            })
+            .await;
+        let feed = server.mock_async(|when, then| {
+            when.path("/feed");
+            then.status(200).body("<rss version=\"2.0\"><channel><title>Feed</title><link>https://example.com/</link></channel></rss>");
+        }).await;
+        let config_path = tmp.path().join("aggr.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[[sources]]\nurl = \"{}/subscriptions.opml\"\n",
+                server.base_url(),
+            ),
+        )
+        .unwrap();
+        let project = Arc::new(Project::load(&config_path).await.unwrap());
+        assert_eq!(project.sources.len(), 1);
+        assert_eq!(project.sources[0].engine.url().unwrap().path(), "/feed");
+        collection.assert_calls_async(1).await;
+        feed.assert_calls_async(1).await;
+        let retained = reload_project(project.clone(), false).await.unwrap();
+        assert!(Arc::ptr_eq(&project, &retained));
+        collection.assert_calls_async(1).await;
+        feed.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn local_refresh_builds_retained_articles_without_fetching_sources() {
+        use crate::model::{FrontMatter, file_stem, item_dir};
+        use crate::store::{NewItem, Store};
+
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(tmp.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let server = httpmock::MockServer::start_async().await;
+        let feed = server
+            .mock_async(|when, then| {
+                when.path("/feed");
+                then.status(500);
+            })
+            .await;
+        let config_path = tmp.path().join("aggr.toml");
+        std::fs::write(&config_path, format!(
+            "[site]\npwa = false\n[[sources]]\nslug = \"blog\"\nurl = \"{}/feed\"\n[[networks]]\nprovider = \"hackernews\"\n",
+            server.base_url(),
+        )).unwrap();
+        let project = Arc::new(Project::load_offline(&config_path).await.unwrap());
+        let retained = reload_project(project.clone(), false).await.unwrap();
+        assert!(Arc::ptr_eq(&project, &retained));
+        let (reload, _) = broadcast::channel(16);
+        let state = DevState {
+            data: tmp.path().join("data"),
+            cache: tmp.path().join("cache"),
+            cached: tmp.path().join("site"),
+            staging: tmp.path().join("staging"),
+            site: MemorySite::loading(),
+            reload,
+        };
+        let store = Store::open(&state.data);
+        store.bootstrap().unwrap();
+        let date = Utc::now();
+        let front = FrontMatter {
+            title: "Retained article".into(),
+            link: "https://example.test/article".into(),
+            source: "blog".into(),
+            first_seen: date,
+            ..Default::default()
+        };
+        store
+            .write_item(NewItem {
+                dir: &item_dir("blog", date),
+                stem: &file_stem(date, &front.title),
+                front: &front,
+                body: "Already captured before the previous run stopped.",
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let fetch = FetchArgs::default();
+        let build = BuildArgs::default();
+        assert!(
+            refresh(project.clone(), &fetch, &build, &state, false)
+                .await
+                .unwrap()
+        );
+        let page = state.site.response("/", "/").await.unwrap().1;
+        assert!(
+            String::from_utf8(page)
+                .unwrap()
+                .contains("Retained article")
+        );
+        assert!(
+            !state.cache.join("discussions-v1").exists(),
+            "local rendering must not initiate discussion resolution"
+        );
+        assert!(
+            !refresh(project, &fetch, &build, &state, false)
+                .await
+                .unwrap()
+        );
+        feed.assert_calls_async(0).await;
+
+        let project = Arc::new(Project::load_offline(&config_path).await.unwrap());
+        let front = FrontMatter {
+            title: "Newly synced article".into(),
+            link: "https://example.test/fresh".into(),
+            ..front
+        };
+        let stem = file_stem(date, &front.title);
+        store
+            .write_item(NewItem {
+                dir: &item_dir("blog", date),
+                stem: &stem,
+                front: &front,
+                body: "Freshly captured content",
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let mut reloads = state.reload.subscribe();
+        let fresh = async {
+            let page = state.site.response("/", "/").await.unwrap().1;
+            assert!(
+                String::from_utf8(page)
+                    .unwrap()
+                    .contains("Newly synced article"),
+                "new articles must be visible before discussion lookups start"
+            );
+            assert!(reloads.try_recv().is_ok());
+            Ok(crate::discussions::ResolutionSet::default())
+        };
+        assert!(
+            render_with_discussion_refresh(
+                project.clone(),
+                &build,
+                &state,
+                crate::discussions::ResolutionSet::default(),
+                true,
+                fresh
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            reloads.try_recv().is_err(),
+            "unchanged discussions must not rebuild or reload again"
+        );
+        let enriched: crate::discussions::ResolutionSet =
+            serde_json::from_value(serde_json::json!({
+                "hackernews:https://example.test/fresh": {
+                    "url": "https://news.ycombinator.com/item?id=42", "score": 42
+                }
+            }))
+            .unwrap();
+        assert!(
+            render_with_discussion_refresh(
+                project.clone(),
+                &build,
+                &state,
+                crate::discussions::ResolutionSet::default(),
+                false,
+                async { Ok(enriched.clone()) }
+            )
+            .await
+            .unwrap()
+        );
+        assert!(reloads.try_recv().is_ok());
+        assert!(reloads.try_recv().is_err());
+        let article = state
+            .site
+            .response("/", &format!("/items/blog/{stem}/"))
+            .await
+            .unwrap()
+            .1;
+        assert!(
+            String::from_utf8(article)
+                .unwrap()
+                .contains("https://news.ycombinator.com/item?id=42")
+        );
+        assert!(
+            !render_with_discussion_refresh(project, &build, &state, enriched, false, async {
+                anyhow::bail!("provider unavailable")
+            })
+            .await
+            .unwrap()
+        );
+        assert!(
+            reloads.try_recv().is_err(),
+            "provider failure keeps the current readable snapshot"
+        );
     }
 
     #[test]

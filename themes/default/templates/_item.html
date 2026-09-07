@@ -7,18 +7,9 @@
     <div class="row-heading">
       <span class="rank" aria-hidden="true">{{ rank }}.</span>
       <a class="title p-name u-url" data-row-open href="{{ item.url | url_for }}">{{ item.title }}</a>
-      {% if item.domain %}<a class="domain" href="{{ ('sources/' ~ item.source ~ '/') | url_for }}">{{ item.domain }}</a>{% endif %}
     </div>
     {% if site.params.excerpts and item.excerpt %}<p class="excerpt">{{ item.excerpt }}</p>{% endif %}
-    <div class="meta">
-      <time class="dt-published" datetime="{{ item.date }}" title="{{ item.date }}">{{ item.date | date }}</time>
-      {% if item.extra.points is defined %}<span>{{ item.extra.points }} points</span>{% endif %}
-      {% if item.extra.comments_url is defined %}
-      <a href="{{ item.extra.comments_url }}" target="_blank" rel="noopener noreferrer">{% if item.extra.num_comments is defined %}{{ item.extra.num_comments }} comments{% else %}comments{% endif %}</a>
-      {% endif %}
-      <a class="u-bookmark-of" href="{{ item.link }}" target="_blank" rel="external noopener noreferrer via">original</a>
-      {% for discussion in item.discussions %}<a class="discussion" href="{{ discussion.url }}" target="_blank" rel="noopener noreferrer" aria-label="{{ discussion.name }}, matching discussion found{% if discussion.score is not none %}, score {{ discussion.score }}{% endif %}">{{ discussion.name }}</a>{% endfor %}
-    </div>
+    {% include "_metadata.html" %}
     </div>
     {% if item.preview %}<span class="preview-media"{% if item.preview.color %} style="--preview-color: {{ item.preview.color }}"{% endif %}><img class="preview-image" src="{{ item.preview.url | url_for }}" width="{{ item.preview.width }}" height="{{ item.preview.height }}" alt="{{ item.preview.alt or '' }}" loading="lazy" decoding="async"></span>{% endif %}
     </div>

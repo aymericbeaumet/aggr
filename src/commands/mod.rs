@@ -45,7 +45,12 @@ pub async fn run(cli: Cli) -> Result<()> {
                 )?;
                 args.clean = false;
             }
-            build::sync_and_run(&Project::load(&cli.config).await?, &args).await
+            let project = if args.data_ref.is_some() {
+                Project::load_offline(&cli.config).await?
+            } else {
+                Project::load(&cli.config).await?
+            };
+            build::sync_and_run(&project, &args).await
         }
         Command::Dev(args) => dev::run(&cli.config, &args).await,
         Command::Clean(args) => clean::run(&cli.config, &args),
@@ -65,6 +70,15 @@ pub struct Project {
 impl Project {
     pub async fn load(config_path: &Path) -> Result<Self> {
         let config = Config::load(config_path).await?;
+        Self::from_config(config_path, config)
+    }
+
+    async fn load_offline(config_path: &Path) -> Result<Self> {
+        let config = Config::load_offline(config_path).await?;
+        Self::from_config(config_path, config)
+    }
+
+    fn from_config(config_path: &Path, config: Config) -> Result<Self> {
         let sources = config.sources()?;
         let config_path = config_path
             .canonicalize()

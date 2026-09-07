@@ -7,6 +7,7 @@ pub mod outputs;
 mod pagefind;
 mod related;
 pub mod render;
+mod video;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -21,14 +22,68 @@ use crate::content;
 use crate::model::Item;
 use crate::store::{Status, Store};
 use context::{
-    ArticleLinkCtx, BuildCtx, CategoryCtx, GitHubLinks, ItemCtx, ItemOptions, PageCtx,
-    PaginatorCtx, PreviewCtx, SiteCtx, SiteIdentityCtx, SourceCtx, SourceErrorCtx,
+    ArticleLinkCtx, ArticlePreviewCtx, BuildCtx, CategoryCtx, GitHubLinks, ItemCtx, ItemOptions,
+    PageCtx, PaginatorCtx, PreviewCtx, SiteCtx, SiteIdentityCtx, SourceCtx, SourceErrorCtx,
 };
 use render::{Layers, Renderer};
 
 const EXCERPT_CHARS: usize = 240;
 const RECOMMENDATION_CARD_COUNT: usize = 1;
 const MARKER: &str = ".aggr-site";
+
+/// Pick one archive page per article without changing retained data or breaking old page URLs.
+fn visible_archive(items: Vec<Item>, sources: &[Source]) -> (Vec<Item>, Vec<(String, String)>) {
+    let publisher_hosts: BTreeMap<_, _> = sources
+        .iter()
+        .filter_map(|source| {
+            source.public_url.as_deref().and_then(|url| {
+                let host = context::domain_of(url);
+                (!host.is_empty()).then_some((source.slug.as_str(), host))
+            })
+        })
+        .collect();
+    let is_publisher = |item: &Item| {
+        publisher_hosts
+            .get(item.front.source.as_str())
+            .is_some_and(|host| *host == context::domain_of(&item.front.link))
+    };
+    let mut groups = BTreeMap::<String, Vec<Item>>::new();
+    let mut visible = Vec::new();
+    for item in items {
+        if item.front.hidden
+            || url::Url::parse(&item.front.link)
+                .is_ok_and(|url| crate::sources::youtube::is_short_url(&url))
+        {
+            continue;
+        }
+        let key = crate::model::normalize_link(&item.front.link);
+        if key.is_empty() {
+            visible.push(item);
+        } else {
+            groups.entry(key).or_default().push(item);
+        }
+    }
+    let mut redirects = Vec::new();
+    for mut group in groups.into_values() {
+        group.sort_by(|a, b| {
+            is_publisher(b)
+                .cmp(&is_publisher(a))
+                .then_with(|| b.body.len().cmp(&a.body.len()))
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        let mut group = group.into_iter();
+        let winner = group.next().expect("nonempty article group");
+        let target = context::item_url(&winner.path);
+        for duplicate in group {
+            let previous = context::item_url(&duplicate.path);
+            if previous != target {
+                redirects.push((previous, target.clone()));
+            }
+        }
+        visible.push(winner);
+    }
+    (visible, redirects)
+}
 
 /// Facts about the build that do not come from the data tree.
 pub struct BuildInfo {
@@ -371,10 +426,10 @@ fn default_site_description(title: &str) -> String {
 }
 
 fn document_title(site_title: &str, page_title: &str, kind: &str, page_number: usize) -> String {
-    let page_title = if matches!(kind, "search" | "library" | "preferences") {
-        page_title.to_lowercase()
-    } else {
+    let page_title = if matches!(kind, "item" | "source") {
         page_title.to_string()
+    } else {
+        page_title.to_lowercase()
     };
     match (kind, page_number) {
         ("river", 1) => format!("{site_title} | aggr"),
@@ -760,10 +815,15 @@ pub fn build(
 
     // Sources: config order, enriched with stored state and counts.
     let status = store.status()?;
-    let mut all_items = store.items()?;
-    all_items.retain(|item| !item.front.hidden);
+    let (mut all_items, duplicate_redirects) = visible_archive(store.items()?, sources);
     for item in &mut all_items {
-        if !item.front.html_truncated && has_code(&item.body) {
+        if !item.front.html_truncated
+            && (has_code(&item.body)
+                || content::has_heading_breaks(&item.body)
+                || (item.body.lines().any(|line| line.starts_with("\\- "))
+                    && url::Url::parse(&item.front.link)
+                        .is_ok_and(|url| crate::sources::youtube::is_video_url(&url))))
+        {
             let retained_html = store.read_html(item)?;
             let base = url::Url::parse(&item.front.link).ok();
             item.body = derived::markdown(
@@ -774,7 +834,7 @@ pub fn build(
             );
         }
         item.body =
-            content::strip_leading_metadata(&item.body, item.front.published, &item.front.source);
+            content::strip_article_metadata(&item.body, item.front.published, &item.front.source);
     }
     all_items.sort_by(|a, b| {
         b.created_at()
@@ -823,6 +883,9 @@ pub fn build(
                 now: info.now,
             },
         );
+        if let Some(source) = source_by_slug.get(item.front.source.as_str()) {
+            ctx.set_source(source);
+        }
         if let Some(preview) = &item.front.preview
             && let Some(bytes) = store.read_preview(item)?
         {
@@ -1122,7 +1185,33 @@ pub fn build(
 
     for (ctx, item) in archive_items.iter().zip(&all_items) {
         let mut ctx = ctx.clone();
+        ctx.video = video::VideoCtx::from_url(&item.front.link);
+        if ctx.is_youtube
+            && let Ok(url) = url::Url::parse(&item.front.link)
+            && let Some(image) = article_images.get(&item.path).and_then(|images| {
+                let candidates = crate::sources::youtube::poster_candidates(&url);
+                images.iter().find(|image| {
+                    candidates
+                        .iter()
+                        .any(|candidate| candidate.url.as_str() == image.source)
+                })
+            })
+        {
+            ctx.article_preview = Some(ArticlePreviewCtx::from_image(image));
+        }
         let portable_html = content::render_markdown(&item.body);
+        if ctx.video.is_none()
+            && let Ok(base) = url::Url::parse(&item.front.link)
+        {
+            ctx.article_preview = ArticlePreviewCtx::lead_image(
+                &portable_html,
+                &base,
+                article_images
+                    .get(&item.path)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            );
+        }
         ctx.body_html = Some(content::render_markdown_with_images(
             &item.body,
             article_images
@@ -1168,6 +1257,14 @@ pub fn build(
                 Some(archive_modified_at(&ctx)),
             ));
         }
+    }
+
+    for (previous, target) in duplicate_redirects {
+        let target = format!("{}{target}", site.base_path);
+        write(
+            &out.join(previous).join("index.html"),
+            outputs::redirect_stub(&target).as_bytes(),
+        )?;
     }
 
     let search_documents: Vec<_> = archive_items
@@ -1412,10 +1509,7 @@ fn source_contexts(
         .iter()
         .map(|source| {
             let state = store.source_state(&source.slug)?;
-            let (count, latest) = counts
-                .get(source.slug.as_str())
-                .copied()
-                .unwrap_or_default();
+            let (count, latest) = counts.remove(source.slug.as_str()).unwrap_or_default();
             let name = source
                 .name
                 .clone()
@@ -1427,7 +1521,10 @@ fn source_contexts(
                 name,
                 url: source.public_url.clone(),
                 site_url: state.site_url.clone(),
-                category: source.category.clone(),
+                category: source
+                    .category
+                    .as_deref()
+                    .and_then(crate::model::normalize_category),
                 engine: source.engine.name().to_string(),
                 count,
                 latest,
@@ -1438,6 +1535,28 @@ fn source_contexts(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    for (slug, (count, latest)) in counts {
+        let state = store.source_state(slug)?;
+        let public_url = |value: Option<String>| {
+            value
+                .and_then(|value| url::Url::parse(&value).ok())
+                .filter(|url| matches!(url.scheme(), "http" | "https"))
+                .map(|url| crate::config::public_url(&url, false))
+        };
+        let site_url = public_url(state.site_url);
+        contexts.push(SourceCtx {
+            page: format!("sources/{slug}/"),
+            slug: slug.to_string(),
+            name: state.title.unwrap_or_else(|| slug.to_string()),
+            url: public_url(state.resolved_url).or_else(|| site_url.clone()),
+            site_url,
+            category: None,
+            engine: "web".into(),
+            count,
+            latest,
+            error: None,
+        });
+    }
     contexts.sort_by(|a, b| {
         a.name
             .to_lowercase()
@@ -1787,6 +1906,84 @@ mod tests {
     }
 
     #[test]
+    fn retained_sources_keep_metadata_and_archive_pages_after_config_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _, store) = fixture(dir.path(), 2, "max_age_days = 30\npwa = false\n");
+        store
+            .write_source_state(
+                "blog",
+                &crate::store::SourceState {
+                    title: Some("Hacker News: Best".into()),
+                    site_url: Some("https://news.ycombinator.com/".into()),
+                    resolved_url: Some("https://hnrss.org/best".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let items = store.items().unwrap();
+        let contexts = source_contexts(&[], &store, &Status::default(), &items).unwrap();
+        assert_eq!(contexts.len(), 1);
+        let source = &contexts[0];
+        assert_eq!(source.slug, "blog");
+        assert_eq!(source.name, "Hacker News: Best");
+        assert_eq!(source.url.as_deref(), Some("https://hnrss.org/best"));
+        assert_eq!(
+            source.site_url.as_deref(),
+            Some("https://news.ycombinator.com/")
+        );
+        assert_eq!(source.count, 2);
+        assert_eq!(source.latest, Some(day(2)));
+        assert_eq!(source.page, "sources/blog/");
+
+        let out = dir.path().join("out");
+        build(&config, &[], &store, dir.path(), &info(out.clone())).unwrap();
+        let archive = std::fs::read_to_string(out.join("sources/blog/index.html")).unwrap();
+        assert!(archive.contains("Post 0"));
+        assert!(archive.contains("Post 1"));
+        assert!(archive.contains("Hacker News: Best"));
+        let article =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
+        assert!(article.contains("href=\"sources/blog/\""), "{article}");
+        assert!(article.contains("hnrss.org/best"));
+        assert!(article.contains("blog.example · via Hacker News: Best"));
+        for (html, selector) in [
+            (&article, ".itemhead .meta .domain"),
+            (&archive, ".row .domain"),
+        ] {
+            let document = scraper::Html::parse_document(html);
+            let selector = scraper::Selector::parse(selector).unwrap();
+            let source_link = document.select(&selector).next().unwrap();
+            assert_eq!(source_link.value().attr("href"), Some("sources/blog/"));
+            assert_eq!(
+                source_link.text().collect::<String>().trim(),
+                "blog.example via hnrss.org/best"
+            );
+            let emphasis = scraper::Selector::parse("em").unwrap();
+            assert_eq!(
+                source_link
+                    .select(&emphasis)
+                    .next()
+                    .unwrap()
+                    .text()
+                    .collect::<String>(),
+                "via hnrss.org/best"
+            );
+        }
+    }
+
+    #[test]
+    fn retained_sources_without_state_keep_archives_without_invented_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _, store) = fixture(dir.path(), 1, "");
+        let contexts =
+            source_contexts(&[], &store, &Status::default(), &store.items().unwrap()).unwrap();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].name, "blog");
+        assert!(contexts[0].url.is_none());
+        assert!(contexts[0].site_url.is_none());
+    }
+
+    #[test]
     fn document_titles_keep_page_site_and_aggr_identity_consistent() {
         for (kind, page, title, expected) in [
             ("river", 1, "Reader", "Reader | aggr"),
@@ -1800,11 +1997,11 @@ mod tests {
                 "preferences | Reader | aggr",
             ),
             ("source", 3, "Example", "Example — page 3 | Reader | aggr"),
-            ("category", 1, "Engineering", "Engineering | Reader | aggr"),
-            ("tag", 1, "rust", "rust | Reader | aggr"),
+            ("category", 1, "Engineering", "engineering | Reader | aggr"),
+            ("tag", 1, "Rust", "rust | Reader | aggr"),
             ("item", 1, "Article Title", "Article Title | Reader | aggr"),
-            ("404", 1, "Not found", "Not found | Reader | aggr"),
-            ("offline", 1, "Offline", "Offline | Reader | aggr"),
+            ("404", 1, "Not found", "not found | Reader | aggr"),
+            ("offline", 1, "Offline", "offline | Reader | aggr"),
         ] {
             assert_eq!(
                 document_title("Reader", title, kind, page),
@@ -2144,6 +2341,182 @@ mod tests {
     }
 
     #[test]
+    fn archive_selection_is_order_independent_and_keeps_anonymous_items() {
+        let item = |path: &str, link: &str, body: &str| Item {
+            path: path.into(),
+            front: crate::model::FrontMatter {
+                link: link.into(),
+                ..Default::default()
+            },
+            body: body.into(),
+        };
+        let items = vec![
+            item("items/hn/a", "https://example.test/article", "Summary"),
+            item(
+                "items/hn/b",
+                "https://example.test/article#top",
+                "Full article content",
+            ),
+            item(
+                "items/hn/c",
+                "https://example.test/article?id=1",
+                "Distinct query",
+            ),
+            item("items/hn/d", "", "Anonymous first"),
+            item("items/hn/e", "", "Anonymous second"),
+        ];
+        let (selected, redirects) = visible_archive(items.clone(), &[]);
+        assert_eq!(selected.len(), 4);
+        assert!(selected.iter().any(|item| item.path == "items/hn/b"));
+        assert_eq!(
+            redirects,
+            vec![("items/hn/a/".into(), "items/hn/b/".into())]
+        );
+        let (mut reversed, reverse_redirects) =
+            visible_archive(items.into_iter().rev().collect(), &[]);
+        let mut selected = selected;
+        selected.sort_by(|a, b| a.path.cmp(&b.path));
+        reversed.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(selected, reversed);
+        assert_eq!(redirects, reverse_redirects);
+    }
+
+    #[test]
+    fn archived_duplicates_and_shorts_are_removed_from_all_collections() {
+        use crate::model::{FrontMatter, file_stem, item_dir};
+        use crate::store::NewItem;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _, store) = fixture(dir.path(), 0, "");
+        let config = Config::parse(
+            r#"[site]
+max_age_days = 365
+pwa = true
+[[sources]]
+slug = "hn"
+url = "https://hnrss.org/frontpage"
+category = "News"
+[[sources]]
+slug = "blog"
+url = "https://blog.example/feed"
+category = "Science"
+"#,
+        )
+        .unwrap();
+        let sources = config.resolve_sources(&|_| None).unwrap();
+        let mut paths = Vec::new();
+        for (source, title, link, hidden, labels) in [
+            (
+                "hn",
+                "Duplicate headline",
+                "http://www.blog.example/article/?utm_source=hn#top",
+                false,
+                vec!["duplicate-only"],
+            ),
+            (
+                "blog",
+                "Publisher headline",
+                "https://blog.example/article",
+                false,
+                vec!["science"],
+            ),
+            (
+                "hn",
+                "Excluded short",
+                "https://www.youtube.com/shorts/abc123",
+                false,
+                vec!["short-only"],
+            ),
+            (
+                "hn",
+                "Hidden headline",
+                "https://blog.example/hidden",
+                true,
+                vec!["hidden-only"],
+            ),
+            (
+                "hn",
+                "Distinct article",
+                "https://blog.example/article?id=2",
+                false,
+                vec![],
+            ),
+        ] {
+            let date = day(19);
+            let front = FrontMatter {
+                title: title.into(),
+                link: link.into(),
+                source: source.into(),
+                published: Some(date),
+                first_seen: date,
+                hidden,
+                labels: labels.into_iter().map(str::to_owned).collect(),
+                ..Default::default()
+            };
+            let item_dir = item_dir(source, date);
+            let stem = file_stem(date, title);
+            store
+                .write_item(NewItem {
+                    dir: &item_dir,
+                    stem: &stem,
+                    front: &front,
+                    body: title,
+                    html: None,
+                    preview: None,
+                    images: &[],
+                })
+                .unwrap();
+            paths.push(context::item_url(&format!("{item_dir}/{stem}")));
+        }
+        let before = store.items().unwrap();
+        let out = dir.path().join("out");
+        let mut build_info = info(out.clone());
+        build_info.release = true;
+        let summary = build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        assert_eq!(summary.items, 2);
+        assert_eq!(
+            store.items().unwrap(),
+            before,
+            "rendering leaves the archive intact"
+        );
+
+        for path in [
+            "index.html",
+            "sources/hn/index.html",
+            "sources/blog/index.html",
+            "categories/news/index.html",
+            "categories/science/index.html",
+            "library/index.html",
+            "feed.xml",
+            "atom.xml",
+            "rss.xml",
+            "feed.json",
+            "linkset.json",
+            "sitemap.xml",
+            "sources/hn/feed.json",
+            "sources/blog/atom.xml",
+            "categories/news/rss.xml",
+            "sw.js",
+        ] {
+            let text = std::fs::read_to_string(out.join(path)).unwrap();
+            for excluded in ["Duplicate headline", "Excluded short", "Hidden headline"] {
+                assert!(!text.contains(excluded), "{path} includes {excluded}");
+            }
+            for path in [&paths[0], &paths[2], &paths[3]] {
+                assert!(!text.contains(path), "collection links to excluded {path}");
+            }
+        }
+        assert!(!out.join("tags/short-only").exists());
+        assert!(!out.join("tags/duplicate-only").exists());
+        assert!(!out.join(&paths[2]).exists());
+        assert!(!out.join(&paths[3]).exists());
+        let redirect = std::fs::read_to_string(out.join(&paths[0]).join("index.html")).unwrap();
+        assert!(redirect.contains(&paths[1]));
+        assert!(redirect.contains("noindex"));
+        assert!(out.join(&paths[1]).join("index.html").is_file());
+    }
+
+    #[test]
     fn old_items_stay_browsable_in_source_archives() {
         let dir = tempfile::tempdir().unwrap();
         let (config, sources, store) = fixture(dir.path(), 1, "max_age_days = 5\npwa = false\n");
@@ -2242,7 +2615,7 @@ mod tests {
         let first_card_end = second_footer.find("</a>").unwrap();
         let first_card = &second_footer[..first_card_end];
         assert!(first_card.contains("rel=\"next\""), "{first_card}");
-        assert!(first_card.contains(">Next article</span>"), "{first_card}");
+        assert!(first_card.contains(">Coming next</span>"), "{first_card}");
         assert!(
             first_card.contains("items/blog/2026-09-04-post-3/"),
             "{first_card}"
@@ -2253,7 +2626,7 @@ mod tests {
             "{recommendation}"
         );
         assert!(
-            recommendation.contains(">Recommended</span>"),
+            recommendation.contains(">Discover more</span>"),
             "{recommendation}"
         );
         assert!(
@@ -2326,6 +2699,38 @@ mod tests {
         let markdown =
             std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0.md")).unwrap();
         assert!(!markdown.contains("1st September 2026"), "{markdown}");
+    }
+
+    #[test]
+    fn build_cleans_existing_boundary_controls_without_rewriting_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let mut item = store.items().unwrap().remove(0);
+        item.body =
+            "Actual article.\n\n\\[[0 comments](https://publisher.example/#comment-form)\\]\n"
+                .into();
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &item.front,
+                body: &item.body,
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let html =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
+        let markdown =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0.md")).unwrap();
+        assert!(!html.contains("0 comments"), "{html}");
+        assert!(!markdown.contains("0 comments"), "{markdown}");
+        assert!(html.contains("Actual article."), "{html}");
+        assert_eq!(store.items().unwrap()[0].body, item.body);
     }
 
     #[test]
@@ -2419,6 +2824,100 @@ mod tests {
         assert_eq!(
             feed["items"][0]["image"],
             format!("https://u.github.io/repo/{path}")
+        );
+    }
+
+    #[test]
+    fn build_recovers_verified_heading_breaks_without_rewriting_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "");
+        let mut item = store.items().unwrap().remove(0);
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        item.body = "## First line\\\n*Second line.*\n\nDetails.\n".into();
+        item.front.html = Some(format!("{stem}.html"));
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &item.front,
+                body: &item.body,
+                html: Some("<h2>First line<br><em>Second line.</em></h2><p>Details.</p>"),
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let page =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
+        assert!(
+            page.contains("<h2>First line<br />\n<em>Second line.</em></h2>"),
+            "{page}"
+        );
+        assert_eq!(store.read_item(&item.path).unwrap().body, item.body);
+    }
+
+    #[test]
+    fn youtube_article_poster_keeps_feed_thumbnail_small_and_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "");
+        let mut item = store.items().unwrap().remove(0);
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        item.front.link = "https://www.youtube.com/watch?v=video123".into();
+        item.body = "Video description.\n".into();
+        let pixels = image::RgbaImage::from_pixel(1280, 720, image::Rgba([21, 82, 109, 255]));
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(pixels)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let asset = crate::media::prepare_asset(
+            &crate::sources::youtube::poster_candidates(
+                &url::Url::parse(&item.front.link).unwrap(),
+            )[0],
+            encoded.into_inner(),
+            &crate::media::MediaLimits::default(),
+        )
+        .unwrap();
+        let preview = crate::preview::thumbnail(&asset.master_bytes, None).unwrap();
+        item.front.images = vec![asset.metadata(stem)];
+        item.front.preview = Some(preview.metadata(stem));
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &item.front,
+                body: &item.body,
+                html: None,
+                preview: Some(&preview.bytes),
+                images: std::slice::from_ref(&asset),
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let page =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
+        assert!(page.contains("video-preview"), "{page}");
+        assert!(page.contains("width=\"1280\" height=\"720\""), "{page}");
+        assert!(page.contains("640w"), "{page}");
+        assert!(page.contains("1280w"), "{page}");
+        assert!(!page.contains("src=\"https://i.ytimg.com"), "{page}");
+        let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(!feed.contains("assets/images/"), "{feed}");
+        assert!(feed.contains("width=\"256\" height=\"144\""), "{feed}");
+        let export: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("feed.json")).unwrap()).unwrap();
+        assert!(
+            export["items"][0]["image"]
+                .as_str()
+                .unwrap()
+                .contains("/assets/previews/")
+        );
+        assert_eq!(
+            store
+                .read_preview(&store.items().unwrap()[0])
+                .unwrap()
+                .unwrap(),
+            preview.bytes
         );
     }
 
@@ -2559,7 +3058,10 @@ mod tests {
         let library = std::fs::read_to_string(out.join("library/index.html")).unwrap();
         assert!(library.contains("id=\"sources\""), "{library}");
         assert!(library.contains("id=\"tags\""), "{library}");
-        assert!(!library.contains("id=\"categories\""), "{library}");
+        assert!(library.contains("id=\"categories\""), "{library}");
+        assert!(library.contains("0 categories."), "{library}");
+        assert!(library.contains("0 tags."), "{library}");
+        assert!(library.contains("in <code>aggr.toml</code>"), "{library}");
         assert!(library.contains("href=\"sources/blog/\""), "{library}");
         assert!(!library.contains("explore-nav"), "{library}");
         assert!(!library.contains("directory-count"), "{library}");
@@ -2857,6 +3359,53 @@ mod tests {
             json_snapshot["@id"],
             "https://u.github.io/repo/items/blog/2026-09-03-post-2/#webpage"
         );
+    }
+
+    #[test]
+    fn rendered_titles_preserve_article_and_source_case_with_lowercase_topics() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, mut sources, store) = fixture(dir.path(), 1, "");
+        sources[0].name = Some("The Example Blog".into());
+        sources[0].category = Some("Computer SCIENCE".into());
+        let mut item = store.items().unwrap().remove(0);
+        item.front.labels = vec!["#Rust".into(), "RUST".into(), "Generative AI".into()];
+        store
+            .write_item(crate::store::NewItem {
+                dir: "items/blog/2026/09",
+                stem: "2026-09-01-post-0",
+                front: &item.front,
+                body: &item.body,
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        for (path, title) in [
+            ("items/blog/2026-09-01-post-0/index.html", "Post 0"),
+            ("sources/blog/index.html", "The Example Blog"),
+            ("categories/computer-science/index.html", "computer science"),
+            ("tags/rust/index.html", "rust"),
+            ("tags/generative-ai/index.html", "generative ai"),
+            ("library/index.html", "library"),
+        ] {
+            let html = std::fs::read_to_string(out.join(path)).unwrap();
+            assert!(
+                html.contains(&format!(
+                    "<title>{title} | Demo &lt;site&gt; | aggr</title>"
+                )),
+                "{path}: {html}"
+            );
+            assert!(!html.contains("Computer SCIENCE"), "{path}");
+            assert!(!html.contains("Generative AI"), "{path}");
+            assert!(!html.contains(">#Rust<"), "{path}");
+        }
+        let article =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
+        assert!(article.contains("content=\"computer science\""));
+        assert!(article.contains(">#rust</a>"));
+        assert!(article.contains(">#generative ai</a>"));
     }
 
     #[test]

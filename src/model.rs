@@ -39,6 +39,15 @@ impl RawItem {
     }
 }
 
+pub fn normalize_category(category: &str) -> Option<String> {
+    let normalized = category
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
 /// Canonical labels used in front matter, indexes, feeds and templates. Providers disagree on
 /// casing and occasionally include a presentation `#`; normalizing at the model boundary keeps
 /// one stable taxonomy while still accepting hand-written historical items at render time.

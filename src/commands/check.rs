@@ -11,7 +11,7 @@ use super::Project;
 use crate::config::{Engine, Source};
 use crate::git;
 use crate::http;
-use crate::sources::{self, Fetch, feed};
+use crate::sources::{self, Fetch};
 use crate::store::SourceState;
 
 pub async fn run(project: &Project) -> Result<()> {
@@ -78,7 +78,7 @@ async fn probe(source: &Source, client: &http::Client) -> Result<String> {
                 state: &state,
                 cache_dir: cache.path(),
             };
-            let (meta, items, resolved) = match feed::fetch(url, source, &ctx).await? {
+            let (meta, items, resolved) = match sources::fetch(source, &ctx).await? {
                 Fetch::Changed {
                     validators,
                     meta,

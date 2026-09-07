@@ -1,0 +1,12 @@
+{# Shared by feed rows and article headers; keep search metadata in renderResult() aligned. #}
+{% set updated = item.updated if item.updated != item.date else none %}
+<div class="meta">
+  {% if item.domain %}<span class="meta-field"><a class="domain" href="{{ ('sources/' ~ item.source ~ '/') | url_for }}" title="{{ item.source_title }}">{{ item.source_display }}{% if item.is_aggregated %} <em>via {{ item.feed_display }}</em>{% endif %}</a></span>{% endif %}
+  {% if item.category %}<span class="meta-field"><span class="category"><a class="p-category" rel="tag" href="{{ ('categories/' ~ (item.category | slug) ~ '/') | url_for }}">/{{ item.category }}</a></span></span>{% endif %}
+  <span class="meta-field"><span class="published-date" data-date-tooltip{% if updated %} data-date-updated="{{ updated }}"{% endif %} title="Published: {{ item.date }}{% if updated %}&#10;Updated: {{ updated }}{% endif %}">{% if page.kind == 'item' and item.published %}published {% endif %}<time class="dt-published" datetime="{{ item.date }}">{{ item.date | date }}</time></span></span>
+  {% if page.kind == 'item' and item.word_count %}<span class="meta-field"><span class="reading-stats" title="{{ item.word_count }} {{ 'word' if item.word_count == 1 else 'words' }}"><time datetime="PT{{ item.reading_minutes }}M">{{ item.reading_minutes }} min read</time></span></span>{% endif %}
+  <span class="meta-field"><a class="u-bookmark-of" href="{{ item.link }}" title="{{ item.link }}" target="_blank" rel="external noopener noreferrer via">original</a></span>
+  {% for discussion in item.discussions %}<span class="meta-field"><a class="discussion" data-discussion="{{ discussion.name }}" href="{{ discussion.url }}" title="{{ discussion.url }}" target="_blank" rel="noopener noreferrer" aria-label="{{ discussion.name }}, matching discussion found{% if discussion.score is not none %}, score {{ discussion.score }}{% endif %}">{{ discussion.name }}</a></span>{% endfor %}
+  {% if item.extra.points is defined %}<span class="meta-field"><span>{{ item.extra.points }} points</span></span>{% endif %}
+  {% if item.extra.comments_url is defined %}<span class="meta-field"><a href="{{ item.extra.comments_url }}" title="{{ item.extra.comments_url }}" target="_blank" rel="noopener noreferrer">{% if item.extra.num_comments is defined %}{{ item.extra.num_comments }} comments{% else %}comments{% endif %}</a></span>{% endif %}
+</div>

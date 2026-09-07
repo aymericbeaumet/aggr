@@ -5,37 +5,32 @@
     <h1 id="page-title">{{ page.title }}</h1>
     <p class="muted library-intro">Find every retained archive by source or topic.</p>
   </header>
-  <div class="page-body library-directory" data-directory-root>
-    <form class="directory-tools" role="search" action="{{ 'library/' | url_for }}" method="get">
-      <label class="sr-only" for="directory-filter">Filter sources, categories, and tags</label>
-      <input id="directory-filter" name="q" type="search" inputmode="search" autocomplete="off" placeholder="Filter sources and topics…" data-directory-filter data-page-search>
-    </form>
+  <div class="page-body library-directory">
     <div class="library-groups">
-      <section class="library-group library-group-sources" id="sources" aria-labelledby="sources-title" data-directory-section>
-        <h2 id="sources-title">Sources</h2>
-        {% if sources %}
-          {% set entries = sources %}{% set directory_kind = 'sources' %}{% set directory_title = 'Sources' %}{% include "_directory.html" %}
+      {% for directory_kind, directory_title, entries in [['sources', 'Sources', sources], ['tags', 'Tags', tags], ['categories', 'Categories', categories]] %}
+      <section class="library-group library-group-{{ directory_kind }}" id="{{ directory_kind }}" aria-labelledby="{{ directory_kind }}-title">
+        <h2 id="{{ directory_kind }}-title">{{ directory_title }}</h2>
+        {% if entries %}
+          <ul class="library-entries" aria-label="{{ entries | length }} {{ directory_title | lower }}">
+          {% for entry in entries %}
+            {% if entry.count > 0 or directory_kind == 'sources' %}
+            <li class="library-entry" data-directory-entry>
+              <div class="library-entry-heading">
+                <a class="library-entry-link" href="{{ entry.page | url_for }}">{{ '#' if directory_kind == 'tags' else '/' if directory_kind == 'categories' }}{{ entry.name }}</a>
+                {% if directory_kind == 'sources' and entry.site_url %}<a class="library-entry-website" href="{{ entry.site_url }}" title="{{ entry.site_url }}" target="_blank" rel="noopener noreferrer" data-aggr-external-label="Open {{ entry.name }} website" aria-label="Open {{ entry.name }} website, opens in a new tab">↗</a>{% endif %}
+              </div>
+              <p class="library-entry-meta"><span>{{ entry.count }} {{ 'item' if entry.count == 1 else 'items' }}</span>{% if entry.latest %}<span><span class="sr-only">Latest: </span><time datetime="{{ entry.latest }}" title="{{ entry.latest }}">{{ entry.latest | date }}</time></span>{% endif %}{% if directory_kind == 'sources' %}<span>{{ entry.engine }}</span>{% if entry.category %}<span>/{{ entry.category }}</span>{% endif %}{% endif %}</p>
+              {% if directory_kind == 'sources' and entry.error %}<p class="library-entry-error error" title="{{ entry.error.message }}">error since <time datetime="{{ entry.error.since }}" title="{{ entry.error.since }}">{{ entry.error.since | date }}</time></p>{% endif %}
+            </li>
+            {% endif %}
+          {% endfor %}
+          </ul>
         {% else %}
-          <p class="empty">No sources configured. Add a <code>[[sources]]</code> entry to <code>aggr.toml</code>.</p>
+          <p class="empty">0 {{ directory_kind }}. {% if directory_kind == 'sources' %}Add a <code>[[sources]]</code> table with <code>url = "…"</code>{% elif directory_kind == 'categories' %}Add <code>category = "…"</code> to a source{% else %}Add <code>labels = ["…"]</code> to a source{% endif %} in <code>aggr.toml</code>.</p>
         {% endif %}
       </section>
-      {% if site.has_categories %}
-      <section class="library-group" id="categories" aria-labelledby="categories-title" data-directory-section>
-        <h2 id="categories-title">Categories</h2>
-        {% set entries = categories %}{% set directory_kind = 'categories' %}{% set directory_title = 'Categories' %}{% include "_directory.html" %}
-      </section>
-      {% endif %}
-      <section class="library-group" id="tags" aria-labelledby="tags-title" data-directory-section>
-        <h2 id="tags-title">Tags</h2>
-        {% if tags %}
-          {% set entries = tags %}{% set directory_kind = 'tags' %}{% set directory_title = 'Tags' %}{% include "_directory.html" %}
-        {% else %}
-          <p class="empty">No tagged articles yet.</p>
-        {% endif %}
-      </section>
+      {% endfor %}
     </div>
-    <p class="empty" data-directory-empty hidden>No matching sources or topics.</p>
-    <noscript><p class="muted">All collections remain available below; filtering needs JavaScript.</p></noscript>
   </div>
 </section>
 {% endblock %}

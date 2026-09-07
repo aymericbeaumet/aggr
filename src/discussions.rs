@@ -70,6 +70,26 @@ struct Job {
     previous_misses: u32,
 }
 
+/// Reuse previous matches while dev refreshes its sources, without waiting for providers.
+pub fn cached(configs: &[NetworkConfig], items: &[Item], cache_root: &Path) -> ResolutionSet {
+    let root = cache_root.join(CACHE_NAMESPACE);
+    let providers: BTreeSet<_> = configs
+        .iter()
+        .filter_map(|config| config.provider)
+        .collect();
+    let mut out = ResolutionSet::default();
+    for item in items {
+        for &provider in &providers {
+            if let Some(found) = read_cache(&cache_path(&root, provider, &item.front.link))
+                .and_then(|entry| entry.found)
+            {
+                out.insert(provider, &item.front.link, found);
+            }
+        }
+    }
+    out
+}
+
 pub async fn resolve(
     configs: &[NetworkConfig],
     items: &[Item],
@@ -411,6 +431,55 @@ async fn x(link: &str, client: &http::Client) -> Result<Lookup> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_resolution_reuses_matches_even_after_their_refresh_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        let link = "https://example.test/article";
+        let found = Found {
+            url: "https://news.ycombinator.com/item?id=42".into(),
+            score: 42,
+        };
+        write_cache(
+            &cache_path(
+                &dir.path().join(CACHE_NAMESPACE),
+                NetworkProvider::HackerNews,
+                link,
+            ),
+            &CacheEntry {
+                checked_at: now - Duration::days(7),
+                found: Some(found.clone()),
+                misses: 0,
+            },
+        )
+        .unwrap();
+        let config =
+            crate::config::Config::parse("[[networks]]\nprovider = \"hackernews\"").unwrap();
+        let item = Item {
+            path: "items/blog/article".into(),
+            front: crate::model::FrontMatter {
+                link: format!("{link}?utm_source=feed"),
+                ..Default::default()
+            },
+            body: String::new(),
+        };
+        let resolutions = cached(&config.networks, std::slice::from_ref(&item), dir.path());
+        assert_eq!(
+            resolutions.get(NetworkProvider::HackerNews, link),
+            Some(&found)
+        );
+        assert!(
+            cached(&[], std::slice::from_ref(&item), dir.path())
+                .get(NetworkProvider::HackerNews, link)
+                .is_none()
+        );
+        assert!(
+            cached(&config.networks, &[], dir.path())
+                .get(NetworkProvider::HackerNews, link)
+                .is_none()
+        );
+    }
 
     #[test]
     fn hn_requires_an_exact_normalized_link_and_uses_the_highest_score() {

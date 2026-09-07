@@ -4,6 +4,8 @@
 pub mod aggr;
 pub mod feed;
 pub mod html;
+pub mod qwen;
+pub mod youtube;
 
 use std::path::Path;
 
@@ -49,7 +51,8 @@ pub enum Fetch {
 }
 
 pub async fn fetch(source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
-    match &source.engine {
+    let mut fetched = match &source.engine {
+        Engine::Feed { url } if qwen::is_blog_url(url) => qwen::fetch(url, source, ctx).await,
         Engine::Feed { url } => feed::fetch(url, source, ctx).await,
         Engine::Aggr {
             url,
@@ -57,7 +60,13 @@ pub async fn fetch(source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
             sources,
             limit,
         } => aggr::fetch(url, branch, sources, *limit, source, ctx).await,
+    }?;
+    if let Fetch::Changed { items, .. } = &mut fetched {
+        items.retain(|item| {
+            !url::Url::parse(&item.link).is_ok_and(|url| youtube::is_short_url(&url))
+        });
     }
+    Ok(fetched)
 }
 
 impl Validators {

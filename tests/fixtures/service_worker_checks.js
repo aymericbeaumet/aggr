@@ -7,7 +7,12 @@ const finish = arguments[arguments.length - 1];
   const buckets = new Map();
   let rejectWrites = false;
   let skipWaitingCalls = 0;
-  let network = async () => new Response("fresh page");
+  let writes = 0;
+  let enumerations = 0;
+  let network = async (request, options) => {
+    assert(!options || options.priority !== "low", "foreground navigation must retain normal fetch priority");
+    return new Response("fresh page");
+  };
   const key = request => new URL(typeof request === "string" ? request : request.url, scope).href;
   const storage = {
     keys: async () => Array.from(buckets.keys()),
@@ -17,11 +22,15 @@ const finish = arguments[arguments.length - 1];
       const entries = buckets.get(name);
       return {
         put: async (request, response) => {
+          writes += 1;
           if (rejectWrites) throw new Error("quota exceeded");
           entries.set(key(request), response.clone());
         },
         delete: async request => entries.delete(key(request)),
-        keys: async () => Array.from(entries.keys()).map(url => new Request(url)),
+        keys: async () => {
+          enumerations += 1;
+          return Array.from(entries.keys()).map(url => new Request(url));
+        },
         match: async (request, options) => {
           const wanted = new URL(key(request));
           for (const [url, response] of entries) {
@@ -46,7 +55,7 @@ const finish = arguments[arguments.length - 1];
     .replace(/\{\{ version \| json \}\}/g, JSON.stringify("test"))
     .replace(/\{\{ precache \| json \}\}/g, JSON.stringify([{ url: "", revision: "new", required: true }]));
   const api = new Function("self", "caches", "fetch", source +
-    "\nreturn {networkFirst, remember, fetchEntry, PRECACHE, PAGES, ASSETS, SEARCH, SEARCH_PREFIX, LEGACY_SEARCH, IMAGES, ENTRIES, REQUIRED_URLS, OPTIONAL_URLS, setPrecacheTimeout: ms => PRECACHE_TIMEOUT = ms};"
+    "\nreturn {networkFirst, remember, fetchEntry, populate, PRECACHE, PAGES, ASSETS, SEARCH, SEARCH_PREFIX, LEGACY_SEARCH, IMAGES, ENTRIES, REQUIRED_URLS, OPTIONAL_URLS, setPrecacheTimeout: ms => PRECACHE_TIMEOUT = ms};"
   )(self, storage, (request, options) => network(request, options));
   function assert(value, message) { if (!value) throw new Error(message); }
   const pending = [];
@@ -89,6 +98,30 @@ const finish = arguments[arguments.length - 1];
     await Promise.all(lifetime);
     return resolved;
   }
+  const html = new Request(scope, { headers: { accept: "text/html" } });
+  let refresh;
+  network = () => new Promise(resolve => { refresh = resolve; });
+  const refreshLifetime = [];
+  let htmlResponse;
+  handlers.fetch({
+    request: html,
+    respondWith: value => { htmlResponse = value; },
+    waitUntil: value => { refreshLifetime.push(value); }
+  });
+  const immediate = await Promise.race([
+    htmlResponse,
+    new Promise(resolve => setTimeout(() => resolve(null), 100))
+  ]);
+  assert(immediate && await immediate.text() === "new deployment", "cached HTML must render without waiting for a slow network");
+  refresh(new Response("background update"));
+  await Promise.all(refreshLifetime);
+  assert(await (await (await storage.open(api.PAGES)).match(html)).text() === "background update", "cached navigation must refresh in the background");
+  for (const cache of ["reload", "no-cache"]) {
+    network = async () => new Response("explicit reload " + cache);
+    const reload = new Request(scope, { headers: { accept: "text/html" }, cache });
+    assert(await (await dispatch(reload)).text() === "explicit reload " + cache, "an explicit app update or pull refresh must fetch current HTML instead of a saved article");
+  }
+
   for (const extension of ["md", "txt", "rst", "json"]) {
     const representation = new Request(scope + "items/example/story." + extension);
     await (await storage.open(api.PAGES)).put(representation, new Response("stale " + extension));
@@ -104,6 +137,11 @@ const finish = arguments[arguments.length - 1];
   const imageKeys = await (await storage.open(api.IMAGES)).keys();
   const assetKeys = await (await storage.open(api.ASSETS)).keys();
   assert(imageKeys.some(request => request.url === localImage.url) && !assetKeys.some(request => request.url === localImage.url), "article images must use the bounded image cache, not the app-asset cache");
+  const writesBeforeHit = writes;
+  const enumerationsBeforeHit = enumerations;
+  network = async () => { throw new Error("cache hit must not fetch"); };
+  assert(await (await dispatch(localImage)).text() === "local article image", "cached images must remain available");
+  assert(writes === writesBeforeHit && enumerations === enumerationsBeforeHit, "asset cache hits must not rewrite responses or enumerate the entire cache");
 
   const opaque = { ok: false, type: "opaque", clone: () => new Response("unverifiable remote response") };
   const imageCountBeforeOpaque = (await (await storage.open(api.IMAGES)).keys()).length;
@@ -132,12 +170,32 @@ const finish = arguments[arguments.length - 1];
   handlers.install({waitUntil: promise => { installation = promise; }});
   await installation;
   assert(skipWaitingCalls === 1 && await (await storage.open(api.PRECACHE)).match(request), "optional failures must not prevent installing the readable app shell");
+  let releaseSlowDownload;
+  const downloads = [];
+  network = async request => {
+    downloads.push(key(request));
+    return key(request).endsWith("/0")
+      ? new Promise(resolve => { releaseSlowDownload = resolve; })
+      : new Response("downloaded");
+  };
+  const entries = Array.from({ length: 25 }, (_, index) => ({ url: scope + index, revision: String(index) }));
+  const population = api.populate(await storage.open("pool-pages"), await storage.open("pool-revisions"), [], entries, true);
+  const downloadDeadline = Date.now() + 1000;
+  while (!downloads.includes(scope + "24") && Date.now() < downloadDeadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert(downloads.includes(scope + "24"), "one slow download must not stall the rest of the precache queue");
+  releaseSlowDownload(new Response("slow download"));
+  await population;
+  let precachePriority;
   network = (request, options) => new Promise((resolve, reject) => {
+    precachePriority = options.priority;
     options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
   });
   api.setPrecacheTimeout(20);
   let timedOut = false;
   try { await api.fetchEntry({ url: scope + "never-finishes" }); } catch (_) { timedOut = true; }
   assert(timedOut, "stalled precache downloads must have a deadline");
-  return { checks: 14 };
+  assert(precachePriority === "low", "offline precache downloads must yield network priority to foreground navigation");
+  return { checks: 17 };
 })().then(finish, error => finish({ error: error.message }));
