@@ -31,6 +31,8 @@ struct SearchDisplay<'a> {
     source_slug: &'a str,
     excerpt: &'a str,
     discussions: &'a [super::context::DiscussionLinkCtx],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<&'a super::context::PreviewCtx>,
 }
 
 impl SearchDocument {
@@ -50,6 +52,7 @@ impl SearchDocument {
                 source_slug: &item.source,
                 excerpt: &item.excerpt,
                 discussions: &item.discussions,
+                preview: item.preview.as_ref(),
             })
             .map(hex::encode)
             .unwrap_or_default(),
@@ -259,13 +262,17 @@ mod tests {
             labels: vec!["rust".into()],
             discussions: vec![DiscussionLinkCtx {
                 name: "hackernews".into(),
-                url: "https://hn.example/search".into(),
-                found: false,
-                score: None,
+                url: "https://news.ycombinator.com/item?id=42".into(),
+                shortcut: None,
+                found: true,
+                score: Some(12),
             }],
             summary: Some("A concise fallback".into()),
             excerpt: "A concise fallback".into(),
             content: crate::model::ContentKind::Extracted,
+            word_count: 0,
+            reading_minutes: 0,
+            preview: None,
             extra: BTreeMap::new(),
             permalink: None,
             raw_url: None,
@@ -306,8 +313,26 @@ mod tests {
         assert_eq!(display["source_slug"], "blog");
         assert_eq!(display["excerpt"], "A concise fallback");
         assert_eq!(display["discussions"][0]["name"], "hackernews");
+        assert_eq!(
+            display["discussions"][0]["url"],
+            "https://news.ycombinator.com/item?id=42"
+        );
+        assert_eq!(display["discussions"][0]["found"], true);
         assert_eq!(document.filters["category"], ["engineering"]);
         assert_eq!(document.filters["tag"], ["rust"]);
+    }
+
+    #[test]
+    fn search_display_does_not_invent_unavailable_discussions() {
+        let mut item = item();
+        item.discussions.clear();
+        let document = SearchDocument::new(&item, "Searchable prose.");
+        let display: serde_json::Value = serde_json::from_slice(
+            &hex::decode(&document.meta["aggr_display"]).expect("hex display metadata"),
+        )
+        .expect("JSON display metadata");
+
+        assert_eq!(display["discussions"], serde_json::json!([]));
     }
 
     #[test]

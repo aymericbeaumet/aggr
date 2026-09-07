@@ -70,10 +70,17 @@ pub fn instance_descriptor(site: &SiteCtx, build: &BuildCtx) -> Result<String> {
     }
 
     let mut collections = Map::new();
-    collections.insert("sources".into(), Value::String(endpoint("sources/")));
-    collections.insert("tags".into(), Value::String(endpoint("tags/")));
+    collections.insert("library".into(), Value::String(endpoint("library/")));
+    collections.insert(
+        "sources".into(),
+        Value::String(endpoint("library/#sources")),
+    );
+    collections.insert("tags".into(), Value::String(endpoint("library/#tags")));
     if site.has_categories {
-        collections.insert("categories".into(), Value::String(endpoint("categories/")));
+        collections.insert(
+            "categories".into(),
+            Value::String(endpoint("library/#categories")),
+        );
     }
 
     serde_json::to_string_pretty(&serde_json::json!({
@@ -121,7 +128,7 @@ pub fn llms_txt(site: &SiteCtx) -> String {
         .clone()
         .unwrap_or_else(|| endpoint("aggr.toml"));
     let mut out = format!(
-        "# {}\n\n> {}\n\n## Resources\n\n- [Site]({})\n- [Instance metadata]({})\n- [Atom feed]({})\n- [RSS feed]({})\n- [JSON Feed]({})\n- [Sources]({})\n",
+        "# {}\n\n> {}\n\n## Resources\n\n- [Site]({})\n- [Instance metadata]({})\n- [Atom feed]({})\n- [RSS feed]({})\n- [JSON Feed]({})\n- [Library]({})\n- [Sources]({})\n",
         site.title,
         site.description,
         endpoint(""),
@@ -129,14 +136,18 @@ pub fn llms_txt(site: &SiteCtx) -> String {
         endpoint("atom.xml"),
         endpoint("rss.xml"),
         endpoint("feed.json"),
-        endpoint("sources/"),
+        endpoint("library/"),
+        endpoint("library/#sources"),
     );
     if site.has_categories {
-        out.push_str(&format!("- [Categories]({})\n", endpoint("categories/")));
+        out.push_str(&format!(
+            "- [Categories]({})\n",
+            endpoint("library/#categories")
+        ));
     }
     out.push_str(&format!(
         "- [Tags]({})\n- [Source configuration]({config_url})\n",
-        endpoint("tags/")
+        endpoint("library/#tags")
     ));
     if site.base_url.is_some() {
         out.push_str(&format!(
@@ -197,13 +208,13 @@ pub fn linkset_json(site: &SiteCtx, items: &[ItemCtx]) -> Result<String> {
     }))?)
 }
 
-/// A ~200 byte page that sends old URLs to the item's GitHub permalink.
-#[cfg(test)]
+/// A tiny, progressively functional migration page for a retired public route.
 pub fn redirect_stub(target: &str) -> String {
     let target = escape(target);
     format!(
         "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0;url={target}\">\
-         <link rel=\"canonical\" href=\"{target}\"><title>Moved</title><a href=\"{target}\">Moved</a>\n"
+         <meta name=\"robots\" content=\"noindex,follow\"><link rel=\"canonical\" href=\"{target}\">\
+         <title>Moved</title><a href=\"{target}\">Continue</a>\n"
     )
 }
 
@@ -395,6 +406,11 @@ pub fn json_collection(
                 entry.insert("external_url".into(), Value::String(item.link.clone()));
             }
             entry.insert("title".into(), Value::String(item.title.clone()));
+            if let Some(preview) = &item.preview
+                && site.base_url.is_some()
+            {
+                entry.insert("image".into(), Value::String(site_url(site, &preview.url)));
+            }
             if !item.excerpt.is_empty() {
                 entry.insert("summary".into(), Value::String(item.excerpt.clone()));
             }
@@ -629,13 +645,18 @@ pub fn item_json(
     markdown: &str,
 ) -> Result<String> {
     let local = site_url(site, &item.url);
+    let snapshot_id = format!("{local}#webpage");
     let mut original = serde_json::json!({
         "@type": "CreativeWork",
         "@id": item.link,
         "url": item.link,
         "headline": item.title,
-        "archivedAt": {"@id": local},
+        "archivedAt": {"@id": snapshot_id},
     });
+    if item.word_count > 0 {
+        original["wordCount"] = serde_json::json!(item.word_count);
+        original["timeRequired"] = Value::String(format!("PT{}M", item.reading_minutes));
+    }
     if let Some(published) = item.published {
         original["datePublished"] = Value::String(published.to_rfc3339());
     }
@@ -659,10 +680,22 @@ pub fn item_json(
         })
     });
 
+    if let Some(preview) = &item.preview
+        && site.base_url.is_some()
+    {
+        original["image"] = serde_json::json!({
+            "@type": "ImageObject",
+            "url": site_url(site, &preview.url),
+            "width": preview.width,
+            "height": preview.height,
+            "caption": preview.alt,
+        });
+    }
+
     Ok(serde_json::to_string_pretty(&serde_json::json!({
         "@context": "https://schema.org",
         "@type": ["WebPage", "ArchiveComponent"],
-        "@id": local,
+        "@id": snapshot_id,
         "id": item_uid(item),
         "url": local,
         "name": format!("Archived snapshot: {}", item.title),
@@ -684,6 +717,9 @@ pub fn item_json(
         "authors": item.authors,
         "summary": item.summary,
         "description": item.excerpt,
+        "preview": item.preview,
+        "word_count": item.word_count,
+        "reading_minutes": item.reading_minutes,
         "git": git,
         "articleBody": markdown,
         "content_html": item.body_html,
@@ -995,13 +1031,17 @@ mod tests {
             labels: vec!["Rust".into(), "engineering".into()],
             discussions: vec![DiscussionLinkCtx {
                 name: "hackernews".into(),
-                url: "https://news.ycombinator.com/".into(),
-                found: false,
-                score: None,
+                url: "https://news.ycombinator.com/item?id=42".into(),
+                shortcut: None,
+                found: true,
+                score: Some(12),
             }],
             summary: Some("Summary".into()),
             excerpt: "A concise <summary>".into(),
             content: ContentKind::Feed,
+            word_count: 3,
+            reading_minutes: 1,
+            preview: None,
             extra: BTreeMap::new(),
             permalink: None,
             raw_url: None,
@@ -1042,6 +1082,32 @@ mod tests {
             "<content type=\"html\">&lt;p&gt;Clean &amp;amp; &lt;strong&gt;complete&lt;/strong&gt;&lt;/p&gt;</content>"
         ));
         assert!(atom.contains("<updated>2026-09-02T09:30:00+00:00</updated>"));
+    }
+
+    #[test]
+    fn json_feed_preview_has_a_public_local_url_without_changing_provenance() {
+        let mut item = item();
+        item.preview = Some(super::super::context::PreviewCtx {
+            url: "assets/previews/abc.jpg".into(),
+            width: 320,
+            height: 180,
+            alt: Some("A preview".into()),
+            color: Some("#285a8c".into()),
+        });
+        let feed: Value =
+            serde_json::from_str(&json_collection(&site(), "Feed", "", &[item.clone()]).unwrap())
+                .unwrap();
+        assert_eq!(
+            feed["items"][0]["image"],
+            "https://example.test/reads/assets/previews/abc.jpg"
+        );
+        assert_eq!(feed["items"][0]["external_url"], item.link);
+        let mut portable = site();
+        portable.base_url = None;
+        let feed: Value =
+            serde_json::from_str(&json_collection(&portable, "Feed", "", &[item]).unwrap())
+                .unwrap();
+        assert!(feed["items"][0].get("image").is_none());
     }
 
     #[test]
@@ -1152,7 +1218,10 @@ mod tests {
             serde_json::json!(["WebPage", "ArchiveComponent"])
         );
         assert_eq!(document["id"], feed["items"][0]["id"]);
-        assert_eq!(document["@id"], feed["items"][0]["url"]);
+        assert_eq!(
+            document["@id"],
+            format!("{}#webpage", feed["items"][0]["url"].as_str().unwrap())
+        );
         assert_eq!(document["url"], feed["items"][0]["url"]);
         assert_eq!(
             document["isBasedOn"]["@id"],
@@ -1162,7 +1231,11 @@ mod tests {
             document["mainEntity"]["@id"],
             "https://upstream.test/story?a=1&b=2"
         );
-        assert_eq!(document["mainEntity"]["archivedAt"]["@id"], document["url"]);
+        assert_eq!(document["mainEntity"]["archivedAt"]["@id"], document["@id"]);
+        assert_eq!(document["word_count"], 3);
+        assert_eq!(document["reading_minutes"], 1);
+        assert_eq!(document["mainEntity"]["wordCount"], 3);
+        assert_eq!(document["mainEntity"]["timeRequired"], "PT1M");
         assert_eq!(document["dateCreated"], "2026-09-02T10:30:00+00:00");
         assert_eq!(document["articleBody"], "# Complete");
     }
@@ -1246,6 +1319,22 @@ mod tests {
             "https://example.test/reads/atom.xml"
         );
         assert_eq!(
+            descriptor["collections"]["library"],
+            "https://example.test/reads/library/"
+        );
+        assert_eq!(
+            descriptor["collections"]["sources"],
+            "https://example.test/reads/library/#sources"
+        );
+        assert_eq!(
+            descriptor["collections"]["tags"],
+            "https://example.test/reads/library/#tags"
+        );
+        assert_eq!(
+            descriptor["collections"]["categories"],
+            "https://example.test/reads/library/#categories"
+        );
+        assert_eq!(
             descriptor["discovery"]["sitemap"],
             "https://example.test/reads/sitemap.xml"
         );
@@ -1263,8 +1352,21 @@ mod tests {
         assert_eq!(descriptor["url"], "./");
         assert_eq!(descriptor["source"]["config"], "aggr.toml");
         assert_eq!(descriptor["feeds"]["json"], "feed.json");
+        assert_eq!(descriptor["collections"]["library"], "library/");
+        assert_eq!(descriptor["collections"]["sources"], "library/#sources");
+        assert_eq!(descriptor["collections"]["tags"], "library/#tags");
         assert!(descriptor["collections"].get("categories").is_none());
         assert!(descriptor["discovery"].get("sitemap").is_none());
+    }
+
+    #[test]
+    fn llms_inventory_points_collection_discovery_at_library() {
+        let inventory = llms_txt(&site());
+        assert!(inventory.contains("[Library](https://example.test/reads/library/)"));
+        assert!(inventory.contains("[Sources](https://example.test/reads/library/#sources)"));
+        assert!(inventory.contains("[Tags](https://example.test/reads/library/#tags)"));
+        assert!(inventory.contains("[Categories](https://example.test/reads/library/#categories)"));
+        assert!(!inventory.contains("[Sources](https://example.test/reads/sources/)"));
     }
 
     #[test]
@@ -1387,7 +1489,7 @@ mod tests {
         assert!(stub.contains("http-equiv=\"refresh\""));
         assert!(stub.contains("&amp;b=&quot;2&quot;"));
         assert!(!stub.contains("&b=\"2\""));
-        assert!(stub.len() < 400);
+        assert!(stub.len() < 512);
     }
 
     #[test]

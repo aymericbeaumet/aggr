@@ -1,7 +1,7 @@
 //! Cache locations and namespaces. Build/CI state belongs to the repository; dev state belongs
 //! to the operating system's standard cache directory and is isolated per configuration file.
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -16,7 +16,10 @@ const ARTICLE_NAMESPACE: &str = "articles-v1";
 const RENDER_NAMESPACE: &str = "render-v1";
 const RENDER_KEY_FILE: &str = ".aggr-build-key";
 /// Bump when article extraction semantics change. Raw responses remain reusable across bumps.
-const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-1";
+const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-2";
+const MAX_ARTICLE_METADATA_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_ARTICLE_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_EXTRACTED_ARTICLE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Persistent cache used by `aggr build` and `aggr sync`, safely scoped to one repository.
 pub fn build(repo_root: &Path) -> PathBuf {
@@ -64,16 +67,7 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     hash_field(&mut hash, b"version", env!("CARGO_PKG_VERSION").as_bytes());
     // Development builds often keep the package version while renderer code changes. Hash the
     // implementation itself so a prior binary can never make a new binary restore stale HTML.
-    for (name, source) in [
-        ("content", include_str!("content.rs")),
-        ("model", include_str!("model.rs")),
-        ("site", include_str!("site/mod.rs")),
-        ("context", include_str!("site/context.rs")),
-        ("outputs", include_str!("site/outputs.rs")),
-        ("pagefind", include_str!("site/pagefind.rs")),
-        ("related", include_str!("site/related.rs")),
-        ("render", include_str!("site/render.rs")),
-    ] {
+    for (name, source) in render_implementation_sources() {
         hash_field(&mut hash, name.as_bytes(), source.as_bytes());
     }
     hash_field(
@@ -121,6 +115,26 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
+fn render_implementation_sources() -> [(&'static str, &'static str); 15] {
+    [
+        ("config", include_str!("config.rs")),
+        ("defaults", include_str!("../config.default.toml")),
+        ("content", include_str!("content.rs")),
+        ("media", include_str!("media.rs")),
+        ("model", include_str!("model.rs")),
+        ("preview", include_str!("preview.rs")),
+        ("store", include_str!("store/mod.rs")),
+        ("frontmatter", include_str!("store/frontmatter.rs")),
+        ("site", include_str!("site/mod.rs")),
+        ("derived", include_str!("site/derived.rs")),
+        ("context", include_str!("site/context.rs")),
+        ("outputs", include_str!("site/outputs.rs")),
+        ("pagefind", include_str!("site/pagefind.rs")),
+        ("related", include_str!("site/related.rs")),
+        ("render", include_str!("site/render.rs")),
+    ]
+}
+
 #[derive(Serialize, Deserialize)]
 struct RenderManifest {
     fingerprint: String,
@@ -147,6 +161,12 @@ pub fn restore_render(
     };
     let cached = root.join("site");
     if !cached.join(".aggr-site").is_file() {
+        return Ok(None);
+    }
+    if std::fs::read_to_string(cached.join(RENDER_KEY_FILE))
+        .ok()
+        .is_none_or(|key| key != fingerprint)
+    {
         return Ok(None);
     }
     if std::fs::read_to_string(out.join(RENDER_KEY_FILE))
@@ -305,6 +325,17 @@ pub struct ArticleResponse {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub body_hash: String,
+    pub content_type: Option<String>,
+}
+
+impl ArticleResponse {
+    pub fn html_text(&self) -> String {
+        crate::http::decode_html(&self.bytes, self.content_type.as_deref())
+    }
+
+    pub fn extraction_key(&self) -> String {
+        crate::model::sha1_hex(format!("{}\0{:?}", self.body_hash, self.content_type))
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -313,6 +344,8 @@ struct ArticleMeta {
     etag: Option<String>,
     last_modified: Option<String>,
     body_hash: String,
+    #[serde(default)]
+    content_type: Option<String>,
 }
 
 impl ArticleCache {
@@ -322,28 +355,33 @@ impl ArticleCache {
         }
     }
 
-    pub fn load(&self, url: &Url) -> Result<Option<ArticleResponse>> {
-        let key = article_key(url);
+    pub fn load(&self, url: &Url, headers: &[(String, String)]) -> Result<Option<ArticleResponse>> {
+        let key = article_key(url, headers);
         let meta_path = self.root.join("entries").join(format!("{key}.toml"));
-        let text = match std::fs::read_to_string(&meta_path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => {
-                return Err(err).with_context(|| format!("reading {}", meta_path.display()));
-            }
+        let Some(metadata) = read_bounded_regular(&meta_path, MAX_ARTICLE_METADATA_BYTES)
+            .with_context(|| format!("reading {}", meta_path.display()))?
+        else {
+            return Ok(None);
         };
-        let meta: ArticleMeta =
-            toml::from_str(&text).with_context(|| format!("parsing {}", meta_path.display()))?;
+        let Ok(text) = std::str::from_utf8(&metadata) else {
+            return Ok(None);
+        };
+        let Ok(meta) = toml::from_str::<ArticleMeta>(text) else {
+            return Ok(None);
+        };
+        if meta.body_hash.len() != 40
+            || !meta.body_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Ok(None);
+        }
         let body_path = self
             .root
             .join("bodies")
             .join(format!("{}.html", meta.body_hash));
-        let bytes = match std::fs::read(&body_path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => {
-                return Err(err).with_context(|| format!("reading {}", body_path.display()));
-            }
+        let Some(bytes) = read_bounded_regular(&body_path, MAX_ARTICLE_BODY_BYTES)
+            .with_context(|| format!("reading {}", body_path.display()))?
+        else {
+            return Ok(None);
         };
         if crate::model::sha1_hex(&bytes) != meta.body_hash {
             log::warn!(
@@ -352,21 +390,35 @@ impl ArticleCache {
             );
             return Ok(None);
         }
-        let final_url = Url::parse(&meta.final_url)
-            .with_context(|| format!("invalid cached article URL in {}", meta_path.display()))?;
+        let Ok(final_url) = Url::parse(&meta.final_url) else {
+            return Ok(None);
+        };
+        if !matches!(final_url.scheme(), "http" | "https") {
+            return Ok(None);
+        }
         Ok(Some(ArticleResponse {
             bytes,
             final_url,
             etag: meta.etag,
             last_modified: meta.last_modified,
             body_hash: meta.body_hash,
+            content_type: meta.content_type,
         }))
     }
 
-    pub fn store(&self, requested_url: &Url, body: &crate::http::Body) -> Result<ArticleResponse> {
+    pub fn store(
+        &self,
+        requested_url: &Url,
+        headers: &[(String, String)],
+        body: &crate::http::Body,
+    ) -> Result<ArticleResponse> {
         let body_hash = crate::model::sha1_hex(&body.bytes);
         let body_path = self.root.join("bodies").join(format!("{body_hash}.html"));
-        write_if_missing(&body_path, &body.bytes)?;
+        if read_bounded_regular(&body_path, MAX_ARTICLE_BODY_BYTES)?.as_deref()
+            != Some(body.bytes.as_slice())
+        {
+            write(&body_path, &body.bytes)?;
+        }
 
         let response = ArticleResponse {
             bytes: body.bytes.clone(),
@@ -374,17 +426,19 @@ impl ArticleCache {
             etag: body.etag.clone(),
             last_modified: body.last_modified.clone(),
             body_hash,
+            content_type: body.content_type.clone(),
         };
         let meta = ArticleMeta {
             final_url: response.final_url.to_string(),
             etag: response.etag.clone(),
             last_modified: response.last_modified.clone(),
             body_hash: response.body_hash.clone(),
+            content_type: response.content_type.clone(),
         };
         let meta_path = self
             .root
             .join("entries")
-            .join(format!("{}.toml", article_key(requested_url)));
+            .join(format!("{}.toml", article_key(requested_url, headers)));
         write(
             &meta_path,
             toml::to_string(&meta)
@@ -394,36 +448,73 @@ impl ArticleCache {
         Ok(response)
     }
 
-    pub fn extracted(&self, body_hash: &str) -> Result<Option<String>> {
-        let path = self.extracted_path(body_hash);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => Ok(Some(content)),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
-        }
+    pub fn extracted(
+        &self,
+        body_hash: &str,
+        final_url: &Url,
+    ) -> Result<Option<crate::content::ExtractedArticle>> {
+        let path = self.extracted_path(body_hash, final_url);
+        let Some(content) = read_bounded_regular(&path, MAX_EXTRACTED_ARTICLE_BYTES)
+            .with_context(|| format!("reading {}", path.display()))?
+        else {
+            return Ok(None);
+        };
+        Ok(serde_json::from_slice(&content).ok())
     }
 
-    pub fn store_extracted(&self, body_hash: &str, content: &str) -> Result<()> {
-        write_if_missing(&self.extracted_path(body_hash), content.as_bytes())
+    pub fn store_extracted(
+        &self,
+        body_hash: &str,
+        final_url: &Url,
+        content: &crate::content::ExtractedArticle,
+    ) -> Result<()> {
+        write(
+            &self.extracted_path(body_hash, final_url),
+            &serde_json::to_vec(content)?,
+        )
     }
 
-    fn extracted_path(&self, body_hash: &str) -> PathBuf {
+    fn extracted_path(&self, body_hash: &str, final_url: &Url) -> PathBuf {
         self.root
             .join("extracted")
             .join(EXTRACTOR_VERSION)
-            .join(format!("{body_hash}.html"))
+            .join(format!("{body_hash}-{}.json", article_key(final_url, &[])))
     }
 }
 
-fn article_key(url: &Url) -> String {
-    crate::model::sha1_hex(crate::model::normalize_link(url.as_str()).as_bytes())
+fn read_bounded_regular(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("inspecting {}", path.display())),
+    };
+    if !metadata.file_type().is_file() || metadata.len() > max_bytes as u64 {
+        return Ok(None);
+    }
+    let capacity = usize::try_from(metadata.len()).context("cached file is too large")?;
+    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspecting open cache file {}", path.display()))?;
+    if !opened.is_file() || opened.len() > max_bytes as u64 {
+        return Ok(None);
+    }
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading {}", path.display()))?;
+    Ok((bytes.len() <= max_bytes).then_some(bytes))
 }
 
-fn write_if_missing(path: &Path, bytes: &[u8]) -> Result<()> {
-    if path.is_file() {
-        return Ok(());
-    }
-    write(path, bytes)
+fn article_key(url: &Url, headers: &[(String, String)]) -> String {
+    let mut url = url.clone();
+    url.set_fragment(None);
+    let mut headers = headers
+        .iter()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.as_str()))
+        .collect::<Vec<_>>();
+    headers.sort();
+    crate::model::sha1_hex(format!("response-v2\0{}\0{headers:?}", url.as_str()))
 }
 
 pub(crate) fn write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -446,6 +537,28 @@ mod tests {
     use super::*;
     use crate::http::Body;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_cache_reads_reject_oversized_and_non_regular_files() {
+        let root = tempdir().unwrap();
+        let file = root.path().join("entry");
+        std::fs::write(&file, b"1234").unwrap();
+        assert_eq!(
+            read_bounded_regular(&file, 4).unwrap(),
+            Some(b"1234".to_vec())
+        );
+        assert_eq!(read_bounded_regular(&file, 3).unwrap(), None);
+        assert_eq!(read_bounded_regular(root.path(), 10).unwrap(), None);
+
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_eq!(read_bounded_regular(&link, 10).unwrap(), None);
+        assert_eq!(
+            read_bounded_regular(&root.path().join("missing"), 10).unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn build_and_dev_namespaces_are_explicit_and_disjoint() {
@@ -470,22 +583,150 @@ mod tests {
             etag: Some("\"v1\"".into()),
             last_modified: None,
             final_url: Url::parse("https://example.com/post").unwrap(),
+            content_type: Some("text/html; charset=utf-8".into()),
         };
-        let stored = cache.store(&requested, &body).unwrap();
+        let stored = cache.store(&requested, &[], &body).unwrap();
         cache
-            .store_extracted(&stored.body_hash, "<article>clean</article>")
+            .store_extracted(
+                &stored.body_hash,
+                &stored.final_url,
+                &crate::content::ExtractedArticle {
+                    html: "<article>clean</article>".into(),
+                    image: None,
+                },
+            )
             .unwrap();
 
-        let equivalent = Url::parse("https://example.com/post").unwrap();
+        let equivalent = requested.clone();
         let loaded = ArticleCache::new(root.path())
-            .load(&equivalent)
+            .load(&equivalent, &[])
             .unwrap()
             .unwrap();
         assert_eq!(loaded.bytes, body.bytes);
         assert_eq!(loaded.etag.as_deref(), Some("\"v1\""));
         assert_eq!(
-            cache.extracted(&loaded.body_hash).unwrap().as_deref(),
+            cache
+                .extracted(&loaded.body_hash, &loaded.final_url)
+                .unwrap()
+                .map(|article| article.html)
+                .as_deref(),
             Some("<article>clean</article>")
+        );
+        assert!(
+            cache
+                .extracted(
+                    &loaded.body_hash,
+                    &Url::parse("https://elsewhere.example/post").unwrap()
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .load(&requested, &[("Authorization".into(), "different".into())])
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(loaded.content_type, body.content_type);
+        let mut different_encoding = loaded.clone();
+        different_encoding.content_type = Some("text/html; charset=windows-1252".into());
+        assert_ne!(loaded.extraction_key(), different_encoding.extraction_key());
+    }
+
+    #[test]
+    fn article_cache_keeps_http_identity_distinct_from_dedupe_identity() {
+        let original = Url::parse("http://www.example.com:8080/post?ref=a").unwrap();
+        let key = article_key(&original, &[]);
+        for other in [
+            "http://www.example.com:8081/post?ref=a",
+            "https://www.example.com:8080/post?ref=a",
+            "http://www.example.com:8080/post?ref=b",
+        ] {
+            assert_ne!(key, article_key(&Url::parse(other).unwrap(), &[]));
+        }
+        assert_eq!(
+            key,
+            article_key(
+                &Url::parse("http://www.example.com:8080/post?ref=a#part").unwrap(),
+                &[]
+            )
+        );
+    }
+
+    #[test]
+    fn disposable_article_cache_recovers_from_corruption_without_storing_headers() {
+        let root = tempdir().unwrap();
+        let cache = ArticleCache::new(root.path());
+        let url = Url::parse("https://example.com/article").unwrap();
+        let headers = vec![("Authorization".into(), "Bearer private-test-secret".into())];
+        let body = Body {
+            bytes: b"<p>article</p>".to_vec(),
+            etag: None,
+            last_modified: None,
+            final_url: url.clone(),
+            content_type: Some("text/html".into()),
+        };
+        let response = cache.store(&url, &headers, &body).unwrap();
+        let metadata = cache
+            .root
+            .join("entries")
+            .join(format!("{}.toml", article_key(&url, &headers)));
+        assert!(
+            !std::fs::read_to_string(&metadata)
+                .unwrap()
+                .contains("private-test-secret")
+        );
+        let body_path = cache
+            .root
+            .join("bodies")
+            .join(format!("{}.html", response.body_hash));
+        std::fs::write(&body_path, "corrupt").unwrap();
+        assert!(cache.load(&url, &headers).unwrap().is_none());
+        cache.store(&url, &headers, &body).unwrap();
+        assert_eq!(
+            cache.load(&url, &headers).unwrap().unwrap().bytes,
+            body.bytes
+        );
+
+        std::fs::write(&metadata, "invalid toml").unwrap();
+        assert!(cache.load(&url, &headers).unwrap().is_none());
+        cache.store(&url, &headers, &body).unwrap();
+        let text = std::fs::read_to_string(&metadata).unwrap();
+        std::fs::write(
+            &metadata,
+            text.replace(&response.body_hash, "../../outside"),
+        )
+        .unwrap();
+        assert!(cache.load(&url, &headers).unwrap().is_none());
+
+        let extracted = crate::content::ExtractedArticle {
+            html: "<p>article</p>".into(),
+            image: None,
+        };
+        cache
+            .store_extracted(&response.extraction_key(), &url, &extracted)
+            .unwrap();
+        std::fs::write(
+            cache.extracted_path(&response.extraction_key(), &url),
+            "invalid json",
+        )
+        .unwrap();
+        assert!(
+            cache
+                .extracted(&response.extraction_key(), &url)
+                .unwrap()
+                .is_none()
+        );
+        cache
+            .store_extracted(&response.extraction_key(), &url, &extracted)
+            .unwrap();
+        assert_eq!(
+            cache
+                .extracted(&response.extraction_key(), &url)
+                .unwrap()
+                .unwrap()
+                .html,
+            extracted.html
         );
     }
 
@@ -521,6 +762,45 @@ mod tests {
             restore_render(&cache_root, "different", &out)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn render_restore_rejects_a_manifest_and_site_from_different_generations() {
+        let root = tempdir().unwrap();
+        let cache_root = root.path().join("cache");
+        let rendered = root.path().join("staging");
+        std::fs::create_dir_all(&rendered).unwrap();
+        std::fs::write(rendered.join(".aggr-site"), "1").unwrap();
+        std::fs::write(rendered.join("index.html"), "cached generation").unwrap();
+        let summary = crate::site::Summary {
+            pages: 1,
+            items: 1,
+            stubs: 0,
+        };
+        store_render(&cache_root, "manifest-generation", &rendered, summary).unwrap();
+        std::fs::write(
+            cache_root
+                .join(RENDER_NAMESPACE)
+                .join("site")
+                .join(RENDER_KEY_FILE),
+            "site-generation",
+        )
+        .unwrap();
+
+        let out = root.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(".aggr-site"), "1").unwrap();
+        std::fs::write(out.join("index.html"), "untouched output").unwrap();
+
+        assert!(
+            restore_render(&cache_root, "manifest-generation", &out)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("index.html")).unwrap(),
+            "untouched output"
         );
     }
 
@@ -566,5 +846,15 @@ mod tests {
 
         let discussion_changed = fingerprint!(Some("new-direct-link"));
         assert_ne!(remote_changed, discussion_changed);
+    }
+
+    #[test]
+    fn render_fingerprint_tracks_config_implementation_and_embedded_defaults() {
+        let names = render_implementation_sources()
+            .map(|(name, _)| name)
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"config"));
+        assert!(names.contains(&"defaults"));
     }
 }

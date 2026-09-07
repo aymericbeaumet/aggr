@@ -17,27 +17,37 @@
   </div>
 </div>
 {% endif %}
+{% if page.kind in ['source', 'category', 'tag'] %}
+<form class="directory-tools collection-tools" role="search" action="{{ page.path | url_for }}" method="get">
+  <label class="sr-only" for="collection-filter">Filter articles on this page</label>
+  <input id="collection-filter" name="q" type="search" inputmode="search" autocomplete="off" placeholder="Filter this page…" aria-controls="collection-list" data-list-filter data-page-search>
+  <span id="collection-count" class="muted directory-count" aria-hidden="true">{{ items | length }}</span>
+  <span id="collection-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true">{{ items | length }} {{ 'article' if (items | length) == 1 else 'articles' }}</span>
+</form>
+<noscript><p class="muted">All articles remain available below; filtering needs JavaScript.</p></noscript>
+{% endif %}
 {% set paginator = page.paginator %}
 {% if items %}
-<ol class="rows" role="list" start="{{ paginator.offset + 1 }}">
+<ol class="rows"{% if page.kind in ['source', 'category', 'tag'] %} id="collection-list"{% endif %} role="list" start="{{ paginator.offset + 1 }}">
   {% for item in items %}
     {% set rank = loop.index + paginator.offset %}
     {% include "_item.html" %}
   {% endfor %}
 </ol>
+{% if page.kind in ['source', 'category', 'tag'] %}<p class="empty" data-list-empty hidden>No matching articles on this page.</p>{% endif %}
 {% else %}
 <p class="empty">Nothing here yet.</p>
 {% endif %}
-{% if paginator.number_pagers > 1 %}
-<nav class="pager" aria-label="Pagination">
+{% if paginator.number_pagers > 1 or page.kind == 'river' %}
+<nav class="pager" aria-label="Pagination"{% if page.kind == 'river' %} data-feed-pager data-static-page="{{ paginator.current_index }}" data-static-pages="{{ paginator.number_pagers }}" data-static-page-size="{{ paginator.paginate_by }}" data-total-items="{{ paginator.total_items }}" data-static-first="{{ paginator.first | url_for }}" data-static-last="{{ paginator.last | url_for }}"{% if paginator.previous %} data-static-previous="{{ paginator.previous | url_for }}"{% endif %}{% if paginator.next %} data-static-next="{{ paginator.next | url_for }}"{% endif %}{% if paginator.number_pagers == 1 %} hidden{% endif %}{% endif %}>
   <span class="pager-side">
-    {% if paginator.previous %}<a href="{{ paginator.first | url_for }}">⇤ first</a>{% endif %}
-    {% if paginator.previous %}<a href="{{ paginator.previous | url_for }}">← newer</a>{% endif %}
+    <a data-page-first href="{{ paginator.first | url_for }}"{% if not paginator.previous %} hidden{% endif %}>first</a>
+    <a data-page-previous href="{{ paginator.previous | url_for if paginator.previous else paginator.first | url_for }}"{% if not paginator.previous %} hidden{% endif %}>newer</a>
   </span>
-  <span>page {{ paginator.current_index }} / {{ paginator.number_pagers }}</span>
+  <span data-page-status>page {{ paginator.current_index }} / {{ paginator.number_pagers }}</span>
   <span class="pager-side">
-    {% if paginator.next %}<a href="{{ paginator.next | url_for }}">older →</a>{% endif %}
-    {% if paginator.next %}<a href="{{ paginator.last | url_for }}">last ⇥</a>{% endif %}
+    <a data-page-next href="{{ paginator.next | url_for if paginator.next else paginator.last | url_for }}"{% if not paginator.next %} hidden{% endif %}>older</a>
+    <a data-page-last href="{{ paginator.last | url_for }}"{% if not paginator.next %} hidden{% endif %}>last</a>
   </span>
 </nav>
 {% endif %}

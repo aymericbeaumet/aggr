@@ -54,9 +54,10 @@ streams and advertises them from its HTML:
 | `rss.xml` | `application/rss+xml` | RSS 2.0 |
 | `feed.json` | `application/feed+json` | JSON Feed 1.1 |
 
-The same names live below `sources/<slug>/`, `categories/<slug>/`, and `tags/<slug>/`. Feed entries
-point their primary URL at the local clean-reading page and carry the original URL through the
-format's provenance field.
+The same names live below `sources/<slug>/`, `categories/<slug>/`, and `tags/<slug>/`. The
+human-facing `/library/` hub groups links to those stable per-collection routes; there are no
+separate source, category, or tag index pages. Feed entries point their primary URL at the local
+clean-reading page and carry the original URL through the format's provenance field.
 
 ## Discovery and URL lookup
 
@@ -71,7 +72,8 @@ emits:
 - `llms.txt`, a short inventory of the site's public resources.
 
 HTML advertises the descriptor and linkset. `aggr.json` names the instance and generator, identifies
-the aggr network, and enumerates feeds, collections, search, sitemap, PWA, and linkset endpoints.
+the aggr network, and enumerates feeds, the unified Library collection hub and its group anchors,
+search, sitemap, PWA, and linkset endpoints.
 When GitHub repository identity is known, it also points to the pinned root config and data tree.
 The human `aggr.toml` navigation link opens GitHub's commit-pinned blob page, while machine
 metadata uses the raw-content URL. On another host those GitHub-specific fields are omitted and

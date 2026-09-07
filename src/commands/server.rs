@@ -11,6 +11,7 @@ use notify::{RecursiveMode, Watcher as _};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep};
 
 use super::{Project, build, sync};
@@ -58,20 +59,33 @@ impl MemorySite {
 
     async fn replace_from(&self, staging: &Path, cached: &Path) -> Result<()> {
         let files = read_site(staging)?;
-        if cached.exists() {
-            remove_build(cached)?;
+        let previous = cached.with_extension("previous");
+        if previous.exists() {
+            remove_build(&previous)?;
         }
         if let Some(parent) = cached.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        std::fs::rename(staging, cached).with_context(|| {
-            format!(
-                "promoting dev build {} to {}",
-                staging.display(),
-                cached.display()
-            )
-        })?;
+        if cached.exists() {
+            std::fs::rename(cached, &previous)
+                .with_context(|| format!("moving cached dev build {} aside", cached.display()))?;
+        }
+        if let Err(error) = std::fs::rename(staging, cached) {
+            if previous.exists() {
+                let _ = std::fs::rename(&previous, cached);
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "promoting dev build {} to {}",
+                    staging.display(),
+                    cached.display()
+                )
+            });
+        }
+        if previous.exists() {
+            remove_build(&previous)?;
+        }
         *self.files.write().await = files;
         Ok(())
     }
@@ -109,6 +123,32 @@ struct DevState {
     reload: broadcast::Sender<()>,
 }
 
+struct DevWatcher {
+    task: JoinHandle<()>,
+}
+
+impl Drop for DevWatcher {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+struct PendingWatcher {
+    watcher: notify::RecommendedWatcher,
+    events: mpsc::UnboundedSender<notify::Result<notify::Event>>,
+    changes: mpsc::UnboundedReceiver<notify::Result<notify::Event>>,
+    paths: WatchPaths,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WatchPaths {
+    configs: Vec<PathBuf>,
+    themes: Vec<PathBuf>,
+    excluded: Vec<PathBuf>,
+    recursive: Vec<PathBuf>,
+    shallow: Vec<PathBuf>,
+}
+
 fn read_site(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut files = BTreeMap::new();
     for entry in walkdir::WalkDir::new(root) {
@@ -140,13 +180,14 @@ fn remove_build(root: &Path) -> Result<()> {
 }
 
 pub async fn run_with_reload(
-    project: &Project,
+    project: Project,
     args: &DevArgs,
     data: PathBuf,
     cache: PathBuf,
     cached: PathBuf,
     staging: PathBuf,
 ) -> Result<()> {
+    let project = Arc::new(project);
     // Install the process signal handler before the listener becomes visible. This makes even an
     // immediate Ctrl-C (common when a command was started by mistake) a graceful shutdown.
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
@@ -155,7 +196,7 @@ pub async fn run_with_reload(
     });
     tokio::task::yield_now().await;
     let build_args = args.build_args();
-    let base = crate::site::base_path(build::base_url(project, &build_args)?.as_deref());
+    let base = crate::site::base_path(build::base_url(&project, &build_args)?.as_deref());
     let listener = bind(args.port).await?;
     let url = format!("http://127.0.0.1:{}{base}", listener.local_addr()?.port());
     println!("aggr dev: {url}");
@@ -180,8 +221,12 @@ pub async fn run_with_reload(
         site,
         reload,
     };
+    // Register filesystem watches before the first network sync/build. Editors can otherwise save
+    // a config or theme while startup is busy and leave the served snapshot stale until the next
+    // manual edit.
+    let pending_watcher = prepare_watch(&project, &state)?;
     let initializing = async {
-        match refresh(project, &args.fetch, &build_args, &state, true).await {
+        match refresh(project.clone(), &args.fetch, &build_args, &state, true).await {
             Ok(rebuilt) => {
                 println!("ready: {url}");
                 if rebuilt {
@@ -190,7 +235,7 @@ pub async fn run_with_reload(
             }
             Err(err) => eprintln!("initial build failed: {err:#}"),
         }
-        let _watcher = watch(project, args, state)?;
+        let _watcher = pending_watcher.start(&project, args, state);
         std::future::pending::<Result<()>>().await
     };
     let result = tokio::select! {
@@ -207,16 +252,16 @@ pub async fn run_with_reload(
 }
 
 async fn refresh(
-    project: &Project,
+    project: Arc<Project>,
     fetch_args: &FetchArgs,
     build_args: &BuildArgs,
     state: &DevState,
     sync_sources: bool,
 ) -> Result<bool> {
-    let base_url = build::base_url(project, build_args)?;
+    let base_url = build::base_url(&project, build_args)?;
     let worktree = Worktree::ephemeral(state.data.clone());
     let visible_change = if sync_sources {
-        let report = sync::run_dev(project, &worktree, fetch_args, &state.cache).await?;
+        let report = sync::run_dev(&project, &worktree, fetch_args, &state.cache).await?;
         println!(
             "dev data: {} new item(s) in the isolated system cache (never committed or pushed)",
             report.added()
@@ -230,12 +275,65 @@ async fn refresh(
                 .any(|source| source.outcome == crate::store::Outcome::Ok && !source.unchanged)
     } else {
         println!("rebuilding from cached source data");
-        true
+        false
     };
     let store = crate::store::Store::open(&state.data);
     let now = Utc::now();
+    let discussions = build::resolve_discussions(&project, &store, &state.cache, now).await?;
+    let build_args = build_args.clone();
+    let data = state.data.clone();
+    let cache = state.cache.clone();
+    let cached = state.cached.clone();
+    let staging = state.staging.clone();
+    let (rendered, finished) = oneshot::channel();
+    // A dedicated thread keeps template rendering from blocking the signal future. Unlike
+    // `spawn_blocking`, it also cannot make Tokio wait for a long render while shutting down;
+    // interrupted output stays in the disposable staging directory and is cleared next run.
+    std::thread::Builder::new()
+        .name("aggr-dev-render".to_string())
+        .spawn(move || {
+            let result = render_refresh(
+                &project,
+                &build_args,
+                &data,
+                &cache,
+                &cached,
+                &staging,
+                base_url,
+                discussions,
+                now,
+                visible_change,
+            );
+            let _ = rendered.send(result);
+        })
+        .context("starting dev render worker")?;
+    let rebuilt = finished
+        .await
+        .context("dev render worker stopped before finishing")??;
+    if rebuilt {
+        state
+            .site
+            .replace_from(&state.staging, &state.cached)
+            .await?;
+    }
+    Ok(rebuilt)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_refresh(
+    project: &Project,
+    build_args: &BuildArgs,
+    data: &Path,
+    cache: &Path,
+    cached: &Path,
+    staging: &Path,
+    base_url: Option<String>,
+    discussions: crate::discussions::ResolutionSet,
+    now: chrono::DateTime<Utc>,
+    visible_change: bool,
+) -> Result<bool> {
+    let store = crate::store::Store::open(data);
     let generation = crate::site::render_generation(&store.items()?, &project.config.site, now);
-    let discussions = build::resolve_discussions(project, &store, &state.cache, now).await?;
     let discussions_fingerprint = discussions.fingerprint();
     let config_sha = project.config_sha();
     let fingerprint = crate::cache::render_fingerprint(crate::cache::RenderFingerprint {
@@ -248,28 +346,21 @@ async fn refresh(
         discussions: Some(&discussions_fingerprint),
         generation: &generation,
     })?;
-    if !visible_change && dev_key_matches(&state.cached, &fingerprint) {
+    if !rebuild_required(visible_change, cached, &fingerprint) {
         println!("dev build already current");
         return Ok(false);
     }
     // The staging directory is disposable. A template error may leave a partial tree without the
     // safety marker used for user-selected output directories, so always reset it before retrying.
-    remove_build(&state.staging)?;
-    build::run_ephemeral(
-        project,
-        build_args,
-        &state.data,
-        &state.staging,
-        &state.cache,
-        discussions,
-    )?;
-    crate::cache::write(&state.staging.join(DEV_KEY_FILE), fingerprint.as_bytes())
+    remove_build(staging)?;
+    build::run_ephemeral(project, build_args, data, staging, cache, discussions)?;
+    crate::cache::write(&staging.join(DEV_KEY_FILE), fingerprint.as_bytes())
         .context("writing the dev build fingerprint")?;
-    state
-        .site
-        .replace_from(&state.staging, &state.cached)
-        .await
-        .map(|()| true)
+    Ok(true)
+}
+
+fn rebuild_required(visible_change: bool, site: &Path, fingerprint: &str) -> bool {
+    visible_change || !dev_key_matches(site, fingerprint)
 }
 
 fn dev_key_matches(site: &Path, fingerprint: &str) -> bool {
@@ -319,70 +410,233 @@ async fn bind(port: u16) -> Result<TcpListener> {
     }
 }
 
-fn watch(project: &Project, args: &DevArgs, state: DevState) -> Result<notify::RecommendedWatcher> {
-    let (events, mut changes) = mpsc::unbounded_channel();
+fn prepare_watch(project: &Project, state: &DevState) -> Result<PendingWatcher> {
+    let (events, changes) = mpsc::unbounded_channel();
+    let paths = WatchPaths::new(project, state)?;
+    let watcher = create_watcher(&events, &paths)?;
+    Ok(PendingWatcher {
+        watcher,
+        events,
+        changes,
+        paths,
+    })
+}
+
+impl PendingWatcher {
+    fn start(self, project: &Project, args: &DevArgs, state: DevState) -> DevWatcher {
+        let Self {
+            watcher,
+            events,
+            mut changes,
+            paths,
+        } = self;
+        let config_path = project.config_path.clone();
+        let build_args = args.build_args();
+        let fetch_args = args.fetch.clone();
+        let task = tokio::spawn(async move {
+            // Kept in the task so aborting it synchronously drops the native watcher too.
+            let mut active_watcher = watcher;
+            let mut active_paths = paths;
+            while let Some(event) = changes.recv().await {
+                let Ok(event) = event else { continue };
+                if !rebuild_event(event.kind) {
+                    continue;
+                }
+                let mut changed = event
+                    .paths
+                    .into_iter()
+                    .filter(|path| active_paths.watched(path))
+                    .collect::<Vec<_>>();
+                if changed.is_empty() {
+                    continue;
+                }
+                sleep(Duration::from_millis(150)).await;
+                while let Ok(event) = changes.try_recv() {
+                    if let Ok(event) = event
+                        && rebuild_event(event.kind)
+                    {
+                        changed.extend(
+                            event
+                                .paths
+                                .into_iter()
+                                .filter(|path| active_paths.watched(path)),
+                        );
+                    }
+                }
+                changed.sort();
+                changed.dedup();
+                let sync_sources = changed
+                    .iter()
+                    .any(|path| active_paths.configs.contains(path));
+                let result: Result<bool> = async {
+                    let project = Arc::new(Project::load(&config_path).await?);
+                    let next_paths = WatchPaths::new(&project, &state)?;
+                    if next_paths != active_paths {
+                        let next_watcher = create_watcher(&events, &next_paths)?;
+                        active_watcher = next_watcher;
+                        active_paths = next_paths;
+                    }
+                    refresh(project, &fetch_args, &build_args, &state, sync_sources).await
+                }
+                .await;
+                match result {
+                    Ok(true) => {
+                        println!("reloaded");
+                        let _ = state.reload.send(());
+                    }
+                    Ok(false) => println!("already current"),
+                    Err(err) => eprintln!("build failed: {err:#}"),
+                }
+            }
+            drop(active_watcher);
+        });
+        DevWatcher { task }
+    }
+}
+
+impl WatchPaths {
+    fn new(project: &Project, state: &DevState) -> Result<Self> {
+        let mut configs = project.config.loaded_files.clone();
+        configs.sort();
+        configs.dedup();
+
+        // Keep absent override directories as logical dependencies. Their nearest existing parent
+        // is watched shallowly so creating `templates/`, `static/`, or a configured theme starts
+        // recursive watching without restarting dev.
+        let mut themes = vec![project.root.join("templates"), project.root.join("static")];
+        if project.config.site.theme == "default" {
+            #[cfg(debug_assertions)]
+            {
+                let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes/default");
+                if source.is_dir() && !source.starts_with(&project.root) {
+                    themes.push(source);
+                }
+            }
+        } else {
+            themes.push(project.root.join(&project.config.site.theme));
+        }
+        themes = themes
+            .into_iter()
+            .map(normalize_watch_path)
+            .collect::<Result<Vec<_>>>()?;
+        themes.sort();
+        themes.dedup();
+
+        let mut excluded = vec![
+            state.data.clone(),
+            state.cache.clone(),
+            state.cached.clone(),
+            state.cached.with_extension("previous"),
+            state.staging.clone(),
+        ];
+        excluded.sort();
+        excluded.dedup();
+
+        let mut recursive = themes
+            .iter()
+            .filter(|path| path.is_dir())
+            .cloned()
+            .collect::<Vec<_>>();
+        recursive.sort();
+        recursive.dedup();
+
+        let mut shallow = configs
+            .iter()
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
+            .collect::<Vec<_>>();
+        for theme in themes.iter().filter(|path| !path.is_dir()) {
+            if let Some(parent) = nearest_existing_parent(theme)
+                && parent.starts_with(&project.root)
+            {
+                shallow.push(parent);
+            }
+        }
+        shallow.retain(|path| !recursive.iter().any(|root| path.starts_with(root)));
+        shallow.sort();
+        shallow.dedup();
+
+        Ok(Self {
+            configs,
+            themes,
+            excluded,
+            recursive,
+            shallow,
+        })
+    }
+
+    fn watched(&self, path: &Path) -> bool {
+        watched(path, &self.configs, &self.themes, &self.excluded)
+    }
+}
+
+fn create_watcher(
+    events: &mpsc::UnboundedSender<notify::Result<notify::Event>>,
+    paths: &WatchPaths,
+) -> Result<notify::RecommendedWatcher> {
+    let events = events.clone();
     let mut watcher = notify::recommended_watcher(move |event| {
         let _ = events.send(event);
     })?;
-    let mut roots = vec![project.root.clone()];
-    roots.extend(crate::site::theme_layers(&project.config, &project.root)?.dirs);
-    roots.sort();
-    roots.dedup();
-    let mut watched_roots: Vec<PathBuf> = Vec::new();
-    for root in roots {
-        if !watched_roots.iter().any(|parent| root.starts_with(parent)) {
-            watched_roots.push(root);
-        }
-    }
-    for root in &watched_roots {
+    for root in &paths.recursive {
         watcher
             .watch(root, RecursiveMode::Recursive)
             .with_context(|| format!("watching {}", root.display()))?;
         log::info!("watching {}", root.display());
     }
-
-    let config_path = project.config_path.clone();
-    let build_args = args.build_args();
-    let fetch_args = args.fetch.clone();
-    tokio::spawn(async move {
-        while let Some(event) = changes.recv().await {
-            let Ok(event) = event else { continue };
-            if !event.paths.iter().any(|path| watched(path, &state.staging)) {
-                continue;
-            }
-            let mut changed = event.paths;
-            sleep(Duration::from_millis(150)).await;
-            while let Ok(event) = changes.try_recv() {
-                if let Ok(event) = event {
-                    changed.extend(event.paths);
-                }
-            }
-            let sync_sources = changed.iter().any(|path| {
-                path.extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
-            });
-            let result = match Project::load(&config_path).await {
-                Ok(project) => {
-                    refresh(&project, &fetch_args, &build_args, &state, sync_sources).await
-                }
-                Err(err) => Err(err),
-            };
-            match result {
-                Ok(true) => {
-                    println!("reloaded");
-                    let _ = state.reload.send(());
-                }
-                Ok(false) => println!("already current"),
-                Err(err) => eprintln!("build failed: {err:#}"),
-            }
-        }
-    });
+    for root in &paths.shallow {
+        watcher
+            .watch(root, RecursiveMode::NonRecursive)
+            .with_context(|| format!("watching {}", root.display()))?;
+        log::info!("watching {}", root.display());
+    }
     Ok(watcher)
 }
 
-fn watched(path: &Path, out: &Path) -> bool {
-    !path.starts_with(out)
+fn normalize_watch_path(path: PathBuf) -> Result<PathBuf> {
+    if path.exists() {
+        return path
+            .canonicalize()
+            .with_context(|| format!("resolving watch path {}", path.display()));
+    }
+    let mut normalized = PathBuf::new();
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component),
+        }
+    }
+    Ok(normalized)
+}
+
+fn nearest_existing_parent(path: &Path) -> Option<PathBuf> {
+    let mut parent = path.parent()?;
+    loop {
+        if parent.is_dir() {
+            return Some(parent.to_path_buf());
+        }
+        parent = parent.parent()?;
+    }
+}
+
+fn rebuild_event(kind: notify::EventKind) -> bool {
+    !matches!(
+        kind,
+        notify::EventKind::Access(_)
+            | notify::EventKind::Modify(notify::event::ModifyKind::Metadata(
+                notify::event::MetadataKind::AccessTime
+            ))
+    )
+}
+
+fn watched(path: &Path, configs: &[PathBuf], themes: &[PathBuf], excluded: &[PathBuf]) -> bool {
+    (configs.iter().any(|config| path == config)
+        || themes
+            .iter()
+            .any(|theme| path.starts_with(theme) || theme.starts_with(path)))
+        && !excluded.iter().any(|root| path.starts_with(root))
         && !path
             .components()
             .any(|part| matches!(part.as_os_str().to_str(), Some(".git" | ".aggr" | "target")))
@@ -558,6 +812,7 @@ pub fn content_type(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn resolves_under_the_root_only() {
@@ -613,6 +868,7 @@ mod tests {
 
         assert!(!staging.exists());
         assert!(cached.join("index.html").is_file());
+        assert!(!cached.with_extension("previous").exists());
         assert_eq!(site.response("/", "/").await.unwrap().1, b"second");
         assert!(site.response("/", "/404.html").await.is_none());
         assert_eq!(site.response("/", "/search.json").await.unwrap().1, b"[]");
@@ -678,11 +934,98 @@ mod tests {
     #[test]
     fn ignores_generated_and_internal_changes() {
         let root = Path::new("/project");
-        let out = root.join("_site");
-        assert!(watched(&root.join("aggr.toml"), &out));
-        assert!(watched(&root.join("templates/base.html"), &out));
-        assert!(!watched(&out.join("index.html"), &out));
-        assert!(!watched(&root.join(".aggr/data/item.md"), &out));
-        assert!(!watched(&root.join("target/debug/aggr"), &out));
+        let configs = vec![root.join("aggr.toml")];
+        let themes = vec![root.join("templates")];
+        let excluded = vec![root.join("templates/generated")];
+        assert!(watched(
+            &root.join("aggr.toml"),
+            &configs,
+            &themes,
+            &excluded
+        ));
+        assert!(watched(
+            &root.join("templates/base.html"),
+            &configs,
+            &themes,
+            &excluded
+        ));
+        assert!(!watched(
+            &root.join("readme.md"),
+            &configs,
+            &themes,
+            &excluded
+        ));
+        assert!(!watched(
+            &root.join("templates/generated/index.html"),
+            &configs,
+            &themes,
+            &excluded
+        ));
+        assert!(!watched(
+            &root.join(".aggr/data/item.md"),
+            &configs,
+            &themes,
+            &excluded
+        ));
+        assert!(!watched(
+            &root.join("target/debug/aggr"),
+            &configs,
+            &themes,
+            &excluded
+        ));
+        assert!(!rebuild_event(notify::EventKind::Access(
+            notify::event::AccessKind::Read
+        )));
+        assert!(!rebuild_event(notify::EventKind::Modify(
+            notify::event::ModifyKind::Metadata(notify::event::MetadataKind::AccessTime)
+        )));
+        assert!(rebuild_event(notify::EventKind::Modify(
+            notify::event::ModifyKind::Any
+        )));
+        assert!(watched(
+            &root.join("templates"),
+            &configs,
+            &themes,
+            &excluded
+        ));
+    }
+
+    #[test]
+    fn identical_dependency_events_do_not_rebuild_a_current_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(DEV_KEY_FILE), "same").unwrap();
+        std::fs::write(temp.path().join(".aggr-site"), "1").unwrap();
+
+        assert!(!rebuild_required(false, temp.path(), "same"));
+        assert!(rebuild_required(false, temp.path(), "changed"));
+        assert!(rebuild_required(true, temp.path(), "same"));
+    }
+
+    #[tokio::test]
+    async fn dropping_the_watcher_cancels_queued_reload_work() {
+        struct MarksDrop(Arc<AtomicBool>);
+        impl Drop for MarksDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let marker = MarksDrop(dropped.clone());
+        let task = tokio::spawn(async move {
+            let _marker = marker;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        let guard = DevWatcher { task };
+
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

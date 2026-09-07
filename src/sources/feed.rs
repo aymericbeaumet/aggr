@@ -62,7 +62,7 @@ async fn request(
     ctx.client
         .get(Request {
             url,
-            headers: &source.headers,
+            headers: crate::http::source_headers(source, url),
             etag: previous.etag.as_deref(),
             last_modified: previous.last_modified.as_deref(),
         })
@@ -95,10 +95,10 @@ async fn interpret(
     }
 
     if let Ok(feed) = parse(&body.bytes, &body.final_url) {
-        return Ok(changed(feed, &body.final_url, validators));
+        return Ok(changed(feed, &body.final_url, validators, &body.bytes));
     }
 
-    let page = String::from_utf8_lossy(&body.bytes);
+    let page = body.html_text();
     for candidate in crate::sources::html::feed_links(&page, &body.final_url) {
         if candidate == body.final_url {
             continue;
@@ -115,6 +115,7 @@ async fn interpret(
                             body_hash: Some(sha1_hex(&feed_body.bytes)),
                             resolved_url: Some(feed_body.final_url.to_string()),
                         },
+                        &feed_body.bytes,
                     ));
                 }
                 Err(err) => log::debug!(
@@ -145,12 +146,52 @@ async fn interpret(
     }
 }
 
-fn changed(feed: Feed, url: &Url, validators: Validators) -> Fetch {
-    let (meta, items) = convert(&feed, url);
+fn changed(feed: Feed, url: &Url, validators: Validators, bytes: &[u8]) -> Fetch {
+    let (meta, mut items) = convert(&feed, url);
+    supplement_json_images(bytes, url, &mut items);
     Fetch::Changed {
         validators,
         meta,
         items,
+    }
+}
+
+fn supplement_json_images(bytes: &[u8], base: &Url, items: &mut [RawItem]) {
+    if bytes
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+        != Some(b'{')
+    {
+        return;
+    }
+    let Ok(document) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return;
+    };
+    let Some(entries) = document.get("items").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    let by_id: std::collections::HashMap<_, _> = entries
+        .iter()
+        .filter_map(|entry| Some((entry.get("id")?.as_str()?, entry)))
+        .collect();
+    for item in items {
+        let Some(entry) = item.id.as_deref().and_then(|id| by_id.get(id)) else {
+            continue;
+        };
+        for name in ["image", "banner_image"] {
+            if let Some(url) = entry
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| base.join(value).ok())
+                .filter(|url| matches!(url.scheme(), "http" | "https"))
+            {
+                item.preview_candidates.push(crate::preview::Candidate {
+                    url: url.to_string(),
+                    alt: None,
+                });
+            }
+        }
     }
 }
 
@@ -186,6 +227,7 @@ async fn discover_common(url: &Url, source: &Source, ctx: &Context<'_>) -> Optio
                 body_hash: Some(sha1_hex(&body.bytes)),
                 resolved_url: Some(body.final_url.to_string()),
             },
+            &body.bytes,
         ));
     }
     None
@@ -320,6 +362,40 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<RawItem> {
         summary,
         content_html,
         extra,
+        preview_candidates: entry
+            .media
+            .iter()
+            .flat_map(|media| {
+                media
+                    .thumbnails
+                    .iter()
+                    .map(|thumbnail| crate::preview::Candidate {
+                        url: feed_url
+                            .join(&thumbnail.image.uri)
+                            .map(|url| url.to_string())
+                            .unwrap_or_else(|_| thumbnail.image.uri.clone()),
+                        alt: thumbnail.image.title.clone(),
+                    })
+                    .chain(
+                        media
+                            .content
+                            .iter()
+                            .filter(|content| {
+                                content
+                                    .content_type
+                                    .as_ref()
+                                    .is_some_and(|kind| kind.ty() == "image")
+                            })
+                            .filter_map(|content| content.url.as_ref())
+                            .map(|url| crate::preview::Candidate {
+                                url: url.to_string(),
+                                alt: None,
+                            }),
+                    )
+            })
+            .collect(),
+        preview: None,
+        images: Vec::new(),
     })
 }
 
@@ -511,9 +587,65 @@ line two</content>
             persist_endpoint: true,
             headers: vec![],
             html: true,
+            previews: false,
+            images: true,
             content: crate::config::ContentMode::Light,
             engine: crate::config::Engine::Feed { url },
         }
+    }
+
+    #[test]
+    fn json_feed_images_survive_feed_rs_conversion() {
+        let url = Url::parse("https://example.com/feed.json").unwrap();
+        let bytes = br#"{"version":"https://jsonfeed.org/version/1.1","title":"Example","items":[{"id":"post","url":"https://example.com/post","content_text":"Body","image":"/image.jpg","banner_image":"/banner.webp"}]}"#;
+        let Fetch::Changed { items, .. } = changed(
+            super::parse(bytes, &url).unwrap(),
+            &url,
+            Validators::default(),
+            bytes,
+        ) else {
+            panic!("changed feed")
+        };
+        assert_eq!(
+            items[0]
+                .preview_candidates
+                .iter()
+                .map(|image| image.url.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "https://example.com/image.jpg",
+                "https://example.com/banner.webp"
+            ]
+        );
+    }
+
+    #[test]
+    fn configured_headers_do_not_follow_unrelated_article_origins() {
+        let mut source = source(Url::parse("https://example.com/feed").unwrap());
+        source
+            .headers
+            .push(("Authorization".into(), "Bearer private".into()));
+        assert_eq!(
+            crate::http::source_headers(
+                &source,
+                &Url::parse("https://example.com/article").unwrap()
+            ),
+            source.headers
+        );
+        assert!(
+            crate::http::source_headers(
+                &source,
+                &Url::parse("https://other.example/article").unwrap()
+            )
+            .is_empty()
+        );
+        assert!(
+            crate::http::source_headers(
+                &source,
+                &Url::parse("https://example.com:8443/article").unwrap()
+            )
+            .is_empty()
+        );
     }
 
     #[tokio::test]

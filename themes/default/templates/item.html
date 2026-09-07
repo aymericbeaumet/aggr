@@ -22,31 +22,38 @@
     <h1 class="p-name">{{ item.title }}</h1>
     <div class="meta">
       {% if item.domain %}<a href="{{ ('sources/' ~ item.source ~ '/') | url_for }}">{{ item.domain }}</a>{% endif %}
-      {% if item.published %}<span>· published <time class="dt-published" datetime="{{ item.published }}" title="{{ item.published }}">{{ item.published | date('%Y-%m-%d %H:%M') }}</time></span>{% endif %}
-      {% if item.updated and item.updated != item.published %}<span>· updated <time class="dt-updated" datetime="{{ item.updated }}" title="{{ item.updated }}">{{ item.updated | date }}</time></span>{% endif %}
-      {% if item.category %}<span>· <a class="p-category" rel="tag" href="{{ ('categories/' ~ (item.category | slug) ~ '/') | url_for }}">{{ item.category }}</a></span>{% endif %}
-      {% if item.labels %}<span>· <span class="item-tags">{% for label in item.labels %}<a class="tag p-category" rel="tag" href="{{ ('tags/' ~ (label | slug) ~ '/') | url_for }}">#{{ label }}</a>{% endfor %}</span></span>{% endif %}
-      <span>· <a class="u-bookmark-of" href="{{ item.link }}" target="_blank" rel="external noopener noreferrer via">original</a></span>
-      {% for discussion in item.discussions %}<span>· <a class="discussion{% if discussion.found %} is-found{% endif %}" href="{{ discussion.url }}" target="_blank" rel="noopener noreferrer"{% if discussion.found %} aria-label="{{ discussion.name }}, matching discussion found{% if discussion.score is not none %}, score {{ discussion.score }}{% endif %}"{% endif %}>{{ discussion.name }}</a></span>{% endfor %}
+      {% if item.published %}<span>published <time class="dt-published" datetime="{{ item.published }}" title="{{ item.published }}">{{ item.published | date('%Y-%m-%d %H:%M') }}</time></span>{% endif %}
+      {% if item.word_count %}<span class="reading-stats">{{ item.word_count }} {{ 'word' if item.word_count == 1 else 'words' }} · <time datetime="PT{{ item.reading_minutes }}M">{{ item.reading_minutes }} min read</time></span>{% endif %}
+      {% if item.updated and item.updated != item.published %}<span>Updated <time class="dt-updated" datetime="{{ item.updated }}" title="{{ item.updated }}">{{ item.updated | date }}</time></span>{% endif %}
+      {% if item.category %}<a class="p-category" rel="tag" href="{{ ('categories/' ~ (item.category | slug) ~ '/') | url_for }}">{{ item.category }}</a>{% endif %}
+      {% if item.labels %}<span class="item-tags">{% for label in item.labels %}<a class="tag p-category" rel="tag" href="{{ ('tags/' ~ (label | slug) ~ '/') | url_for }}">#{{ label }}</a>{% endfor %}</span>{% endif %}
+      <a class="u-bookmark-of" href="{{ item.link }}" target="_blank" rel="external noopener noreferrer via">original</a>
+      {% for discussion in item.discussions %}<a class="discussion" data-discussion="{{ discussion.name }}" href="{{ discussion.url }}" target="_blank" rel="noopener noreferrer" aria-label="{{ discussion.name }}, matching discussion found{% if discussion.score is not none %}, score {{ discussion.score }}{% endif %}">{{ discussion.name }}</a>{% endfor %}
     </div>
   </header>
   {% if item.content == 'none' and not item.body_html %}
   <p class="empty">This source publishes titles only — <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer">open the original</a>.</p>
   {% endif %}
   <div class="body e-content">{{ item.body_html | safe }}</div>
-  <nav class="article-navigation" aria-label="Article navigation">
-    <span class="article-navigation-side">{% if item.previous_article %}<a class="article-navigation-link" rel="prev" href="{{ item.previous_article.url | url_for }}">← newer</a>{% endif %}</span>
-    <a class="article-navigation-link article-navigation-home" rel="home" href="{{ '' | url_for }}">feed</a>
-    <span class="article-navigation-side">{% if item.next_article %}<a class="article-navigation-link" rel="next" href="{{ item.next_article.url | url_for }}">older →</a>{% endif %}</span>
-  </nav>
-  {% if item.recommended_articles %}
+  {% if item.next_article or item.recommended_articles %}
   <footer class="article-footer">
-    <nav class="article-more" aria-label="More articles">
+    <h2 class="article-more-heading" id="continue-reading-title">Continue reading</h2>
+    <nav class="article-more" aria-labelledby="continue-reading-title">
+      {% if item.next_article %}
+      <a class="article-more-link" rel="next" href="{{ item.next_article.url | url_for }}">
+        <span class="article-more-kicker">Next article</span>
+        <span class="article-more-title">{{ item.next_article.title }}</span>
+        <span class="article-more-domain">{% if item.next_article.domain %}{{ item.next_article.domain }} · {% endif %}<time datetime="{{ item.next_article.date }}" title="{{ item.next_article.date }}">{{ item.next_article.date | date }}</time></span>
+      </a>
+      {% endif %}
       {% for article in item.recommended_articles %}
+      {% if (not item.previous_article or article.url != item.previous_article.url) and (not item.next_article or article.url != item.next_article.url) %}
       <a class="article-more-link" href="{{ article.url | url_for }}">
+        <span class="article-more-kicker">Recommended</span>
         <span class="article-more-title">{{ article.title }}</span>
         <span class="article-more-domain">{% if article.domain %}{{ article.domain }} · {% endif %}<time datetime="{{ article.date }}" title="{{ article.date }}">{{ article.date | date }}</time></span>
       </a>
+      {% endif %}
       {% endfor %}
     </nav>
   </footer>

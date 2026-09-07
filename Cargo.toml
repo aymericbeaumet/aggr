@@ -1,6 +1,6 @@
 [package]
 name = "aggr"
-version = "1.4.1"
+version = "1.5.0"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
@@ -20,12 +20,14 @@ clap_complete = "4"
 comrak = { version = "0.54", default-features = false }
 dom_smoothie = "0.18"
 directories = "6"
+encoding_rs = "0.8"
 env_logger = "0.11"
 feed-rs = "2"
 futures-util = "0.3"
 glob = "0.3"
 hex = "0.4"
 htmd = "0.5"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 log = "0.4"
 minijinja = { version = "2", features = ["loader", "json"] }
 notify = "8"
@@ -46,21 +48,32 @@ serde_json = "1"
 serde_yaml_ng = "0.10"
 sha1 = "0.11"
 slug = "0.1"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal"] }
 toml = "1"
 url = { version = "2", features = ["serde"] }
+unicode-segmentation = "1"
 walkdir = "2"
 
 [dev-dependencies]
 assert_cmd = "2"
+fantoccini = { version = "0.22", default-features = false }
 httpmock = "0.8"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 insta = "1"
+png = "0.18"
 predicates = "3"
 tokio = { version = "1", features = ["test-util"] }
 
 [profile.dev]
 opt-level = 0
+
+[profile.dev.package.fancy-regex]
+opt-level = 3
+
+[profile.dev.package.regex-automata]
+opt-level = 3
 
 [profile.release]
 codegen-units = 1

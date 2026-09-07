@@ -1,12 +1,15 @@
 //! The template contract: everything a theme can see, as plain serializable structs. Documented
 //! for theme authors in `docs/themes.md`; changing a field here is a theme-facing change.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::model::{ContentKind, Item, normalize_labels};
+use crate::{
+    content,
+    model::{ContentKind, Item, normalize_labels},
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SiteCtx {
@@ -53,6 +56,8 @@ pub struct SiteIdentityCtx {
 pub struct DiscussionLinkCtx {
     pub name: String,
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shortcut: Option<String>,
     /// A direct link to a matching discussion rather than the provider's search page.
     pub found: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,8 +78,8 @@ pub struct BuildCtx {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PageCtx {
-    /// `river`, `source`, `category`, `tag`, taxonomy indexes, `item`, `sources`, `search`,
-    /// `preferences`, `404`, or `offline`.
+    /// `river`, `source`, `category`, `tag`, `library`, `item`, `search`, `preferences`, `404`,
+    /// or `offline`.
     pub kind: String,
     pub title: String,
     pub document_title: String,
@@ -142,6 +147,11 @@ pub struct ItemCtx {
     pub summary: Option<String>,
     pub excerpt: String,
     pub content: ContentKind,
+    /// Visible body words and a rounded-up estimate at 225 words per minute.
+    pub word_count: usize,
+    pub reading_minutes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<PreviewCtx>,
     pub extra: BTreeMap<String, serde_yaml_ng::Value>,
     /// GitHub URLs pinned to the data commit; `None` when the repository is unknown.
     pub permalink: Option<String>,
@@ -158,6 +168,15 @@ pub struct ItemCtx {
     /// Rendered Markdown; only filled on the item's own page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_html: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewCtx {
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+    pub alt: Option<String>,
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -256,6 +275,7 @@ pub fn category_slug(name: &str) -> String {
 impl ItemCtx {
     pub fn from_item(item: &Item, options: ItemOptions<'_>) -> Self {
         let md = item.md_path();
+        let (word_count, reading_minutes) = content::reading_metrics(&item.body);
         Self {
             path: item.path.clone(),
             url: item_url(&item.path),
@@ -276,26 +296,24 @@ impl ItemCtx {
             discussions: options
                 .discussions
                 .iter()
-                .map(|discussion| {
-                    let found = discussion
-                        .provider
-                        .and_then(|provider| options.resolutions.get(provider, &item.front.link));
-                    DiscussionLinkCtx {
+                .filter_map(|discussion| {
+                    let provider = discussion.provider?;
+                    let found = options.resolutions.get(provider, &item.front.link)?;
+                    Some(DiscussionLinkCtx {
                         name: compact_name(&discussion.name),
-                        url: found.map(|found| found.url.clone()).unwrap_or_else(|| {
-                            discussion
-                                .url
-                                .replace("{url}", &encode_query(&item.front.link))
-                                .replace("{title}", &encode_query(&item.front.title))
-                        }),
-                        found: found.is_some(),
-                        score: found.map(|found| found.score),
-                    }
+                        url: found.url.clone(),
+                        shortcut: None,
+                        found: true,
+                        score: Some(found.score),
+                    })
                 })
                 .collect(),
             summary: item.front.summary.clone(),
             excerpt: options.excerpt,
             content: item.front.content,
+            word_count,
+            reading_minutes,
+            preview: None,
             extra: item.front.extra.clone(),
             permalink: options.links.map(|l| l.permalink(&md)),
             raw_url: options.links.map(|l| l.raw(&md)),
@@ -364,14 +382,52 @@ pub fn compact_name(name: &str) -> String {
         .collect()
 }
 
-fn encode_query(value: &str) -> String {
-    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+/// Assign deterministic, collision-free uppercase shortcuts to enabled discussion networks.
+/// Existing reader keys are reserved; later networks fall through to the next unused letter in
+/// their configured name.
+pub fn discussion_shortcuts(networks: &[crate::config::NetworkConfig]) -> Vec<Option<String>> {
+    let mut used = BTreeSet::from(['D', 'G', 'J', 'K', 'O', 'U']);
+    networks
+        .iter()
+        .map(|network| {
+            network
+                .name
+                .chars()
+                .filter(|character| character.is_ascii_alphabetic())
+                .map(|character| character.to_ascii_uppercase())
+                .find(|character| used.insert(*character))
+                .map(|character| character.to_string())
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn discussion_shortcuts_are_uppercase_distinct_and_reserve_original() {
+        let network = |name: &str| crate::config::NetworkConfig {
+            name: name.into(),
+            url: "https://example.test/?q={url}".into(),
+            provider: None,
+        };
+        let shortcuts = discussion_shortcuts(&[
+            network("Hacker News"),
+            network("Reddit"),
+            network("X"),
+            network("Open Web"),
+            network("Hacker Forum"),
+        ]);
+        assert_eq!(
+            shortcuts,
+            vec![Some("H"), Some("R"), Some("X"), Some("P"), Some("A")]
+                .into_iter()
+                .map(|shortcut| shortcut.map(str::to_string))
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn age_bands_change_at_exact_visual_boundaries() {
@@ -431,5 +487,89 @@ mod tests {
             item_url("items/techmeme/2026/09/2026-09-02-a-story"),
             "items/techmeme/2026-09-02-a-story/"
         );
+    }
+
+    #[test]
+    fn items_expose_only_resolved_discussions() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
+        let item = Item {
+            path: "items/example/2026/09/article".into(),
+            front: crate::model::FrontMatter {
+                title: "An article".into(),
+                link: "https://example.com/article".into(),
+                source: "example".into(),
+                first_seen: now,
+                ..Default::default()
+            },
+            body: String::new(),
+        };
+        let configured = vec![
+            crate::config::NetworkConfig {
+                name: "Hacker News".into(),
+                url: "https://hn.algolia.com/?q={url}".into(),
+                provider: Some(crate::config::NetworkProvider::HackerNews),
+            },
+            crate::config::NetworkConfig {
+                name: "Reddit".into(),
+                url: "https://www.reddit.com/search/?q=url%3A{url}".into(),
+                provider: Some(crate::config::NetworkProvider::Reddit),
+            },
+            crate::config::NetworkConfig {
+                name: "X".into(),
+                url: "https://x.com/search?q={url}".into(),
+                provider: Some(crate::config::NetworkProvider::X),
+            },
+            crate::config::NetworkConfig {
+                name: "Custom".into(),
+                url: "https://discussion.example/search?q={url}".into(),
+                provider: None,
+            },
+        ];
+        let resolutions: crate::discussions::ResolutionSet =
+            serde_json::from_value(serde_json::json!({
+                "hackernews:https://example.com/article": {
+                    "url": "https://news.ycombinator.com/item?id=42",
+                    "score": 12
+                },
+                "x:https://example.com/article": {
+                    "url": "https://x.com/example/status/42",
+                    "score": 3
+                }
+            }))
+            .unwrap();
+
+        let context = ItemCtx::from_item(
+            &item,
+            ItemOptions {
+                source_name: "Example",
+                category: None,
+                links: None,
+                excerpt: String::new(),
+                discussions: &configured,
+                resolutions: &resolutions,
+                now,
+            },
+        );
+
+        assert_eq!(
+            context
+                .discussions
+                .iter()
+                .map(|discussion| (discussion.name.as_str(), discussion.url.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("hackernews", "https://news.ycombinator.com/item?id=42"),
+                ("x", "https://x.com/example/status/42"),
+            ]
+        );
+        assert!(
+            context
+                .discussions
+                .iter()
+                .all(|discussion| discussion.found)
+        );
+        let serialized = serde_json::to_string(&context).unwrap();
+        assert!(!serialized.contains("reddit"));
+        assert!(!serialized.contains("discussion.example"));
     }
 }

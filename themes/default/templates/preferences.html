@@ -1,39 +1,57 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="page preferences" aria-labelledby="page-title">
-  <header class="page-header"><h1 id="page-title">{{ page.title }}</h1></header>
+  <header class="page-header"><h1 id="page-title">{{ page.title }}</h1><p class="preferences-intro muted">Make yourself comfortable. Changes save automatically in this browser.</p></header>
   <div class="page-body preferences-body">
+    <noscript><p>Preferences need JavaScript. Articles and navigation work without it.</p></noscript>
     <section class="preferences-group" aria-labelledby="appearance-heading">
       <h2 id="appearance-heading">Appearance</h2>
       <label class="setting" for="theme-mode">
-        <span><strong>Theme</strong><small>Follow this device or choose a fixed colour scheme.</small></span>
-        <select id="theme-mode"><option value="auto">auto</option><option value="light">light</option><option value="dark">dark</option></select>
+        <strong>Theme</strong>
+        <select id="theme-mode" data-preference="theme"><option value="auto">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
       </label>
+      <label class="setting" for="motion"><strong>Page transitions</strong><select id="motion" data-preference="motion"><option value="auto">Follow system</option><option value="off">Off</option></select></label>
+    </section>
+    <section class="preferences-group" aria-labelledby="reading-heading">
+      <h2 id="reading-heading">Reading</h2>
+      <label class="setting" for="text-size"><strong>Article text</strong><select id="text-size" data-preference="text-size"><option value="default">Default</option><option value="large">Large</option><option value="largest">Largest</option></select></label>
+      <label class="setting" for="reading-width"><strong>Line width</strong><select id="reading-width" data-preference="reading-width"><option value="standard">Standard</option><option value="wide">Wide</option></select></label>
+    </section>
+    <section class="preferences-group" aria-labelledby="feed-heading">
+      <h2 id="feed-heading">Feed</h2>
+      <label class="setting" for="density"><strong>Density</strong><select id="density" data-preference="density"><option value="compact">Compact</option><option value="comfortable">Comfortable</option></select></label>
+      <label class="setting" for="thumbnails"><strong>Preview images</strong><select id="thumbnails" data-preference="thumbnails"><option value="show">Show when available</option><option value="hide">Hide</option></select></label>
+      <label class="setting" for="feed-page-size"><strong>Maximum per page</strong><select id="feed-page-size" data-preference="feed-page-size"><option value="10">10</option><option value="25">25</option><option value="50">50</option></select></label>
       <label class="setting" for="date-format">
-        <span><strong>Date format</strong><small>Choose how publication dates appear throughout the site.</small></span>
-        <select id="date-format"><option value="relative">relative</option><option value="iso">YYYY-MM-DD</option><option value="local">local date</option><option value="local-time">local date + time</option></select>
+        <strong>Dates</strong>
+        <select id="date-format" data-preference="date-format"><option value="relative">Relative</option><option value="iso">YYYY-MM-DD</option><option value="local">Local date</option><option value="local-time">Local date &amp; time</option></select>
       </label>
     </section>
-    <section class="preferences-group copy-preferences" aria-labelledby="copy-state-heading">
-      <h2 id="copy-state-heading">Copy state</h2>
-      <p class="muted">Copy the theme and date format into a shareable URL. Opening it on another device imports those preferences once without keeping them in the address.</p>
-      <div class="copy-action">
-        <button id="copy-state" type="button">copy state URL</button>
-        <span id="copy-state-status" class="muted" role="status" aria-live="polite"></span>
+    <section class="preferences-group" aria-labelledby="keyboard-heading">
+      <h2 id="keyboard-heading">Keyboard</h2>
+      <div class="setting shortcut-setting">
+        <a id="show-shortcuts" href="{{ 'preferences/' | url_for }}#shortcut-help" aria-haspopup="dialog" aria-controls="shortcut-help">Keyboard shortcuts</a>
+        <label class="shortcut-toggle" for="single-key-shortcuts"><span class="sr-only">Enable single-key keyboard shortcuts</span><input id="single-key-shortcuts" data-preference="single-key-shortcuts" type="checkbox" checked></label>
       </div>
     </section>
-    {% if site.pwa %}
-    <section class="preferences-group" aria-labelledby="installed-app-heading">
-      <h2 id="installed-app-heading">Installed app</h2>
-      <p class="muted">The app shell, home feed, and newest configured entries are cached for offline reading. While running, aggr checks for deployments once a minute and checks again when you return or reconnect. Pull down where supported, or use the header refresh button anywhere.</p>
-      <p id="install-guidance" class="muted">Use your browser’s Install or Add to Home Screen action. A direct install button appears here when the browser provides one.</p>
+    <section id="preferences-import" class="preferences-group preferences-import" aria-labelledby="preferences-import-heading" hidden>
+      <h2 id="preferences-import-heading">Review imported preferences</h2>
+      <ul id="preferences-import-summary"></ul>
+      <div class="preference-actions"><button data-preferences-action="apply" type="button">Apply preferences</button><button data-preferences-action="cancel" type="button">Cancel</button></div>
+    </section>
+    <details class="preferences-group preferences-transfer">
+      <summary>Transfer preferences</summary>
+      <p class="muted">Use the same settings on another device. Links and files contain only the options above, never reading history.</p>
       <div class="preference-actions">
-        <button id="install-app" type="button" hidden>install aggr</button>
-        <span id="pwa-status" class="muted" role="status" aria-live="polite"></span>
+        <button id="share-state" data-preferences-action="share" type="button" hidden>Share</button>
+        <button id="copy-state" data-preferences-action="copy" type="button">Copy link</button>
+        <button data-preferences-action="save" type="button">Save file</button>
+        <button data-preferences-action="import" type="button">Import file</button>
       </div>
-      <small class="muted pwa-limit">New-item highlights and the title/favicon dot stay local to this tab. A static site cannot wake a closed or suspended app with background push.</small>
-    </section>
-    {% endif %}
+      <input id="preferences-link" type="url" aria-label="Preferences link" readonly hidden>
+      <input id="preferences-file" type="file" accept="application/json,.json" hidden>
+    </details>
+    <div class="preference-actions"><button class="text-button" data-preferences-action="reset" type="button">Reset to defaults</button><span id="preferences-status" class="muted" role="status" aria-live="polite"></span></div>
   </div>
 </section>
 {% endblock %}

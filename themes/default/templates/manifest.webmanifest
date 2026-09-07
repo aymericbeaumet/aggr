@@ -1,10 +1,9 @@
 {# Rendered to <site>/manifest.webmanifest; colours match style.css. #}
 {
-  "name": "aggr",
+  "name": {{ site.title | json }},
   "short_name": "aggr",
   "description": {{ site.description | json }},
   "lang": {{ site.language | json }},
-  "id": "./",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
@@ -19,7 +18,8 @@
   ],
   "shortcuts": [
     { "name": "Feed", "short_name": "Feed", "url": "./", "icons": [{ "src": "{{ 'assets/icon-192.png' | url_for }}", "sizes": "192x192" }] },
-    { "name": "Search", "short_name": "Search", "url": "{{ 'search/' | url_for }}", "icons": [{ "src": "{{ 'assets/icon-192.png' | url_for }}", "sizes": "192x192" }] }
+    { "name": "Search", "short_name": "Search", "url": "{{ 'search/' | url_for }}", "icons": [{ "src": "{{ 'assets/icon-192.png' | url_for }}", "sizes": "192x192" }] },
+    { "name": "Library", "short_name": "Library", "url": "{{ 'library/' | url_for }}", "icons": [{ "src": "{{ 'assets/icon-192.png' | url_for }}", "sizes": "192x192" }] }
   ],
   "categories": ["news", "productivity"],
   "prefer_related_applications": false

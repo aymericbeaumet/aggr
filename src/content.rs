@@ -3,12 +3,21 @@
 //! Markdown body derived from it. Rendering Markdown back to HTML never emits raw HTML.
 
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use ammonia::UrlRelative;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, Utc};
 use dom_smoothie::Readability;
+use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
 use url::Url;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractedArticle {
+    pub html: String,
+    pub image: Option<String>,
+}
 
 /// Elements whose content is executable, styled, or embedded: dropped whole.
 const DROP_ELEMENTS: &[&str] = &["script", "style", "svg", "iframe", "object", "embed"];
@@ -74,17 +83,71 @@ const URL_ATTRIBUTES: &[&str] = &[
 /// Extract the primary article from a complete origin page. Readability intentionally does not
 /// sanitize its output, so callers must still pass this HTML through the normal storage and
 /// Markdown safety pipeline.
-pub fn extract_article(page: &str, url: &Url) -> Result<String> {
-    let mut readability = Readability::new(page, Some(url.as_str()), None)
+pub fn extract_article(page: &str, url: &Url) -> Result<ExtractedArticle> {
+    let config = dom_smoothie::Config {
+        max_elements_to_parse: 100_000,
+        ..Default::default()
+    };
+    let mut readability = Readability::new(page, Some(url.as_str()), Some(config))
         .context("parsing the original article page")?;
     let article = readability
         .parse()
         .context("extracting readable article content")?;
     let html = article.content.to_string();
-    if html_to_text(&html).trim().is_empty() {
+    if !has_meaningful_extracted_content(&html, url) {
         bail!("extracted article is empty");
     }
-    Ok(html)
+    Ok(ExtractedArticle {
+        html,
+        image: article.image,
+    })
+}
+
+fn has_meaningful_extracted_content(html: &str, base: &Url) -> bool {
+    if !html_to_text(html).trim().is_empty() {
+        return true;
+    }
+    let normalized = normalize_image_sources(html);
+    let passive = strip_active_content(&normalized);
+    let clean = sanitize(&passive, Some(base));
+    let Ok(images) = Selector::parse("img[src]") else {
+        return false;
+    };
+    Html::parse_fragment(&clean).select(&images).any(|image| {
+        image.value().attr("src").is_some_and(|src| {
+            Url::parse(src).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+            })
+        })
+    })
+}
+
+pub async fn extract_article_async(page: String, url: Url) -> Result<ExtractedArticle> {
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+    static LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    limited_extraction(
+        LIMIT.get_or_init(|| Arc::new(Semaphore::new(2))).clone(),
+        move || extract_article(&page, &url),
+    )
+    .await
+}
+
+async fn limited_extraction<T: Send + 'static>(
+    limit: std::sync::Arc<tokio::sync::Semaphore>,
+    operation: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let permit = limit
+        .acquire_owned()
+        .await
+        .context("waiting for article extraction")?;
+    tokio::task::spawn_blocking(move || {
+        // Cancellation cannot interrupt CPU work; keep its slot until the closure really exits.
+        let _permit = permit;
+        operation()
+    })
+    .await
+    .context("article extraction task")?
 }
 
 /// HTML prepared for storage as the `.html` sibling: `<script>`, `<style>`, inline `<svg>`,
@@ -302,6 +365,8 @@ fn without_active_attributes(tag: &str) -> String {
 /// `data:`, `javascript:` or `vbscript:` anywhere in a (possibly comma-separated srcset) value,
 /// ignoring the whitespace and control characters browsers skip before the scheme.
 fn is_active_url(value: &str) -> bool {
+    let decoded = decode_entities(value);
+    let value = decoded.as_str();
     value.split(',').any(|candidate| {
         let scheme: String = candidate
             .chars()
@@ -336,27 +401,194 @@ fn cap(html: String, max_bytes: usize) -> (String, bool) {
 /// URLs resolved against `base`, only http/https/mailto schemes (so `javascript:` and `data:`
 /// are dropped), no event handlers, images lazy and referrer-free.
 pub fn sanitize(html: &str, base: Option<&Url>) -> String {
+    sanitize_with_code_classes(html, base, true)
+}
+
+#[derive(Default)]
+struct PictureSources {
+    supported: Option<String>,
+    fallback: Option<String>,
+}
+
+/// Promote responsive and lazy-loading image candidates into `img[src]` before sanitizing or
+/// converting HTML. Publisher CSS and scripts are intentionally discarded, so leaving the real
+/// URL only in `srcset`, `data-src*`, or a `<picture><source>` would otherwise lose the image.
+pub(crate) fn normalize_image_sources(html: &str) -> String {
+    let mut normalized = String::with_capacity(html.len());
+    let mut pictures = Vec::<PictureSources>::new();
+    let mut position = 0;
+    while position < html.len() {
+        let Some(start) = html[position..].find('<').map(|offset| position + offset) else {
+            normalized.push_str(&html[position..]);
+            break;
+        };
+        normalized.push_str(&html[position..start]);
+        if let Some(length) = comment_end(&html[start..]) {
+            normalized.push_str(&html[start..start + length]);
+            position = start + length;
+            continue;
+        }
+        let Some(tag) = parse_tag(&html[start..]) else {
+            normalized.push('<');
+            position = start + 1;
+            continue;
+        };
+        let Some(length) = tag.end else {
+            normalized.push_str(&html[start..]);
+            break;
+        };
+        let raw = &html[start..start + length];
+        match (tag.closing, tag.name.as_str()) {
+            (false, "picture") => {
+                pictures.push(PictureSources::default());
+                normalized.push_str(raw);
+            }
+            (true, "picture") => {
+                pictures.pop();
+                normalized.push_str(raw);
+            }
+            (false, "source") => {
+                if let Some(picture) = pictures.last_mut()
+                    && let Some(candidate) = image_candidate(raw)
+                {
+                    picture.fallback.get_or_insert_with(|| candidate.clone());
+                    let supported = attribute_value(raw, "type").is_none_or(|kind| {
+                        matches!(
+                            kind.trim().to_ascii_lowercase().as_str(),
+                            "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+                        )
+                    });
+                    if supported {
+                        picture.supported.get_or_insert(candidate);
+                    }
+                }
+                normalized.push_str(raw);
+            }
+            (false, "img") => {
+                let own = image_candidate(raw);
+                let picture = pictures
+                    .last()
+                    .and_then(|sources| sources.supported.as_ref().or(sources.fallback.as_ref()))
+                    .cloned();
+                normalized.push_str(&own.or(picture).map_or_else(
+                    || raw.to_string(),
+                    |source| set_attribute(raw, "src", &source),
+                ));
+            }
+            _ => normalized.push_str(raw),
+        }
+        position = start + length;
+    }
+    normalized
+}
+
+fn image_candidate(tag: &str) -> Option<String> {
+    ["data-srcset", "data-lazy-srcset", "srcset"]
+        .into_iter()
+        .filter_map(|attribute| attribute_value(tag, attribute))
+        .find_map(best_srcset_candidate)
+        .or_else(|| {
+            [
+                "data-src",
+                "data-lazy-src",
+                "data-original",
+                "data-original-src",
+                "data-url",
+                "src",
+            ]
+            .into_iter()
+            .filter_map(|attribute| attribute_value(tag, attribute))
+            .find_map(safe_image_candidate)
+        })
+}
+
+fn best_srcset_candidate(srcset: &str) -> Option<String> {
+    if is_active_url(srcset) {
+        return None;
+    }
+    srcset
+        .split(',')
+        .enumerate()
+        .filter_map(|(order, candidate)| {
+            let mut fields = candidate.split_ascii_whitespace();
+            let url = safe_image_candidate(fields.next()?)?;
+            let score = fields
+                .next()
+                .and_then(|descriptor| {
+                    descriptor
+                        .strip_suffix(['w', 'x'])
+                        .and_then(|value| value.parse::<f64>().ok())
+                })
+                .unwrap_or(order as f64);
+            Some((score, order, url))
+        })
+        .max_by(|left, right| {
+            left.0
+                .total_cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+        })
+        .map(|(_, _, url)| url)
+}
+
+fn safe_image_candidate(value: &str) -> Option<String> {
+    let value = decode_entities(value);
+    let value = value.trim();
+    (!value.is_empty() && !is_active_url(value)).then(|| value.to_string())
+}
+
+fn set_attribute(tag: &str, name: &str, value: &str) -> String {
+    let value = escape_html(value);
+    if let Some(range) = attribute_value_range(tag, name) {
+        return format!("{}{}{}", &tag[..range.start], value, &tag[range.end..]);
+    }
+    let Some(end) = tag.rfind('>') else {
+        return tag.to_string();
+    };
+    let mut insertion = end;
+    while tag.as_bytes()[..insertion]
+        .last()
+        .is_some_and(u8::is_ascii_whitespace)
+    {
+        insertion -= 1;
+    }
+    if tag.as_bytes().get(insertion.wrapping_sub(1)) == Some(&b'/') {
+        insertion -= 1;
+    }
+    format!(
+        "{} {}=\"{}\"{}",
+        &tag[..insertion],
+        name,
+        value,
+        &tag[insertion..]
+    )
+}
+
+fn sanitize_with_code_classes(html: &str, base: Option<&Url>, code_classes: bool) -> String {
     let url_relative = match base {
         Some(base) => UrlRelative::RewriteWithBase(base.clone()),
         None => UrlRelative::PassThrough,
     };
-    ammonia::Builder::default()
+    let mut builder = ammonia::Builder::default();
+    builder
         .url_schemes(HashSet::from(["http", "https", "mailto"]))
         .url_relative(url_relative)
         .link_rel(Some("noopener noreferrer"))
         .set_tag_attribute_value("a", "target", "_blank")
         .set_tag_attribute_value("img", "loading", "lazy")
         .set_tag_attribute_value("img", "decoding", "async")
-        .set_tag_attribute_value("img", "referrerpolicy", "no-referrer")
-        .clean(html)
-        .to_string()
+        .set_tag_attribute_value("img", "referrerpolicy", "no-referrer");
+    if code_classes {
+        builder.add_tag_attributes("code", ["class"]);
+    }
+    builder.clean(html).to_string()
 }
 
 /// [`sanitize`] then htmd. Trailing whitespace trimmed, exactly one trailing newline, runs of
 /// blank lines collapsed to one.
 pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
-    let passive = strip_active_content(html);
-    let normalized = normalize_extracted_controls(&passive);
+    let normalized_images = normalize_image_sources(html);
+    let passive = strip_active_content(&normalized_images);
+    let normalized = normalize_extracted_controls(&normalize_code_blocks(&passive));
     let clean = sanitize(&restore_inline_layout_boundaries(&normalized.html), base);
     let converter = htmd::HtmlToMarkdown::builder()
         .options(htmd::options::Options {
@@ -370,9 +602,224 @@ pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
     let markdown = converter
         .convert(&clean)
         .unwrap_or_else(|_| html_to_text(&clean));
-    let markdown = tidy_markdown(&repair_generated_markdown(&markdown));
+    let markdown = protect_markdown_code(&markdown, |prose| {
+        tidy_markdown(&repair_generated_markdown(prose))
+    });
     let markdown = restore_footnote_references(markdown, normalized.footnotes.len());
     append_footnotes(markdown, &normalized.footnotes, base, &converter)
+}
+
+fn code_language(element: scraper::ElementRef<'_>) -> Option<String> {
+    let value = element.value();
+    let language = value
+        .attr("data-lang")
+        .or_else(|| value.attr("data-language"))
+        .or_else(|| {
+            value.attr("class").and_then(|classes| {
+                classes
+                    .split_whitespace()
+                    .find_map(|class| class.strip_prefix("language-"))
+            })
+        })?;
+    (language.len() <= 40
+        && !language.is_empty()
+        && language
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || b"_+-#".contains(&ch)))
+    .then(|| language.to_ascii_lowercase())
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Flatten highlighting wrappers before htmd can trim the line endings inside their spans.
+fn normalize_code_blocks(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        if let Some(tag) = parse_tag(&html[start..])
+            && !tag.closing
+            && tag.name == "pre"
+            && let Some((_, _, end)) = element_bounds(html, start, "pre")
+        {
+            let fragment = Html::parse_fragment(&html[start..end]);
+            let language = Selector::parse("code,pre")
+                .ok()
+                .and_then(|selector| fragment.select(&selector).find_map(code_language));
+            let mut code = String::new();
+            for node in fragment.tree.nodes() {
+                match node.value() {
+                    scraper::Node::Text(text) => code.push_str(text),
+                    scraper::Node::Element(element) if element.name() == "br" => code.push('\n'),
+                    _ => {}
+                }
+            }
+            out.push_str("<pre><code");
+            if let Some(language) = language {
+                out.push_str(&format!(" class=\"language-{language}\""));
+            }
+            out.push('>');
+            out.push_str(&escape_html(&code));
+            out.push_str("</code></pre>");
+            position = end;
+        } else {
+            out.push('<');
+            position = start + 1;
+        }
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+fn markdown_code_ranges(markdown: &str) -> Vec<std::ops::Range<usize>> {
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    let mut lines = vec![0];
+    lines.extend(markdown.match_indices('\n').map(|(index, _)| index + 1));
+    root.descendants()
+        .filter_map(|node| {
+            let data = node.data.borrow();
+            if !matches!(
+                data.value,
+                comrak::nodes::NodeValue::Code(_) | comrak::nodes::NodeValue::CodeBlock(_)
+            ) {
+                return None;
+            }
+            let start = *lines.get(data.sourcepos.start.line.checked_sub(1)?)?
+                + data.sourcepos.start.column.saturating_sub(1);
+            let end =
+                *lines.get(data.sourcepos.end.line.checked_sub(1)?)? + data.sourcepos.end.column;
+            (start <= end
+                && end <= markdown.len()
+                && markdown.is_char_boundary(start)
+                && markdown.is_char_boundary(end))
+            .then_some(start..end)
+        })
+        .collect()
+}
+
+fn protect_markdown_code(markdown: &str, transform: impl FnOnce(&str) -> String) -> String {
+    let ranges = markdown_code_ranges(markdown);
+    let mut protected = markdown.to_string();
+    for (index, range) in ranges.iter().enumerate().rev() {
+        protected.replace_range(range.clone(), &format!("\u{e010}{index}\u{e011}"));
+    }
+    let mut transformed = transform(&protected);
+    for (index, range) in ranges.iter().enumerate() {
+        transformed = transformed.replace(
+            &format!("\u{e010}{index}\u{e011}"),
+            &markdown[range.clone()],
+        );
+    }
+    transformed
+}
+
+/// Recover only code blocks demonstrably damaged by the previous converter. Markdown remains
+/// authoritative for edits and prose; the caller excludes truncated HTML companions.
+pub fn effective_markdown(stored: &str, retained_html: Option<&str>, base: Option<&Url>) -> String {
+    let Some(html) = retained_html else {
+        return stored.to_string();
+    };
+    let stored_blocks = fenced_blocks(stored);
+    if stored_blocks.is_empty() {
+        return stored.to_string();
+    }
+    let source = sanitize_with_code_classes(
+        &restore_inline_layout_boundaries(&strip_active_content(html)),
+        base,
+        false,
+    );
+    let converter = htmd::HtmlToMarkdown::builder()
+        .options(htmd::options::Options {
+            bullet_list_marker: htmd::options::BulletListMarker::Dash,
+            br_style: htmd::options::BrStyle::Backslash,
+            ul_bullet_spacing: 1,
+            ol_number_spacing: 1,
+            ..Default::default()
+        })
+        .build();
+    let Ok(legacy) = converter.convert(&source) else {
+        return stored.to_string();
+    };
+    let legacy = tidy_markdown(&repair_generated_markdown(&legacy));
+    // Captures made before inline-layout repair have no separators between highlighting spans.
+    let earlier = converter
+        .convert(&sanitize_with_code_classes(
+            &strip_active_content(html),
+            base,
+            false,
+        ))
+        .map(|markdown| tidy_markdown(&repair_generated_markdown(&markdown)))
+        .unwrap_or_default();
+    let corrected = to_markdown(html, base);
+    let old_blocks = fenced_blocks(&legacy);
+    let earlier_blocks = fenced_blocks(&earlier);
+    let new_blocks = fenced_blocks(&corrected);
+    if old_blocks.len() != new_blocks.len() || old_blocks.len() != stored_blocks.len() {
+        return stored.to_string();
+    }
+    let mut result = stored.to_string();
+    for (index, ((old, new), kept)) in old_blocks
+        .iter()
+        .zip(&new_blocks)
+        .zip(&stored_blocks)
+        .enumerate()
+        .rev()
+    {
+        let matches =
+            |original: &FencedBlock| kept.literal == original.literal && kept.info == original.info;
+        if matches(old)
+            || (earlier_blocks.len() == old_blocks.len()
+                && earlier_blocks.get(index).is_some_and(matches))
+        {
+            result.replace_range(kept.range.clone(), &corrected[new.range.clone()]);
+        }
+    }
+    result
+}
+
+struct FencedBlock {
+    literal: String,
+    info: String,
+    range: std::ops::Range<usize>,
+}
+
+fn fenced_blocks(markdown: &str) -> Vec<FencedBlock> {
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    let mut lines = vec![0];
+    lines.extend(markdown.match_indices('\n').map(|(index, _)| index + 1));
+    root.descendants()
+        .filter_map(|node| {
+            let data = node.data.borrow();
+            let comrak::nodes::NodeValue::CodeBlock(code) = &data.value else {
+                return None;
+            };
+            if !code.fenced {
+                return None;
+            }
+            let start = *lines.get(data.sourcepos.start.line.checked_sub(1)?)?
+                + data.sourcepos.start.column.saturating_sub(1);
+            let end =
+                *lines.get(data.sourcepos.end.line.checked_sub(1)?)? + data.sourcepos.end.column;
+            (start <= end
+                && end <= markdown.len()
+                && markdown.is_char_boundary(start)
+                && markdown.is_char_boundary(end))
+            .then(|| FencedBlock {
+                literal: code.literal.clone(),
+                info: code.info.clone(),
+                range: start..end,
+            })
+        })
+        .collect()
 }
 
 struct NormalizedHtml {
@@ -415,6 +862,31 @@ fn normalize_extracted_controls(html: &str) -> NormalizedHtml {
         };
         let tag_end = tag_start + tag_len;
         let tag_html = &html[tag_start..tag_end];
+
+        if !tag.closing
+            && matches!(tag.name.as_str(), "pre" | "code")
+            && let Some((_, _, end)) = element_bounds(html, tag_start, &tag.name)
+        {
+            normalized.push_str(&html[tag_start..end]);
+            position = end;
+            continue;
+        }
+
+        if !tag.closing
+            && tag.name == "span"
+            && let Some(length) = html[tag_end..].find('<').filter(|length| *length <= 128)
+            && let Some(closing) = parse_tag(&html[tag_end + length..])
+            && closing.closing
+            && closing.name == "span"
+            && let Some(closing_length) = closing.end
+            && decode_entities(&html[tag_end..tag_end + length])
+                .replace('\u{2060}', "")
+                .trim()
+                == "(opens in a new window)"
+        {
+            position = tag_end + length + closing_length;
+            continue;
+        }
 
         if !tag.closing && tag.name == "label" {
             if let Some(sidenote) = sidenote_at(html, tag_start)
@@ -626,6 +1098,10 @@ fn skip_html_whitespace(html: &str, mut position: usize) -> usize {
 }
 
 fn attribute_value<'a>(tag: &'a str, wanted: &str) -> Option<&'a str> {
+    attribute_value_range(tag, wanted).map(|range| &tag[range])
+}
+
+fn attribute_value_range(tag: &str, wanted: &str) -> Option<std::ops::Range<usize>> {
     let bytes = tag.as_bytes();
     let mut position = 1;
     if bytes.get(position) == Some(&b'/') {
@@ -689,7 +1165,7 @@ fn attribute_value<'a>(tag: &'a str, wanted: &str) -> Option<&'a str> {
             }
         };
         if name.eq_ignore_ascii_case(wanted) {
-            return Some(&tag[value_start..value_end]);
+            return Some(value_start..value_end);
         }
     }
     None
@@ -716,11 +1192,16 @@ fn append_footnotes(
 
     for (index, footnote) in footnotes.iter().enumerate() {
         markdown.push_str("\n\n");
-        let clean = sanitize(&restore_inline_layout_boundaries(footnote), base);
+        let clean = sanitize(
+            &restore_inline_layout_boundaries(&normalize_code_blocks(footnote)),
+            base,
+        );
         let converted = converter
             .convert(&clean)
             .unwrap_or_else(|_| html_to_text(&clean));
-        let converted = tidy_markdown(&repair_generated_markdown(&converted));
+        let converted = protect_markdown_code(&converted, |prose| {
+            tidy_markdown(&repair_generated_markdown(prose))
+        });
         let mut lines = converted.trim_end().lines();
         markdown.push_str(&format!("[^{}]:", index + 1));
         if let Some(first) = lines.next() {
@@ -846,26 +1327,29 @@ fn date_prefixes(value: &str) -> impl Iterator<Item = &str> {
 /// htmd intentionally trims link labels, which can otherwise turn `than <a> 54,000…</a>` into
 /// `than[54,000…](…)`.
 fn repair_generated_markdown(markdown: &str) -> String {
-    let mut value = markdown
-        .replace(" \u{2060}(opens in a new window)", "")
-        .replace("\u{2060}(opens in a new window)", "")
-        .replace(" (opens in a new window)", "");
-    let bytes = value.as_bytes();
-    let mut insertions = Vec::new();
-    for (index, byte) in bytes.iter().enumerate() {
-        if *byte != b'[' || index == 0 || !bytes[index - 1].is_ascii_alphanumeric() {
-            continue;
-        }
-        let Some(close) = value[index + 1..]
-            .find("](")
-            .map(|offset| index + 1 + offset)
-        else {
-            continue;
-        };
-        if close > index + 1 {
-            insertions.push(index);
-        }
-    }
+    let mut value = markdown.to_string();
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, &value, &comrak::Options::default());
+    let mut lines = vec![0];
+    lines.extend(value.match_indices('\n').map(|(index, _)| index + 1));
+    let insertions = root
+        .descendants()
+        .filter_map(|node| {
+            let data = node.data.borrow();
+            if !matches!(data.value, comrak::nodes::NodeValue::Link(_)) {
+                return None;
+            }
+            let index = *lines.get(data.sourcepos.start.line.checked_sub(1)?)?
+                + data.sourcepos.start.column.saturating_sub(1);
+            (index > 0
+                && value.as_bytes().get(index) == Some(&b'[')
+                && value
+                    .as_bytes()
+                    .get(index - 1)
+                    .is_some_and(u8::is_ascii_alphanumeric))
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
     for index in insertions.into_iter().rev() {
         value.insert(index, ' ');
     }
@@ -939,6 +1423,52 @@ fn tidy_markdown(markdown: &str) -> String {
 /// comrak with GFM extensions and raw HTML escaped rather than passed through, so the output is
 /// safe by construction whatever the Markdown says.
 pub fn render_markdown(markdown: &str) -> String {
+    render_markdown_with_images(markdown, &[])
+}
+
+const READING_WORDS_PER_MINUTE: usize = 225;
+
+/// Count visible Unicode words in Markdown and estimate reading time, rounded up to the next
+/// minute. Empty documents deliberately report zero minutes so title-only entries can omit the
+/// metric instead of promising a one-minute article.
+pub fn reading_metrics(markdown: &str) -> (usize, usize) {
+    use unicode_segmentation::UnicodeSegmentation as _;
+
+    let html = comrak::markdown_to_html(markdown, &markdown_options());
+    let text = html_to_text(&html);
+    let words = text.unicode_words().count();
+    let minutes = words.div_ceil(READING_WORDS_PER_MINUTE);
+    (words, minutes)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalImageVariant {
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalImage {
+    pub source: String,
+    pub original: String,
+    pub variants: Vec<LocalImageVariant>,
+    pub width: u32,
+    pub height: u32,
+    pub color: String,
+}
+
+/// Render safe Markdown and replace only validated publisher images with immutable local assets.
+/// The first image is allowed to become the LCP resource; later images use native lazy loading.
+pub fn render_markdown_with_images(markdown: &str, images: &[LocalImage]) -> String {
+    let options = markdown_options();
+    let mut plugins = comrak::options::Plugins::default();
+    plugins.render.codefence_syntax_highlighter = Some(&CodeHighlighter);
+    let html = comrak::markdown_to_html_with_plugins(markdown, &options, &plugins);
+    enhance_rendered_images(&add_link_navigation_attributes(&html), images)
+}
+
+fn markdown_options() -> comrak::Options<'static> {
     let mut options = comrak::Options::default();
     options.extension.table = true;
     options.extension.strikethrough = true;
@@ -947,8 +1477,203 @@ pub fn render_markdown(markdown: &str) -> String {
     options.extension.footnotes = true;
     options.render.r#unsafe = false;
     options.render.escape = true;
-    let html = comrak::markdown_to_html(markdown, &options);
-    add_link_navigation_attributes(&html)
+    options
+}
+
+fn enhance_rendered_images(html: &str, images: &[LocalImage]) -> String {
+    let mut out = String::with_capacity(html.len() + images.len() * 160);
+    let mut position = 0;
+    let mut image_index = 0;
+    while let Some(start) = html[position..]
+        .find("<img ")
+        .map(|offset| position + offset)
+    {
+        out.push_str(&html[position..start]);
+        let Some(tag) = parse_tag(&html[start..]) else {
+            out.push('<');
+            position = start + 1;
+            continue;
+        };
+        let Some(end) = tag.end else {
+            out.push_str(&html[start..]);
+            return out;
+        };
+        let original = &html[start..start + end];
+        out.push_str(&render_image_tag(original, image_index, images));
+        image_index += 1;
+        position = start + end;
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+fn render_image_tag(tag: &str, index: usize, images: &[LocalImage]) -> String {
+    let fragment = Html::parse_fragment(tag);
+    let Ok(selector) = Selector::parse("img") else {
+        return tag.to_string();
+    };
+    let Some(image) = fragment.select(&selector).next() else {
+        return tag.to_string();
+    };
+    let Some(source) = image.value().attr("src") else {
+        return tag.to_string();
+    };
+    let alt = image.value().attr("alt").unwrap_or_default();
+    let title = image.value().attr("title");
+    let key = normalized_image_url(source);
+    let local = images
+        .iter()
+        .find(|candidate| normalized_image_url(&candidate.source) == key);
+    let loading = if index == 0 { "eager" } else { "lazy" };
+    let priority = if index == 0 { "high" } else { "low" };
+    let source_dimensions = image
+        .value()
+        .attr("width")
+        .and_then(|width| width.parse::<u32>().ok())
+        .filter(|width| *width > 0)
+        .zip(
+            image
+                .value()
+                .attr("height")
+                .and_then(|height| height.parse::<u32>().ok())
+                .filter(|height| *height > 0),
+        )
+        .map(|(width, height)| format!(" width=\"{width}\" height=\"{height}\""))
+        .unwrap_or_default();
+    let (src, dimensions, class) = local.map_or_else(
+        || (source, source_dimensions, String::new()),
+        |local| {
+            (
+                local.original.as_str(),
+                format!(" width=\"{}\" height=\"{}\"", local.width, local.height),
+                " class=\"progressive-image\"".to_string(),
+            )
+        },
+    );
+    let title = title
+        .map(|title| format!(" title=\"{}\"", escape_html(title)))
+        .unwrap_or_default();
+    let tag = format!(
+        "<img src=\"{}\"{} alt=\"{}\"{} loading=\"{}\" decoding=\"async\" fetchpriority=\"{}\" referrerpolicy=\"no-referrer\"{}>",
+        escape_html(src),
+        dimensions,
+        escape_html(alt),
+        title,
+        loading,
+        priority,
+        class
+    );
+    let Some(local) = local else {
+        return tag;
+    };
+    let placeholder = local
+        .variants
+        .first()
+        .map(|variant| format!(" data-placeholder=\"{}\"", escape_html(&variant.url)))
+        .unwrap_or_default();
+    let source = if let Some(full) = local
+        .variants
+        .last()
+        .filter(|variant| variant.width == local.width && variant.height == local.height)
+    {
+        let srcset = local
+            .variants
+            .iter()
+            .map(|variant| format!("{} {}w", escape_html(&variant.url), variant.width))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "<source type=\"image/webp\" width=\"{}\" height=\"{}\" srcset=\"{srcset}\" sizes=\"(max-width: 56rem) calc(100vw - 2rem), 52rem\">",
+            full.width, full.height
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "<picture class=\"article-picture\"{placeholder} style=\"--image-width:{}px;--image-ratio:{} / {};--image-placeholder:{}\">{source}{tag}</picture>",
+        local.width,
+        local.width,
+        local.height,
+        escape_html(&local.color)
+    )
+}
+
+fn normalized_image_url(value: &str) -> String {
+    let Ok(mut url) = Url::parse(value) else {
+        return value.to_string();
+    };
+    url.set_fragment(None);
+    url.to_string()
+}
+
+struct CodeHighlighter;
+
+impl comrak::adapters::SyntaxHighlighterAdapter for CodeHighlighter {
+    fn write_highlighted(
+        &self,
+        output: &mut dyn std::fmt::Write,
+        language: Option<&str>,
+        code: &str,
+    ) -> std::fmt::Result {
+        use syntect::html::{ClassStyle, ClassedHTMLGenerator};
+        use syntect::parsing::SyntaxSet;
+        static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
+        let language = language.unwrap_or_default();
+        if language.is_empty()
+            || code.len() > 100 * 1024
+            || code.lines().any(|line| line.len() > 2_000)
+        {
+            return output.write_str(&escape_html(code));
+        }
+        let syntaxes = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
+        let Some(syntax) = syntaxes.find_syntax_by_token(language) else {
+            return output.write_str(&escape_html(code));
+        };
+        let mut generator = ClassedHTMLGenerator::new_with_class_style(
+            syntax,
+            syntaxes,
+            ClassStyle::SpacedPrefixed { prefix: "syntax-" },
+        );
+        for line in syntect::util::LinesWithEndings::from(code) {
+            if generator
+                .parse_html_for_line_which_includes_newline(line)
+                .is_err()
+            {
+                return output.write_str(&escape_html(code));
+            }
+        }
+        output.write_str(&generator.finalize())
+    }
+
+    fn write_pre_tag(
+        &self,
+        output: &mut dyn std::fmt::Write,
+        attributes: std::collections::HashMap<&'static str, std::borrow::Cow<'_, str>>,
+    ) -> std::fmt::Result {
+        write_code_tag(output, "pre", attributes)
+    }
+
+    fn write_code_tag(
+        &self,
+        output: &mut dyn std::fmt::Write,
+        attributes: std::collections::HashMap<&'static str, std::borrow::Cow<'_, str>>,
+    ) -> std::fmt::Result {
+        write_code_tag(output, "code", attributes)
+    }
+}
+
+fn write_code_tag(
+    output: &mut dyn std::fmt::Write,
+    tag: &str,
+    attributes: std::collections::HashMap<&'static str, std::borrow::Cow<'_, str>>,
+) -> std::fmt::Result {
+    write!(output, "<{tag}")?;
+    let mut attributes = attributes.into_iter().collect::<Vec<_>>();
+    attributes.sort_by_key(|(name, _)| *name);
+    for (name, value) in attributes {
+        write!(output, " {name}=\"{}\"", escape_html(&value))?;
+    }
+    output.write_char('>')
 }
 
 /// Article links open separately, while fragment links such as footnote references and backrefs
@@ -1010,53 +1735,14 @@ pub fn html_to_text(html: &str) -> String {
 }
 
 fn decode_entities(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        let candidate = &rest[amp..];
-        match candidate
-            .find(';')
-            .filter(|&semi| semi <= 10)
-            .and_then(|semi| decode_entity(&candidate[1..semi]).map(|ch| (ch, semi + 1)))
-        {
-            Some((decoded, len)) => {
-                out.push(decoded);
-                rest = &candidate[len..];
-            }
-            None => {
-                out.push('&');
-                rest = &candidate[1..];
-            }
-        }
+    if !text.contains('&') {
+        return text.to_string();
     }
-    out.push_str(rest);
-    out
-}
-
-fn decode_entity(name: &str) -> Option<char> {
-    let code = match name {
-        "amp" => return Some('&'),
-        "lt" => return Some('<'),
-        "gt" => return Some('>'),
-        "quot" => return Some('"'),
-        "apos" => return Some('\''),
-        "nbsp" => return Some(' '),
-        "hellip" => return Some('…'),
-        "mdash" => return Some('—'),
-        "ndash" => return Some('–'),
-        "lsquo" => return Some('‘'),
-        "rsquo" => return Some('’'),
-        "ldquo" => return Some('“'),
-        "rdquo" => return Some('”'),
-        "copy" => return Some('©'),
-        _ => name.strip_prefix('#')?,
-    };
-    let value = match code.strip_prefix(['x', 'X']) {
-        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
-        None => code.parse().ok()?,
-    };
-    char::from_u32(value).filter(|ch| *ch != '\0')
+    let escaped = text.replace('<', "&lt;").replace('>', "&gt;");
+    Html::parse_fragment(&escaped)
+        .root_element()
+        .text()
+        .collect()
 }
 
 /// First `max_chars` chars of the Markdown's plain text, cut on a word boundary with `…`.
@@ -1078,6 +1764,32 @@ pub fn excerpt(markdown: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_extraction_keeps_its_cpu_slot_until_blocking_work_finishes() {
+        let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let task_limit = limit.clone();
+        let task = tokio::spawn(async move {
+            limited_extraction(task_limit, move || {
+                started_tx.send(()).unwrap();
+                finish_rx.recv().unwrap();
+                Ok(())
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        task.abort();
+        let _ = task.await;
+        let slots_while_running = limit.available_permits();
+        finish_tx.send(()).unwrap();
+        let _released = tokio::time::timeout(std::time::Duration::from_secs(1), limit.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(slots_while_running, 0);
+    }
 
     const HOSTILE: &str = r#"<p>Hi <b>there</b></p>
 <script>alert(1)</script>
@@ -1212,6 +1924,42 @@ mod tests {
     }
 
     #[test]
+    fn markdown_promotes_lazy_srcsets_and_picture_sources() {
+        let html = r#"
+          <img alt="Responsive" src="tiny.jpg" srcset="medium.jpg 640w, large.jpg 1280w">
+          <img alt="Lazy" src="data:image/gif;base64,AAAA" data-srcset="lazy-small.webp 1x, lazy-large.webp 2x">
+          <picture>
+            <source type="image/avif" srcset="hero.avif 1x">
+            <source type="image/webp" data-srcset="hero-small.webp 320w, hero-large.webp 1200w">
+            <img alt="Hero" src="data:image/gif;base64,AAAA">
+          </picture>
+        "#;
+        let normalized = normalize_image_sources(html);
+        assert!(normalized.contains(r#"src="large.jpg""#), "{normalized}");
+        assert!(
+            normalized.contains(r#"src="lazy-large.webp""#),
+            "{normalized}"
+        );
+        assert!(
+            normalized.contains(r#"alt="Hero" src="hero-large.webp""#),
+            "{normalized}"
+        );
+        let markdown = to_markdown(html, Some(&base()));
+        assert!(
+            markdown.contains("![Responsive](https://example.com/blog/post/large.jpg)"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("![Lazy](https://example.com/blog/post/lazy-large.webp)"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("![Hero](https://example.com/blog/post/hero-large.webp)"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
     fn markdown_conversion_covers_common_structures() {
         let html = r#"<h2>Title</h2>
 <p>Para with <a href="/x">link</a><br>next line</p>
@@ -1232,6 +1980,181 @@ mod tests {
         assert!(!md.ends_with("\n\n"), "{md}");
         assert!(!md.contains("\n\n\n"), "{md}");
         assert_eq!(to_markdown("", None), "");
+    }
+
+    #[test]
+    fn highlighted_code_preserves_lines_language_and_literal_markdown() {
+        let html = concat!(
+            "<pre><code data-lang=\"bash\"><span>$ z dotfiles\n</span>",
+            "<span>$ <span>pwd</span>\n</span><span>/Users/example/dotfiles\n</span>",
+            "<span>\n\n  foo[bar](baz)  \n</span></code></pre>"
+        );
+        assert_eq!(
+            to_markdown(html, None),
+            concat!(
+                "```bash\n$ z dotfiles\n$ pwd\n/Users/example/dotfiles\n",
+                "\n\n  foo[bar](baz)  \n```\n"
+            )
+        );
+        assert!(
+            to_markdown(
+                "<p><code>foo[bar](baz) (opens in a new window)</code></p>",
+                None
+            )
+            .contains("`foo[bar](baz) (opens in a new window)`")
+        );
+    }
+
+    #[test]
+    fn accessibility_label_cleanup_only_removes_short_unformatted_markers() {
+        let marker = "<span>\u{2060}(opens in a new window)</span>";
+        assert_eq!(normalize_extracted_controls(marker).html, "");
+        let literal = "<span><em>(opens in a new window)</em></span>";
+        assert_eq!(normalize_extracted_controls(literal).html, literal);
+        let deeply_nested = format!(
+            "{}literal{}",
+            "<span>".repeat(2_000),
+            "</span>".repeat(2_000)
+        );
+        assert_eq!(
+            normalize_extracted_controls(&deeply_nested).html,
+            deeply_nested
+        );
+    }
+
+    #[test]
+    fn storage_strips_entity_encoded_active_urls() {
+        let (html, _) = storage_html(
+            "<a href=\"jav&#x61;script:alert(1)\">bad</a><img src=\"d&#97;ta:x\">",
+            usize::MAX,
+        );
+        assert_eq!(html, "<a>bad</a><img>");
+    }
+
+    #[test]
+    fn article_images_receive_loading_and_privacy_attributes_after_rendering() {
+        let html = render_markdown(
+            "![Hero](https://example.com/hero.webp)\n\n![Later](https://example.com/later.webp)",
+        );
+        assert!(html.contains("loading=\"eager\""), "{html}");
+        assert!(html.contains("fetchpriority=\"high\""), "{html}");
+        assert!(html.contains("loading=\"lazy\""), "{html}");
+        assert!(html.contains("fetchpriority=\"low\""), "{html}");
+        assert!(html.contains("decoding=\"async\""), "{html}");
+        assert!(html.contains("referrerpolicy=\"no-referrer\""), "{html}");
+        assert!(html.contains("alt=\"Hero\""), "{html}");
+    }
+
+    #[test]
+    fn local_article_images_use_lossless_sources_and_an_exact_fallback() {
+        let image = LocalImage {
+            source: "https://publisher.example/diagram.png".into(),
+            original: "assets/images/original.png".into(),
+            variants: vec![
+                LocalImageVariant {
+                    url: "assets/images/small.webp".into(),
+                    width: 320,
+                    height: 213,
+                },
+                LocalImageVariant {
+                    url: "assets/images/large.webp".into(),
+                    width: 640,
+                    height: 427,
+                },
+                LocalImageVariant {
+                    url: "assets/images/full.webp".into(),
+                    width: 1200,
+                    height: 800,
+                },
+            ],
+            width: 1200,
+            height: 800,
+            color: "#285a8c".into(),
+        };
+        let html = render_markdown_with_images(
+            "![Useful diagram](https://publisher.example/diagram.png \"Details\")",
+            std::slice::from_ref(&image),
+        );
+        assert!(
+            html.contains("<picture class=\"article-picture\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("data-placeholder=\"assets/images/small.webp\""),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "style=\"--image-width:1200px;--image-ratio:1200 / 800;--image-placeholder:#285a8c\""
+            ),
+            "{html}"
+        );
+        assert!(html.contains("type=\"image/webp\""), "{html}");
+        assert!(
+            html.contains("<source type=\"image/webp\" width=\"1200\" height=\"800\""),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "small.webp 320w, assets/images/large.webp 640w, assets/images/full.webp 1200w"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("src=\"assets/images/original.png\""),
+            "{html}"
+        );
+        assert!(html.contains("width=\"1200\" height=\"800\""), "{html}");
+        assert!(html.contains("alt=\"Useful diagram\""), "{html}");
+        assert!(html.contains("title=\"Details\""), "{html}");
+        assert!(html.contains("--image-placeholder:#285a8c"), "{html}");
+
+        let without_variants = LocalImage {
+            variants: Vec::new(),
+            ..image.clone()
+        };
+        let html = render_markdown_with_images(
+            "![Useful diagram](https://publisher.example/diagram.png)",
+            &[without_variants],
+        );
+        assert!(
+            html.contains("<picture class=\"article-picture\""),
+            "{html}"
+        );
+        assert!(!html.contains("<source "), "{html}");
+
+        let later = render_markdown_with_images(
+            "![Remote](https://publisher.example/first.png)\n\n![Useful diagram](https://publisher.example/diagram.png)",
+            &[image],
+        );
+        assert!(
+            later.contains("sizes=\"(max-width: 56rem) calc(100vw - 2rem), 52rem\""),
+            "{later}"
+        );
+        assert!(!later.contains("sizes=\"auto,"), "{later}");
+    }
+
+    #[test]
+    fn retained_html_recovers_only_matching_legacy_code() {
+        let html = "<p>Old prose.</p><pre><code data-lang=bash><span><span>$ z dotfiles\n</span></span><span><span>$ <span>pwd</span>\n</span></span><span><span>/Users/example/dotfiles\n</span></span></code></pre>";
+        let stored = "Edited prose stays.\n\n```\n$ z dotfiles$ pwd/Users/example/dotfiles\n```\n";
+        assert_eq!(
+            effective_markdown(stored, Some(html), None),
+            "Edited prose stays.\n\n```bash\n$ z dotfiles\n$ pwd\n/Users/example/dotfiles\n```\n"
+        );
+        let edited = stored.replace("$ z dotfiles", "$ z elsewhere");
+        assert_eq!(effective_markdown(&edited, Some(html), None), edited);
+        assert_eq!(effective_markdown(stored, None, None), stored);
+    }
+
+    #[test]
+    fn syntax_highlighting_is_static_safe_and_optional() {
+        let html = render_markdown("```rust\nlet name = \"<script>\";\n```\n");
+        assert!(html.contains("syntax-"), "{html}");
+        assert!(!html.contains("<script>"), "{html}");
+        let plain = render_markdown("```unknown-language\n<script>\n```\n");
+        assert!(!plain.contains("syntax-"), "{plain}");
+        assert!(plain.contains("&lt;script&gt;"), "{plain}");
     }
 
     #[test]
@@ -1441,6 +2364,19 @@ mod tests {
     }
 
     #[test]
+    fn reading_metrics_count_visible_unicode_words_and_round_up() {
+        let markdown = "# One two\n\nThree **four** five. `six`\n\n```text\nseven eight\n```\n";
+        assert_eq!(reading_metrics(markdown), (8, 1));
+        assert_eq!(reading_metrics(""), (0, 0));
+
+        let long = std::iter::repeat_n("word", READING_WORDS_PER_MINUTE + 1)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(reading_metrics(&long), (READING_WORDS_PER_MINUTE + 1, 2));
+        assert_eq!(reading_metrics("你好世界").0, 4);
+    }
+
+    #[test]
     fn excerpt_cuts_on_word_boundary() {
         assert_eq!(excerpt("Short **text**.", 100), "Short text.");
         assert_eq!(
@@ -1460,9 +2396,25 @@ mod tests {
 <main><article><h1>A useful post</h1><p>This is the complete article body with enough useful prose for extraction.</p><p>It has a second paragraph, unlike the short feed summary.</p></article></main>
 <footer>Copyright and navigation</footer>"#;
         let extracted = extract_article(page, &base()).unwrap();
-        let text = html_to_text(&extracted);
+        let text = html_to_text(&extracted.html);
         assert!(text.contains("complete article body"), "{text}");
         assert!(text.contains("second paragraph"), "{text}");
         assert!(!text.contains("Products About Contact"), "{text}");
+    }
+
+    #[test]
+    fn readability_accepts_an_image_only_article() {
+        let page = r#"<!doctype html><title>Comic</title>
+<main><article><figure><img src="/comic.png" alt="Today's comic"></figure></article></main>"#;
+
+        let extracted = extract_article(page, &base()).unwrap();
+        let clean = sanitize(&normalize_image_sources(&extracted.html), Some(&base()));
+
+        assert!(clean.contains("https://example.com/comic.png"), "{clean}");
+        assert!(clean.contains("Today's comic"), "{clean}");
+        assert!(!has_meaningful_extracted_content(
+            r#"<img src="data:image/png;base64,AAAA" alt="tracker">"#,
+            &base()
+        ));
     }
 }
