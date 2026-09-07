@@ -1,6 +1,10 @@
 //! `aggr.toml`: on-disk schema, defaults, validation, and resolution into engine-ready sources.
 
-mod include_graph;
+mod import_formats;
+mod import_graph;
+mod source_entries;
+
+use source_entries::deserialize_sources;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -23,8 +27,9 @@ pub struct Config {
     pub fetch: FetchConfig,
     /// Optional networks searched at build time for conversations about each item.
     pub networks: Vec<NetworkConfig>,
+    #[serde(deserialize_with = "deserialize_sources")]
     pub sources: Vec<SourceConfig>,
-    /// Root and included TOML files that produced this config; used for exact build-cache keys.
+    /// Local source documents that produced this config; used for build-cache keys and watching.
     #[serde(skip)]
     pub(crate) loaded_files: Vec<PathBuf>,
     /// Remote config identities and content digests that produced this config.
@@ -219,12 +224,12 @@ pub struct FetchConfig {
     pub timeout_secs: u64,
     pub max_body_bytes: usize,
     pub retries: u32,
-    /// Permit a remotely loaded config to name another absolute remote config. Relative includes
-    /// within the same remote repository remain allowed regardless of this setting.
-    pub allow_remote_include_chains: bool,
+    /// Allow a remote collection to expand collections outside its own origin or repository.
+    #[serde(alias = "allow_remote_include_chains")]
+    pub allow_remote_source_chains: bool,
     /// `heavy` downloads and extracts original article pages; `light` trusts feed content.
     pub content: ContentMode,
-    /// Download a small local preview for newly retained items only.
+    /// Download a small local preview; explicit refresh fills missing previews on old items.
     pub previews: bool,
     /// Archive safe article-body raster images and derive lossless responsive renditions.
     pub images: bool,
@@ -239,9 +244,9 @@ impl Default for FetchConfig {
             timeout_secs: 20,
             max_body_bytes: 10_000_000,
             retries: 2,
-            allow_remote_include_chains: false,
+            allow_remote_source_chains: false,
             content: ContentMode::Heavy,
-            previews: false,
+            previews: true,
             images: true,
         }
     }
@@ -255,16 +260,17 @@ pub enum ContentMode {
     Light,
 }
 
-/// One `[[sources]]` table as written by the user. Engine-specific keys are validated when the
-/// table is resolved, so an unknown key names the offending source.
-#[derive(Debug, Default, Deserialize)]
+/// One normalized source candidate, expanded from a `[[sources]]` group.
+/// Engine-specific options are validated when it resolves to a Source.
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SourceConfig {
     #[serde(rename = "type")]
     pub kind: Option<String>,
-    /// Local/remote aggr config or glob expanded at this position. Mutually exclusive with `url`.
-    pub include: Option<String>,
     pub url: Option<String>,
+    /// Local feed documents are produced only by imports, never by deserializing a URL.
+    #[serde(skip)]
+    pub(crate) local_feed: Option<PathBuf>,
     /// Display name; the upstream feed title is used when unset.
     pub name: Option<String>,
     /// Directory name under `items/`; derived from `name` or `url` when unset.
@@ -345,12 +351,28 @@ impl Engine {
 }
 
 impl Config {
-    /// Parse `path` and expand local or remote `[[sources]].include` entries in place.
+    pub(crate) fn parse_source_document(bytes: &[u8], url: &Url) -> Result<Vec<SourceConfig>> {
+        import_formats::parse_bytes(bytes, url).map(|document| document.sources)
+    }
+
+    /// Parse `path` and resolve source documents into individual sources in place.
     pub async fn load(path: &Path) -> Result<Self> {
         Self::load_with_github_api(path, None).await
     }
 
+    pub async fn load_offline(path: &Path) -> Result<Self> {
+        Self::load_documents(path, None, false).await
+    }
+
     async fn load_with_github_api(path: &Path, github_api: Option<Url>) -> Result<Self> {
+        Self::load_documents(path, github_api, true).await
+    }
+
+    async fn load_documents(
+        path: &Path,
+        github_api: Option<Url>,
+        load_remote: bool,
+    ) -> Result<Self> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut config =
@@ -358,11 +380,12 @@ impl Config {
         let root = path
             .canonicalize()
             .with_context(|| format!("resolving {}", path.display()))?;
-        let expansion = include_graph::expand(
+        let expansion = import_graph::expand(
             std::mem::take(&mut config.sources),
             root,
             &config.fetch,
             github_api,
+            load_remote,
         )
         .await?;
         config.sources = expansion.sources;
@@ -434,12 +457,6 @@ impl Config {
             && repo.split('/').filter(|part| !part.is_empty()).count() != 2
         {
             bail!("[site] repository must be `owner/repo`, got {repo:?}");
-        }
-        for (index, source) in self.sources.iter().enumerate() {
-            if source.include.is_some() {
-                validate_source_file_entry(source)
-                    .with_context(|| format!("[[sources]] #{}", index + 1))?;
-            }
         }
         Ok(())
     }
@@ -625,53 +642,15 @@ fn is_bcp47_language_tag(tag: &str) -> bool {
     index == subtags.len()
 }
 
-fn validate_source_file_entry(source: &SourceConfig) -> Result<()> {
-    if source.url.is_some() {
-        bail!("`url` and `include` are mutually exclusive");
-    }
-    let has_other_key = source.kind.is_some()
-        || source.name.is_some()
-        || source.slug.is_some()
-        || !source.labels.is_empty()
-        || !source.headers.is_empty()
-        || source.html.is_some()
-        || source.content.is_some()
-        || source.previews.is_some()
-        || source.images.is_some()
-        || source.repo.is_some()
-        || source.branch.is_some()
-        || !source.sources.is_empty()
-        || source.limit.is_some();
-    if has_other_key {
-        bail!("an include entry may only set `include` and `category`");
-    }
-    if source.include.as_deref().is_none_or(str::is_empty) {
-        bail!("`include` must name an aggr config path, URL, or glob");
-    }
-    Ok(())
-}
-
 fn describe(raw: &SourceConfig) -> String {
     raw.slug
         .clone()
         .or_else(|| raw.name.clone())
         .or_else(|| raw.url.clone())
-        .or_else(|| raw.include.clone())
         .unwrap_or_else(|| "<empty>".into())
 }
 
-fn resolve_source(
-    raw: &SourceConfig,
-    default_content: ContentMode,
-    default_previews: bool,
-    default_images: bool,
-    env: &dyn Fn(&str) -> Option<String>,
-) -> Result<Source> {
-    if raw.include.is_some() {
-        bail!("`include` entries must be loaded from an aggr.toml file before resolving sources");
-    }
-    let kind = raw.kind.as_deref().unwrap_or("feed");
-    let identity = source_identity(raw, kind);
+fn validate_source_options(raw: &SourceConfig) -> Result<()> {
     let aggr_keys = [
         ("repo", raw.repo.is_some()),
         ("branch", raw.branch.is_some()),
@@ -686,13 +665,42 @@ fn resolve_source(
         }
         Ok(())
     };
-    let engine = match kind {
-        "feed" => {
-            only("aggr", &aggr_keys)?;
-            Engine::Feed {
-                url: http_url(raw, env)?,
+    match raw.kind.as_deref().unwrap_or("feed") {
+        "feed" => only("aggr", &aggr_keys)?,
+        "aggr" => {
+            if raw.limit == Some(0) {
+                bail!("`limit` must be at least 1; omit it to import all retained items");
+            }
+            for slug in &raw.sources {
+                validate_slug(slug).context("in `sources`")?;
             }
         }
+        other => bail!("unknown source type {other:?}; known types: feed, aggr"),
+    }
+    if let Some(slug) = &raw.slug {
+        validate_slug(slug)?;
+    }
+    Ok(())
+}
+
+fn resolve_source(
+    raw: &SourceConfig,
+    default_content: ContentMode,
+    default_previews: bool,
+    default_images: bool,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Source> {
+    let kind = raw.kind.as_deref().unwrap_or("feed");
+    let identity = source_identity(raw, kind);
+    validate_source_options(raw)?;
+    let engine = match kind {
+        "feed" => Engine::Feed {
+            url: match &raw.local_feed {
+                Some(path) => Url::from_file_path(path)
+                    .map_err(|_| anyhow::anyhow!("invalid local feed path"))?,
+                None => http_url(raw, env)?,
+            },
+        },
         "aggr" => {
             let url = match (&raw.repo, &raw.url) {
                 (Some(repo), None) => {
@@ -709,12 +717,6 @@ fn resolve_source(
                 (Some(_), Some(_)) => bail!("set either `repo` or `url`, not both"),
                 (None, None) => bail!("`repo` (owner/repo) or `url` (git URL) is required"),
             };
-            if raw.limit == Some(0) {
-                bail!("`limit` must be at least 1; omit it to import all retained items");
-            }
-            for slug in &raw.sources {
-                validate_slug(slug).context("in `sources`")?;
-            }
             Engine::Aggr {
                 url,
                 branch: raw.branch.clone().unwrap_or_else(|| "aggr".into()),
@@ -730,6 +732,21 @@ fn resolve_source(
             validate_slug(slug)?;
             slug.clone()
         }
+        None if raw.local_feed.is_some() => raw
+            .name
+            .as_deref()
+            .map(slug::slugify)
+            .filter(|slug| !slug.is_empty())
+            .or_else(|| {
+                raw.local_feed
+                    .as_ref()
+                    .and_then(|path| path.file_stem())
+                    .and_then(|stem| stem.to_str())
+                    .map(slug::slugify)
+                    .filter(|slug| !slug.is_empty())
+            })
+            .map(|slug| truncate_slug(&slug))
+            .unwrap_or_else(|| "source".into()),
         None => match (&engine, &raw.name) {
             // `owner/repo` reads better than `github-com-owner-repo`.
             (Engine::Aggr { url, .. }, None) => {
@@ -750,14 +767,20 @@ fn resolve_source(
         .collect::<Result<Vec<_>>>()?;
 
     let effective_url = engine.url();
-    let persist_endpoint = !configured_url_is_sensitive(raw.url.as_deref());
+    let persist_endpoint =
+        raw.local_feed.is_none() && !configured_url_is_sensitive(raw.url.as_deref());
     Ok(Source {
         slug,
         name: raw.name.clone().filter(|name| !name.is_empty()),
-        category: raw.category.clone().filter(|category| !category.is_empty()),
-        labels: raw.labels.clone(),
+        category: raw
+            .category
+            .as_deref()
+            .and_then(crate::model::normalize_category),
+        labels: crate::model::normalize_labels(&raw.labels),
         identity,
-        public_url: effective_url.map(|url| public_url(url, !persist_endpoint)),
+        public_url: effective_url
+            .filter(|url| matches!(url.scheme(), "http" | "https"))
+            .map(|url| public_url(url, !persist_endpoint)),
         persist_endpoint,
         headers,
         html: raw.html.unwrap_or(true),
@@ -769,6 +792,9 @@ fn resolve_source(
 }
 
 fn source_identity(raw: &SourceConfig, kind: &str) -> String {
+    if let Some(path) = &raw.local_feed {
+        return crate::model::sha1_hex(format!("local-feed\0{}", path.display()));
+    }
     let headers = raw
         .headers
         .iter()
@@ -835,9 +861,12 @@ fn http_url(raw: &SourceConfig, env: &dyn Fn(&str) -> Option<String>) -> Result<
         .filter(|url| !url.is_empty())
         .context("`url` is required")?;
     let url = expand_env(url, env)?;
+    if url.contains(char::is_whitespace) {
+        bail!("each `url` line must contain one URL without whitespace");
+    }
     let url = Url::parse(&url).map_err(|_| {
         anyhow::anyhow!(
-            "url {url:?} must be an absolute http(s) URL; use `include = \"./file.toml\"` for local source files"
+            "url {url:?} must be an absolute http(s) URL; load the config from a file to resolve local source documents"
         )
     })?;
     if !matches!(url.scheme(), "http" | "https") {
@@ -957,6 +986,208 @@ mod tests {
         assert_eq!(sources[0].name, None);
         assert_eq!(sources[0].engine.name(), "web");
         assert!(sources[0].html);
+    }
+
+    #[test]
+    fn source_taxonomies_are_normalized_without_changing_source_names() {
+        let config = Config::parse(
+            r##"[[sources]]
+url = "https://example.com/feed"
+name = "The Example Blog"
+category = "  Computer   SCIENCE  "
+labels = ["#Rust", "RUST", "Generative AI"]
+"##,
+        )
+        .unwrap();
+        let sources = config.resolve_sources(&no_env).unwrap();
+        assert_eq!(sources[0].name.as_deref(), Some("The Example Blog"));
+        assert_eq!(sources[0].category.as_deref(), Some("computer science"));
+        assert_eq!(sources[0].labels, ["generative ai", "rust"]);
+    }
+
+    #[test]
+    fn local_feed_slug_fallback_never_contains_parent_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("private/reader/feeds/news.xml");
+        for name in [None, Some(""), Some("   "), Some("!!!")] {
+            let config = Config {
+                sources: vec![SourceConfig {
+                    local_feed: Some(path.clone()),
+                    name: name.map(str::to_owned),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let sources = config.sources().unwrap();
+            assert_eq!(sources[0].slug, "news");
+            assert_eq!(sources[0].public_url, None);
+            assert!(!sources[0].persist_endpoint);
+        }
+    }
+
+    #[test]
+    fn source_forms_share_normalization_and_resolution() {
+        let expected = Config::parse("[[sources]]\nurl='https://one.example/feed#part'\ncategory='AI'\nlabels=['research']\n[[sources]]\nurl='https://two.example/'\ncategory='AI'\nlabels=['research']")
+            .unwrap().resolve_sources(&no_env).unwrap();
+        {
+            let key = "url";
+            for value in [
+                r#""  https://one.example/feed#part\r\n\n https://two.example/\t ""#,
+                r#"[" https://one.example/feed#part ", "", "https://two.example/"]"#,
+                r#"[" \nhttps://one.example/feed#part\n https://two.example/\n", " "]"#,
+                "'''\n  https://one.example/feed#part\n\n  https://two.example/\n'''",
+            ] {
+                let text =
+                    format!("[[sources]]\n{key}={value}\ncategory='AI'\nlabels=['research']");
+                let actual = Config::parse(&text)
+                    .unwrap()
+                    .resolve_sources(&no_env)
+                    .unwrap();
+                assert_eq!(actual, expected, "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn source_blocks_can_mix_forms_between_sections_in_declaration_order() {
+        let config = Config::parse(
+            r#"
+[site]
+title = "Mixed"
+[[sources]]
+url = "https://one.example/"
+category = "first"
+[fetch]
+content = "light"
+[[sources]]
+url = ["https://two.example/", "https://three.example/"]
+category = "second"
+[[networks]]
+provider = "reddit"
+[[sources]]
+url = "https://one.example/"
+name = "Duplicate"
+[[sources]]
+url = "https://${HOST}/"
+headers = { Authorization = "Bearer ${TOKEN}" }
+images = false
+"#,
+        )
+        .unwrap();
+        let sources = config
+            .resolve_sources(&|key| match key {
+                "HOST" => Some("four.example".into()),
+                "TOKEN" => Some("secret".into()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            sources.iter().map(|s| s.slug.as_str()).collect::<Vec<_>>(),
+            [
+                "one-example",
+                "two-example",
+                "three-example",
+                "four-example"
+            ]
+        );
+        assert_eq!(sources[0].category.as_deref(), Some("first"));
+        assert_eq!(sources[1].category.as_deref(), Some("second"));
+        assert_eq!(sources[2].category.as_deref(), Some("second"));
+        assert_eq!(sources[3].category, None);
+        assert_eq!(
+            sources[3].headers,
+            [("Authorization".into(), "Bearer secret".into())]
+        );
+        assert!(!sources[3].images);
+        assert!(sources.iter().all(|s| s.content == ContentMode::Light));
+    }
+
+    #[test]
+    fn source_selectors_reject_conflicts_types_and_removed_syntax() {
+        {
+            let key = "url";
+            for invalid in ["42", "[42]", "[{url='https://example.com/'}]"] {
+                assert!(Config::parse(&format!("[[sources]]\n{key}={invalid}")).is_err());
+            }
+            for empty in ["''", "[]", r#"["", " \n\t"]"#] {
+                assert!(
+                    Config::parse(&format!("[[sources]]\n{key}={empty}"))
+                        .unwrap()
+                        .sources
+                        .is_empty()
+                );
+                assert!(Config::parse(&format!("[[sources]]\n{key}={empty}\ntypo=true")).is_err());
+            }
+        }
+        {
+            let key = "url";
+            for invalid in [
+                r##"#[category="ai"]"##,
+                r##"https://one.example/ #[category="ai"]"##,
+                "https://one.example/ https://two.example/",
+                "file:///tmp/feed.xml",
+                "ftp://example.com/feed",
+            ] {
+                assert!(
+                    Config::parse(&format!("[[sources]]\n{key}={invalid:?}"))
+                        .and_then(|c| c.resolve_sources(&no_env))
+                        .is_err(),
+                    "{key}: {invalid}"
+                );
+            }
+        }
+        assert!(Config::parse("sources_urls=[]").is_err());
+        for options in [
+            "type='typo'",
+            "slug='INVALID'",
+            "repo='a/b'",
+            "type='aggr'\nlimit=0",
+        ] {
+            assert!(Config::parse(&format!("[[sources]]\nurl=[]\n{options}")).is_err());
+        }
+        assert!(Config::parse("[[sources]]\nimport='./one.toml'").is_err());
+        assert!(Config::parse("sources=['https://example.com/']").is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_include_and_remote_chain_setting_remain_compatible() {
+        crate::http::install_crypto_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("aggr.toml");
+        std::fs::write(
+            &root,
+            "[fetch]\nallow_remote_include_chains = true\n[[sources]]\ninclude = './topics.toml'\ncategory = 'Programming'\n",
+        ).unwrap();
+        std::fs::write(
+            dir.path().join("topics.toml"),
+            "[[sources]]\ninclude = './nested.toml'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("nested.toml"),
+            "[[sources]]\nurl = 'https://example.org/feed'\n",
+        )
+        .unwrap();
+        let config = Config::load_offline(&root).await.unwrap();
+        assert!(config.fetch.allow_remote_source_chains);
+        let sources = config.sources().unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].category.as_deref(), Some("programming"));
+        assert_eq!(
+            sources[0].public_url.as_deref(),
+            Some("https://example.org/feed")
+        );
+    }
+
+    #[test]
+    fn legacy_aliases_reject_ambiguous_and_unknown_fields() {
+        for text in [
+            "[[sources]]\nurl = './a.toml'\ninclude = './b.toml'",
+            "[fetch]\nallow_remote_source_chains = false\nallow_remote_include_chains = true",
+            "[[sources]]\ninclude = './a.toml'\ninculde = './b.toml'",
+        ] {
+            assert!(Config::parse(text).is_err(), "accepted {text}");
+        }
     }
 
     #[test]
@@ -1152,8 +1383,8 @@ mod tests {
         assert_eq!(config.fetch.max_body_bytes, compiled.fetch.max_body_bytes);
         assert_eq!(config.fetch.retries, compiled.fetch.retries);
         assert_eq!(
-            config.fetch.allow_remote_include_chains,
-            compiled.fetch.allow_remote_include_chains
+            config.fetch.allow_remote_source_chains,
+            compiled.fetch.allow_remote_source_chains
         );
         assert_eq!(config.fetch.content, compiled.fetch.content);
         assert_eq!(config.fetch.previews, compiled.fetch.previews);
@@ -1200,15 +1431,15 @@ mod tests {
     }
 
     #[test]
-    fn previews_are_opt_in_and_sources_can_override_the_default() {
+    fn previews_are_enabled_and_sources_can_override_the_default() {
         let config = Config::parse("[[sources]]\nurl = 'https://example.com/feed'\n").unwrap();
-        assert!(!config.fetch.previews);
-        assert!(!config.sources().unwrap()[0].previews);
+        assert!(config.fetch.previews);
+        assert!(config.sources().unwrap()[0].previews);
         let config = Config::parse("[fetch]\npreviews = true\n[[sources]]\nurl = 'https://a.example/feed'\n[[sources]]\nurl = 'https://b.example/feed'\npreviews = false\n").unwrap();
         let sources = config.sources().unwrap();
         assert!(sources[0].previews);
         assert!(!sources[1].previews);
-        assert!(Config::parse("[[sources]]\ninclude = './other.toml'\npreviews = true\n").is_err());
+        assert!(Config::parse("[[sources]]\nurl = './other.toml'\npreviews = true\n").is_ok());
     }
 
     #[test]
@@ -1220,7 +1451,7 @@ mod tests {
         let sources = config.sources().unwrap();
         assert!(!sources[0].images);
         assert!(sources[1].images);
-        assert!(Config::parse("[[sources]]\ninclude = './other.toml'\nimages = true\n").is_err());
+        assert!(Config::parse("[[sources]]\nurl = './other.toml'\nimages = true\n").is_ok());
     }
 
     #[test]
@@ -1352,15 +1583,15 @@ url = "https://lobste.rs/search?q={url}"
         std::fs::write(
             root.join("aggr.toml"),
             "[[sources]]\nurl = \"https://a.b/feed\"\n\
-             [[sources]]\ninclude = \"./aggr-ai.toml\"\ncategory = \"ai\"\n\
-             [[sources]]\ninclude = \"./topics/*.toml\"\n",
+             [[sources]]\nurl = \"./aggr-ai.toml\"\ncategory = \"ai\"\n\
+             [[sources]]\nurl = \"./topics/*.toml\"\n",
         )
         .unwrap();
         std::fs::write(
             root.join("aggr-ai.toml"),
             "[[sources]]\nurl = \"https://ai.example/feed\"\n\
              [[sources]]\nurl = \"https://ml.example/feed\"\ncategory = \"ml\"\n\
-             [[sources]]\ninclude = \"./nested.toml\"\n",
+             [[sources]]\nurl = \"./nested.toml\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -1414,21 +1645,21 @@ url = "https://lobste.rs/search?q={url}"
 
         std::fs::write(
             root.join("aggr.toml"),
-            "[[sources]]\ninclude = \"./missing.toml\"\n",
+            "[[sources]]\nurl = \"./missing.toml\"\n",
         )
         .unwrap();
         let config = Config::load(&root.join("aggr.toml")).await.unwrap();
         assert!(config.sources.is_empty(), "missing includes are ignored");
         std::fs::write(
             root.join("aggr.toml"),
-            "[[sources]]\ninclude = \"./nope/*.toml\"\n",
+            "[[sources]]\nurl = \"./nope/*.toml\"\n",
         )
         .unwrap();
         let config = Config::load(&root.join("aggr.toml")).await.unwrap();
         assert!(config.sources.is_empty(), "empty globs are ignored");
         std::fs::write(
             root.join("aggr.toml"),
-            "[[sources]]\ninclude = \"./bad.toml\"\n",
+            "[[sources]]\nurl = \"./bad.toml\"\n",
         )
         .unwrap();
         std::fs::write(root.join("bad.toml"), "[site]\ntitle = \"x\"\n").unwrap();
@@ -1440,7 +1671,7 @@ url = "https://lobste.rs/search?q={url}"
 
         std::fs::write(
             root.join("aggr.toml"),
-            "[[sources]]\ninclude = \"./aggr.toml\"\n",
+            "[[sources]]\nurl = \"./aggr.toml\"\n",
         )
         .unwrap();
         let config = Config::load(&root.join("aggr.toml")).await.unwrap();
@@ -1451,25 +1682,19 @@ url = "https://lobste.rs/search?q={url}"
 
         std::fs::write(
             root.join("aggr.toml"),
-            "[[sources]]\ninclude = \"./nested.toml\"\nname = \"not allowed\"\n",
+            "[[sources]]\nurl = \"./nested.toml\"\nname = \"shared name\"\n",
         )
         .unwrap();
-        let err = Config::load(&root.join("aggr.toml")).await.unwrap_err();
-        assert!(
-            format!("{err:#}").contains("may only set `include` and `category`"),
-            "{err:#}"
-        );
+        let config = Config::load(&root.join("aggr.toml")).await.unwrap();
+        assert_eq!(config.sources[0].name.as_deref(), Some("shared name"));
 
         std::fs::write(
             root.join("aggr.toml"),
-            "[[sources]]\ninclude = \"./nested.toml\"\nurl = \"https://example.com\"\n",
+            "[[sources]]\nurl = \"./nested.toml\"\nurl = \"https://example.com\"\n",
         )
         .unwrap();
         let err = Config::load(&root.join("aggr.toml")).await.unwrap_err();
-        assert!(
-            format!("{err:#}").contains("`url` and `include` are mutually exclusive"),
-            "{err:#}"
-        );
+        assert!(format!("{err:#}").contains("duplicate key"), "{err:#}");
     }
 
     #[tokio::test]
@@ -1493,10 +1718,10 @@ title = "ignored remote title"
 url = "https://same.example/feed"
 
 [[sources]]
-include = "./topics/*.toml"
+url = "./topics/*.toml"
 
 [[sources]]
-include = "{}/forbidden.toml"
+url = "{}/forbidden.toml"
 "#,
             server.base_url()
         );
@@ -1529,7 +1754,7 @@ include = "{}/forbidden.toml"
                     .query_param("ref", "main");
                 then.status(200).body(
                     "[[sources]]\nurl = \"https://a.example/feed\"\n\
-                     [[sources]]\ninclude = \"../aggr.toml\"\n",
+                     [[sources]]\nurl = \"../aggr.toml\"\n",
                 );
             })
             .await;
@@ -1545,11 +1770,19 @@ include = "{}/forbidden.toml"
             })
             .await;
 
+        let forbidden = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/forbidden.toml");
+                then.status(200)
+                    .body("[[sources]]\nurl='https://forbidden.example/feed'\n");
+            })
+            .await;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("aggr.toml");
         std::fs::write(
             &path,
-            "[[sources]]\ninclude = \"https://github.com/owner/reading\"\ncategory = \"shared\"\n",
+            "[[sources]]\nurl = \"https://github.com/owner/reading\"\ncategory = \"shared\"\n",
         )
         .unwrap();
         let config = Config::load_with_github_api(
@@ -1579,6 +1812,7 @@ include = "{}/forbidden.toml"
         );
         assert_eq!(config.loaded_files.len(), 1);
         assert_eq!(config.loaded_remote.len(), 3);
+        forbidden.assert_calls_async(1).await;
         metadata.assert_calls_async(1).await;
         root_config.assert_calls_async(1).await;
         tree.assert_calls_async(1).await;
@@ -1587,15 +1821,16 @@ include = "{}/forbidden.toml"
     }
 
     #[tokio::test]
-    async fn the_root_can_explicitly_allow_remote_include_chains() {
+    async fn the_root_can_explicitly_allow_remote_source_chains() {
         use httpmock::Method::GET;
         use httpmock::MockServer;
 
         let server = MockServer::start_async().await;
-        let second_url = server.url("/second.toml");
+        let other = MockServer::start_async().await;
+        let second_url = other.url("/second.toml");
         let first_body = format!(
             "[[sources]]\nurl = \"https://one.example/feed\"\n\
-             [[sources]]\ninclude = \"{second_url}\"\n"
+             [[sources]]\nurl = \"{second_url}\"\n"
         );
         let first = server
             .mock_async(|when, then| {
@@ -1603,7 +1838,7 @@ include = "{}/forbidden.toml"
                 then.status(200).body(first_body.clone());
             })
             .await;
-        let second = server
+        let second = other
             .mock_async(|when, then| {
                 when.method(GET).path("/second.toml");
                 then.status(200)
@@ -1615,18 +1850,18 @@ include = "{}/forbidden.toml"
 
         std::fs::write(
             &path,
-            format!("[[sources]]\ninclude = \"{}\"\n", server.url("/first.toml")),
+            format!("[[sources]]\nurl = \"{}\"\n", server.url("/first.toml")),
         )
         .unwrap();
         let config = Config::load(&path).await.unwrap();
         assert_eq!(config.sources().unwrap().len(), 1);
-        assert_eq!(second.calls_async().await, 0);
+        assert_eq!(second.calls_async().await, 1);
 
         std::fs::write(
             &path,
             format!(
-                "[fetch]\nallow_remote_include_chains = true\n\
-                 [[sources]]\ninclude = \"{}\"\n",
+                "[fetch]\nallow_remote_source_chains = true\n\
+                 [[sources]]\nurl = \"{}\"\n",
                 server.url("/first.toml")
             ),
         )
@@ -1634,7 +1869,7 @@ include = "{}/forbidden.toml"
         let config = Config::load(&path).await.unwrap();
         assert_eq!(config.sources().unwrap().len(), 2);
         assert_eq!(first.calls_async().await, 2);
-        second.assert_calls_async(1).await;
+        second.assert_calls_async(2).await;
     }
 
     #[test]
@@ -1650,11 +1885,11 @@ include = "{}/forbidden.toml"
     }
 
     #[test]
-    fn relative_urls_are_never_treated_as_includes() {
+    fn unresolved_local_sources_require_loading_the_config() {
         let config = Config::parse("[[sources]]\nurl = \"./aggr-ai.toml\"\n").unwrap();
         let err = config.resolve_sources(&no_env).unwrap_err();
         assert!(
-            format!("{err:#}").contains("use `include = \"./file.toml\"`"),
+            format!("{err:#}").contains("load the config from a file"),
             "{err:#}"
         );
     }

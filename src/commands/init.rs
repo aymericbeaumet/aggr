@@ -29,7 +29,7 @@ pub const WORKFLOW_PATH: &str = ".github/workflows/aggr.yml";
 pub const WORKFLOW: &str = "\
 name: aggr
 on:
-  schedule: [{ cron: \"*/30 * * * *\" }]
+  schedule: [{ cron: \"7,37 * * * *\" }]
   push: { paths: [\"*.toml\", \"**/*.toml\", themes/**, templates/**, static/**] }
   workflow_dispatch:
 permissions: { contents: write, pages: write, id-token: write }
@@ -100,7 +100,7 @@ mod tests {
             workflow["jobs"]["aggr"]["if"],
             "github.event_name != 'push' || github.ref_name == github.event.repository.default_branch"
         );
-        assert!(workflow["on"].get("schedule").is_some());
+        assert_eq!(workflow["on"]["schedule"][0]["cron"], "7,37 * * * *");
         assert!(workflow["on"].get("workflow_dispatch").is_some());
         assert!(
             WORKFLOW.lines().count() <= 10,

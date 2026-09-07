@@ -586,7 +586,8 @@ fn sanitize_with_code_classes(html: &str, base: Option<&Url>, code_classes: bool
 /// [`sanitize`] then htmd. Trailing whitespace trimmed, exactly one trailing newline, runs of
 /// blank lines collapsed to one.
 pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
-    let normalized_images = normalize_image_sources(html);
+    let description = normalize_youtube_description(html, base);
+    let normalized_images = normalize_image_sources(&description);
     let passive = strip_active_content(&normalized_images);
     let normalized = normalize_extracted_controls(&normalize_code_blocks(&passive));
     let clean = sanitize(&restore_inline_layout_boundaries(&normalized.html), base);
@@ -598,6 +599,7 @@ pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
             ol_number_spacing: 1,
             ..Default::default()
         })
+        .add_handler(vec!["h1", "h2", "h3", "h4", "h5", "h6"], markdown_heading)
         .build();
     let markdown = converter
         .convert(&clean)
@@ -607,6 +609,170 @@ pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
     });
     let markdown = restore_footnote_references(markdown, normalized.footnotes.len());
     append_footnotes(markdown, &normalized.footnotes, base, &converter)
+}
+
+/// YouTube descriptions are plain text carried as paragraphs with line breaks, not Markdown.
+/// Recognize only explicit dash lists, leaving rich HTML and code alone.
+fn normalize_youtube_description(html: &str, base: Option<&Url>) -> String {
+    let Some(id) = base.and_then(crate::sources::youtube::video_id) else {
+        return html.to_string();
+    };
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        if let Some(tag) = parse_tag(&html[start..])
+            && !tag.closing
+            && tag.name == "p"
+            && let Some((_, _, end)) = element_bounds(html, start, "p")
+        {
+            let fragment = Html::parse_fragment(&html[start..end]);
+            let plain = fragment
+                .root_element()
+                .descendants()
+                .all(|node| match node.value() {
+                    scraper::Node::Element(element) => {
+                        matches!(element.name(), "html" | "p" | "br")
+                    }
+                    _ => true,
+                });
+            let mut text = String::new();
+            for node in fragment.root_element().descendants() {
+                match node.value() {
+                    scraper::Node::Text(value) => text.push_str(value),
+                    scraper::Node::Element(element) if element.name() == "br" => text.push('\n'),
+                    _ => {}
+                }
+            }
+            if plain && text.lines().any(|line| description_bullet(line).is_some()) {
+                out.push_str(&description_blocks(&text, &id));
+            } else {
+                out.push_str(&html[start..end]);
+            }
+            position = end;
+        } else {
+            out.push('<');
+            position = start + 1;
+        }
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+fn description_bullet(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start_matches(' ');
+    if line.len() - trimmed.len() > 3 {
+        return None;
+    }
+    trimmed
+        .strip_prefix("- ")
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+}
+
+fn description_blocks(text: &str, video_id: &str) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut out = String::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        if line.is_empty() {
+            index += 1;
+            continue;
+        }
+        if description_bullet(lines[index]).is_some() {
+            out.push_str("<ul>");
+            while let Some(bullet) = lines.get(index).and_then(|line| description_bullet(line)) {
+                out.push_str("<li>");
+                out.push_str(&description_chapter(bullet, video_id));
+                out.push_str("</li>");
+                index += 1;
+            }
+            out.push_str("</ul>");
+        } else if line.ends_with(':')
+            && line.len() <= 80
+            && lines
+                .get(index + 1)
+                .is_some_and(|line| description_bullet(line).is_some())
+        {
+            out.push_str(&format!(
+                "<h3>{}</h3>",
+                escape_html(line.trim_end_matches(':'))
+            ));
+            index += 1;
+        } else {
+            out.push_str("<p>");
+            out.push_str(&escape_html(lines[index]));
+            index += 1;
+            while let Some(line) = lines.get(index)
+                && !line.trim().is_empty()
+                && description_bullet(line).is_none()
+            {
+                out.push_str("<br>");
+                out.push_str(&escape_html(line));
+                index += 1;
+            }
+            out.push_str("</p>");
+        }
+    }
+    out
+}
+
+fn description_chapter(text: &str, video_id: &str) -> String {
+    let Some((timestamp, rest)) = text.split_once(char::is_whitespace) else {
+        return escape_html(text);
+    };
+    let parts = timestamp.split(':').collect::<Vec<_>>();
+    if !(2..=3).contains(&parts.len())
+        || parts.iter().any(|part| {
+            part.is_empty() || part.len() > 3 || !part.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return escape_html(text);
+    }
+    let values = parts
+        .iter()
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect::<Vec<_>>();
+    if values.len() != parts.len() || values[1..].iter().any(|value| *value >= 60) {
+        return escape_html(text);
+    }
+    let seconds = values.into_iter().fold(0, |total, part| total * 60 + part);
+    format!(
+        "<a href=\"https://www.youtube.com/watch?v={video_id}&amp;t={seconds}\">{timestamp}</a> {}",
+        escape_html(rest)
+    )
+}
+
+fn markdown_heading(
+    handlers: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element<'_>,
+) -> Option<htmd::element_handler::HandlerResult> {
+    let level = element.tag.strip_prefix('h')?.parse::<usize>().ok()?;
+    let content = handlers.walk_children(element.node).content;
+    let content = content.trim();
+    let heading = if level <= 2 && content.contains("\\\n") {
+        let underline = if level == 1 { "===" } else { "---" };
+        format!("{content}\n{underline}")
+    } else {
+        // Setext supports multiline h1/h2; higher levels must stay on one ATX line.
+        format!("{} {}", "#".repeat(level), content.replace("\\\n", " "))
+    };
+    Some(format!("\n\n{heading}\n\n").into())
+}
+
+pub fn has_heading_breaks(markdown: &str) -> bool {
+    markdown.lines().any(|line| {
+        let text = line.trim_start_matches(' ');
+        let hashes = text.bytes().take_while(|byte| *byte == b'#').count();
+        line.len() - text.len() <= 3
+            && (1..=6).contains(&hashes)
+            && text
+                .as_bytes()
+                .get(hashes)
+                .is_some_and(u8::is_ascii_whitespace)
+            && text.bytes().rev().take_while(|byte| *byte == b'\\').count() % 2 == 1
+    })
 }
 
 fn code_language(element: scraper::ElementRef<'_>) -> Option<String> {
@@ -721,14 +887,16 @@ fn protect_markdown_code(markdown: &str, transform: impl FnOnce(&str) -> String)
     transformed
 }
 
-/// Recover only code blocks demonstrably damaged by the previous converter. Markdown remains
-/// authoritative for edits and prose; the caller excludes truncated HTML companions.
+/// Recover damaged code blocks, headings, or unformatted video descriptions from retained HTML.
+/// Markdown edits stay authoritative; the caller excludes truncated HTML companions.
 pub fn effective_markdown(stored: &str, retained_html: Option<&str>, base: Option<&Url>) -> String {
     let Some(html) = retained_html else {
         return stored.to_string();
     };
     let stored_blocks = fenced_blocks(stored);
-    if stored_blocks.is_empty() {
+    let description = base.is_some_and(crate::sources::youtube::is_video_url)
+        && stored.lines().any(|line| line.starts_with("\\- "));
+    if stored_blocks.is_empty() && !has_heading_breaks(stored) && !description {
         return stored.to_string();
     }
     let source = sanitize_with_code_classes(
@@ -759,6 +927,9 @@ pub fn effective_markdown(stored: &str, retained_html: Option<&str>, base: Optio
         .map(|markdown| tidy_markdown(&repair_generated_markdown(&markdown)))
         .unwrap_or_default();
     let corrected = to_markdown(html, base);
+    if (has_heading_breaks(stored) || description) && (stored == legacy || stored == earlier) {
+        return corrected;
+    }
     let old_blocks = fenced_blocks(&legacy);
     let earlier_blocks = fenced_blocks(&earlier);
     let new_blocks = fenced_blocks(&corrected);
@@ -1282,9 +1453,141 @@ fn restore_inline_layout_boundaries(html: &str) -> String {
     out
 }
 
+/// Shared cleanup for every feed and extracted article, both on storage and when building older
+/// archives. Restrict comment controls to document boundaries, never code or body paragraphs.
+pub fn strip_article_metadata(
+    markdown: &str,
+    published: Option<DateTime<Utc>>,
+    source_slug: &str,
+) -> String {
+    let markdown = strip_boundary_comment_controls(markdown);
+    let markdown = strip_leading_metadata(&markdown, published, source_slug);
+    strip_boundary_comment_controls(&markdown)
+}
+
+fn strip_boundary_comment_controls(markdown: &str) -> String {
+    let trimmed = markdown.trim();
+    let first = trimmed
+        .split_once("\n\n")
+        .map_or(trimmed, |(first, _)| first);
+    let last = trimmed
+        .rsplit_once("\n\n")
+        .map_or(trimmed, |(_, last)| last);
+    if ![first, last]
+        .iter()
+        .any(|text| text.to_ascii_lowercase().contains("comment"))
+    {
+        return markdown.to_string();
+    }
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    let blocks = root.children().collect::<Vec<_>>();
+    if blocks.is_empty() {
+        return markdown.to_string();
+    }
+    let leading = blocks
+        .iter()
+        .take_while(|node| is_comment_control(node))
+        .count();
+    if leading == blocks.len() {
+        return String::new();
+    }
+    let trailing = blocks
+        .iter()
+        .rev()
+        .take_while(|node| is_comment_control(node))
+        .count();
+    if leading == 0 && trailing == 0 {
+        return markdown.to_string();
+    }
+    let mut lines = vec![0];
+    lines.extend(markdown.match_indices('\n').map(|(index, _)| index + 1));
+    let start = if leading > 0 {
+        let end = blocks[leading - 1].data.borrow().sourcepos.end.line;
+        lines.get(end).copied().unwrap_or(markdown.len())
+    } else {
+        0
+    };
+    let end = if trailing > 0 {
+        let start = blocks[blocks.len() - trailing]
+            .data
+            .borrow()
+            .sourcepos
+            .start
+            .line;
+        lines
+            .get(start.saturating_sub(1))
+            .copied()
+            .unwrap_or(markdown.len())
+    } else {
+        markdown.len()
+    };
+    let kept = &markdown[start..end];
+    let kept = if leading > 0 {
+        kept.trim_start_matches('\n')
+    } else {
+        kept
+    };
+    if trailing > 0 {
+        format!("{}\n", kept.trim_end_matches('\n'))
+    } else {
+        kept.to_string()
+    }
+}
+
+fn is_comment_control<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
+    use comrak::nodes::NodeValue;
+    if !matches!(node.data.borrow().value, NodeValue::Paragraph) {
+        return false;
+    }
+    let mut text = String::new();
+    let mut linked = false;
+    for child in node.descendants() {
+        match &child.data.borrow().value {
+            NodeValue::Text(value) => text.push_str(value),
+            NodeValue::SoftBreak | NodeValue::LineBreak => text.push(' '),
+            NodeValue::Link(_) => linked = true,
+            NodeValue::Paragraph | NodeValue::Emph | NodeValue::Strong => {}
+            _ => return false,
+        }
+    }
+    let text = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let text = text.trim();
+    let text = text
+        .strip_prefix('[')
+        .and_then(|text| text.strip_suffix(']'))
+        .unwrap_or(text)
+        .trim();
+    let text = if linked {
+        text.strip_suffix("(opens in a new window)")
+            .unwrap_or(text)
+            .trim()
+    } else {
+        text
+    };
+    let count = text
+        .strip_suffix(" comments")
+        .or_else(|| text.strip_suffix(" comment"))
+        .or_else(|| {
+            text.strip_prefix("comments (")
+                .and_then(|text| text.strip_suffix(')'))
+        });
+    if count
+        .is_some_and(|count| !count.is_empty() && count.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return true;
+    }
+    linked && matches!(text, "no comments" | "leave a comment")
+}
+
 /// Remove a metadata line that readability promoted to the first Markdown paragraph. This covers
 /// a publication date (including a short suffix such as `- Link Blog`) and a source-name-only
-/// accessibility label. Normal prose containing a date remains intact.
+/// accessibility label. A standalone pipe after the date is its orphaned metadata separator.
+/// Normal prose containing a date remains intact.
 pub fn strip_leading_metadata(
     markdown: &str,
     published: Option<DateTime<Utc>>,
@@ -1312,7 +1615,11 @@ pub fn strip_leading_metadata(
     if !source_only && !matching_date {
         return markdown.to_string();
     }
-    rest.trim_start_matches('\n').to_string()
+    let rest = rest.trim_start_matches('\n');
+    if matching_date {
+        return rest.strip_prefix("|\n\n").unwrap_or(rest).to_string();
+    }
+    rest.to_string()
 }
 
 fn date_prefixes(value: &str) -> impl Iterator<Item = &str> {
@@ -1434,7 +1741,7 @@ const READING_WORDS_PER_MINUTE: usize = 225;
 pub fn reading_metrics(markdown: &str) -> (usize, usize) {
     use unicode_segmentation::UnicodeSegmentation as _;
 
-    let html = comrak::markdown_to_html(markdown, &markdown_options());
+    let html = render_markdown_html(markdown, &comrak::options::Plugins::default());
     let text = html_to_text(&html);
     let words = text.unicode_words().count();
     let minutes = words.div_ceil(READING_WORDS_PER_MINUTE);
@@ -1461,11 +1768,43 @@ pub struct LocalImage {
 /// Render safe Markdown and replace only validated publisher images with immutable local assets.
 /// The first image is allowed to become the LCP resource; later images use native lazy loading.
 pub fn render_markdown_with_images(markdown: &str, images: &[LocalImage]) -> String {
-    let options = markdown_options();
     let mut plugins = comrak::options::Plugins::default();
     plugins.render.codefence_syntax_highlighter = Some(&CodeHighlighter);
-    let html = comrak::markdown_to_html_with_plugins(markdown, &options, &plugins);
+    let html = render_markdown_html(markdown, &plugins);
     enhance_rendered_images(&add_link_navigation_attributes(&html), images)
+}
+
+fn render_markdown_html(markdown: &str, plugins: &comrak::options::Plugins<'_>) -> String {
+    let options = markdown_options();
+    if !markdown.contains("\\\n") && !markdown.contains("\\\r\n") {
+        return comrak::markdown_to_html_with_plugins(markdown, &options, plugins);
+    }
+    // Parse breaks before autolinking, whose URL matcher otherwise consumes a trailing backslash.
+    let mut parse_options = markdown_options();
+    parse_options.extension.autolink = false;
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, markdown, &parse_options);
+    let mut lines = vec![0];
+    lines.extend(markdown.match_indices('\n').map(|(index, _)| index + 1));
+    let mut positions = root
+        .descendants()
+        .filter_map(|node| {
+            let data = node.data.borrow();
+            if !matches!(data.value, comrak::nodes::NodeValue::LineBreak) {
+                return None;
+            }
+            let index = *lines.get(data.sourcepos.start.line.checked_sub(1)?)?
+                + data.sourcepos.start.column.saturating_sub(1);
+            (markdown.as_bytes().get(index) == Some(&b'\\')).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    positions.sort_unstable();
+    positions.dedup();
+    let mut prepared = markdown.to_string();
+    for index in positions.into_iter().rev() {
+        prepared.replace_range(index..index + 1, "  ");
+    }
+    comrak::markdown_to_html_with_plugins(&prepared, &options, plugins)
 }
 
 fn markdown_options() -> comrak::Options<'static> {
@@ -1763,6 +2102,7 @@ pub fn excerpt(markdown: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[tokio::test]
@@ -2148,6 +2488,215 @@ mod tests {
     }
 
     #[test]
+    fn html_heading_breaks_remain_inside_one_heading() {
+        for level in 1..=6 {
+            let markdown = to_markdown(
+                &format!(
+                    "<h{level}>40 hours, $2M+ AI credits,<br><em>solve an open problem.</em></h{level}><p>Details.</p>"
+                ),
+                None,
+            );
+            let html = render_markdown(&markdown);
+            let separator = if level <= 2 { "<br />\n" } else { " " };
+            assert!(html.contains(&format!("<h{level}>40 hours, $2M+ AI credits,{separator}<em>solve an open problem.</em></h{level}>")), "{markdown:?}\n{html}");
+            assert!(html.contains("<p>Details.</p>"), "{html}");
+        }
+    }
+
+    #[test]
+    fn bare_urls_before_hard_breaks_do_not_include_backslashes() {
+        let markdown = to_markdown(
+            "<p>Watch https://example.com/video<br>Second line.<br>More.</p>",
+            None,
+        );
+        let html = render_markdown(&markdown);
+        assert!(
+            html.contains("href=\"https://example.com/video\""),
+            "{markdown:?}\n{html}"
+        );
+        assert!(
+            html.contains("</a><br />\nSecond line.<br />\nMore."),
+            "{html}"
+        );
+        assert!(!html.contains('\\'), "{html}");
+        let unicode = render_markdown("Étude https://example.com/video\\\r\nSecond line.\r\n");
+        assert!(
+            unicode.contains("href=\"https://example.com/video\""),
+            "{unicode}"
+        );
+        assert!(unicode.contains("</a><br />\nSecond line."), "{unicode}");
+    }
+
+    #[test]
+    fn markdown_break_repairs_preserve_literal_backslashes_and_code() {
+        let markdown = "A literal \\\\ character.\n\n`https://example.com/\\`\n\n```text\n# heading\\\nhttps://example.com/\\\n```\n";
+        let html = render_markdown(markdown);
+        assert!(html.contains("A literal \\ character."), "{html}");
+        assert!(
+            html.contains("<code>https://example.com/\\</code>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("# heading\\\nhttps://example.com/\\\n</code>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn boundary_comment_controls_are_removed_for_every_source() {
+        let controls = [
+            r"\[[0 comments](https://blog.netbsd.org/post#comment-form)\]",
+            "[1 comment](https://example.com/post#comments)",
+            "[42 COMMENTS](https://example.com/comments)",
+            "[Comments (12)](https://example.com/post#comments)",
+            "[No comments](https://example.com/post#comments)",
+            "[Leave a comment](https://example.com/post#respond)",
+            "[0 comments]",
+            "0 comments",
+            "[**12 comments**](https://example.com/#comments)",
+            "[0 comments (opens in a new window)](https://example.com/#comments)",
+        ];
+        for source in [
+            "hnrss-org-frontpage",
+            "a-normal-feed",
+            "an-html-source",
+            "imported",
+        ] {
+            for control in controls {
+                for body in [
+                    format!("{control}\n\nActual article.\n"),
+                    format!("Actual article.\n\n{control}\n"),
+                    format!("{control}\n\nActual article.\n\n{control}\n"),
+                ] {
+                    assert_eq!(
+                        strip_article_metadata(&body, None, source),
+                        "Actual article.\n",
+                        "{body}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn comment_cleanup_preserves_article_content_and_code() {
+        for body in [
+            "The article has [0 comments](https://example.com/#comments).\n",
+            "This code has 0 comments.\n",
+            "`0 comments`\n",
+            "```text\n0 comments\n```\n",
+            "> [0 comments](https://example.com/#comments)\n",
+            "- [0 comments](https://example.com/#comments)\n",
+            "## 0 comments\n",
+            "Article.\n\n[0 comments](https://example.com/#comments)\n\nMore article.\n",
+            "[Read the comments about the algorithm](https://example.com/#comments)\n",
+            "![0 comments](https://example.com/image.png)\n",
+            "Leave a comment\n",
+            "Comment 42\n",
+            "[0 comments]: https://example.com/#comments\n",
+        ] {
+            assert_eq!(strip_article_metadata(body, None, "feed"), body, "{body}");
+        }
+    }
+
+    #[test]
+    fn boundary_controls_compose_with_metadata_and_html_conversion() {
+        let published = DateTime::parse_from_rfc3339("2026-09-06T15:44:24Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let html = "<div><p>[<a href=\"https://example.com/#comments\">0 comments</a>]</p><p>September 06, 2026</p><p>Actual article.</p><p>[<a href=\"https://example.com/#comment-form\">0 comments</a>]</p></div>";
+        let body = to_markdown(html, None);
+        assert_eq!(
+            strip_article_metadata(&body, Some(published), "feed"),
+            "Actual article.\n"
+        );
+        assert_eq!(strip_article_metadata("0 comments\n", None, "feed"), "");
+    }
+
+    #[test]
+    fn youtube_plain_description_has_sections_lists_and_chapter_links() {
+        let url = Url::parse("https://www.youtube.com/watch?v=abc123").unwrap();
+        let html = "<p>Streamed live: https://twitch.tv/example<br>Enable subtitles</p><p>References:<br>- https://example.com/a<br>- https://example.com/b</p><p>Chapters:<br>- 00:00:00 - Intro<br>- 01:13:41 - More</p>";
+        let markdown = to_markdown(html, Some(&url));
+        assert!(
+            markdown.contains("### References\n\n- https://example.com/a\n- https://example.com/b"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("### Chapters"), "{markdown}");
+        assert!(
+            markdown.contains("[01:13:41](https://www.youtube.com/watch?v=abc123&t=4421)"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("\\-"), "{markdown}");
+        let ordinary = to_markdown(html, Some(&Url::parse("https://example.com/").unwrap()));
+        assert!(ordinary.contains("\\-"), "{ordinary}");
+    }
+
+    #[test]
+    fn youtube_description_does_not_guess_rich_html_or_invalid_timestamps() {
+        let url = Url::parse("https://youtu.be/abc123").unwrap();
+        let rich = "<p><strong>References:</strong><br>- preserve my formatting</p>";
+        assert_eq!(to_markdown(rich, Some(&url)), to_markdown(rich, None));
+        for literal in [
+            "12:90 - invalid",
+            "1:2:3:4 - too many parts",
+            "01:23x - text",
+            "- literal dash",
+            "12:30",
+        ] {
+            assert_eq!(description_chapter(literal, "abc123"), escape_html(literal));
+        }
+        assert_eq!(description_bullet("    - indented literal"), None);
+        assert_eq!(description_bullet("- "), None);
+        assert!(description_chapter("12:30 - chapter", "abc123").contains("&amp;t=750"));
+    }
+
+    #[test]
+    fn youtube_description_recovery_preserves_edits_and_literal_markup() {
+        let url = Url::parse("https://www.youtube.com/watch?v=abc123").unwrap();
+        let html = "<p>References:<br>- https://example.com/a</p>";
+        let stored = to_markdown(html, None);
+        let repaired = effective_markdown(&stored, Some(html), Some(&url));
+        assert!(
+            repaired.contains("### References\n\n- https://example.com/a"),
+            "{repaired}"
+        );
+        let edited = format!("{stored}My own note.\n");
+        assert_eq!(effective_markdown(&edited, Some(html), Some(&url)), edited);
+        let code = "<pre><code>Chapters:\n- 01:02 - example</code></pre>";
+        assert_eq!(to_markdown(code, Some(&url)), to_markdown(code, None));
+        let literal =
+            "<p>Quotes:<br>- &lt;script&gt;alert(1)&lt;/script&gt; &amp; literal *stars*</p>";
+        let output = render_markdown(&to_markdown(literal, Some(&url)));
+        assert!(output.contains("&lt;script&gt;"), "{output}");
+        assert!(!output.contains("<script>"), "{output}");
+        assert!(!output.contains("<em>stars</em>"), "{output}");
+    }
+
+    #[test]
+    fn retained_html_repairs_only_unedited_legacy_heading_breaks() {
+        let html =
+            "<h2>40 hours, $2M+ AI credits,<br><em>solve an open problem.</em></h2><p>Details.</p>";
+        let stored = "## 40 hours, $2M+ AI credits,\\\n*solve an open problem.*\n\nDetails.\n";
+        let repaired = effective_markdown(stored, Some(html), None);
+        assert_eq!(repaired, to_markdown(html, None));
+        assert!(render_markdown(&repaired).contains(
+            "<h2>40 hours, $2M+ AI credits,<br />\n<em>solve an open problem.</em></h2>"
+        ));
+        let edited = stored.replace("Details.", "Edited details.");
+        assert_eq!(effective_markdown(&edited, Some(html), None), edited);
+        assert_eq!(effective_markdown(stored, None, None), stored);
+        assert!(
+            render_markdown("# Literal\\\nFollowing paragraph.\n")
+                .contains("<h1>Literal\\</h1>\n<p>Following paragraph.</p>")
+        );
+        assert!(
+            render_markdown("> # Literal\\\n> Following paragraph.\n")
+                .contains("<h1>Literal\\</h1>")
+        );
+    }
+
+    #[test]
     fn syntax_highlighting_is_static_safe_and_optional() {
         let html = render_markdown("```rust\nlet name = \"<script>\";\n```\n");
         assert!(html.contains("syntax-"), "{html}");
@@ -2155,6 +2704,59 @@ mod tests {
         let plain = render_markdown("```unknown-language\n<script>\n```\n");
         assert!(!plain.contains("syntax-"), "{plain}");
         assert!(plain.contains("&lt;script&gt;"), "{plain}");
+    }
+
+    #[test]
+    fn strips_orphaned_divider_only_after_matching_publication_date() {
+        use chrono::{TimeZone as _, Utc};
+
+        let published = Utc.with_ymd_and_hms(2026, 9, 2, 15, 40, 0).unwrap();
+        let markdown = to_markdown(
+            "<p>Sep 02, 2026</p><span>|</span><p>The actual article.</p>",
+            None,
+        );
+        assert_eq!(
+            strip_leading_metadata(&markdown, Some(published), "blog-google"),
+            "The actual article.\n"
+        );
+
+        for body in [
+            "|\n\nAn article about the pipe symbol.\n",
+            "`|`\n\nAn article about the pipe symbol.\n",
+            "```sh\ncat input | sort\n```\n\nBody.\n",
+            "| Input | Output |\n| --- | --- |\n| a | b |\n",
+            "The expression a | b combines the values.\n",
+        ] {
+            assert_eq!(
+                strip_leading_metadata(body, Some(published), "blog-google"),
+                body
+            );
+            assert_eq!(
+                strip_leading_metadata(
+                    &format!("Sep 02, 2026\n\n{body}"),
+                    Some(published),
+                    "blog-google"
+                ),
+                if body.starts_with("|\n\n") {
+                    "An article about the pipe symbol.\n"
+                } else {
+                    body
+                }
+            );
+        }
+        let wrong_date = "Sep 02, 2025\n\n|\n\nBody.\n";
+        assert_eq!(
+            strip_leading_metadata(wrong_date, Some(published), "blog-google"),
+            wrong_date
+        );
+        assert_eq!(
+            strip_leading_metadata(
+                "Blog Google\n\n|\n\nBody.\n",
+                Some(published),
+                "blog-google"
+            ),
+            "|\n\nBody.\n"
+        );
     }
 
     #[test]

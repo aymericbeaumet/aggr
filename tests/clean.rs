@@ -338,7 +338,7 @@ fn clean_applies_the_same_repository_boundary_as_dev() {
 
 #[test]
 fn clean_is_offline_scoped_and_preserves_archive_and_unknown_output() {
-    let fixture = Fixture::new("[[sources]]\ninclude = 'http://127.0.0.1:1/unavailable.toml'\n");
+    let fixture = Fixture::new("[[sources]]\nurl = 'http://127.0.0.1:1/unavailable.toml'\n");
     let dev = fixture.dev(&fixture.root.join("aggr.toml"));
     let build = fixture.root.join(".aggr/cache/build-v1");
     git(&fixture.root, &["branch", "aggr"]);
@@ -630,10 +630,10 @@ fn cleaning_only_build_artifacts_does_not_create_a_dev_namespace() {
 }
 
 #[test]
-fn clean_flags_run_before_remote_include_resolution() {
+fn clean_flags_run_before_remote_source_resolution() {
     for command in ["sync", "build", "dev"] {
         let fixture = Fixture::new(
-            "[fetch]\nretries = 0\n[[sources]]\ninclude = 'http://127.0.0.1:1/unavailable.toml'\n[[sources]]\nurl = '${AGGR_CLEAN_UNSET}'\n",
+            "[fetch]\nretries = 0\n[[sources]]\nurl = 'http://127.0.0.1:1/unavailable.toml'\n[[sources]]\nurl = '${AGGR_CLEAN_UNSET}'\n",
         );
         fixture.put(&fixture.root.join(".aggr/cache/build-v1/proof"), "cached");
         fixture
@@ -648,17 +648,17 @@ fn clean_flags_run_before_remote_include_resolution() {
 }
 
 #[test]
-fn cleanup_protects_untracked_local_includes_and_custom_archives() {
-    let included = Fixture::new("[[sources]]\ninclude = '_site/local.toml'\n");
-    included.put(&included.root.join("_site/local.toml"), "");
-    included.put(&included.root.join("_site/.aggr-site"), "1");
-    included
+fn cleanup_protects_untracked_local_sources_and_custom_archives() {
+    let local = Fixture::new("[[sources]]\nurl = '_site/local.toml'\n");
+    local.put(&local.root.join("_site/local.toml"), "");
+    local.put(&local.root.join("_site/.aggr-site"), "1");
+    local
         .command()
         .arg("clean")
         .assert()
         .failure()
         .stderr(predicate::str::contains("protected path"));
-    assert!(included.root.join("_site/local.toml").exists());
+    assert!(local.root.join("_site/local.toml").exists());
 
     let custom = Fixture::new("[store]\ndir = '../archive'\n");
     let archive = custom.root.parent().unwrap().join("archive");
@@ -778,4 +778,98 @@ fn dev_clean_acquires_one_lock_and_keeps_it_while_serving() {
         .stderr(predicate::str::contains("another `aggr dev`"));
     drop(process);
     fixture.command().arg("clean").assert().success();
+}
+
+#[test]
+fn cleanup_protects_nested_local_source_documents_without_fetching() {
+    let server = httpmock::MockServer::start();
+    let remote = server.mock(|when, then| {
+        when.any_request();
+        then.status(200).body("unused remote resource");
+    });
+    for (name, contents) in [
+        ("feeds.txt", "https://example.com/feed.xml\n"),
+        (
+            "subscriptions.opml",
+            r#"<opml version="2.0"><body><outline xmlUrl="https://example.com/feed.xml"/></body></opml>"#,
+        ),
+        (
+            "feed.xml",
+            r#"<rss version="2.0"><channel><title>Local</title><link>https://example.com</link><description>Local feed</description></channel></rss>"#,
+        ),
+    ] {
+        let fixture = Fixture::new(&format!(
+            "[[sources]]\nurl = ['sources/list.txt', '{}']\n",
+            server.url("/remote")
+        ));
+        fixture.put(&fixture.root.join("sources/list.txt"), "nested.toml\n");
+        fixture.put(
+            &fixture.root.join("sources/nested.toml"),
+            &format!("[[sources]]\nurl = '../_site/{name}'\n"),
+        );
+        fixture.put(&fixture.root.join("_site/.aggr-site"), "1");
+        fixture.put(&fixture.root.join("_site").join(name), contents);
+        fixture.put(&fixture.root.join(".aggr/cache/proof"), "keep on failure");
+        fixture
+            .command()
+            .arg("clean")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("protected path"));
+        assert_eq!(
+            std::fs::read_to_string(fixture.root.join("_site").join(name)).unwrap(),
+            contents
+        );
+        assert!(fixture.root.join(".aggr/cache/proof").exists());
+    }
+    remote.assert_calls(0);
+}
+
+#[test]
+fn cleanup_handles_local_feeds_and_collection_cycles_offline() {
+    let server = httpmock::MockServer::start();
+    let remote = server.mock(|when, then| {
+        when.any_request();
+        then.status(200).body("unused remote resource");
+    });
+    let fixture = Fixture::new("[[sources]]\nurl = 'sources/list.txt'\n");
+    fixture.put(
+        &fixture.root.join("sources/list.txt"),
+        &format!("nested.toml\n{}\n", server.url("/remote")),
+    );
+    fixture.put(
+        &fixture.root.join("sources/nested.toml"),
+        "[[sources]]\nurl = ['list.txt', 'feed.xml', 'subscriptions.opml']\n",
+    );
+    fixture.put(&fixture.root.join("sources/feed.xml"), r#"<rss version="2.0"><channel><title>Local</title><link>https://example.com</link><description>Local feed</description></channel></rss>"#);
+    let opml = r#"<opml version="2.0"><body><outline xmlUrl="feed.xml"/></body></opml>"#;
+    let bytes = [0xff, 0xfe]
+        .into_iter()
+        .chain(opml.encode_utf16().flat_map(u16::to_le_bytes))
+        .collect::<Vec<_>>();
+    std::fs::write(fixture.root.join("sources/subscriptions.opml"), bytes).unwrap();
+    fixture.put(&fixture.root.join(".aggr/cache/proof"), "disposable");
+    fixture.command().arg("clean").assert().success();
+    assert!(!fixture.root.join(".aggr/cache").exists());
+    assert!(fixture.root.join("sources/feed.xml").exists());
+    assert!(fixture.root.join("sources/subscriptions.opml").exists());
+    remote.assert_calls(0);
+}
+
+#[test]
+fn cleanup_protects_local_source_paths_expanded_from_the_environment() {
+    let fixture = Fixture::new("[[sources]]\nurl = '${AGGR_CLEAN_LOCAL_SOURCE}'\n");
+    fixture.put(&fixture.root.join("_site/.aggr-site"), "1");
+    fixture.put(
+        &fixture.root.join("_site/feeds.txt"),
+        "https://example.com/feed.xml\n",
+    );
+    fixture
+        .command()
+        .env("AGGR_CLEAN_LOCAL_SOURCE", "_site/feeds.txt")
+        .arg("clean")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("protected path"));
+    assert!(fixture.root.join("_site/feeds.txt").exists());
 }

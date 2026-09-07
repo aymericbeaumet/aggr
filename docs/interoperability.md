@@ -9,6 +9,32 @@ replicates the append-only branch, while any static host can serve the rendered 
 turnkey workflow, Pages deployment, config discovery shortcuts, and commit-pinned web links around
 that portable core.
 
+## Source definitions and collections
+
+`[[sources]].url` is the shared configuration boundary for local or remote websites, feeds,
+aggr TOML, OPML subscriptions, and newline-separated URL lists. Resource content determines the
+format: a feed contributes one source, while a collection expands into its entries. Strings and
+arrays of strings share line splitting, whitespace trimming, and empty-line removal. Per-table
+options group resources without an additional syntax inside strings.
+
+Expansion preserves declaration order and reduces every form to the same `Source` model for
+defaults, environment expansion, validation, deduplication, and discovery. Collection entries
+resolve local paths relative to their file and inherit source options unless they override them.
+Repeated resources and cycles are skipped. Remote collection chaining is controlled by the root
+configuration's `fetch.allow_remote_source_chains`; nested files cannot grant themselves broader
+access. Ordinary feed and website entries may still point to other origins. Inherited headers stay on
+the collection's origin or repository; redirects cannot transfer collection credentials to children
+on another origin.
+
+Offline cleanup uses the same document parser to protect local dependencies through nested
+collections, including environment-expanded paths, without requesting remote resources. New
+collection formats must preserve this dependency tracking as well as normal loading.
+
+Online loading reads remote inputs to classify them before fetching the resolved sources; this
+currently adds a detection request for ordinary feeds and websites. Pinned archive builds use
+offline loading. Dev starts from local configuration and cached data, resolves remote inputs in
+the background, and reuses the resolved sources when only templates or styles change.
+
 ## A local snapshot and its original
 
 An item page identifies the readable copy held by one aggr instance. Its canonical URL therefore
@@ -106,9 +132,9 @@ JSON-LD expresses the same membership with `WebSite.isPartOf`; `meta[name="gener
 descriptor schema is [`aggr-instance.schema.json`](aggr-instance.schema.json).
 
 The config link identifies the tracked root file used for the build when that identity is known. It
-does not embed the full effective configuration: local included files, remote included bodies,
+does not embed the full effective configuration: local collection files, remote collection bodies,
 themes, environment expansion, and the binary version remain separate inputs. Pin or vendor remote
-includes when repeatable rebuilding matters.
+collections when repeatable rebuilding matters.
 
 An instance can also consume another instance's retained data through a `type = "aggr"` source.
 That copies readable item content and its ultimate original URL into a second repository. It is
@@ -139,11 +165,24 @@ the live site is intended to remain a complete archive.
 ## Preservation boundary
 
 aggr preserves a safe, readable snapshot: metadata, extracted or feed Markdown, and optionally the
-stripped HTML used to derive it. It does not preserve the complete HTTP exchange, executable page,
-stylesheet, fonts, video, or other linked assets, and a failed extraction can leave only feed
-metadata. It is therefore not a pixel-perfect mirror or a WARC archive.
+stripped HTML used to derive it. Optional image retention preserves safe raster masters and
+lossless derivatives, including a metadata lead image omitted from extracted prose. It does not preserve the complete HTTP exchange,
+executable page, stylesheet, fonts, video streams, or arbitrary linked assets, and a failed
+extraction can leave only feed metadata. It is therefore not a pixel-perfect mirror or a WARC archive.
 
 Protocols that require a receiving server, callback, provider-controlled response headers, or an
 immutable capture endpoint are not advertised merely because aggr could emit a suggestive link.
 Webmention, WebSub publication, and Memento support should be claimed only when a deployment can
 complete their full contracts.
+
+Shared content cleanup runs during fetch and rendering, so retained archives benefit without
+rewriting stored companions. Boundary removal targets standalone metadata and comment controls;
+code, quotes, lists, references, and interior prose remain intact. Provider-specific description
+normalization stays scoped to that provider. Public YouTube captions are fetched with bounded
+requests when advertised; unavailable captions leave the description intact and do not count as a
+successfully cached transcript.
+
+Explicit `--refresh` may fill missing previews or article media while preserving existing
+companions and historical blob URLs. To refresh existing dev items, run `dev --refresh` once and
+then return to normal `dev`; leaving the flag enabled reprocesses feed-present entries on each
+poll. Dev changes only its isolated cache.

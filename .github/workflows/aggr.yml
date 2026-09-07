@@ -28,7 +28,8 @@ on:
 jobs:
   aggr:
     runs-on: ubuntu-latest
-    # Cron, config pushes and manual runs queue instead of racing on the data branch.
+    # Serialize sync and deploy across all callers. Keep the active run and one pending run;
+    # newer arrivals replace the pending run because each sync fetches the latest content.
     concurrency:
       group: aggr-${{ github.repository }}
       cancel-in-progress: false

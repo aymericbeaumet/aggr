@@ -115,13 +115,17 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
-fn render_implementation_sources() -> [(&'static str, &'static str); 15] {
+fn render_implementation_sources() -> [(&'static str, &'static str); 19] {
     [
         ("config", include_str!("config.rs")),
+        ("source-entries", include_str!("config/source_entries.rs")),
+        ("source-formats", include_str!("config/import_formats.rs")),
+        ("source-graph", include_str!("config/import_graph.rs")),
         ("defaults", include_str!("../config.default.toml")),
         ("content", include_str!("content.rs")),
         ("media", include_str!("media.rs")),
         ("model", include_str!("model.rs")),
+        ("youtube", include_str!("sources/youtube.rs")),
         ("preview", include_str!("preview.rs")),
         ("store", include_str!("store/mod.rs")),
         ("frontmatter", include_str!("store/frontmatter.rs")),

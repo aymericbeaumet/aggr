@@ -14,7 +14,7 @@ pub async fn run(config_path: &Path, args: &DevArgs) -> Result<()> {
     let project = if args.clean {
         super::clean::load_project(config_path)?
     } else {
-        Project::load(config_path).await?
+        Project::load_offline(config_path).await?
     };
     if args.clean {
         project.validate_layout()?;
@@ -29,7 +29,7 @@ pub async fn run(config_path: &Path, args: &DevArgs) -> Result<()> {
         cleanup.execute(false)?;
     }
     let project = if args.clean {
-        Project::load(config_path).await?
+        Project::load_offline(config_path).await?
     } else {
         project
     };

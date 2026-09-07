@@ -279,7 +279,7 @@ fn item_front(repo: &TestRepo, rev: &str, title: &str) -> (String, serde_yaml_ng
 }
 
 #[test]
-fn previews_are_new_only_optional_and_preserved_on_refresh() {
+fn previews_are_optional_and_refresh_fills_missing_without_replacing_existing() {
     let server = MockServer::start();
     let mut feed = server.mock(|when, then| {
         when.method(GET).path("/feed.json");
@@ -307,7 +307,7 @@ fn previews_are_new_only_optional_and_preserved_on_refresh() {
     let repo = TestRepo::new();
     let config = |previews| {
         format!(
-            "[fetch]\ncontent = \"light\"\npreviews = {previews}\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+            "[fetch]\ncontent = \"light\"\nimages = false\npreviews = {previews}\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
             server.url("/feed.json"),
         )
     };
@@ -371,11 +371,28 @@ fn previews_are_new_only_optional_and_preserved_on_refresh() {
         repo.origin_bytes("aggr", companion.to_str().unwrap()),
         bytes
     );
-    assert!(item_front(&repo, "aggr", "old").1["preview"].is_null());
+    assert!(!item_front(&repo, "aggr", "old").1["preview"].is_null());
     assert!(item_front(&repo, "aggr", "missing").1["preview"].is_null());
-    old_image.assert_calls(0);
+    old_image.assert_calls(1);
     image.assert_calls(1);
-    missing.assert_calls(1);
+    missing.assert_calls(2);
+    assert_eq!(repo.origin_bytes(&tip, companion.to_str().unwrap()), bytes);
+
+    let article_images = TestRepo::new();
+    article_images.write_raw_config(&config(false).replace("images = false", "images = true"));
+    article_images.aggr().arg("sync").assert().success();
+    let (path, front) = item_front(&article_images, "aggr", "old");
+    assert!(front["preview"].is_null(), "feed previews remain disabled");
+    assert_eq!(front["images"].as_sequence().map(Vec::len), Some(1));
+    let original = Path::new(&path)
+        .parent()
+        .unwrap()
+        .join(front["images"][0]["original"]["file"].as_str().unwrap());
+    assert_eq!(
+        article_images.origin_bytes("aggr", original.to_str().unwrap()),
+        preview_image(),
+        "article lead images retain their original bytes independently of feed previews"
+    );
 }
 
 #[test]
@@ -743,6 +760,206 @@ fn dev_uses_an_external_persistent_cache_and_stops_on_ctrl_c() {
 }
 
 #[test]
+fn sync_reports_finished_sources_while_another_source_is_still_waiting() {
+    use std::io::{BufRead as _, BufReader, Write as _};
+
+    let slow = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    slow.set_nonblocking(true).unwrap();
+    let slow_url = format!("http://{}/feed", slow.local_addr().unwrap());
+    let (release, released) = std::sync::mpsc::channel();
+    let slow_server = std::thread::spawn(move || {
+        // Classification reads the document before sync fetches the resolved sources.
+        let probe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut probe = loop {
+            match slow.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(std::time::Instant::now() < probe_deadline);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(error) => panic!("accepting classification request: {error}"),
+            }
+        };
+        probe.set_nonblocking(false).unwrap();
+        probe
+            .set_read_timeout(Some(std::time::Duration::from_secs(15)))
+            .unwrap();
+        let mut request = BufReader::new(&mut probe);
+        loop {
+            let mut line = String::new();
+            request.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let body = r#"{"version":"https://jsonfeed.org/version/1.1","title":"Slow","items":[]}"#;
+        write!(probe, "HTTP/1.1 200 OK\r\nContent-Type: application/feed+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        drop(probe);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut socket = loop {
+            match slow.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "slow source was never requested"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(error) => panic!("accepting slow source: {error}"),
+            }
+        };
+        socket.set_nonblocking(false).unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(15)))
+            .unwrap();
+        let mut request = BufReader::new(&mut socket);
+        loop {
+            let mut line = String::new();
+            request.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+        }
+        released
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .unwrap();
+        let body = r#"{"version":"https://jsonfeed.org/version/1.1","title":"Slow","items":[]}"#;
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/feed+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    });
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.path("/fast");
+        then.status(200).header("content-type", "application/feed+json")
+            .json_body(serde_json::json!({"version":"https://jsonfeed.org/version/1.1", "title":"Fast", "items":[]}));
+    });
+    let repo = TestRepo::new();
+    repo.write_raw_config(&format!(
+        "[[sources]]\nname = 'Slow'\nurl = '{slow_url}'\n[[sources]]\nname = 'Fast'\nurl = '{}'\n",
+        server.url("/fast")
+    ));
+    let mut child = repo
+        .aggr()
+        .arg("sync")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (lines, output) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if lines.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let progress = loop {
+        match output.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(line) if line.starts_with("fast:") => break Ok(line),
+            Ok(_) => {}
+            Err(error) => break Err(error),
+        }
+    };
+    release.send(()).unwrap();
+    let result = child.wait_with_output().unwrap();
+    reader.join().unwrap();
+    slow_server.join().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let progress =
+        progress.expect("fast source must report completion before slow source is released");
+    assert!(progress.contains("1/2 sources complete"), "{progress}");
+    assert!(progress.contains("s;"), "{progress}");
+}
+
+#[test]
+fn sync_deduplicates_articles_across_sources_without_extra_commits_or_state() {
+    let server = MockServer::start();
+    for (path, id, link) in [
+        (
+            "/publisher",
+            "original-id",
+            "https://www.example.com/article/",
+        ),
+        (
+            "/frontpage",
+            "hacker-news-id",
+            "http://example.com/article?utm_source=hn#comments",
+        ),
+    ] {
+        server.mock(|when, then| {
+            when.path(path);
+            then.status(200)
+                .header("content-type", "application/feed+json")
+                .json_body(serde_json::json!({
+                    "version": "https://jsonfeed.org/version/1.1",
+                    "title": id,
+                    "items": [{"id": id, "title": id, "url": link, "content_text": "Body"}]
+                }));
+        });
+    }
+    let repo = TestRepo::new();
+    repo.write_raw_config(&format!(
+        "[fetch]\ncontent = 'light'\nimages = false\npreviews = false\n[[sources]]\nname = 'Publisher'\nurl = '{}'\n[[sources]]\nname = 'Frontpage'\nurl = '{}'\n",
+        server.url("/publisher"), server.url("/frontpage")
+    ));
+    repo.aggr().arg("sync").assert().success();
+    let tip = repo.origin_rev("refs/heads/aggr").unwrap();
+    let files = repo.origin_files("aggr");
+    assert_eq!(
+        files
+            .iter()
+            .filter(|file| file.starts_with("items/") && file.ends_with(".md"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        files
+            .iter()
+            .filter(|file| file.ends_with("/state.toml"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        files
+            .iter()
+            .filter(|file| file.ends_with("/seen.txt"))
+            .count(),
+        1
+    );
+
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing new"));
+    assert_eq!(
+        repo.origin_rev("refs/heads/aggr").as_deref(),
+        Some(tip.as_str())
+    );
+    assert_eq!(
+        repo.origin_rev("refs/aggr/last-good").as_deref(),
+        Some(tip.as_str())
+    );
+    assert_eq!(repo.origin_files("aggr"), files);
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo.data_dir())
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    assert!(
+        status.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+#[test]
 fn sync_bootstraps_appends_and_leaves_no_trace_when_nothing_changed() {
     let server = MockServer::start();
     let mut feed = server.mock(|when, then| {
@@ -1053,7 +1270,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     );
     assert!(!item.join("html.html").exists());
     assert!(page.contains(">original</a>"), "{page}");
-    let category = page.find(">demo</a>").unwrap();
+    let category = page.find(">/demo</a>").unwrap();
     let first_tag = page.find(">#example</a>").unwrap();
     assert!(
         category < first_tag,
@@ -1063,7 +1280,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
         page.contains("<time class=\"dt-published\" datetime=\"2026-09-01T"),
         "{page}"
     );
-    assert!(page.contains("title=\"2026-09-01T"), "{page}");
+    assert!(page.contains("title=\"Published: 2026-09-01T"), "{page}");
     assert!(!page.contains("blob "), "{page}");
     assert!(site.join("pagefind/pagefind.js").exists());
     assert!(site.join("feed.xml").exists());
@@ -1333,6 +1550,149 @@ const LISTING: &str = r#"<!doctype html><html><head><title>Blog | Scraped</title
 </ul></body></html>"#;
 
 #[test]
+fn smart_source_groups_expand_mixed_documents_and_preserve_the_archive_on_repeat() {
+    let server = MockServer::start();
+    for name in ["toml", "opml", "list", "direct"] {
+        server.mock(|when, then| {
+            when.method(GET).path(format!("/{name}-feed"));
+            then.status(200)
+                .body(FEED.replace("demo.example", &format!("{name}.example")));
+        });
+    }
+    server.mock(|when, then| {
+        when.method(GET).path("/collection");
+        then.status(200)
+            .body("[[sources]]\nurl = ['toml-feed', 'collection']\n");
+    });
+    let repo = TestRepo::new();
+    std::fs::write(
+        repo.clone.join("subscriptions.opml"),
+        format!(
+            r#"<opml version="2.0"><body><outline xmlUrl="{}"/></body></opml>"#,
+            server.url("/opml-feed")
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.clone.join("feeds.txt"),
+        format!(" \n {} \r\n", server.url("/list-feed")),
+    )
+    .unwrap();
+    repo.write_raw_config(&format!(
+        r#"
+[site]
+title = "Mixed sources"
+repository = "o/r"
+[[sources]]
+url = [" ./subscriptions.opml\n{origin}/collection ", "./feeds.txt", "{origin}/direct-feed"]
+category = "reading"
+labels = ["shared"]
+[fetch]
+content = "light"
+images = false
+previews = false
+"#,
+        origin = server.url("")
+    ));
+    repo.aggr().arg("build").assert().success();
+    let files = repo.origin_files("aggr");
+    assert_eq!(
+        files
+            .iter()
+            .filter(|path| path.starts_with("sources/") && path.ends_with("/state.toml"))
+            .count(),
+        4
+    );
+    assert_eq!(
+        files
+            .iter()
+            .filter(|path| path.starts_with("items/") && path.ends_with(".md"))
+            .count(),
+        8
+    );
+    assert!(
+        repo.clone
+            .join("_site/categories/reading/index.html")
+            .is_file()
+    );
+    assert!(repo.clone.join("_site/tags/shared/index.html").is_file());
+    let before = repo.origin_rev("aggr").unwrap();
+    repo.aggr().arg("sync").assert().success();
+    assert_eq!(repo.origin_rev("aggr").unwrap(), before);
+}
+
+#[test]
+fn source_group_options_apply_to_fetches_and_category_pages_without_leaking() {
+    let server = MockServer::start();
+    for name in ["Alpha", "Beta", "Gamma", "Delta"] {
+        server.mock(|when, then| {
+            let when = when.method(GET).path(format!("/{name}/feed.xml"));
+            if name != "Delta" {
+                when.header("X-Topic", "ai");
+            }
+            then.status(200).body(format!(
+                r#"<rss version="2.0"><channel><title>{name}</title>
+<item><title>{name} article</title><link>{}/articles/{name}</link>
+<pubDate>Tue, 01 Sep 2026 10:00:00 GMT</pubDate><description>Feed body</description>
+</item></channel></rss>"#,
+                server.url("")
+            ));
+        });
+    }
+    let repo = TestRepo::new();
+    repo.write_raw_config(&format!(
+        r##"[site]
+title = "Test reads"
+repository = "o/r"
+[fetch]
+content = "light"
+images = false
+previews = false
+[[sources]]
+url = """
+{origin}/Alpha/feed.xml
+{origin}/Gamma/feed.xml
+"""
+category = "ai"
+labels = ["Research"]
+headers = {{X-Topic="ai"}}
+[[sources]]
+url = ["{origin}/Beta/feed.xml"]
+name = "Beta"
+category = "programming"
+labels = ["Rust"]
+headers = {{X-Topic="ai"}}
+[[sources]]
+url = "{origin}/Delta/feed.xml"
+name = "Delta"
+"##,
+        origin = server.url("")
+    ));
+    repo.aggr().arg("build").assert().success();
+    for (name, label) in [
+        ("alpha", "research"),
+        ("beta", "rust"),
+        ("gamma", "research"),
+    ] {
+        let (_, front) = item_front(&repo, "aggr", &format!("{name}-article"));
+        assert_eq!(front["labels"], serde_yaml_ng::to_value([label]).unwrap());
+    }
+    let (_, delta) = item_front(&repo, "aggr", "delta-article");
+    assert!(delta["labels"].is_null());
+    let ai = std::fs::read_to_string(repo.clone.join("_site/categories/ai/index.html")).unwrap();
+    assert!(ai.contains("Alpha article") && ai.contains("Gamma article"));
+    assert!(!ai.contains("Beta article") && !ai.contains("Delta article"));
+    let programming =
+        std::fs::read_to_string(repo.clone.join("_site/categories/programming/index.html"))
+            .unwrap();
+    assert!(programming.contains("Beta article"));
+    assert!(!programming.contains("Alpha article") && !programming.contains("Gamma article"));
+    let before = repo.origin_rev("aggr").unwrap();
+    repo.aggr().arg("sync").assert().success();
+    assert_eq!(repo.origin_rev("aggr").unwrap(), before);
+}
+
+#[test]
 fn included_topic_files_and_automatic_html_fallback_work_end_to_end() {
     let server = MockServer::start();
     server.mock(|when, then| {
@@ -1356,7 +1716,7 @@ fn included_topic_files_and_automatic_html_fallback_work_end_to_end() {
     .unwrap();
     repo.write_raw_config(&format!(
         "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n\
-         [[sources]]\ninclude = \"./aggr-*.toml\"\ncategory = \"ai\"\n\
+         [[sources]]\nurl = \"./aggr-*.toml\"\ncategory = \"ai\"\n\
          [[sources]]\nurl = \"{}\"\nname = \"Demo\"\ncategory = \"demo\"\n",
         server.url("/feed.xml")
     ));

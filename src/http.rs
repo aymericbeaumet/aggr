@@ -215,6 +215,10 @@ pub fn user_agent() -> String {
 }
 
 impl Client {
+    pub(crate) fn max_body_bytes(&self) -> usize {
+        self.max_body_bytes
+    }
+
     pub fn new(config: &FetchConfig) -> Result<Self> {
         install_crypto_provider();
         let inner = reqwest::Client::builder()

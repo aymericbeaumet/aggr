@@ -145,8 +145,10 @@ window.AGGRPreferences = (function () {
 <div id="connection-status" class="connection-status" role="status" aria-live="polite" aria-atomic="true" hidden>
   <span id="connection-status-message"></span>
   <button id="connection-retry" type="button" hidden>retry</button>
+  <button id="pwa-refresh" type="button" title="Update app and keep your place" hidden><span aria-hidden="true">↻</span> Update app</button>
 </div>
 <span id="aggr-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></span>
+{% macro key_pair(first, second, separator='+') %}<span class="key-pair"><kbd>{{ first }}</kbd><small>{{ separator }}</small><kbd>{{ second }}</kbd></span>{% endmacro %}
 <dialog id="shortcut-help" class="shortcut-help" aria-labelledby="shortcut-help-title" aria-keyshortcuts="?" data-nosnippet>
   <form method="dialog">
     <header class="shortcut-help-head">
@@ -154,34 +156,51 @@ window.AGGRPreferences = (function () {
       <button class="shortcut-close" value="close" aria-label="Close keyboard shortcuts">×</button>
     </header>
     <div class="shortcut-groups">
-      <section aria-labelledby="shortcut-anywhere">
-        <h3 id="shortcut-anywhere">Anywhere</h3>
+      <section aria-labelledby="shortcut-scrolling">
+        <h3 id="shortcut-scrolling">Scrolling (all pages)</h3>
         <dl class="shortcut-list">
-          <div><dt class="key-alternatives"><span><kbd>⌘</kbd><kbd>K</kbd></span><small>or</small><span><kbd>Ctrl</kbd><kbd>K</kbd></span><small>or</small><span><kbd>g</kbd><kbd>/</kbd></span></dt><dd>Global search</dd></div>
-          <div><dt><kbd>/</kbd></dt><dd>Local search</dd></div>
-          <div><dt class="key-alternatives"><span><kbd>g</kbd><kbd>f</kbd></span><small>or</small><span><kbd>g</kbd><kbd>i</kbd></span></dt><dd>Feed</dd></div>
-          <div><dt><kbd>g</kbd><kbd>l</kbd></dt><dd>Library</dd></div>
-          <div><dt><kbd>g</kbd><kbd>p</kbd></dt><dd>Preferences</dd></div>
-          <div><dt><kbd>g</kbd><kbd>1–9</kbd></dt><dd>Open feed entry</dd></div>
-          <div><dt><kbd>?</kbd></dt><dd>Show this help</dd></div>
-        </dl>
-      </section>
-      <section aria-labelledby="shortcut-lists">
-        <h3 id="shortcut-lists">Lists</h3>
-        <dl class="shortcut-list">
-          <div><dt><kbd>j</kbd><kbd>k</kbd></dt><dd>Next / previous item</dd></div>
-          <div><dt class="key-alternatives"><kbd>o</kbd><small>or</small><kbd>Enter</kbd></dt><dd>Open selected item</dd></div>
+          <div><dt class="key-alternatives"><kbd>d</kbd><small>or</small>{{ key_pair('Ctrl', 'd') }}</dt><dd>Scroll down</dd></div>
+          <div><dt class="key-alternatives"><kbd>u</kbd><small>or</small>{{ key_pair('Ctrl', 'u') }}</dt><dd>Scroll up</dd></div>
+          <div><dt>{{ key_pair('Ctrl', 'e') }}</dt><dd>One line down</dd></div>
+          <div><dt>{{ key_pair('Ctrl', 'y') }}</dt><dd>One line up</dd></div>
+          <div><dt>{{ key_pair('g', 'g', 'then') }}</dt><dd>Top of page</dd></div>
+          <div><dt><kbd>G</kbd></dt><dd>Bottom of page</dd></div>
         </dl>
       </section>
       <section aria-labelledby="shortcut-articles">
         <h3 id="shortcut-articles">Articles</h3>
         <dl class="shortcut-list">
-          <div><dt><kbd>k</kbd></dt><dd>Newer article</dd></div>
           <div><dt><kbd>j</kbd></dt><dd>Older article</dd></div>
+          <div><dt><kbd>k</kbd></dt><dd>Newer article</dd></div>
           <div><dt><kbd>O</kbd></dt><dd>Open original</dd></div>
           {% for discussion in site.discussions %}{% if discussion.shortcut %}<div><dt><kbd>{{ discussion.shortcut }}</kbd></dt><dd>Open {{ discussion.name }} discussion / search</dd></div>{% endif %}{% endfor %}
-          <div><dt><kbd>u</kbd></dt><dd>Scroll up</dd></div>
-          <div><dt><kbd>d</kbd></dt><dd>Scroll down</dd></div>
+        </dl>
+      </section>
+      <section aria-labelledby="shortcut-lists">
+        <h3 id="shortcut-lists">Lists</h3>
+        <dl class="shortcut-list">
+          <div><dt><kbd>j</kbd></dt><dd>Next item</dd></div>
+          <div><dt><kbd>k</kbd></dt><dd>Previous item</dd></div>
+          <div><dt class="key-alternatives"><kbd>o</kbd><small>or</small><kbd>Enter</kbd></dt><dd>Open selected item</dd></div>
+        </dl>
+      </section>
+      <section aria-labelledby="shortcut-navigation">
+        <h3 id="shortcut-navigation">Go to</h3>
+        <dl class="shortcut-list">
+          <div><dt class="key-alternatives">{{ key_pair('g', 'f', 'then') }}<small>or</small>{{ key_pair('g', 'i', 'then') }}</dt><dd>Feed</dd></div>
+          <div><dt>{{ key_pair('g', '/', 'then') }}</dt><dd>Global search</dd></div>
+          <div><dt>{{ key_pair('g', '1–9', 'then') }}</dt><dd>Open feed entry</dd></div>
+          <div><dt>{{ key_pair('g', 'l', 'then') }}</dt><dd>Library</dd></div>
+          <div><dt>{{ key_pair('g', 'p', 'then') }}</dt><dd>Preferences</dd></div>
+        </dl>
+      </section>
+      <section aria-labelledby="shortcut-anywhere">
+        <h3 id="shortcut-anywhere">Search and help</h3>
+        <dl class="shortcut-list">
+          <div><dt><kbd>/</kbd></dt><dd>Local search</dd></div>
+          <div><dt class="key-alternatives">{{ key_pair('⌘', 'k') }}<small>or</small>{{ key_pair('Ctrl', 'k') }}</dt><dd>Global search</dd></div>
+          <div><dt><kbd>?</kbd></dt><dd>Show this help</dd></div>
+          <div><dt><kbd>Esc</kbd></dt><dd>Close this help</dd></div>
         </dl>
       </section>
     </div>

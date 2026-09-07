@@ -26,8 +26,8 @@ pub(super) fn load_project(config_path: &Path) -> Result<Project> {
         .parent()
         .context("config file has a parent directory")?
         .to_path_buf();
-    // Includes contain sources, not site/store settings. Cleaning must work offline even when
-    // a remote include is unavailable or a source's credentials have expired.
+    // Source documents do not change site/store settings. Cleaning must work offline even when
+    // a remote resource is unavailable or a source's credentials have expired.
     let config = Config::parse(&std::fs::read_to_string(&config_path)?)?;
     Ok(Project {
         config,
@@ -255,8 +255,8 @@ impl Layout {
 
         let mut configs = project.config.loaded_files.clone();
         if configs.is_empty() {
-            // The offline clean loader deliberately skips include expansion.
-            protect_local_includes(&project.config_path, &mut BTreeSet::new(), &mut configs)?;
+            // The offline clean loader deliberately skips source document expansion.
+            protect_local_sources(&project.config_path, &mut BTreeSet::new(), &mut configs)?;
         } else {
             configs.push(project.config_path.clone());
         }
@@ -392,7 +392,7 @@ fn protected_paths(project: &Project, repo: &Path) -> Result<Vec<PathBuf>> {
     }
     protected.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("themes/default"));
     protected.extend(project.config.loaded_files.iter().cloned());
-    protect_local_includes(&project.config_path, &mut BTreeSet::new(), &mut protected)?;
+    protect_local_sources(&project.config_path, &mut BTreeSet::new(), &mut protected)?;
     protected.extend(tracked_paths(repo)?);
     let protected = protected
         .into_iter()
@@ -637,30 +637,53 @@ fn tracked_paths(repo: &Path) -> Result<Vec<PathBuf>> {
         .collect()
 }
 
-fn protect_local_includes(
+fn protect_local_sources(
     path: &Path,
     seen: &mut BTreeSet<PathBuf>,
     protected: &mut Vec<PathBuf>,
 ) -> Result<()> {
+    let root_config = seen.is_empty();
     let path = path.canonicalize()?;
     if !seen.insert(path.clone()) {
         return Ok(());
     }
     if seen.len() > 256 {
-        bail!("too many local config files to establish cleanup safety");
+        bail!("too many local source documents to establish cleanup safety");
     }
     protected.push(path.clone());
-    let config = Config::parse(&std::fs::read_to_string(&path)?)?;
+    let bytes = std::fs::read(&path)?;
+    let sources = if root_config {
+        Config::parse(std::str::from_utf8(&bytes)?)?.sources
+    } else if bytes.iter().all(u8::is_ascii_whitespace) {
+        Vec::new()
+    } else {
+        let location = url::Url::from_file_path(&path)
+            .map_err(|_| anyhow::anyhow!("invalid source document path {}", path.display()))?;
+        Config::parse_source_document(&bytes, &location)?
+    };
     let root = path
         .parent()
-        .context("config file has a parent directory")?;
-    for source in config.sources {
-        if let Some(pattern) = source.include {
-            if pattern.contains("://") {
+        .context("source document has a parent directory")?;
+    for source in sources {
+        if source.kind.as_deref() == Some("aggr") {
+            continue;
+        }
+        if let Some(pattern) = source.url {
+            // Unavailable credentials must not prevent offline cleanup. A configured local
+            // path whose variables are available still needs the same protection as a literal.
+            let Ok(pattern) = crate::config::expand_env(&pattern, &|key| std::env::var(key).ok())
+            else {
                 continue;
-            }
-            for entry in glob::glob(&root.join(pattern).to_string_lossy())? {
-                protect_local_includes(&entry?, seen, protected)?;
+            };
+            let pattern = match url::Url::parse(&pattern) {
+                Ok(url) if url.scheme() == "file" => url
+                    .to_file_path()
+                    .map_err(|_| anyhow::anyhow!("invalid local source URL {url}"))?,
+                Ok(_) => continue,
+                Err(_) => root.join(pattern),
+            };
+            for entry in glob::glob(&pattern.to_string_lossy())? {
+                protect_local_sources(&entry?, seen, protected)?;
             }
         }
     }

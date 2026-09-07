@@ -27,6 +27,7 @@ const PLACEHOLDER_WIDTH: u32 = 48;
 #[cfg(test)]
 thread_local! {
     static STORED_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RENDITION_ENCODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -360,6 +361,26 @@ fn image_file(stem: &str, part: AssetPart<'_>) -> ImageFile {
     }
 }
 
+/// A publisher's lead image can sit outside Readability's article subtree. Retain the first
+/// explicit/metadata candidate as a full image, using the same limits and URL rules as body media.
+pub fn article_candidates(
+    html: &str,
+    previews: &[crate::preview::Candidate],
+    base: &Url,
+) -> Vec<Candidate> {
+    let lead = previews.iter().find_map(|candidate| {
+        safe_image_url(&candidate.url, base).map(|url| Candidate {
+            url,
+            alt: clean_alt(candidate.alt.as_deref()),
+        })
+    });
+    let mut seen = BTreeSet::new();
+    lead.into_iter()
+        .chain(body_candidates(html, base))
+        .filter(|candidate| seen.insert(candidate.url.clone()))
+        .collect()
+}
+
 /// Extract safe body-image candidates in document order. The URL fragment is irrelevant to an
 /// image request and is removed before deduplication.
 pub fn body_candidates(html: &str, base: &Url) -> Vec<Candidate> {
@@ -479,12 +500,26 @@ impl Fetcher {
     /// Fetch candidates in source order. An unavailable or malformed image never prevents later
     /// candidates from succeeding; returned assets retain that deterministic source order.
     pub async fn fetch(&self, candidates: &[Candidate], source: &Source) -> Vec<Asset> {
+        self.fetch_up_to(candidates, source, self.limits.max_assets)
+            .await
+    }
+
+    /// Alternative URLs for one image stop after the first usable response.
+    pub async fn fetch_first(&self, candidates: &[Candidate], source: &Source) -> Option<Asset> {
+        self.fetch_up_to(candidates, source, 1).await.pop()
+    }
+
+    async fn fetch_up_to(
+        &self,
+        candidates: &[Candidate],
+        source: &Source,
+        max_assets: usize,
+    ) -> Vec<Asset> {
         let mut assets = Vec::new();
         let mut downloaded = 0_usize;
         let mut retained = 0_usize;
         for candidate in candidates.iter().take(self.limits.max_candidates) {
-            if assets.len() >= self.limits.max_assets || downloaded >= self.limits.max_article_bytes
-            {
+            if assets.len() >= max_assets || downloaded >= self.limits.max_article_bytes {
                 break;
             }
             let Ok(download_permit) = self.download_limit.clone().acquire_owned().await else {
@@ -611,48 +646,31 @@ pub fn prepare_asset(candidate: &Candidate, bytes: Vec<u8>, limits: &MediaLimits
     let (width, height) = image.dimensions();
     validate_dimensions(width, height, limits)?;
 
-    let mut rendition_widths = limits
+    let rendition_widths = limits
         .rendition_widths
         .iter()
         .copied()
         .filter(|width| *width > 0 && *width < image.width())
         .collect::<BTreeSet<_>>();
-    if animated || has_icc || !safe_for_renditions(original_color) {
-        rendition_widths.clear();
-    } else if format != ImageFormat::WebP {
-        // The exact-pixel full-width WebP lets `<picture>` negotiate WebP without making a
-        // high-density client upscale one of the responsive downsampled renditions. A WebP master
-        // can fill this role directly, without storing a duplicate re-encoding.
-        rendition_widths.insert(image.width());
-    }
-    let mut renditions = Vec::with_capacity(rendition_widths.len());
-    for rendition_width in rendition_widths {
-        let rendition_height = scaled_height(image.width(), image.height(), rendition_width);
-        let resized = if rendition_width == image.width() {
-            image.to_rgba8()
-        } else {
-            image
-                .resize_exact(
-                    rendition_width,
-                    rendition_height,
-                    image::imageops::FilterType::Lanczos3,
-                )
-                .to_rgba8()
-        };
-        if let Ok(rendition) = lossless_webp(&resized, limits.max_file_bytes)
-            && rendition.bytes.len() < bytes.len()
-        {
-            renditions.push(rendition);
+    let mut renditions = Vec::with_capacity(rendition_widths.len() + 1);
+    if !animated && !has_icc && safe_for_renditions(original_color) {
+        // Without a smaller full-width WebP, only the first useful placeholder is retained.
+        // Decide that before paying to resize and encode the other responsive widths.
+        let full_width = (format != ImageFormat::WebP)
+            .then(|| prepare_rendition(&image, image.width(), limits.max_file_bytes, bytes.len()))
+            .flatten();
+        let responsive = format == ImageFormat::WebP || full_width.is_some();
+        for rendition_width in rendition_widths {
+            if let Some(rendition) =
+                prepare_rendition(&image, rendition_width, limits.max_file_bytes, bytes.len())
+            {
+                renditions.push(rendition);
+                if !responsive {
+                    break;
+                }
+            }
         }
-    }
-    if format != ImageFormat::WebP
-        && renditions
-            .last()
-            .is_none_or(|rendition| rendition.width != image.width())
-    {
-        // Without an exact full-width candidate `<picture>` must fall back to the master rather
-        // than upscale a partial rendition. Only the smallest rendition is used as the preview.
-        renditions.truncate(1);
+        renditions.extend(full_width);
     }
     Ok(Asset {
         source_url: candidate.url.to_string(),
@@ -666,6 +684,28 @@ pub fn prepare_asset(candidate: &Candidate, bytes: Vec<u8>, limits: &MediaLimits
         dominant_color: dominant_color(&image),
         renditions,
     })
+}
+
+fn prepare_rendition(
+    image: &DynamicImage,
+    width: u32,
+    max_file_bytes: usize,
+    master_bytes: usize,
+) -> Option<Rendition> {
+    let resized = if width == image.width() {
+        image.to_rgba8()
+    } else {
+        image
+            .resize_exact(
+                width,
+                scaled_height(image.width(), image.height(), width),
+                image::imageops::FilterType::Lanczos3,
+            )
+            .to_rgba8()
+    };
+    lossless_webp(&resized, max_file_bytes)
+        .ok()
+        .filter(|rendition| rendition.bytes.len() < master_bytes)
 }
 
 /// Validate an untrusted stored companion using the same conservative bounds as acquisition.
@@ -951,6 +991,8 @@ fn scaled_height(width: u32, height: u32, target_width: u32) -> u32 {
 }
 
 fn lossless_webp(image: &image::RgbaImage, max_bytes: usize) -> Result<Rendition> {
+    #[cfg(test)]
+    RENDITION_ENCODE_COUNT.set(RENDITION_ENCODE_COUNT.get() + 1);
     let mut bytes = Vec::new();
     image::codecs::webp::WebPEncoder::new_lossless(&mut bytes)
         .encode(
@@ -1053,6 +1095,7 @@ fn dominant_color(image: &DynamicImage) -> String {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use image::{ImageBuffer, ImageEncoder as _, Rgba};
 
@@ -1090,6 +1133,36 @@ mod tests {
             url: Url::parse(url).unwrap(),
             alt: Some("An image".into()),
         }
+    }
+
+    #[test]
+    fn article_candidates_keep_a_metadata_lead_without_duplicating_body_images() {
+        let base = Url::parse("https://example.com/article").unwrap();
+        let previews = vec![
+            crate::preview::Candidate {
+                url: "javascript:bad".into(),
+                alt: None,
+            },
+            crate::preview::Candidate {
+                url: "/lead.jpg#fragment".into(),
+                alt: Some("  Remote   control ".into()),
+            },
+            crate::preview::Candidate {
+                url: "/unrelated.jpg".into(),
+                alt: None,
+            },
+        ];
+        let images = article_candidates("<p>Story</p><img src='/body.jpg'>", &previews, &base);
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].url.as_str(), "https://example.com/lead.jpg");
+        assert_eq!(images[0].alt.as_deref(), Some("Remote control"));
+        assert_eq!(images[1].url.as_str(), "https://example.com/body.jpg");
+        let duplicate = article_candidates(
+            "<img src='/lead.jpg'><img src='/body.jpg'>",
+            &previews,
+            &base,
+        );
+        assert_eq!(duplicate.len(), 2);
     }
 
     #[test]
@@ -1263,6 +1336,7 @@ mod tests {
 
     #[test]
     fn compact_masters_keep_a_tiny_placeholder_without_offering_incomplete_sources() {
+        RENDITION_ENCODE_COUNT.set(0);
         let source = DynamicImage::ImageRgb8(ImageBuffer::from_fn(800, 480, |x, y| {
             image::Rgb([
                 ((x * 37 + y * 11) % 256) as u8,
@@ -1283,6 +1357,11 @@ mod tests {
             Some(48)
         );
         assert_eq!(asset.renditions.len(), 1);
+        assert_eq!(
+            RENDITION_ENCODE_COUNT.get(),
+            2,
+            "only encode the full-width candidate and the retained placeholder"
+        );
         assert!(
             asset
                 .renditions
@@ -1567,6 +1646,50 @@ mod tests {
         assert!(
             validate_stored(&asset.master_bytes, &wrong_dimensions, StoredKind::Master).is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn alternative_images_stop_after_first_usable_response() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let missing = server.mock(|when, then| {
+            when.path("/missing");
+            then.status(404);
+        });
+        let poster = server.mock(|when, then| {
+            when.path("/poster.png");
+            then.status(200)
+                .body(png(&DynamicImage::new_rgba8(640, 360)));
+        });
+        let unused = server.mock(|when, then| {
+            when.path("/unused.png");
+            then.status(200).body(png(&DynamicImage::new_rgba8(80, 48)));
+        });
+        let config = crate::config::Config::parse(&format!(
+            "[[sources]]\nurl = [{:?}]",
+            server.url("/feed")
+        ))
+        .unwrap();
+        let source = config.sources().unwrap().remove(0);
+        let fetcher = Fetcher::new(
+            &FetchConfig {
+                retries: 0,
+                ..FetchConfig::default()
+            },
+            MediaLimits::default(),
+        )
+        .unwrap();
+        let candidates = [
+            candidate(&server.url("/missing")),
+            candidate(&server.url("/poster.png")),
+            candidate(&server.url("/unused.png")),
+        ];
+        let asset = fetcher.fetch_first(&candidates, &source).await.unwrap();
+        assert_eq!((asset.width, asset.height), (640, 360));
+        missing.assert_calls(1);
+        poster.assert_calls(1);
+        unused.assert_calls(0);
     }
 
     #[tokio::test]

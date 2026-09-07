@@ -27,12 +27,33 @@ pub struct SearchDocument {
 #[derive(Serialize)]
 struct SearchDisplay<'a> {
     original: &'a str,
-    domain: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated: Option<String>,
     source_slug: &'a str,
+    source_display: &'a str,
+    source_title: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: Option<SearchCategory<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    feed_display: Option<&'a str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_aggregated: bool,
     excerpt: &'a str,
-    discussions: &'a [super::context::DiscussionLinkCtx],
+    discussions: Vec<SearchDiscussion<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     preview: Option<&'a super::context::PreviewCtx>,
+}
+
+#[derive(Serialize)]
+struct SearchCategory<'a> {
+    name: &'a str,
+    slug: String,
+}
+
+#[derive(Serialize)]
+struct SearchDiscussion<'a> {
+    name: &'a str,
+    url: &'a str,
 }
 
 impl SearchDocument {
@@ -44,14 +65,32 @@ impl SearchDocument {
             format!("{} {} {}", item.source_name, item.source, item.domain),
         );
         meta.insert("date".into(), item.date.to_rfc3339());
+        // Pagefind tokenizes every metadata value, including fields ranked at zero. Keep display
+        // data opaque so provider names, JSON keys and preview URLs cannot become search terms.
         meta.insert(
             "aggr_display".into(),
             serde_json::to_vec(&SearchDisplay {
                 original: &item.link,
-                domain: &item.domain,
+                updated: item.updated.map(|date| date.to_rfc3339()),
                 source_slug: &item.source,
+                source_display: &item.source_display,
+                source_title: &item.source_title,
+                category: item.category.as_deref().map(|name| SearchCategory {
+                    name,
+                    slug: super::context::category_slug(name),
+                }),
+                feed_display: item.is_aggregated.then_some(item.feed_display.as_str()),
+                is_aggregated: item.is_aggregated,
                 excerpt: &item.excerpt,
-                discussions: &item.discussions,
+                discussions: item
+                    .discussions
+                    .iter()
+                    .filter(|discussion| discussion.found)
+                    .map(|discussion| SearchDiscussion {
+                        name: &discussion.name,
+                        url: &discussion.url,
+                    })
+                    .collect(),
                 preview: item.preview.as_ref(),
             })
             .map(hex::encode)
@@ -251,6 +290,12 @@ mod tests {
             domain: "secret.example".into(),
             source: "blog".into(),
             source_name: "Blog".into(),
+            source_display: "secret.example".into(),
+            source_title: "Blog".into(),
+            source_url: "https://secret.example/".into(),
+            feed_display: "secret.example".into(),
+            is_aggregated: false,
+            is_youtube: false,
             category: Some("engineering".into()),
             date: Utc.with_ymd_and_hms(2026, 9, 3, 10, 0, 0).unwrap(),
             age_band: "h1",
@@ -273,6 +318,8 @@ mod tests {
             word_count: 0,
             reading_minutes: 0,
             preview: None,
+            article_preview: None,
+            video: None,
             extra: BTreeMap::new(),
             permalink: None,
             raw_url: None,
@@ -309,7 +356,11 @@ mod tests {
         )
         .expect("JSON display metadata");
         assert_eq!(display["original"], item().link);
-        assert_eq!(display["domain"], "secret.example");
+        assert_eq!(display["source_display"], "secret.example");
+        assert!(display.get("domain").is_none());
+        assert!(display.get("source_url").is_none());
+        assert!(display.get("feed_display").is_none());
+        assert!(display.get("is_aggregated").is_none());
         assert_eq!(display["source_slug"], "blog");
         assert_eq!(display["excerpt"], "A concise fallback");
         assert_eq!(display["discussions"][0]["name"], "hackernews");
@@ -317,7 +368,7 @@ mod tests {
             display["discussions"][0]["url"],
             "https://news.ycombinator.com/item?id=42"
         );
-        assert_eq!(display["discussions"][0]["found"], true);
+        assert_eq!(display["discussions"][0].as_object().unwrap().len(), 2);
         assert_eq!(document.filters["category"], ["engineering"]);
         assert_eq!(document.filters["tag"], ["rust"]);
     }
@@ -325,7 +376,7 @@ mod tests {
     #[test]
     fn search_display_does_not_invent_unavailable_discussions() {
         let mut item = item();
-        item.discussions.clear();
+        item.discussions[0].found = false;
         let document = SearchDocument::new(&item, "Searchable prose.");
         let display: serde_json::Value = serde_json::from_slice(
             &hex::decode(&document.meta["aggr_display"]).expect("hex display metadata"),
@@ -333,6 +384,56 @@ mod tests {
         .expect("JSON display metadata");
 
         assert_eq!(display["discussions"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn search_display_retains_aggregate_feed_identity() {
+        let mut item = item();
+        item.is_aggregated = true;
+        item.feed_display = "hnrss.org/frontpage".into();
+        let document = SearchDocument::new(&item, "Searchable prose.");
+        let display: serde_json::Value =
+            serde_json::from_slice(&hex::decode(&document.meta["aggr_display"]).unwrap()).unwrap();
+
+        assert_eq!(display["is_aggregated"], true);
+        assert_eq!(display["feed_display"], "hnrss.org/frontpage");
+        assert_eq!(display["source_display"], "secret.example");
+    }
+
+    #[test]
+    fn search_display_precomputes_category_archive_link() {
+        let mut item = item();
+        let display = |item: &ItemCtx| {
+            let document = SearchDocument::new(item, "Searchable prose.");
+            serde_json::from_slice::<serde_json::Value>(
+                &hex::decode(&document.meta["aggr_display"]).unwrap(),
+            )
+            .unwrap()
+        };
+        item.category = Some("rust & friends".into());
+        assert_eq!(
+            display(&item)["category"],
+            serde_json::json!({
+                "name": "rust & friends", "slug": "rust-friends"
+            })
+        );
+        item.category = None;
+        assert!(display(&item).get("category").is_none());
+    }
+
+    #[test]
+    fn search_display_includes_update_date_only_when_available() {
+        let mut item = item();
+        let display = |item: &ItemCtx| {
+            let document = SearchDocument::new(item, "Searchable prose.");
+            serde_json::from_slice::<serde_json::Value>(
+                &hex::decode(&document.meta["aggr_display"]).unwrap(),
+            )
+            .unwrap()
+        };
+        assert!(display(&item).get("updated").is_none());
+        item.updated = Some(Utc.with_ymd_and_hms(2026, 9, 4, 12, 30, 0).unwrap());
+        assert_eq!(display(&item)["updated"], "2026-09-04T12:30:00+00:00");
     }
 
     #[test]

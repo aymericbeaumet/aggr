@@ -32,7 +32,7 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
 ```
 src/main.rs, cli.rs            entry + clap types
 src/commands/*.rs              one file per subcommand; Project = config + sources + repo
-src/config.rs, config/         aggr.toml types, safe local/remote include graph, ${ENV}, validation
+src/config.rs, config/         aggr.toml types, safe source collections, ${ENV}, validation
 src/git.rs                     worktree/orphan bootstrap, commit with trailers, push+rebase, refs
 src/http.rs                    reqwest client: UA, timeouts, size cap, conditional GET, retries
 src/sources/{mod,feed,html,aggr}.rs source dispatch, automatic feed/HTML discovery, aggr engine
@@ -71,3 +71,22 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   discovered feed endpoint. `type = "html"` and site-specific selectors are not public config.
 - `sync` persists to git; `build` runs that same sync first; `dev` runs it against a namespaced
   OS cache and serves an atomic in-memory snapshot without committing or pushing.
+
+## Reader and ingestion invariants
+
+- Normalize source syntax into `SourceConfig` before shared resolution and deduplication; reuse
+  its strict option schema. Scope inherited collection headers to the declaring origin or repository.
+- Preserve existing body, HTML, and preview companions when explicit refresh fills missing media;
+  apply shared boundary cleanup during both fetch and rendering so old archives benefit safely.
+- Derive publisher/profile identity from configured or persisted source metadata, never from slugs.
+  Keep upstream or configured labels distinct from categories; do not invent tags for unlabelled items.
+- Keep feed, search, and item metadata aligned. Put separators outside links and hover targets.
+- Precompute display data during builds. Keep Pagefind display metadata opaque: even zero-weight
+  metadata can pollute search results. Bound navigation caches and speculative requests.
+- Preserve pristine page HTML before client enhancement, and restore keyboard selection by URL
+  across navigation and staged search results. Avoid layout shifts when selection or headers change.
+- Keep provider embed URLs validated and permissions minimal; do not cache missing captions as a
+  successful transcript or promise privacy controls that the provider does not support.
+
+See [the theme contract](docs/themes.md) for reader behavior and
+[interoperability](docs/interoperability.md) for source and preservation boundaries.

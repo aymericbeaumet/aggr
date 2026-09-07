@@ -5,9 +5,9 @@
   <h1>
     {% if page.kind == 'source' and source %}
       {{ source.name }}
-      {% if source.site_url %}<a class="muted" href="{{ source.site_url }}" target="_blank" rel="noopener noreferrer">({{ source.site_url | domain }})</a>{% endif %}
+      {% if source.site_url %}<a class="muted" href="{{ source.site_url }}" title="{{ source.name }}" target="_blank" rel="noopener noreferrer">({{ (source.url or source.site_url) | profile }})</a>{% endif %}
     {% elif page.kind in ['category', 'tag'] and category %}
-      {{ '#' if page.kind == 'tag' }}{{ category.name }}
+      {{ '#' if page.kind == 'tag' else '/' }}{{ category.name }}
     {% endif %}
   </h1>
   <div class="listtools">
@@ -17,24 +17,14 @@
   </div>
 </div>
 {% endif %}
-{% if page.kind in ['source', 'category', 'tag'] %}
-<form class="directory-tools collection-tools" role="search" action="{{ page.path | url_for }}" method="get">
-  <label class="sr-only" for="collection-filter">Filter articles on this page</label>
-  <input id="collection-filter" name="q" type="search" inputmode="search" autocomplete="off" placeholder="Filter this page…" aria-controls="collection-list" data-list-filter data-page-search>
-  <span id="collection-count" class="muted directory-count" aria-hidden="true">{{ items | length }}</span>
-  <span id="collection-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true">{{ items | length }} {{ 'article' if (items | length) == 1 else 'articles' }}</span>
-</form>
-<noscript><p class="muted">All articles remain available below; filtering needs JavaScript.</p></noscript>
-{% endif %}
 {% set paginator = page.paginator %}
 {% if items %}
-<ol class="rows"{% if page.kind in ['source', 'category', 'tag'] %} id="collection-list"{% endif %} role="list" start="{{ paginator.offset + 1 }}">
+<ol class="rows" role="list" start="{{ paginator.offset + 1 }}" style="--rank-indent: {{ ((paginator.offset + (items|length))|string|length) - 1 }}ch">
   {% for item in items %}
     {% set rank = loop.index + paginator.offset %}
     {% include "_item.html" %}
   {% endfor %}
 </ol>
-{% if page.kind in ['source', 'category', 'tag'] %}<p class="empty" data-list-empty hidden>No matching articles on this page.</p>{% endif %}
 {% else %}
 <p class="empty">Nothing here yet.</p>
 {% endif %}

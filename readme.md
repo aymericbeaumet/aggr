@@ -70,9 +70,39 @@ git commit -m "add aggr"
 git push -u origin HEAD
 ```
 
-The generated workflow runs every 30 minutes and after root or nested TOML configuration and theme
-changes on the repository's actual default branch. Push events from other branches are ignored;
-scheduled and manual runs remain available.
+The generated workflow requests a run at minutes 7 and 37 of every hour (UTC), and after root or
+nested TOML configuration and theme changes on the repository's actual default branch. Push events
+from other branches are ignored; scheduled and manual runs remain available.
+
+GitHub's scheduler can [delay or drop scheduled runs under load](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+Avoiding the start of the hour reduces a documented source of contention, but the cron interval
+is not a freshness guarantee. Artificial commits do not have a documented scheduling benefit;
+aggr leaves the data branch unchanged when there is nothing new. The separate 60-day inactivity
+rule can disable a public repository's schedule; check the workflow's state and
+[re-enable it](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows)
+if needed.
+
+For more predictable trigger timing, an external scheduler can invoke the existing manual trigger
+without creating commits. For example, run this from an authenticated host every 15 or 30 minutes
+(replace `OWNER/REPO` with the instance repository):
+
+```sh
+gh workflow run aggr.yml --repo OWNER/REPO
+```
+
+Give the host's repository-scoped token Actions write permission. Monitor successful deployments
+and retry failed dispatches: an accepted dispatch still depends on runner availability and a
+successful build. The existing GitHub schedule can remain as a fallback.
+
+The reusable workflow already serializes sync and Pages deployment across scheduled, manual, and
+push-triggered runs. Its [concurrency group](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)
+keeps one active run and one pending run; newer arrivals replace the pending run. Extra caller
+concurrency or duplicate scheduled workflow files are unnecessary for that protection.
+
+When diagnosing freshness, compare gaps between successful deployments, including the longest
+gap, over complete days. Workflow creation time modulo the cron interval measures only a phase:
+a five-minute delay and a 65-minute delay look identical on a 30-minute schedule. Daily run counts
+show a delivery shortfall but cannot distinguish delayed events from dropped ones.
 
 The reader checks for deployments once a minute while visible and online, and checks again when
 it returns to the foreground or reconnects. An update takes effect on your next navigation or
@@ -146,7 +176,8 @@ Only write values you want to change. The commented
 [`config.default.toml`](config.default.toml) is the complete configuration reference and the single
 source of truth for every default.
 
-An ordinary website URL is usually enough:
+An ordinary website URL is usually enough. Each `[[sources]]` table has a `url` field and can
+appear between any other TOML sections:
 
 ```toml
 [site]
@@ -154,9 +185,41 @@ title = "My reads"
 
 [[sources]]
 url = "https://blog.rust-lang.org/"
-category = "programming"
+name = "Rust Blog"
 labels = ["rust", "language"]
+
+[[sources]]
+category = "programming"
+url = """
+https://example.com/feed.xml
+https://example.org/rss
+"""
+
+[fetch]
+content = "light"
+
+[[sources]]
+category = "science"
+url = ["https://example.net/feed.xml", "https://example.edu/rss"]
 ```
+
+`url` accepts a string, a multiline string, or an array of strings, including multiline
+strings within an array. Each string is split into lines, surrounding whitespace is trimmed,
+and empty lines are discarded. URLs retain their
+fragments. Put comments and options in the TOML table, outside the strings; use another
+`[[sources]]` table to start a group with different options.
+
+Existing configs can keep `include` as an alias for `url` and
+`[fetch].allow_remote_include_chains` as an alias for `allow_remote_source_chains`.
+Do not set both names of an alias in the same table.
+
+The table's options apply to every source it expands. Collections inherit these defaults unless
+their entries set explicit options. Complete source tables can be mixed with other sections
+anywhere in the file; their fields must stay inside their own table.
+
+All forms reduce to the same source model before validation and discovery, using the same
+global defaults, `${ENV}` expansion, collection expansion, and deduplication. Sources are expanded
+in declaration order, with the first declaration of an equivalent endpoint winning.
 
 Each item has at most one category and any number of labels. aggr tries the URL as a feed, follows
 RSS/Atom/JSON Feed discovery metadata, probes conventional endpoints, and finally falls back to
@@ -164,6 +227,14 @@ conservative article discovery. In the default heavy content mode it attempts to
 original page and extract its main article; use `content = "light"` on a source to trust its feed
 content instead. The default first import considers the newest 100 entries from each feed, then
 every later run adds newly observed entries.
+
+Articles are deduplicated across sources by normalized original URL, so following both Hacker
+News and a publisher keeps one copy. Existing archived duplicates appear once in the reader;
+their previous item URLs redirect to the selected copy.
+
+YouTube videos use their feed descriptions instead of article extraction. YouTube Shorts links
+are always excluded, including from other feeds and mirrored archives, with no setting to enable
+them. Previously archived Shorts are omitted when the site is rebuilt.
 
 Extraction retains article images, inline links, and code indentation, with syntax colors for
 recognized code languages. When retained HTML can recover code formatting lost in an older
@@ -228,7 +299,7 @@ history, and normal retention cannot reclaim historical objects. Before publishi
 make sure storing and redistributing a source's images is compatible with its terms and your local
 law. Use `images = false` for sources whose media you should not retain.
 
-To save small local previews for newly discovered articles:
+Small local previews are enabled by default. They can be disabled globally or per source:
 
 ```toml
 [fetch]
@@ -242,54 +313,69 @@ url = "https://example.com/feed.xml"
 previews = false # override the default for one source
 ```
 
-Previews are off by default. aggr downloads and resizes a suitable image to at most 256 pixels per
-side, encodes it as lossless WebP (up to 384 KiB), and records its intrinsic dimensions, alt text,
+aggr downloads and resizes a suitable image to at most 256 pixels per side, encodes it as lossless WebP (up to 384 KiB), and records its intrinsic dimensions, alt text,
 and dominant color. The color reserves a calm placeholder while the thumbnail loads. A missing or
 unusable preview never prevents saving the article. Previews appear in feed and search rows
-without adding a duplicate hero to the article page, and existing items are not backfilled when
-previews are enabled.
+and YouTube article pages. Enabling previews applies to new items; run with `--refresh` to fill
+missing previews on existing items without replacing stored previews.
 
-Split a growing collection by including a TOML file as a source. Its position is preserved, and
-the category on the entry becomes the default for sources that do not set their own:
+In heavy mode, YouTube articles also include a timed transcript when the public video page
+advertises accessible captions. Timestamp links open the video at that point. Captions are grouped
+into short readable paragraphs and fetched directly from YouTube, with no third-party transcript
+service or credentials. Videos without accessible captions retain their description and preview;
+YouTube may withhold or rate-limit captions. Light mode does not request video pages or transcripts.
+
+The same `url` field also accepts local paths and remote URLs for aggr TOML, OPML subscription
+lists, newline-separated URL lists, RSS, Atom, and JSON Feed. aggr detects the format from the
+resource's content. A feed document registers one source; a collection expands into its listed
+sources at that position. The table's options become defaults for those sources:
 
 ```toml
 # aggr.toml
 [[sources]]
-include = "./aggr-ai.toml"
+url = ["./aggr-ai.toml", "./subscriptions.opml", "./feeds.txt"]
 category = "ai"
 ```
 
 ```toml
 # aggr-ai.toml
 [[sources]]
-url = "https://www.anthropic.com/news"
+url = """
+https://www.anthropic.com/news
+https://openai.com/news/
+"""
 
 [[sources]]
-url = "https://openai.com/news/"
+url = "https://example.com/research.xml"
 category = "research" # an explicit category wins
 ```
 
-Includes may be local paths/globs or direct HTTP(S) URLs. A bare GitHub repository URL finds its
-`aggr.toml` automatically, and GitHub-hosted configs can use relative wildcards just like local
-ones:
+Local paths resolve relative to the file that names them. Local globs and direct HTTP(S) URLs
+are supported. A bare GitHub repository URL finds its `aggr.toml` automatically, and GitHub-hosted
+configs can use relative wildcards just like local ones. Collections and feeds can share a table:
 
 ```toml
 [[sources]]
-include = "https://github.com/aymericbeaumet/aggr-instance"
+url = """
+https://github.com/aymericbeaumet/aggr-instance
+https://example.com/subscriptions.opml
+https://example.org/feed.xml
+"""
+category = "community"
 
 [[sources]]
-include = "https://github.com/owner/reader/blob/main/topics/*.toml"
-category = "community"
+url = "https://github.com/owner/reader/blob/main/topics/*.toml"
 ```
 
-Expansion is deterministic and cycle-safe: files and equivalent source endpoints are loaded once,
-in declaration order, with the first declaration winning. Missing, malformed, and non-aggr targets
-warn and are skipped. By default, a remote config may recurse only through relative paths on the
-same HTTP origin—and, for GitHub URLs, within the same repository. The trusted root can opt into
-broader chains with `[fetch] allow_remote_include_chains = true`. GitHub requests automatically use `GITHUB_TOKEN` or
+Expansion is deterministic and cycle-safe: resources and equivalent source endpoints are loaded
+once, in declaration order, with the first declaration winning. Missing, malformed, and unsupported
+collections warn and are skipped. By default, a remote collection may expand only relative paths
+on the same HTTP origin—and, for GitHub URLs, within the same repository. Its feed and website
+entries may use other origins. The trusted root can opt into broader collection chains with
+`[fetch] allow_remote_source_chains = true`. GitHub requests automatically use `GITHUB_TOKEN` or
 `GH_TOKEN` when present; a private repository must grant that token read access.
 
-Remote includes are live configuration dependencies, not part of the append-only data branch.
+Remote collections are live configuration dependencies, not part of the append-only data branch.
 Pin their revision, or vendor them into the primary branch, if rebuilding the same site later
 matters. Custom domains, network links, headers/secrets, PWA controls, retention, themes, and all
 other options are documented directly in [`config.default.toml`](config.default.toml).
@@ -411,7 +497,11 @@ contract.
 
 Build uses a repository-local cache; dev uses a separate OS-standard cache keyed by the canonical
 config path. Repeated runs are designed to become nearly instant without mixing CI/build and local
-development state. Cleanup removes the whole aggr-owned repository cache (including obsolete
+development state. Dev renders retained articles before syncing, reports each source as it
+finishes, and publishes new articles before refreshing optional discussion links. Theme edits
+reuse cached discussions without network requests.
+
+Cleanup removes the whole aggr-owned repository cache (including obsolete
 namespace versions) and this config's dev snapshot, but only after proving each target disposable. Generated
 output needs its `.aggr-site` ownership marker; an unmarked output directory is kept. Protected,
 tracked, escaping, or symlinked targets are rejected, and cleanup stops if the same dev workspace

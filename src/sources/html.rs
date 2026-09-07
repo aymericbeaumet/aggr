@@ -106,8 +106,8 @@ fn feedish(url: &Url) -> bool {
 }
 
 /// Extract likely article entries without per-site selectors. False positives are avoided by
-/// requiring a heading-associated link, or a dated link with a title-like child (or structured
-/// Article JSON-LD), and a distinct HTTP URL.
+/// requiring a heading-associated link, a dated article card, or structured Article JSON-LD,
+/// and a distinct HTTP URL. Plain text links must belong to a compact card in this section.
 pub fn extract(page: &str, page_url: &Url) -> Result<(SourceMeta, Vec<RawItem>)> {
     let document = Html::parse_document(page);
     let meta = SourceMeta {
@@ -146,9 +146,24 @@ fn card_items(document: &Html, page_url: &Url) -> Result<Vec<RawItem>> {
                 .attr("class")
                 .is_some_and(|classes| classes.to_ascii_lowercase().contains("title"))
         });
+        let overlay_card = anchor
+            .value()
+            .attr("aria-label")
+            .filter(|label| !label.trim().is_empty() && text(&anchor).is_empty())
+            .and_then(|label| {
+                let block = anchor.parent().and_then(ElementRef::wrap)?;
+                let heading = block.select(&headings).next()?;
+                (text(&heading) == label.trim()
+                    && block.select(&anchors).count() == 1
+                    && find_date(&text(&block)).is_some())
+                .then_some((block, heading))
+            });
+        let dated_card = dated_text_card(anchor, page_url, &anchors);
         let title_element = nested_heading
             .or(parent_heading)
-            .or_else(|| anchor.select(&times).next().and(titled_child));
+            .or_else(|| anchor.select(&times).next().and(titled_child))
+            .or_else(|| overlay_card.map(|(_, heading)| heading))
+            .or_else(|| dated_card.map(|_| anchor));
         let Some(title_element) = title_element else {
             continue;
         };
@@ -163,11 +178,16 @@ fn card_items(document: &Html, page_url: &Url) -> Result<Vec<RawItem>> {
         if normalize_link(link.as_str()) == normalize_link(page_url.as_str()) {
             continue;
         }
-        let block = anchor
-            .ancestors()
-            .skip(1)
-            .filter_map(ElementRef::wrap)
-            .find(|element| matches!(element.value().name(), "article" | "li"))
+        let block = overlay_card
+            .map(|(block, _)| block)
+            .or(dated_card)
+            .or_else(|| {
+                anchor
+                    .ancestors()
+                    .skip(1)
+                    .filter_map(ElementRef::wrap)
+                    .find(|element| matches!(element.value().name(), "article" | "li"))
+            })
             .unwrap_or(anchor);
         let published = block
             .select(&times)
@@ -200,6 +220,39 @@ fn card_items(document: &Html, page_url: &Url) -> Result<Vec<RawItem>> {
         });
     }
     Ok(out)
+}
+
+fn dated_text_card<'a>(
+    anchor: ElementRef<'a>,
+    page_url: &Url,
+    anchors: &Selector,
+) -> Option<ElementRef<'a>> {
+    let link = article_url(page_url, anchor.value().attr("href")?)?;
+    let section = format!("{}/", page_url.path().trim_end_matches('/'));
+    if section == "/"
+        || link.origin() != page_url.origin()
+        || !link.path().starts_with(&section)
+        || link.path() == section
+        || text(&anchor).len() < 12
+    {
+        return None;
+    }
+    anchor
+        .ancestors()
+        .skip(1)
+        .filter_map(ElementRef::wrap)
+        .take(4)
+        .take_while(|block| matches!(block.value().name(), "div" | "article" | "li"))
+        .find(|block| {
+            block.select(anchors).all(|other| {
+                other
+                    .value()
+                    .attr("href")
+                    .and_then(|href| page_url.join(href).ok())
+                    .as_ref()
+                    == Some(&link)
+            }) && find_date(&text(block)).is_some()
+        })
 }
 
 fn json_ld_items(document: &Html, page_url: &Url) -> Vec<RawItem> {
@@ -445,6 +498,38 @@ mod tests {
         );
         assert_eq!(items[1].title, "Second article");
         assert_eq!(items[2].title, "Third article");
+    }
+
+    #[test]
+    fn extracts_dated_cards_with_labelled_overlay_links() {
+        let page = r#"<nav><a href="/blog/one" aria-label="First article"></a></nav>
+<div><a href="/blog/one" aria-label="First article"></a><div><h4>First article</h4><p>2026-07-16</p></div></div>
+<div><a href="/blog/two" aria-label="Wrong label"></a><h4>Second article</h4><p>2026-07-17</p></div>
+<div><a href="/blog/three" aria-label="Undated article"></a><h4>Undated article</h4></div>"#;
+        let (_, items) = extract(page, &Url::parse("https://example.com/blog/").unwrap()).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "First article");
+        assert_eq!(items[0].link, "https://example.com/blog/one");
+        assert_eq!(
+            items[0].published.unwrap().format("%Y-%m-%d").to_string(),
+            "2026-07-16"
+        );
+    }
+
+    #[test]
+    fn extracts_dated_text_links_in_compact_cards() {
+        let page = r#"<div><a href="/blog/one"><img src="/one.png"></a><div><div><a href="/blog/one">First research article</a></div><div>July 27, 2026</div></div></div>
+<div><a href="/blog/two">Second research article</a><a href="/blog/three">Unrelated article</a><span>July 28, 2026</span></div>
+<nav><a href="/blog/four">Navigation link</a><span>July 29, 2026</span></nav>
+<div><a href="/privacy">Privacy notice</a><span>July 30, 2026</span></div>"#;
+        let (_, items) = extract(page, &Url::parse("https://example.com/blog/").unwrap()).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "First research article");
+        assert_eq!(items[0].link, "https://example.com/blog/one");
+        assert_eq!(
+            items[0].published.unwrap().format("%Y-%m-%d").to_string(),
+            "2026-07-27"
+        );
     }
 
     #[test]
