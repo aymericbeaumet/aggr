@@ -24,8 +24,8 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   `config.rs` (it is embedded and parsed by a test).
 - `VERSION` and `Cargo.toml` `version` must agree; releases are tags `vX.Y.Z`. The stable reusable
   workflow (`@v1`) selects the greatest published binary in its major channel at run time; binary
-  releases do not move the workflow tag. The release also bumps `Formula/aggr.rb` in
-  `aymericbeaumet/homebrew-tap` (the formula must exist there; the action only bumps).
+  releases do not move the workflow tag. Distribute binaries through GitHub Releases and mise
+  using its `github:aymericbeaumet/aggr` backend.
 
 ## Layout
 

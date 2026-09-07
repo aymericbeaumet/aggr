@@ -52,13 +52,19 @@ The workflow enables GitHub Pages, appends fetched items to the orphan `aggr` br
 reader, and deploys it. Put the resulting Pages URL in the repository's About section and link it
 where people can discover it. Scheduled workflows in a fork must remain enabled.
 
-To add aggr to an existing GitHub repository, install the binary with either mise or Cargo:
+To add aggr to an existing GitHub repository, install a prebuilt binary with
+[mise's GitHub backend](https://mise.jdx.dev/dev-tools/backends/github.html):
 
 ```sh
 mise use -g github:aymericbeaumet/aggr
-# or
-cargo install --git https://github.com/aymericbeaumet/aggr
+aggr --version
 ```
+
+Or download the archive for your OS and architecture from
+[GitHub Releases](https://github.com/aymericbeaumet/aggr/releases/latest), verify it against the
+release's `SHA256SUMS`, and put the extracted `aggr` executable on your `PATH`. Release binaries
+are available for Linux, macOS, and Windows on amd64 and arm64. To select a particular release
+with mise, append its version, for example `github:aymericbeaumet/aggr@1.6.0`.
 
 Then, from the repository:
 
