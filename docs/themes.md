@@ -20,8 +20,8 @@ definitions live in [`src/site/context.rs`](../src/site/context.rs).
 
 Article contexts also expose `item.word_count` and `item.reading_minutes`. Both are derived from
 the visible Unicode text at build time, with reading time rounded up at 225 words per minute; an
-empty/title-only body reports zero for each. The default theme presents them in the article
-metadata and emits `wordCount` plus an ISO 8601
+empty/title-only body reports zero for each. The default theme shows reading time beside
+publication, exposes the word count on hover, and emits `wordCount` plus an ISO 8601
 `timeRequired` duration in structured data.
 
 Use `url_for` for internal pages and assets so the same output works at `/` or under a nested
@@ -111,7 +111,7 @@ When extending the default script, keep these relationships intact:
   it. `#aggr-page` supplies the current page root and kind after navigation.
 - Primary navigation links use `data-route` and `data-kinds` for their destination and active
   state. The mobile bar has Feed, Search, Library, and Preferences. `library.html` renders the
-  unified source/category/tag directory at `/library/`. Individual collection archives stay at
+  unified source/tag/category directory at `/library/`. Individual collection archives stay at
   `sources/<slug>/`, `categories/<slug>/`, and
   `tags/<slug>/`.
 - Article lists use `.rows .row`, with a `[data-row-open]` title link. `.is-selected` identifies the
@@ -144,21 +144,62 @@ carry base64url JSON in `#aggr-state=…`, not a server-visible query; older `ag
 remain importable. Files and links are size-bounded, allowlisted, and reviewed before explicit
 application. Reading history and offline cache are never exported or reset with preferences.
 Disabling single-key shortcuts leaves modifier shortcuts and native keyboard operation available.
-`/` opens global search from the river when no local filter is present; Library and individual
-collection archives keep filtering local. The [README keyboard map](../readme.md#read-comfortably)
-describes the controls.
+`/` opens global search; Library and individual collection archives do not have local filters.
+The [README keyboard map](../readme.md#read-comfortably) describes the controls.
 
 Keep keyboard focus visible with an underline or contrasting surface. The default script marks
 programmatic main focus with `data-navigation-focus`, suppressing only the large container
 outline after a page change. Ordinary links, form controls, and the skip link must remain usable
 with a keyboard.
 
-Native View Transitions provide a short main-content fade when supported. They leave persistent
-navigation stationary, honor reduced motion, and do not animate history traversal. Browser
-refresh remains native; the installed app adds pull-to-refresh. A service-worker update shows a
-ready state and takes effect at the next deliberate navigation or refresh without interrupting
-the current article.
+Navigation replaces content without a document transition. Swup starts with pristine initial
+HTML, before enhancement adds binding markers. Page requests share in-flight work; speculative
+fetches are bounded, canceled when unrelated to navigation, and promoted when they become the
+navigation target. Search display data is precomputed and hex-encoded because Pagefind indexes
+even zero-weight metadata values; decoding it for display must not leak implementation keys into
+search matches.
+
+The service worker serves cached HTML immediately and refreshes it in the background. An explicit
+reload requests fresh HTML. The update pill reloads the same page, preserving its query, fragment,
+and scroll position. Browser refresh remains native; the installed app also supports pull-to-refresh.
+Dev disables service workers so a previous deployment cannot mask a local snapshot.
 
 Validate custom themes at narrow widths, with enlarged text, both color schemes, reduced motion,
 and JavaScript disabled. Reserve the bottom bar's full height and device safe area so it cannot
 cover content or keyboard focus.
+
+## Metadata and scrolling
+
+`_metadata.html` supplies the feed and item metadata; search uses the same field order in
+`renderResult()`. The source link combines publisher identity with an optional italic `via` feed
+name. Profile paths distinguish channels on shared hosts. An optional linked `/category` follows
+as its own field, then publication time, item-only reading time, original link, and discussions.
+Noninteractive field wrappers own evenly spaced middots, keeping them outside link underlines and
+tooltips. The publication tooltip contains published and updated timestamps on separate lines;
+equal instants omit the update. Exact dates are localized on interaction with cached formatters.
+Tags use `#` and occupy the article header's second metadata line.
+
+Header folding follows vertical scroll directly. The title scales with fixed line wrapping and a
+measured height so a two-line title cannot abruptly become one line. Tags gradually disappear,
+while the metadata remains. A 48px linear fade below the header softens content passing underneath;
+the one-pixel separator fills left to right with linear page progress. Header, prose, and
+continuation cards use the same reading measure.
+
+The first visible feed row is selected automatically. Desktop selection is an immediate warm left
+bar; mobile hides it. The new-item background fades independently. Separator and highlight edges
+share geometry, and rank-width metadata belongs to the whole list so single- and double-digit
+ranks cannot move individual rules. Clicking row background opens its item, while individual links
+retain their own destinations and text remains selectable.
+
+## Video and lead media
+
+List thumbnails and full article images serve different purposes. `item.article_preview` supplies
+a retained lead image only when that image, or an equivalent retained master, is absent from the
+rendered body. This covers metadata images that article extraction omits without duplicating an
+existing body image. Small feed previews must not replace full article masters.
+
+YouTube item pages initialize a paused native player without autoplay. Twitch and Vimeo load after
+activation. Embed URLs come from validated provider identifiers; YouTube uses its privacy-enhanced
+domain, Vimeo uses DNT, and Twitch requires the current hostname as `parent`. These options do not
+guarantee that providers never set cookies or show recommendations. A creator's published poster
+can differ from the frame visible after playback begins.

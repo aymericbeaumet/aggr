@@ -22,7 +22,9 @@ defaults, environment expansion, validation, deduplication, and discovery. Colle
 resolve local paths relative to their file and inherit source options unless they override them.
 Repeated resources and cycles are skipped. Remote collection chaining is controlled by the root
 configuration's `fetch.allow_remote_source_chains`; nested files cannot grant themselves broader
-access. Ordinary feed and website entries may still point to other origins.
+access. Ordinary feed and website entries may still point to other origins. Inherited headers stay on
+the collection's origin or repository; redirects cannot transfer collection credentials to children
+on another origin.
 
 Offline cleanup uses the same document parser to protect local dependencies through nested
 collections, including environment-expanded paths, without requesting remote resources. New
@@ -163,11 +165,24 @@ the live site is intended to remain a complete archive.
 ## Preservation boundary
 
 aggr preserves a safe, readable snapshot: metadata, extracted or feed Markdown, and optionally the
-stripped HTML used to derive it. It does not preserve the complete HTTP exchange, executable page,
-stylesheet, fonts, video, or other linked assets, and a failed extraction can leave only feed
-metadata. It is therefore not a pixel-perfect mirror or a WARC archive.
+stripped HTML used to derive it. Optional image retention preserves safe raster masters and
+lossless derivatives, including a metadata lead image omitted from extracted prose. It does not preserve the complete HTTP exchange,
+executable page, stylesheet, fonts, video streams, or arbitrary linked assets, and a failed
+extraction can leave only feed metadata. It is therefore not a pixel-perfect mirror or a WARC archive.
 
 Protocols that require a receiving server, callback, provider-controlled response headers, or an
 immutable capture endpoint are not advertised merely because aggr could emit a suggestive link.
 Webmention, WebSub publication, and Memento support should be claimed only when a deployment can
 complete their full contracts.
+
+Shared content cleanup runs during fetch and rendering, so retained archives benefit without
+rewriting stored companions. Boundary removal targets standalone metadata and comment controls;
+code, quotes, lists, references, and interior prose remain intact. Provider-specific description
+normalization stays scoped to that provider. Public YouTube captions are fetched with bounded
+requests when advertised; unavailable captions leave the description intact and do not count as a
+successfully cached transcript.
+
+Explicit `--refresh` may fill missing previews or article media while preserving existing
+companions and historical blob URLs. To refresh existing dev items, run `dev --refresh` once and
+then return to normal `dev`; leaving the flag enabled reprocesses feed-present entries on each
+poll. Dev changes only its isolated cache.
