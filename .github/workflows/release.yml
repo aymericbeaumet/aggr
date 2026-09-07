@@ -93,17 +93,3 @@ jobs:
             --target "$GITHUB_SHA" \
             --generate-notes \
             dist/*
-
-  # Skipped, not failed, on forks and until the HOMEBREW_TAP_TOKEN secret exists.
-  homebrew:
-    needs: [verify, release]
-    runs-on: ubuntu-latest
-    env:
-      COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-    steps:
-      - if: env.COMMITTER_TOKEN != ''
-        uses: mislav/bump-homebrew-formula-action@v4
-        with:
-          formula-name: aggr
-          homebrew-tap: aymericbeaumet/homebrew-tap
-          tag-name: ${{ github.ref_name }}
