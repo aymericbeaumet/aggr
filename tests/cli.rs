@@ -960,6 +960,44 @@ fn sync_deduplicates_articles_across_sources_without_extra_commits_or_state() {
 }
 
 #[test]
+fn build_publishes_data_despite_an_unrelated_recovery_pointer() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200)
+            .header("content-type", "application/rss+xml")
+            .body(FEED);
+    });
+    let repo = TestRepo::new();
+    repo.write_config(&server.url("/feed.xml"), "");
+    git(
+        &repo.origin,
+        &["update-ref", "refs/aggr/last-good", "refs/heads/main"],
+    );
+    let old = repo.origin_rev("refs/aggr/last-good");
+    repo.aggr()
+        .args(["build", "--out", "_site"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("recovery pointer"));
+    assert!(repo.clone.join("_site/index.html").exists());
+    assert!(
+        repo.origin_files("aggr")
+            .iter()
+            .any(|p| p.starts_with("items/") && p.ends_with(".md"))
+    );
+    assert_eq!(repo.origin_rev("refs/aggr/last-good"), old);
+    // A no-change retry also succeeds without modifying either remote ref.
+    let tip = repo.origin_rev("refs/heads/aggr");
+    repo.aggr()
+        .args(["build", "--out", "_site"])
+        .assert()
+        .success();
+    assert_eq!(repo.origin_rev("refs/heads/aggr"), tip);
+    assert_eq!(repo.origin_rev("refs/aggr/last-good"), old);
+}
+
+#[test]
 fn sync_bootstraps_appends_and_leaves_no_trace_when_nothing_changed() {
     let server = MockServer::start();
     let mut feed = server.mock(|when, then| {

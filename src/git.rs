@@ -1,5 +1,5 @@
-//! Git, shelled out. The data branch is only ever appended to: nothing here rewrites history,
-//! and the one forced push (`update_ref`) moves pointer refs, never the branch.
+//! Git, shelled out. The data branch is only ever appended to; neither it nor auxiliary refs
+//! are force-pushed.
 
 use std::fs;
 use std::io::Write as _;
@@ -344,21 +344,67 @@ impl Worktree {
 
     /// Advance an auxiliary ref without ever moving it backwards. Local compare-and-swap catches
     /// races in one checkout; the non-forced push lets the remote enforce the same ancestry.
+    /// A rejected push may only mean a shallow clone lacks the remote pointer's history.
     pub fn update_ref(&self, name: &str, sha: &str) -> Result<()> {
         let old = rev_parse(&self.dir, name)?;
         if let Some(old) = old.as_deref()
             && old != sha
             && git_ok(&self.dir, &["merge-base", "--is-ancestor", old, sha])?.is_none()
         {
-            bail!("ref {name} cannot move backwards from {old} to {sha}");
+            self.fetch_complete_data_history()?;
+            if git_ok(&self.dir, &["merge-base", "--is-ancestor", old, sha])?.is_none() {
+                bail!("ref {name} cannot move backwards from {old} to {sha}");
+            }
         }
         let expected =
             old.unwrap_or_else(|| zero_oid(&self.dir).unwrap_or_else(|_| "0".repeat(40)));
-        git(&self.dir, &["update-ref", name, sha, &expected])?;
+        let mut target = sha.to_owned();
         if self.has_origin()? {
             let refspec = format!("{sha}:{name}");
-            git(&self.dir, &["push", "-q", "origin", &refspec])
-                .with_context(|| format!("pushing {name}"))?;
+            for attempt in 1..=PUSH_ATTEMPTS {
+                let out = command(&self.dir, &["push", "-q", "origin", &refspec])
+                    .output()
+                    .with_context(|| format!("pushing {name}"))?;
+                if out.status.success() {
+                    break;
+                }
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if !stderr.contains("[rejected]") || attempt == PUSH_ATTEMPTS {
+                    bail!(
+                        "pushing {name} failed after {attempt} attempt(s): {}",
+                        stderr.trim()
+                    );
+                }
+                git(&self.dir, &["fetch", "--no-tags", "origin", name])
+                    .with_context(|| format!("fetching recovery pointer {name}"))?;
+                let remote = rev_parse(&self.dir, "FETCH_HEAD")?
+                    .context("fetched recovery pointer is missing")?;
+                self.fetch_complete_data_history()?;
+                if git_ok(&self.dir, &["merge-base", "--is-ancestor", &remote, sha])?.is_some() {
+                    continue;
+                }
+                if git_ok(&self.dir, &["merge-base", "--is-ancestor", sha, &remote])?.is_some() {
+                    // A later successful run already published a newer healthy snapshot.
+                    target = remote;
+                    break;
+                }
+                bail!("{name} points to unrelated history at {remote}; leaving it unchanged");
+            }
+        }
+        git(&self.dir, &["update-ref", name, &target, &expected])?;
+        Ok(())
+    }
+
+    fn fetch_complete_data_history(&self) -> Result<()> {
+        // Pay for full data ancestry only when a shallow boundary prevents verifying a pointer.
+        if git_ok(&self.dir, &["rev-parse", "--is-shallow-repository"])?
+            .is_some_and(|out| stdout(&out) == "true")
+            && self.has_origin()?
+        {
+            git(
+                &self.dir,
+                &["fetch", "--no-tags", "--unshallow", "origin", &self.branch],
+            )?;
         }
         Ok(())
     }
@@ -1112,6 +1158,96 @@ mod tests {
         let err = wt.update_ref("refs/aggr/last-good", &sha).unwrap_err();
         assert!(err.to_string().contains("cannot move backwards"), "{err:#}");
         assert!(ls_remote(&tmp).contains(&format!("{sha2}\trefs/aggr/last-good")));
+    }
+
+    #[test]
+    fn update_ref_recovers_missing_history_in_a_fresh_shallow_clone() {
+        for restore_local_pointer in [false, true] {
+            let (tmp, repo) = fixture();
+            let wt = repo
+                .ensure_worktree("aggr", Path::new(".aggr/data"))
+                .unwrap();
+            fs::write(wt.dir().join("a"), "a").unwrap();
+            commit_all(wt.dir(), "first");
+            wt.push().unwrap();
+            let first = wt.head_sha().unwrap().unwrap();
+            wt.update_ref("refs/aggr/last-good", &first).unwrap();
+            fs::write(wt.dir().join("b"), "b").unwrap();
+            commit_all(wt.dir(), "second");
+            wt.push().unwrap();
+
+            let fresh = tmp.path().join("fresh");
+            let origin = url::Url::from_file_path(tmp.path().join("origin.git")).unwrap();
+            git(
+                tmp.path(),
+                &[
+                    "clone",
+                    "-q",
+                    "--depth=1",
+                    "--no-single-branch",
+                    origin.as_str(),
+                    fresh.to_str().unwrap(),
+                ],
+            )
+            .unwrap();
+            let fresh_wt = Repo::discover(&fresh)
+                .unwrap()
+                .ensure_worktree("aggr", Path::new(".aggr/data"))
+                .unwrap();
+            assert_eq!(
+                sh(fresh_wt.dir(), &["rev-parse", "--is-shallow-repository"]),
+                "true"
+            );
+            assert!(
+                git_ok(fresh_wt.dir(), &["cat-file", "-e", &first])
+                    .unwrap()
+                    .is_none()
+            );
+            if restore_local_pointer {
+                git(
+                    fresh_wt.dir(),
+                    &[
+                        "fetch",
+                        "--no-tags",
+                        "origin",
+                        "refs/aggr/last-good:refs/aggr/last-good",
+                    ],
+                )
+                .unwrap();
+            }
+            fs::write(fresh_wt.dir().join("c"), "c").unwrap();
+            commit_all(fresh_wt.dir(), "third");
+            fresh_wt.push().unwrap();
+            let tip = fresh_wt.head_sha().unwrap().unwrap();
+            fresh_wt.update_ref("refs/aggr/last-good", &tip).unwrap();
+            assert!(ls_remote(&tmp).contains(&format!("{tip}\trefs/aggr/last-good")));
+            assert_eq!(sh(fresh_wt.dir(), &["rev-list", "--count", "HEAD"]), "3");
+        }
+    }
+
+    #[test]
+    fn update_ref_keeps_a_newer_remote_pointer() {
+        let (tmp, repo) = fixture();
+        let wt = repo
+            .ensure_worktree("aggr", Path::new(".aggr/data"))
+            .unwrap();
+        fs::write(wt.dir().join("a"), "a").unwrap();
+        commit_all(wt.dir(), "first");
+        wt.push().unwrap();
+        let first = wt.head_sha().unwrap().unwrap();
+        let other = second_clone(&tmp, "aggr");
+        fs::write(other.join("b"), "b").unwrap();
+        commit_all(&other, "second");
+        git(
+            &other,
+            &["push", "-q", "origin", "aggr", "HEAD:refs/aggr/last-good"],
+        )
+        .unwrap();
+        let newer = sh(&other, &["rev-parse", "HEAD"]);
+        wt.update_ref("refs/aggr/last-good", &first).unwrap();
+        assert!(ls_remote(&tmp).contains(&format!("{newer}\trefs/aggr/last-good")));
+        assert_eq!(wt.rev_parse("refs/aggr/last-good").unwrap(), Some(newer));
+        assert_eq!(wt.head_sha().unwrap(), Some(first));
     }
 
     #[test]

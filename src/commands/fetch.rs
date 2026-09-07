@@ -974,25 +974,39 @@ fn apply_first_import_limit(items: &mut Vec<RawItem>, engine: &Engine, feed_limi
     }
 }
 
+#[derive(Hash, PartialEq, Eq)]
+enum ArticleFailureScope {
+    Page(String),
+    Origin(String),
+}
+
 #[derive(Default)]
 struct ArticleFailures {
-    origins: Mutex<HashSet<String>>,
+    blocked: Mutex<HashSet<ArticleFailureScope>>,
 }
 
 impl ArticleFailures {
     fn blocked(&self, url: &url::Url) -> bool {
-        self.origins
+        let blocked = self
+            .blocked
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .contains(&url.origin().ascii_serialization())
+            .unwrap_or_else(|error| error.into_inner());
+        blocked.contains(&ArticleFailureScope::Page(url.to_string()))
+            || blocked.contains(&ArticleFailureScope::Origin(
+                url.origin().ascii_serialization(),
+            ))
     }
 
-    /// Returns true when this is the first denial recorded for the source-local origin.
-    fn block(&self, url: &url::Url) -> bool {
-        self.origins
+    fn record(&self, url: &url::Url, status: Option<u16>) {
+        let scope = match status {
+            Some(401 | 403) => ArticleFailureScope::Page(url.to_string()),
+            Some(429) => ArticleFailureScope::Origin(url.origin().ascii_serialization()),
+            _ => return,
+        };
+        self.blocked
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(url.origin().ascii_serialization())
+            .insert(scope);
     }
 }
 
@@ -1102,19 +1116,23 @@ async fn heavy_content(
             (enriched, ContentKind::Extracted)
         }
         Err(err) => {
-            let denied = matches!(http::status_code(&err), Some(401 | 403 | 429));
-            if !denied || failures.block(&url) {
-                log::warn!(
-                    "{}: heavy content fallback for {}: {err:#}{}",
-                    source.slug,
-                    raw.link,
-                    if denied {
-                        "; skipping this origin for the rest of this source's run"
-                    } else {
-                        ""
-                    }
-                );
-            }
+            let status = http::status_code(&err);
+            failures.record(&url, status);
+            log::debug!(
+                "{}: original page unavailable for {}; keeping {}: {err:#}{}",
+                source.slug,
+                raw.link,
+                if fallback == ContentKind::Feed {
+                    "feed content"
+                } else {
+                    "item metadata and original link"
+                },
+                if status == Some(429) {
+                    "; pausing original-page requests to this origin for this run"
+                } else {
+                    ""
+                }
+            );
             let mut enriched = raw.clone();
             enriched.preview_candidates =
                 preview::ordered_article_candidates(&preview_candidates, page_candidates, None);
@@ -2340,7 +2358,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn heavy_stops_retrying_a_host_that_denies_article_requests() {
+    async fn heavy_stops_retrying_an_article_that_denies_requests() {
         let server = MockServer::start_async().await;
         let denied = server
             .mock_async(|when, then| {
@@ -2369,6 +2387,87 @@ mod tests {
             assert_eq!(item.content_html, raw.content_html);
         }
         denied.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn article_denials_preserve_feed_items_and_allow_other_pages_on_the_origin() {
+        for status in [401, 403] {
+            let server = MockServer::start_async().await;
+            let denied = server
+                .mock_async(|when, then| {
+                    when.method(GET).path("/private");
+                    then.status(status);
+                })
+                .await;
+            let allowed = server.mock_async(|when, then| {
+                when.method(GET).path("/public");
+                then.status(200).header("content-type", "text/html").body(
+                    "<article><h1>Public article</h1><p>This complete public article remains accessible when another page on the same site requires authorization.</p><p>The feed must continue enriching its other items independently.</p></article>",
+                );
+            }).await;
+            let raw = |path: &str| RawItem {
+                title: "Article".into(),
+                link: server.url(path),
+                content_html: Some("<p>feed copy</p>".into()),
+                ..Default::default()
+            };
+            let client = http::Client::new(&crate::config::FetchConfig {
+                retries: 0,
+                ..Default::default()
+            })
+            .unwrap();
+            let cache = tempfile::tempdir().unwrap();
+            let failures = ArticleFailures::default();
+            let private = raw("/private");
+            let (item, kind) =
+                heavy_content(&private, &source(), &client, cache.path(), &failures).await;
+            assert_eq!(kind, ContentKind::Feed);
+            assert_eq!(item.link, private.link);
+            assert_eq!(item.content_html, private.content_html);
+            let (item, kind) =
+                heavy_content(&raw("/public"), &source(), &client, cache.path(), &failures).await;
+            assert_eq!(kind, ContentKind::Extracted);
+            assert!(
+                item.content_html
+                    .unwrap()
+                    .contains("complete public article")
+            );
+            denied.assert_calls_async(1).await;
+            allowed.assert_calls_async(1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn article_rate_limits_preserve_items_and_pause_only_the_affected_origin() {
+        let server = MockServer::start_async().await;
+        let limited = server
+            .mock_async(|when, then| {
+                when.method(GET);
+                then.status(429);
+            })
+            .await;
+        let client = http::Client::new(&crate::config::FetchConfig {
+            retries: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let failures = ArticleFailures::default();
+        for path in ["/first", "/second"] {
+            let raw = RawItem {
+                title: "Article".into(),
+                link: server.url(path),
+                content_html: Some("<p>feed copy</p>".into()),
+                ..Default::default()
+            };
+            let (item, kind) =
+                heavy_content(&raw, &source(), &client, cache.path(), &failures).await;
+            assert_eq!(kind, ContentKind::Feed);
+            assert_eq!(item.content_html, raw.content_html);
+            assert_eq!(item.link, raw.link);
+        }
+        limited.assert_calls_async(1).await;
+        assert!(!failures.blocked(&Url::parse("https://other.example/post").unwrap()));
     }
 
     #[tokio::test]
