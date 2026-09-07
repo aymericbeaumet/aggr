@@ -555,7 +555,9 @@ mod tests {
         renderer.env.get_template("item.html").unwrap();
 
         let css_file = DefaultTheme::get("static/style.css").unwrap();
-        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
+        let css = std::str::from_utf8(css_file.data.as_ref())
+            .unwrap()
+            .replace("\r\n", "\n");
         assert!(css.contains("--accent: #8ea1ff"));
         assert!(css.contains(".body a { color: var(--accent-strong); font-style: normal"));
         assert!(css.contains(".article-more"));

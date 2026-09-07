@@ -561,6 +561,9 @@ async fn run_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
     );
     assert_eq!(feed_page_size["defaultVisible"], 25);
     assert_eq!(feed_page_size["defaultPagerHidden"], false);
+    client
+        .execute("localStorage.setItem('aggr:theme','light')", vec![])
+        .await?;
     client.refresh().await?;
     wait_for(
         client,
@@ -1835,7 +1838,7 @@ async fn run_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
 
     client
         .execute(
-            "localStorage.setItem('aggr:density','compact');localStorage.setItem('aggr:text-size','normal')",
+            "localStorage.setItem('aggr:theme','light');localStorage.setItem('aggr:density','compact');localStorage.setItem('aggr:text-size','default')",
             vec![],
         )
         .await?;

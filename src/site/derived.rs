@@ -130,7 +130,9 @@ mod tests {
         let mut entry: Entry = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(entry.markdown, expected);
         let unchanged = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
-        std::fs::File::open(&path)
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
             .unwrap()
             .set_modified(unchanged)
             .unwrap();

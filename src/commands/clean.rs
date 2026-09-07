@@ -345,6 +345,9 @@ fn resolve_layout_target(path: PathBuf, description: &str) -> Result<PathBuf> {
     let mut resolved = PathBuf::new();
     for component in std::path::absolute(&path)?.components() {
         match component {
+            Component::Prefix(_) | Component::RootDir => {
+                resolved.push(component);
+            }
             Component::ParentDir => {
                 resolved.pop();
             }
@@ -508,6 +511,9 @@ fn resolve_input(path: PathBuf) -> Result<PathBuf> {
     let mut resolved = PathBuf::new();
     for component in std::path::absolute(&path)?.components() {
         match component {
+            Component::Prefix(_) | Component::RootDir => {
+                resolved.push(component);
+            }
             Component::ParentDir => {
                 resolved.pop();
             }
@@ -583,6 +589,10 @@ fn validate_ancestors(path: &Path) -> Result<()> {
     }
     let mut current = PathBuf::new();
     for component in std::path::absolute(path)?.components() {
+        if matches!(component, Component::Prefix(_) | Component::RootDir) {
+            current.push(component);
+            continue;
+        }
         current.push(component);
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
