@@ -284,7 +284,7 @@ mod tests {
             "base.html",
             "index.html",
             "item.html",
-            "sources.html",
+            "library.html",
             "preferences.html",
             "404.html",
             "offline.html",
@@ -303,7 +303,7 @@ mod tests {
         let file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(file.data.as_ref()).unwrap();
         assert!(css.contains(".row:not(.age-h24):has(+ .row.age-h24)"));
-        assert!(css.contains("border-bottom-color: color-mix"));
+        assert!(css.contains("--row-divider: color-mix"));
         assert!(!css.contains("age-boundary.age-h1"));
         assert!(!css.contains("age-boundary.age-h3"));
     }
@@ -356,6 +356,7 @@ mod tests {
         assert!(css.contains("min-height: 100dvh"));
         assert!(css.contains("env(safe-area-inset-left)"));
         assert!(css.contains("env(safe-area-inset-right)"));
+        assert!(css.contains(".itemhead { position: sticky; top: var(--top-nav-offset);"));
         assert!(css.contains("env(safe-area-inset-bottom)"));
         assert!(css.contains("@media (pointer: coarse)"));
         assert!(css.contains("font-size: 16px"));
@@ -365,10 +366,63 @@ mod tests {
     }
 
     #[test]
-    fn embedded_theme_exposes_progressive_install_refresh_and_update_controls() {
+    fn embedded_theme_presents_and_runtime_caches_article_images() {
+        let css_file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
+        assert!(css.contains(".body .article-picture"));
+        assert!(css.contains("var(--image-placeholder, var(--code))"));
+        assert!(css.contains("inline-size: min(100%, var(--image-width, 100%))"));
+        assert!(css.contains("aspect-ratio: var(--image-ratio)"));
+        assert!(css.contains(".article-picture.is-loading.is-loaded .progressive-image"));
+
         let app_file = DefaultTheme::get("static/app.js").unwrap();
         let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
-        assert!(app.contains("beforeinstallprompt"));
+        assert!(app.contains("function enhanceArticleMedia(root)"));
+        assert!(app.contains("media.dataset.placeholder"));
+        assert!(app.contains("IntersectionObserver"));
+        assert!(app.contains("image.decode()"));
+
+        let worker_file = DefaultTheme::get("templates/sw.js").unwrap();
+        let worker = std::str::from_utf8(worker_file.data.as_ref()).unwrap();
+        assert!(worker.contains("BASE + \"assets/images/\""));
+        assert!(worker.contains("if (isImageAsset(url)) return IMAGES"));
+        assert!(worker.contains("cacheFirst(request, IMAGES, IMAGE_MAX"));
+    }
+
+    #[test]
+    fn embedded_worker_versions_runtime_search_indexes() {
+        let worker_file = DefaultTheme::get("templates/sw.js").unwrap();
+        let worker = std::str::from_utf8(worker_file.data.as_ref()).unwrap();
+        assert!(worker.contains("var SEARCH = SEARCH_PREFIX + VERSION"));
+        assert!(worker.contains("name.indexOf(SEARCH_PREFIX) === 0 && name !== SEARCH"));
+        assert!(worker.contains("name === LEGACY_SEARCH"));
+    }
+
+    #[test]
+    fn embedded_mobile_navigation_keeps_config_without_underlines() {
+        let css_file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
+        assert!(css.contains(".mobile-nav a:hover { text-decoration: none"));
+        assert!(css.contains(
+            ".mobile-nav a:focus-visible { color: var(--bg); text-decoration: none; background: var(--fg)"
+        ));
+        assert!(!css.contains(".nav-spacer, .nav-actions, .nav-menu { display: none; }"));
+
+        let base_file = DefaultTheme::get("templates/base.html").unwrap();
+        let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
+        assert!(base.contains("class=\"config-link\""));
+        assert!(base.contains(">aggr.toml ↗</a>"));
+
+        let app_file = DefaultTheme::get("static/app.js").unwrap();
+        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
+        assert!(app.contains("baseElement.href = BASE"));
+    }
+
+    #[test]
+    fn embedded_theme_exposes_progressive_refresh_and_update_controls() {
+        let app_file = DefaultTheme::get("static/app.js").unwrap();
+        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
+        assert!(!app.contains("beforeinstallprompt"));
         assert!(!app.contains("Notification.requestPermission()"));
         assert!(!app.contains("navigator.setAppBadge"));
         assert!(app.contains("window.addEventListener(\"online\""));
@@ -380,32 +434,79 @@ mod tests {
         assert!(app.contains("external site"));
         assert!(app.contains("(display-mode: minimal-ui)"));
         assert!(!app.contains("link.rel = 'noopener noreferrer'"));
-        assert!(app.contains("var PREFERENCE_KEYS = [\"aggr:theme\", \"aggr:date-format\"]"));
         assert!(app.contains("'link[rel=\"original\"]'"));
         assert!(app.contains("'meta[name=\"author\"]'"));
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
-        assert!(base.contains("id=\"refresh-page\""));
+        assert!(!base.contains("id=\"refresh-page\""));
         assert!(base.contains("id=\"connection-status\""));
 
         let preferences_file = DefaultTheme::get("templates/preferences.html").unwrap();
         let preferences = std::str::from_utf8(preferences_file.data.as_ref()).unwrap();
-        assert!(preferences.contains("id=\"install-app\""));
+        assert!(!preferences.contains("id=\"install-app\""));
+        assert!(!preferences.contains("preferences-config"));
+        assert!(!preferences.contains(">aggr.toml ↗</a>"));
+        for id in [
+            "theme-mode",
+            "date-format",
+            "text-size",
+            "reading-width",
+            "density",
+            "thumbnails",
+            "feed-page-size",
+            "motion",
+            "single-key-shortcuts",
+        ] {
+            assert!(preferences.contains(&format!("id=\"{id}\"")), "{id}");
+        }
+        for action in [
+            "share", "copy", "save", "import", "apply", "cancel", "reset",
+        ] {
+            assert!(
+                preferences.contains(&format!("data-preferences-action=\"{action}\"")),
+                "{action}"
+            );
+        }
+        assert!(preferences.contains("Review imported preferences"));
+        assert!(preferences.contains("never reading history"));
+        assert!(preferences.contains("<strong>Maximum per page</strong>"));
+        assert!(preferences.contains(
+            "<a id=\"show-shortcuts\" href=\"{{ 'preferences/' | url_for }}#shortcut-help\" aria-haspopup=\"dialog\" aria-controls=\"shortcut-help\">Keyboard shortcuts</a>"
+        ));
+        assert!(!preferences.contains("<strong>Single-key shortcuts</strong>"));
+        assert!(!preferences.contains("j/k to select, o to open, / to search."));
+        assert!(preferences.contains("<option value=\"50\">50</option>"));
         assert!(!preferences.contains("id=\"app-badges\""));
-    }
 
-    #[test]
-    fn embedded_theme_checks_for_deployments_and_reloads_automatically() {
-        let file = DefaultTheme::get("static/app.js").unwrap();
-        let script = std::str::from_utf8(file.data.as_ref()).unwrap();
-        assert!(script.contains("var UPDATE_INTERVAL = 60 * 1000"));
-        assert!(script.contains("updateViaCache: \"none\""));
-        assert!(script.contains("registration.update()"));
-        assert!(script.contains("document.visibilityState === \"visible\""));
-        assert!(script.contains("controlled && nextController && !reloading"));
-        assert!(script.contains("location.reload()"));
-        assert!(!script.contains("toast(\"Updated — \""));
+        let base_file = DefaultTheme::get("templates/base.html").unwrap();
+        let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
+        assert!(base.contains("window.AGGRPreferences"));
+        assert!(base.contains("Object.prototype.hasOwnProperty.call(schema, key)"));
+        assert!(base.contains("values: [true, false]"));
+        assert!(base.contains("\"feed-page-size\": { initial: \"50\""));
+        assert!(!base.contains("aggr:reading-history"));
+
+        let index_file = DefaultTheme::get("templates/index.html").unwrap();
+        let index = std::str::from_utf8(index_file.data.as_ref()).unwrap();
+        assert!(index.contains("data-feed-pager"));
+        assert!(index.contains("data-static-page-size"));
+        assert!(index.contains("data-total-items"));
+        assert!(index.contains("data-page-status"));
+
+        assert!(app.contains("function applyFeedPagination()"));
+        assert!(app.contains("FEED_PAGE_PARAMETER = \"feed-page\""));
+        assert!(app.contains(".row:not([hidden])"));
+        assert!(app.contains("function restoreLocalFilter(input)"));
+        assert!(app.contains("url.searchParams.set(\"q\", query)"));
+        assert!(app.contains("updateLocalFilterLocation(input)"));
+        assert!(app.contains("if (row.hidden) return;"));
+        assert!(app.contains("acknowledgeNewEntries(highlighted)"));
+
+        assert!(app.contains("url.hash = \"aggr-state=\" + encoded"));
+        assert!(app.contains("Review the imported settings before applying them."));
+        assert!(app.contains("JSON.stringify(preferencePayload(), null, 2)"));
+        assert!(app.contains("navigator.share"));
     }
 
     #[test]
@@ -418,7 +519,7 @@ mod tests {
         assert!(script.contains("sessionStorage.setItem(key"));
         assert!(script.contains("current.indexOf(previousHead)"));
         assert!(script.contains("row.classList.add(\"is-new\")"));
-        assert!(script.contains("new-marker"));
+        assert!(!script.contains("new-marker"));
         assert!(script.contains("canvas.toDataURL(\"image/png\")"));
         assert!(script.contains("context.fillStyle = \"#e53935\""));
         assert!(script.contains("document.title = \"● \" + document.title"));
@@ -449,62 +550,181 @@ mod tests {
     }
 
     #[test]
-    fn embedded_theme_keeps_article_links_and_navigation_distinct() {
+    fn embedded_theme_unifies_article_navigation_and_recommendations() {
+        let renderer = Renderer::new(Layers::default(), "").unwrap();
+        renderer.env.get_template("item.html").unwrap();
+
         let css_file = DefaultTheme::get("static/style.css").unwrap();
-        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
+        let css = std::str::from_utf8(css_file.data.as_ref())
+            .unwrap()
+            .replace("\r\n", "\n");
         assert!(css.contains("--accent: #8ea1ff"));
         assert!(css.contains(".body a { color: var(--accent-strong); font-style: normal"));
         assert!(css.contains(".article-more"));
-        assert!(css.contains(".main:focus-visible { outline: 3px solid var(--focus)"));
-        assert!(css.contains("--focus:"));
+        assert!(css.contains(".article-more-kicker"));
+        assert!(!css.contains(".article-navigation-home"));
         assert!(css.contains("input:focus-visible"));
         assert!(!css.contains(
             "input:focus-visible, select:focus-visible {\n  outline: 3px solid var(--accent-strong)"
         ));
-
-        let script_file = DefaultTheme::get("static/app.js").unwrap();
-        let script = std::str::from_utf8(script_file.data.as_ref()).unwrap();
-        assert!(script.contains("url.searchParams.set(\"q\", query)"));
-        assert!(script.contains("KIND === \"river\" && direction === \"next\""));
-        assert!(script.contains("direction === \"previous\" ? BASE"));
-        assert!(script.contains("[\"ArrowLeft\", \"h\", \"k\"]"));
-        assert!(script.contains("[\"ArrowRight\", \"l\", \"j\"]"));
-        assert!(!script.contains("var selected ="));
-        assert!(!script.contains("event.key === \"o\""));
-        assert!(script.contains("openFirstResult"));
-        assert!(script.contains("focusPageSearch"));
-        assert!(script.contains("wireMenuNavigation"));
-        assert!(script.contains("event.key === \"?\""));
-        assert!(script.contains("f: \"\", i: \"\", \"/\": \"search/\", c: \"categories/\""));
-        assert!(script.contains("window.innerHeight * 0.42"));
-        assert!(script.contains("window.scrollBy(0,"));
-        assert!(script.contains("window.AGGR.entries"));
-        assert!(script.contains("fillDirectory"));
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
         assert!(base.contains("id=\"shortcut-help\""));
         assert!(base.contains("Keyboard shortcuts"));
         assert!(base.contains("data-route=\"preferences/\""));
-        assert!(base.contains("Open feed entry"));
         assert!(base.contains("<kbd>1–9</kbd>"));
         assert!(base.contains("rel=\"service-meta\""));
         assert!(base.contains("rel=\"type\""));
         assert!(base.contains("name=\"aggr:network\""));
         assert!(base.contains("max-image-preview:large"));
+        assert!(base.contains("<meta name=\"twitter:card\" content=\"summary\">"));
+        assert!(!base.contains("summary_large_image"));
         assert!(base.contains("data-nosnippet"));
         assert!(!base.contains("data-route=\"settings/\""));
-        assert!(!base.contains("id=\"shortcut-lists\""));
+        assert!(base.contains("id=\"shortcut-lists\""));
+        assert!(base.contains("id=\"shortcut-help-title\" tabindex=\"-1\""));
+
+        let item_file = DefaultTheme::get("templates/item.html").unwrap();
+        let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
+        assert!(item.contains("<span>published <time"));
+        assert!(item.contains("class=\"reading-stats\""));
+        assert!(item.contains("datetime=\"PT{{ item.reading_minutes }}M\""));
+        assert!(css.contains(".shortcut-help {\n  position: fixed;\n  inset: 0;"));
+        assert!(css.contains("margin: auto"));
 
         let item_file = DefaultTheme::get("templates/item.html").unwrap();
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
         assert!(item.contains("<meta name=\"author\""));
         assert!(item.contains("for article in item.recommended_articles"));
-        assert!(item.contains("class=\"article-navigation\""));
+        assert!(item.contains(">Continue reading</h2>"));
+        assert!(item.contains("aria-labelledby=\"continue-reading-title\""));
+        assert!(!item.contains("article-more-neighbor"));
+        assert!(item.contains("class=\"article-more-link\" rel=\"next\""));
+        assert!(
+            css.contains(".article-more { display: grid; grid-template-columns: minmax(0, 1fr)")
+        );
+        assert!(!item.contains("class=\"article-navigation\""));
+        assert!(!item.contains(">feed</a>"));
         assert!(!item.contains("class=\"archive-note\""));
         assert!(!item.contains("Archived snapshot"));
         assert!(!item.contains("article-more-label"));
         assert!(!item.contains("class=\"permalinks\""));
+    }
+
+    #[test]
+    fn embedded_theme_routes_collection_discovery_through_library() {
+        let renderer = Renderer::new(Layers::default(), "").unwrap();
+        renderer.env.get_template("library.html").unwrap();
+
+        let base_file = DefaultTheme::get("templates/base.html").unwrap();
+        let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
+        assert!(base.contains("data-route=\"library/\""));
+        assert!(base.contains("data-kinds=\"library source category tag\""));
+        assert!(!base.contains("data-route=\"sources/\""));
+        assert!(!base.contains("data-route=\"tags/\""));
+        assert!(!base.contains("data-route=\"categories/\""));
+        assert!(base.contains("aria-label=\"Site navigation\""));
+        assert!(base.contains("aria-label=\"App navigation\""));
+
+        let app_file = DefaultTheme::get("static/app.js").unwrap();
+        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
+        assert!(app.contains("l: \"library/\""));
+        assert!(!app.contains("s: \"library/\""));
+        assert!(!app.contains("t: \"library/#tags\""));
+        assert!(!app.contains("c: \"library/#categories\""));
+        assert!(app.contains("function fillListFilter()"));
+        assert!(app.contains("if (baseElement) baseElement.href = BASE"));
+        assert!(app.contains("$(\"#aggr-base\").setAttribute(\"href\", BASE)"));
+        assert!(app.contains("document.documentElement.style.setProperty(\"--top-nav-offset\", topBar.getBoundingClientRect().height + \"px\")"));
+        assert!(!app.contains("compactHeader"));
+    }
+
+    #[test]
+    fn embedded_theme_keeps_feed_selection_neutral_until_interaction() {
+        let app_file = DefaultTheme::get("static/app.js").unwrap();
+        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
+        assert!(!app.contains("if (KIND !== \"search\") restoreListCursor(restoreListFocus)"));
+        assert!(app.contains(
+            "if ((focusedUrl || restoreListFocus) && restoreListCursor(true, focusedUrl))"
+        ));
+        assert!(!app.contains("|| listRows()[0]"));
+
+        let css_file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
+        assert!(css.contains(".row.is-selected .title:hover"));
+        assert!(css.contains("text-decoration: none"));
+        assert!(css.contains(
+            ".row:has(.title:focus-visible) { background: color-mix(in srgb, var(--fg) 18%, var(--bg)); }"
+        ));
+
+        let item_file = DefaultTheme::get("templates/_item.html").unwrap();
+        let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
+        assert!(item.contains("class=\"row-heading\""));
+        assert!(css.contains("html:not([data-density=\"comfortable\"]) .row-heading"));
+    }
+
+    #[test]
+    fn embedded_theme_only_shows_resolved_discussions_without_emphasis() {
+        let app_file = DefaultTheme::get("static/app.js").unwrap();
+        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
+        assert!(app.contains("filter(function (discussion) { return discussion.found; })"));
+        assert!(app.contains("window.AGGR && window.AGGR.discussions"));
+        assert!(!app.contains("is-found"));
+
+        let css_file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
+        assert!(!css.contains("discussion.is-found"));
+
+        for name in ["_item.html", "item.html"] {
+            let file = DefaultTheme::get(&format!("templates/{name}")).unwrap();
+            let template = std::str::from_utf8(file.data.as_ref()).unwrap();
+            assert!(!template.contains("is-found"), "{name}");
+        }
+    }
+
+    #[test]
+    fn embedded_theme_uses_jk_for_list_selection_and_article_navigation() {
+        let app_file = DefaultTheme::get("static/app.js").unwrap();
+        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
+        assert!(app.contains("if (normalized === \"k\") return \"previous\""));
+        assert!(app.contains("if (normalized === \"j\") return \"next\""));
+        assert!(app.contains("KIND === \"item\" && articleNavigationDirection(event.key)"));
+        assert!(!app.contains("normalized === \"ArrowLeft\""));
+        assert!(!app.contains("normalized === \"ArrowRight\""));
+        assert!(app.contains("if (KIND !== \"item\")"));
+        assert!(!app.contains("dataset.navigationDirection"));
+        assert!(!app.contains("if (focusedLink && !focusedLink.hasAttribute"));
+        assert!(!app.contains("direction === \"previous\" ? BASE : null"));
+
+        let base_file = DefaultTheme::get("templates/base.html").unwrap();
+        let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
+        assert!(base.contains("<kbd>k</kbd></dt><dd>Newer article</dd>"));
+        assert!(base.contains("<kbd>j</kbd></dt><dd>Older article</dd>"));
+        assert!(base.contains("<kbd>O</kbd></dt><dd>Open original</dd>"));
+        assert!(base.contains("discussion.shortcut"));
+        assert!(!base.contains("<dt><kbd>h</kbd></dt>"));
+        assert!(!base.contains("<dt><kbd>l</kbd></dt>"));
+        assert!(!base.contains("<kbd>←</kbd>"));
+        assert!(!base.contains("<kbd>→</kbd>"));
+
+        let css_file = DefaultTheme::get("static/style.css").unwrap();
+        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
+        assert!(!css.contains("reader-page-next-out"));
+        assert!(!css.contains("reader-page-previous-in"));
+        assert!(css.contains(".itemhead { position: sticky"));
+        assert!(css.contains(".itemhead::before"));
+        assert!(css.contains("width: 100dvw"));
+        assert!(css.contains(".nav .brand {"));
+        assert!(css.contains("margin-inline-start: 0;"));
+        assert!(css.contains("margin-inline: -0.75rem"));
+        assert!(app.contains("function articleExternalShortcut(key)"));
+        assert!(app.contains("candidate.shortcut === key"));
+        assert!(app.contains(".split(\"{url}\").join(encodeURIComponent(originalUrl))"));
+
+        let item_file = DefaultTheme::get("templates/item.html").unwrap();
+        let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
+        assert!(item.contains("data-discussion=\"{{ discussion.name }}\""));
     }
 
     #[test]

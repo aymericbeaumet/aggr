@@ -13,8 +13,10 @@ title = "aggr"
 language = "en"
 # "default", or a directory relative to the repository (e.g. "themes/mine").
 theme = "default"
-# Number of entries on each generated feed, source, category, and tag page.
-items_per_page = 60
+# Number of entries kept in each generated feed, source, category, and tag page. The reader can
+# split these static pages into smaller browser-side feed pages without hiding any entry from
+# no-JavaScript readers or crawlers.
+items_per_page = 50
 # Recent home-feed window. Source/category/tag archives remain complete until `[store]` retention.
 max_items = 5000
 # Entries older than this leave the home feed but remain in archive pages.
@@ -81,7 +83,8 @@ article_concurrency = 4
 max_items_per_source = 100
 # Total timeout for one HTTP request, in seconds.
 timeout_secs = 20
-# Maximum response body accepted from a feed, discovery page, or article, in bytes.
+# Maximum response body accepted from a feed, discovery page, or article, in bytes (up to
+# 16777216, the bounded persistent-cache reader limit).
 max_body_bytes = 10000000
 # Retries after transient HTTP failures. Retries use deterministic exponential backoff.
 retries = 2
@@ -91,6 +94,13 @@ retries = 2
 allow_remote_include_chains = false
 # `heavy` downloads the original page and extracts its article; `light` reuses feed content.
 content = "heavy"
+# Store one small local article thumbnail for new items only. Existing items are not backfilled.
+# Preview failures never prevent an article from being retained. Enabled mirrored previews reuse
+# their existing local bytes without contacting the publisher.
+previews = false
+# Archive safe raster images referenced by new articles. The exact publisher bytes remain the
+# fallback; responsive derivatives use lossless encoding and failures keep the publisher URL.
+images = true
 
 # One table per source. `url` follows a website; `include` imports another aggr config. They are
 # mutually exclusive. aggr discovers RSS, Atom or JSON Feed from a normal website URL and
@@ -106,6 +116,8 @@ content = "heavy"
 # headers = { Authorization = "Bearer ${TOKEN}" } # `${ENV}` values are expanded
 # html = true                # write sanitized raw HTML; defaults to `[store] html`
 # content = "heavy"          # override `[fetch] content` with `"heavy"` or `"light"`
+# previews = true            # override `[fetch] previews` for this source
+# images = false             # override `[fetch] images` for this source
 
 # An include expands source entries from another aggr config at this position. Local and GitHub
 # wildcards work; a bare GitHub repository URL implies its aggr.toml. `category` becomes the

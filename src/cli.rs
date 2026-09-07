@@ -45,6 +45,8 @@ pub enum Command {
     Build(BuildArgs),
     /// Sync and build in a disposable workspace, then serve with live reload.
     Dev(DevArgs),
+    /// Remove disposable local caches and owned generated output; preserve archived articles.
+    Clean(CleanArgs),
     /// Validate the configuration and probe every source.
     Check,
     /// Generate shell completions.
@@ -84,10 +86,26 @@ pub struct SyncArgs {
     /// Write fetched data locally, but do not commit or push it.
     #[arg(long)]
     pub fetch_only: bool,
+    /// Clean disposable local caches and generated output before syncing; keep the archive.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub clean: bool,
+}
+
+#[derive(Debug, Args, Default)]
+pub struct CleanArgs {
+    /// List exact cleanup targets without creating, changing, or removing any files.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Generated output directory to clean instead of [site] out; requires .aggr-site.
+    #[arg(long, value_name = "DIR")]
+    pub out: Option<PathBuf>,
 }
 
 #[derive(Debug, Args, Default, Clone)]
 pub struct BuildArgs {
+    /// Clean disposable local caches and owned output before building; keep the archive.
+    #[arg(long)]
+    pub clean: bool,
     /// Output directory.
     #[arg(long, value_name = "DIR")]
     pub out: Option<PathBuf>,
@@ -105,6 +123,9 @@ pub struct BuildArgs {
 
 #[derive(Debug, Args, Default)]
 pub struct DevArgs {
+    /// Clean this project's disposable caches and dev data before starting; keep the archive.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub clean: bool,
     /// Absolute URL used to exercise a release build locally (defaults to [site] url).
     #[arg(long, value_name = "URL", env = "AGGR_BASE_URL")]
     pub base_url: Option<String>,
@@ -121,6 +142,7 @@ pub struct DevArgs {
 impl DevArgs {
     pub(crate) fn build_args(&self) -> BuildArgs {
         BuildArgs {
+            clean: false,
             out: None,
             base_url: self.base_url.clone(),
             data_ref: None,
@@ -161,5 +183,16 @@ mod tests {
         assert!(sync.fetch_only);
         assert!(sync.fetch.refresh);
         assert!(Cli::try_parse_from(["aggr", "fetch"]).is_err());
+    }
+
+    #[test]
+    fn cleanup_is_explicit_and_never_combined_with_a_fetch_dry_run() {
+        for command in ["sync", "build", "dev"] {
+            assert!(Cli::try_parse_from(["aggr", command, "--clean"]).is_ok());
+        }
+        assert!(Cli::try_parse_from(["aggr", "clean", "--dry-run"]).is_ok());
+        for command in ["sync", "dev"] {
+            assert!(Cli::try_parse_from(["aggr", command, "--clean", "--dry-run"]).is_err());
+        }
     }
 }

@@ -12,15 +12,21 @@ use crate::cli::BuildArgs;
 
 /// Public `aggr build`: live data is synced first, while a pinned ref is rendered as-is.
 pub async fn sync_and_run(project: &Project, args: &BuildArgs) -> Result<()> {
+    // Validate ownership before sync can create a worktree, write state, or fetch anything.
+    // Site rendering and cache restoration both replace the output recursively.
+    super::clean::validate_output(project, &out_dir(project, args))?;
+    if args.clean {
+        super::clean::run_project(project, args.out.as_deref(), false)?;
+    }
     if args.data_ref.is_none() {
         super::sync::run(project, &crate::cli::SyncArgs::default()).await?;
     }
-    run(project, args).await.map(|_| ())
+    run_prevalidated(project, args).await.map(|_| ())
 }
 use crate::site::{self, BuildInfo, Summary};
 use crate::store::Store;
 
-pub async fn run(project: &Project, args: &BuildArgs) -> Result<Summary> {
+async fn run_prevalidated(project: &Project, args: &BuildArgs) -> Result<Summary> {
     let worktree = project.worktree()?;
     let out = out_dir(project, args);
     let base_url = base_url(project, args)?;

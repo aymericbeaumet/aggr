@@ -194,6 +194,9 @@ fn card_items(document: &Html, page_url: &Url) -> Result<Vec<RawItem>> {
             summary,
             content_html: None,
             extra: Default::default(),
+            preview_candidates: crate::preview::html_candidates(&block.html(), page_url),
+            preview: None,
+            images: Vec::new(),
         });
     }
     Ok(out)
@@ -247,6 +250,9 @@ fn collect_articles(value: &Value, page_url: &Url, out: &mut Vec<RawItem>) {
                         summary,
                         content_html: None,
                         extra: Default::default(),
+                        preview_candidates: json_ld_images(object.get("image"), page_url),
+                        preview: None,
+                        images: Vec::new(),
                     });
                 }
             }
@@ -267,6 +273,33 @@ fn article_type(value: Option<&Value>) -> bool {
         }
         Some(Value::Array(kinds)) => kinds.iter().any(|kind| article_type(Some(kind))),
         _ => false,
+    }
+}
+
+fn json_ld_images(value: Option<&Value>, base: &Url) -> Vec<crate::preview::Candidate> {
+    match value {
+        Some(Value::Array(values)) => values
+            .iter()
+            .flat_map(|value| json_ld_images(Some(value), base))
+            .take(3)
+            .collect(),
+        Some(value) => {
+            let url = value
+                .as_str()
+                .or_else(|| value.get("contentUrl").and_then(Value::as_str))
+                .or_else(|| value.get("url").and_then(Value::as_str));
+            url.and_then(|value| article_url(base, value))
+                .map(|url| crate::preview::Candidate {
+                    url: url.to_string(),
+                    alt: value
+                        .get("caption")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                })
+                .into_iter()
+                .collect()
+        }
+        None => vec![],
     }
 }
 

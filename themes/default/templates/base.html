@@ -9,16 +9,64 @@
 <base id="aggr-base" href="{{ page.root }}">
 <title>{% block title %}{{ page.document_title }}{% endblock %}</title>
 {% if page.description %}<meta name="description" content="{{ page.description }}">{% endif %}
-<meta name="application-name" content="aggr">
+<meta name="application-name" content="{{ site.title }}">
 <meta name="generator" content="aggr {{ build.version }}">
 <meta id="theme-color" name="theme-color" content="#291a1b">
 {% if site.pwa %}
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="aggr">
+<meta name="apple-mobile-web-app-title" content="{{ site.title }}">
 {% endif %}
-<script>try{var t=localStorage.getItem('aggr:theme')||'auto';document.documentElement.dataset.theme=/^(auto|light|dark)$/.test(t)?t:'auto'}catch(e){document.documentElement.dataset.theme='auto'}</script>
+<script id="aggr-preferences">
+window.AGGRPreferences = (function () {
+  var schema = {
+    theme: { initial: "auto", values: ["auto", "light", "dark"], attribute: "theme" },
+    "date-format": { initial: "relative", values: ["relative", "iso", "local", "local-time"] },
+    "text-size": { initial: "default", values: ["default", "large", "largest"], attribute: "textSize" },
+    "reading-width": { initial: "standard", values: ["standard", "wide"], attribute: "readingWidth" },
+    density: { initial: "compact", values: ["compact", "comfortable"], attribute: "density" },
+    thumbnails: { initial: "show", values: ["show", "hide"], attribute: "thumbnails" },
+    "feed-page-size": { initial: "50", values: ["10", "25", "50"] },
+    motion: { initial: "auto", values: ["auto", "off"], attribute: "motion" },
+    "single-key-shortcuts": { initial: true, values: [true, false] }
+  };
+  function valid(key, value) {
+    return Object.prototype.hasOwnProperty.call(schema, key) && schema[key].values.indexOf(value) !== -1;
+  }
+  function read() {
+    var state = {};
+    Object.keys(schema).forEach(function (key) {
+      var value;
+      try { value = localStorage.getItem("aggr:" + key); } catch (error) { /* private mode */ }
+      if (typeof schema[key].initial === "boolean") value = value === "true" ? true : value === "false" ? false : null;
+      state[key] = valid(key, value) ? value : schema[key].initial;
+    });
+    return state;
+  }
+  function validate(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Invalid preferences");
+    var legacy = !Object.prototype.hasOwnProperty.call(payload, "version");
+    if (!legacy && (payload.version !== 1 || Object.keys(payload).some(function (key) { return key !== "version" && key !== "preferences"; }))) throw new Error("Unsupported preferences version");
+    var source = legacy ? payload : payload.preferences;
+    if (!source || typeof source !== "object" || Array.isArray(source) || !Object.keys(source).length) throw new Error("Empty preferences");
+    var state = {};
+    Object.keys(source).forEach(function (field) {
+      var key = legacy && field.indexOf("aggr:") === 0 ? field.slice(5) : legacy ? "" : field;
+      var value = source[field];
+      if (legacy && key === "single-key-shortcuts") value = value === "true" ? true : value === "false" ? false : null;
+      if (!valid(key, value)) throw new Error("Invalid preference: " + field);
+      state[key] = value;
+    });
+    return state;
+  }
+  var values = read();
+  Object.keys(schema).forEach(function (key) {
+    if (schema[key].attribute) document.documentElement.dataset[schema[key].attribute] = values[key];
+  });
+  return { schema: schema, values: values, read: read, validate: validate, valid: valid };
+})();
+</script>
 <meta name="aggr:network" content="{{ site.network_url }}">
 <meta name="aggr:instance" content="{{ 'aggr.json' | url_for }}">
 <meta name="aggr:source" content="{{ site.config_url or ('aggr.toml' | url_for) }}">
@@ -39,11 +87,17 @@
 <meta property="og:title" content="{{ page.title }}">
 {% if page.description %}<meta property="og:description" content="{{ page.description }}">{% endif %}
 {% if page.canonical_url %}<meta property="og:url" content="{{ page.canonical_url }}">{% endif %}
-{% if site.base_url %}<meta property="og:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | url_for }}"><meta property="og:image:alt" content="{{ site.title }} app icon">{% endif %}
+{% if site.base_url %}
+{% if item and item.preview %}<meta property="og:image" content="{{ site.base_url }}{{ item.preview.url }}"><meta property="og:image:width" content="{{ item.preview.width }}"><meta property="og:image:height" content="{{ item.preview.height }}">{% if item.preview.alt %}<meta property="og:image:alt" content="{{ item.preview.alt }}">{% endif %}
+{% else %}<meta property="og:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | url_for }}"><meta property="og:image:alt" content="{{ site.title }} app icon">{% endif %}
+{% endif %}
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="{{ page.title }}">
 {% if page.description %}<meta name="twitter:description" content="{{ page.description }}">{% endif %}
-{% if site.base_url %}<meta name="twitter:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | url_for }}"><meta name="twitter:image:alt" content="{{ site.title }} app icon">{% endif %}
+{% if site.base_url %}
+{% if item and item.preview %}<meta name="twitter:image" content="{{ site.base_url }}{{ item.preview.url }}">{% if item.preview.alt %}<meta name="twitter:image:alt" content="{{ item.preview.alt }}">{% endif %}
+{% else %}<meta name="twitter:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | url_for }}"><meta name="twitter:image:alt" content="{{ site.title }} app icon">{% endif %}
+{% endif %}
 <link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
 {% if page.feed_path is not none %}{% set feed_path = page.feed_path %}
 <link rel="alternate" type="application/atom+xml" title="{{ page.title }}" href="{{ (feed_path ~ 'atom.xml') | url_for }}">
@@ -67,28 +121,27 @@
 </div>
 <a class="skip-link" href="#swup">skip to content</a>
 <header class="top" data-nosnippet>
-  <nav class="nav" aria-label="Primary navigation">
+  <nav class="nav" aria-label="Site navigation">
     <a class="brand" data-route="" rel="home" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/favicon-32.png' | url_for }}" alt="" width="20" height="20"><span class="brand-title">{{ site.title | lower }}</span></a>
     <span class="nav-menu">
       <a class="menu-link" data-route="search/" data-kinds="search" href="{{ 'search/' | url_for }}" aria-keyshortcuts="Meta+K Control+K"{% if page.kind == 'search' %} aria-current="page"{% endif %}><span class="menu-label">search</span></a>
       <span class="nav-sep" aria-hidden="true">|</span>
-      {% if site.has_categories %}
-      <a class="menu-link" data-route="categories/" data-kinds="categories category" href="{{ 'categories/' | url_for }}"{% if page.kind in ['categories', 'category'] %} aria-current="page"{% endif %}><span class="menu-label">categories</span></a>
-      <span class="nav-sep" aria-hidden="true">|</span>
-      {% endif %}
-      <a class="menu-link" data-route="tags/" data-kinds="tags tag" href="{{ 'tags/' | url_for }}"{% if page.kind in ['tags', 'tag'] %} aria-current="page"{% endif %}><span class="menu-label">tags</span></a>
-      <span class="nav-sep" aria-hidden="true">|</span>
-      <a class="menu-link" data-route="sources/" data-kinds="sources source" href="{{ 'sources/' | url_for }}"{% if page.kind in ['sources', 'source'] %} aria-current="page"{% endif %}><span class="menu-label">sources</span></a>
+      <a class="menu-link" data-route="library/" data-kinds="library source category tag" href="{{ 'library/' | url_for }}"{% if page.kind in ['library', 'source', 'category', 'tag'] %} aria-current="page"{% endif %}><span class="menu-label">library</span></a>
       <span class="nav-sep" aria-hidden="true">|</span>
       <a class="menu-link" data-route="preferences/" data-kinds="preferences" href="{{ 'preferences/' | url_for }}"{% if page.kind == 'preferences' %} aria-current="page"{% endif %}><span class="menu-label">preferences</span></a>
     </span>
     <span class="nav-spacer"></span>
     <span class="nav-actions">
-      <a id="refresh-page" class="nav-refresh" href="{{ page.path | url_for }}" data-no-swup aria-label="Refresh for new items" title="Refresh for new items"><span aria-hidden="true">↻</span></a>
       <a class="config-link"{% if not site.config_page_url and not site.config_url %} data-route="aggr.toml"{% endif %} href="{{ site.config_page_url or site.config_url or ('aggr.toml' | url_for) }}" target="_blank" rel="noopener noreferrer">aggr.toml ↗</a>
     </span>
   </nav>
 </header>
+<nav class="mobile-nav" aria-label="App navigation" data-nosnippet>
+  <a data-route="" data-kinds="river item" href="{{ '' | url_for }}"{% if page.kind in ['river', 'item'] %} aria-current="page"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7M5 9v12h5v-7h4v7h5V9"/></svg><span>Feed</span></a>
+  <a data-route="search/" data-kinds="search" href="{{ 'search/' | url_for }}" aria-keyshortcuts="Meta+K Control+K"{% if page.kind == 'search' %} aria-current="page"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><span>Search</span></a>
+  <a data-route="library/" data-kinds="library source category tag" href="{{ 'library/' | url_for }}"{% if page.kind in ['library', 'source', 'category', 'tag'] %} aria-current="page"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="7" height="16" rx="1"/><rect x="14" y="4" width="7" height="16" rx="1"/><path d="M6 8h1m10 0h1"/></svg><span>Library</span></a>
+  <a data-route="preferences/" data-kinds="preferences" href="{{ 'preferences/' | url_for }}"{% if page.kind == 'preferences' %} aria-current="page"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg><span>Preferences</span></a>
+</nav>
 <div id="connection-status" class="connection-status" role="status" aria-live="polite" aria-atomic="true" hidden>
   <span id="connection-status-message"></span>
   <button id="connection-retry" type="button" hidden>retry</button>
@@ -97,7 +150,7 @@
 <dialog id="shortcut-help" class="shortcut-help" aria-labelledby="shortcut-help-title" aria-keyshortcuts="?" data-nosnippet>
   <form method="dialog">
     <header class="shortcut-help-head">
-      <h2 id="shortcut-help-title">Keyboard shortcuts</h2>
+      <h2 id="shortcut-help-title" tabindex="-1">Keyboard shortcuts</h2>
       <button class="shortcut-close" value="close" aria-label="Close keyboard shortcuts">×</button>
     </header>
     <div class="shortcut-groups">
@@ -105,23 +158,30 @@
         <h3 id="shortcut-anywhere">Anywhere</h3>
         <dl class="shortcut-list">
           <div><dt class="key-alternatives"><span><kbd>⌘</kbd><kbd>K</kbd></span><small>or</small><span><kbd>Ctrl</kbd><kbd>K</kbd></span><small>or</small><span><kbd>g</kbd><kbd>/</kbd></span></dt><dd>Global search</dd></div>
-          <div><dt><kbd>/</kbd></dt><dd>Search this page</dd></div>
+          <div><dt><kbd>/</kbd></dt><dd>Local search</dd></div>
           <div><dt class="key-alternatives"><span><kbd>g</kbd><kbd>f</kbd></span><small>or</small><span><kbd>g</kbd><kbd>i</kbd></span></dt><dd>Feed</dd></div>
-          {% if site.has_categories %}<div><dt><kbd>g</kbd><kbd>c</kbd></dt><dd>Categories</dd></div>{% endif %}
-          <div><dt><kbd>g</kbd><kbd>t</kbd></dt><dd>Tags</dd></div>
-          <div><dt><kbd>g</kbd><kbd>s</kbd></dt><dd>Sources</dd></div>
+          <div><dt><kbd>g</kbd><kbd>l</kbd></dt><dd>Library</dd></div>
           <div><dt><kbd>g</kbd><kbd>p</kbd></dt><dd>Preferences</dd></div>
           <div><dt><kbd>g</kbd><kbd>1–9</kbd></dt><dd>Open feed entry</dd></div>
           <div><dt><kbd>?</kbd></dt><dd>Show this help</dd></div>
         </dl>
       </section>
+      <section aria-labelledby="shortcut-lists">
+        <h3 id="shortcut-lists">Lists</h3>
+        <dl class="shortcut-list">
+          <div><dt><kbd>j</kbd><kbd>k</kbd></dt><dd>Next / previous item</dd></div>
+          <div><dt class="key-alternatives"><kbd>o</kbd><small>or</small><kbd>Enter</kbd></dt><dd>Open selected item</dd></div>
+        </dl>
+      </section>
       <section aria-labelledby="shortcut-articles">
         <h3 id="shortcut-articles">Articles</h3>
         <dl class="shortcut-list">
-          <div><dt class="key-alternatives"><kbd>←</kbd><small>or</small><kbd>h</kbd><small>or</small><kbd>k</kbd></dt><dd>Previous</dd></div>
-          <div><dt class="key-alternatives"><kbd>→</kbd><small>or</small><kbd>l</kbd><small>or</small><kbd>j</kbd></dt><dd>Next</dd></div>
-          <div><dt class="key-alternatives"><kbd>u</kbd><small>or</small><span><kbd>Ctrl</kbd><kbd>U</kbd></span></dt><dd>Scroll up</dd></div>
-          <div><dt class="key-alternatives"><kbd>d</kbd><small>or</small><span><kbd>Ctrl</kbd><kbd>D</kbd></span></dt><dd>Scroll down</dd></div>
+          <div><dt><kbd>k</kbd></dt><dd>Newer article</dd></div>
+          <div><dt><kbd>j</kbd></dt><dd>Older article</dd></div>
+          <div><dt><kbd>O</kbd></dt><dd>Open original</dd></div>
+          {% for discussion in site.discussions %}{% if discussion.shortcut %}<div><dt><kbd>{{ discussion.shortcut }}</kbd></dt><dd>Open {{ discussion.name }} discussion / search</dd></div>{% endif %}{% endfor %}
+          <div><dt><kbd>u</kbd></dt><dd>Scroll up</dd></div>
+          <div><dt><kbd>d</kbd></dt><dd>Scroll down</dd></div>
         </dl>
       </section>
     </div>

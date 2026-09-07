@@ -12,7 +12,9 @@ var PRECACHE = PRECACHE_PREFIX + VERSION;
 var REVISIONS = CACHE_NAMESPACE + "revisions-" + VERSION;
 var PAGES = CACHE_NAMESPACE + "pages";
 var ASSETS = CACHE_NAMESPACE + "assets";
-var SEARCH = CACHE_NAMESPACE + "search";
+var SEARCH_PREFIX = CACHE_NAMESPACE + "search-";
+var SEARCH = SEARCH_PREFIX + VERSION;
+var LEGACY_SEARCH = CACHE_NAMESPACE + "search";
 var IMAGES = CACHE_NAMESPACE + "images";
 var LEGACY_RUNTIME = CACHE_NAMESPACE + "runtime";
 var PAGE_MAX = 500;
@@ -22,6 +24,7 @@ var IMAGE_MAX = 128;
 var BASE = new URL("./", self.registration.scope).pathname;
 var OFFLINE = BASE + "offline.html";
 var NETWORK_TIMEOUT = 4000;
+var PRECACHE_TIMEOUT = 10000;
 var ENTRIES = {{ precache | json }}.map(function (entry) {
   return {
     url: new URL(entry.url, self.registration.scope).pathname,
@@ -52,7 +55,14 @@ function priorResponse(entry, revisionCaches, index) {
 }
 
 function fetchEntry(entry) {
-  return fetch(new Request(entry.url, { cache: "reload" })).then(function (response) {
+  var signal;
+  if (typeof AbortSignal.timeout === "function") signal = AbortSignal.timeout(PRECACHE_TIMEOUT);
+  else {
+    var controller = new AbortController();
+    setTimeout(function () { controller.abort(); }, PRECACHE_TIMEOUT);
+    signal = controller.signal;
+  }
+  return fetch(new Request(entry.url, { cache: "reload" }), { signal: signal }).then(function (response) {
     if (!response || !response.ok) {
       throw new Error("could not precache " + entry.url);
     }
@@ -108,9 +118,16 @@ self.addEventListener("install", function (event) {
   );
 });
 
+function isImageAsset(url) {
+  return url.origin === self.location.origin &&
+    (url.pathname.indexOf(BASE + "assets/previews/") === 0 ||
+      url.pathname.indexOf(BASE + "assets/images/") === 0);
+}
+
 function isAppAsset(request) {
   var url = new URL(request.url);
-  return url.origin === self.location.origin && url.pathname.indexOf(BASE + "assets/") === 0;
+  return url.origin === self.location.origin && url.pathname.indexOf(BASE + "assets/") === 0 &&
+    !isImageAsset(url);
 }
 
 function trimCache(name, maximum) {
@@ -148,6 +165,7 @@ function migratePrecacheAssets(names) {
 function runtimeCacheName(request) {
   var url = new URL(request.url);
   if (url.origin !== self.location.origin) return IMAGES;
+  if (isImageAsset(url)) return IMAGES;
   if (url.pathname.indexOf(BASE + "assets/") === 0) return ASSETS;
   if (url.pathname.indexOf(BASE + "pagefind/") === 0) return SEARCH;
   return PAGES;
@@ -161,7 +179,7 @@ function migrateLegacyRuntime(names) {
     return source.keys().then(function (keys) {
       return Promise.all(keys.map(function (request) {
         return source.match(request).then(function (response) {
-          if (!response) return null;
+          if (!response || !response.ok || new URL(request.url).origin !== self.location.origin) return null;
           return caches.open(runtimeCacheName(request)).then(function (destination) {
             return destination.put(request, response);
           });
@@ -178,16 +196,52 @@ function migrateLegacyRuntime(names) {
   }).catch(function () { return null; });
 }
 
+function invalidateOlderPages() {
+  var replaced = new Set(ENTRIES.map(function (entry) { return entry.url; }));
+  return Promise.all([caches.open(PAGES), caches.open(PRECACHE)]).then(function (opened) {
+    var cache = opened[0];
+    var installed = opened[1];
+    return cache.keys().then(function (keys) {
+      return Promise.all(keys.filter(function (request) {
+        return replaced.has(new URL(request.url).pathname);
+      }).map(function (request) {
+        return installed.match(request, { ignoreSearch: true }).then(function (replacement) {
+          return replacement && replacement.ok ? cache.delete(request) : false;
+        });
+      }));
+    });
+  }).catch(function () { return null; });
+}
+
+function removeUnverifiableImages() {
+  return caches.open(IMAGES).then(function (cache) {
+    return cache.keys().then(function (keys) {
+      return Promise.all(keys.map(function (request) {
+        return cache.match(request).then(function (response) {
+          if (!response || !response.ok || new URL(request.url).origin !== self.location.origin) {
+            return cache.delete(request);
+          }
+        });
+      }));
+    });
+  }).catch(function () { return null; });
+}
+
 self.addEventListener("activate", function (event) {
   event.waitUntil(
     caches.keys().then(function (names) {
       return migratePrecacheAssets(names).then(function () {
         return migrateLegacyRuntime(names);
       }).then(function () {
+        return invalidateOlderPages();
+      }).then(function () {
+        return removeUnverifiableImages();
+      }).then(function () {
         return Promise.all(names.filter(function (name) {
           var oldPrecache = name.indexOf(PRECACHE_PREFIX) === 0 && name !== PRECACHE;
           var oldRevisions = name.indexOf(REVISIONS_PREFIX) === 0 && name !== REVISIONS;
-          return oldPrecache || oldRevisions || name === LEGACY_RUNTIME;
+          var oldSearch = name.indexOf(SEARCH_PREFIX) === 0 && name !== SEARCH;
+          return oldPrecache || oldRevisions || oldSearch || name === LEGACY_SEARCH || name === LEGACY_RUNTIME;
         }).map(function (name) {
           return caches.delete(name).catch(function () { return false; });
         }));
@@ -209,10 +263,10 @@ function timeout(ms) {
 }
 
 function remember(name, maximum, request, response) {
-  if (!response || (!response.ok && response.type !== "opaque")) return Promise.resolve(response);
+  if (!response || !response.ok) return Promise.resolve(response);
   var copy = response.clone();
   return caches.open(name).then(function (cache) {
-    return cache.delete(request).then(function () { return cache.put(request, copy); })
+    return cache.put(request, copy)
       .then(function () { return cache.keys(); })
       .then(function (keys) {
         return Promise.all(keys.slice(0, Math.max(0, keys.length - maximum)).map(function (key) {
@@ -234,17 +288,21 @@ function firstCached(request, choices, index) {
 
 // A late successful response still refreshes the page cache after the timeout has returned a
 // saved copy to the user. Navigation preload rejection falls back to a normal network request.
-function networkFirst(request, preload) {
+function networkFirst(request, preload, event) {
   var network = Promise.resolve(preload).catch(function () { return null; })
     .then(function (response) { return response || fetch(request); })
     .then(function (response) {
       if (response && response.status >= 500) throw new Error("server error");
-      return remember(PAGES, PAGE_MAX, request, response);
+      return response;
     });
+  var saved = network.then(function (response) {
+    return remember(PAGES, PAGE_MAX, request, response);
+  }).catch(function () { return null; });
+  event.waitUntil(saved);
   return Promise.race([network, timeout(NETWORK_TIMEOUT)]).catch(function () {
     return firstCached(request, [
-      { name: PRECACHE, ignoreSearch: true },
-      { name: PAGES, ignoreSearch: true }
+      { name: PAGES, ignoreSearch: true },
+      { name: PRECACHE, ignoreSearch: true }
     ], 0).then(function (cached) {
       if (cached) return cached;
       if (request.mode === "navigate") {
@@ -255,37 +313,40 @@ function networkFirst(request, preload) {
   });
 }
 
-function cacheFirst(request, name, maximum, ignorePrecacheSearch) {
-  return firstCached(request, [
+function cacheFirst(request, name, maximum, ignorePrecacheSearch, event) {
+  var saved;
+  var response = firstCached(request, [
     { name: PRECACHE, ignoreSearch: !!ignorePrecacheSearch },
     { name: name }
   ], 0).then(function (cached) {
-    if (cached) return remember(name, maximum, request, cached);
-    return fetch(request).then(function (response) {
-      return remember(name, maximum, request, response);
-    });
+    return cached || fetch(request);
   });
+  saved = response.then(function (value) {
+    return remember(name, maximum, request, value);
+  }).catch(function () { return null; });
+  event.waitUntil(saved);
+  return response;
 }
 
 self.addEventListener("fetch", function (event) {
   var request = event.request;
   if (request.method !== "GET") return;
   var url = new URL(request.url);
-  if (url.origin !== self.location.origin) {
-    if (request.destination === "image") event.respondWith(cacheFirst(request, IMAGES, IMAGE_MAX, false));
-    return;
-  }
+  if (url.origin !== self.location.origin) return;
   if (url.pathname.indexOf(BASE) !== 0) return;
   var acceptsHtml = (request.headers.get("accept") || "").indexOf("text/html") !== -1;
   var isSwup = (request.headers.get("x-requested-with") || "").toLowerCase() === "swup";
   var mutable = /\/(?:atom|rss|feed)\.xml$|\/(?:feed|aggr|linkset)\.json$|\/manifest\.webmanifest$|\/opensearch\.xml$|\/sitemap(?:-\d+)?\.xml$|\/robots\.txt$|\/(?:aggr\.toml|llms\.txt)$/.test(url.pathname);
-  if (request.mode === "navigate" || acceptsHtml || isSwup || mutable) {
-    event.respondWith(networkFirst(request, event.preloadResponse));
+  var articleRepresentation = url.pathname.indexOf(BASE + "items/") === 0 && /\.(?:md|txt|rst|json)$/.test(url.pathname);
+  if (request.mode === "navigate" || acceptsHtml || isSwup || mutable || articleRepresentation) {
+    event.respondWith(networkFirst(request, event.preloadResponse, event));
+  } else if (isImageAsset(url)) {
+    event.respondWith(cacheFirst(request, IMAGES, IMAGE_MAX, true, event));
   } else if (url.pathname.indexOf(BASE + "assets/") === 0) {
-    event.respondWith(cacheFirst(request, ASSETS, ASSET_MAX, false));
+    event.respondWith(cacheFirst(request, ASSETS, ASSET_MAX, true, event));
   } else if (url.pathname.indexOf(BASE + "pagefind/") === 0) {
-    event.respondWith(cacheFirst(request, SEARCH, SEARCH_MAX, true));
+    event.respondWith(cacheFirst(request, SEARCH, SEARCH_MAX, true, event));
   } else {
-    event.respondWith(cacheFirst(request, PAGES, PAGE_MAX, false));
+    event.respondWith(cacheFirst(request, PAGES, PAGE_MAX, false, event));
   }
 });

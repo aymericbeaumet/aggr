@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use assert_cmd::prelude::*;
 use httpmock::prelude::*;
 use predicates::prelude::*;
+use sha1::Digest as _;
 use tempfile::TempDir;
 
 const FEED: &str = r#"<?xml version="1.0"?>
@@ -65,7 +66,7 @@ impl TestRepo {
 
     fn write_config(&self, feed_url: &str, extra: &str) {
         self.write_raw_config(&format!(
-            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n{extra}\n[fetch]\ncontent = \"light\"\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\nlabels = [\"example\", \"news\"]\n"
+            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n{extra}\n[fetch]\ncontent = \"light\"\nimages = false\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\nlabels = [\"example\", \"news\"]\n"
         ));
     }
 
@@ -137,6 +138,21 @@ impl TestRepo {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    fn origin_bytes(&self, rev: &str, path: &str) -> Vec<u8> {
+        let path = path.replace('\\', "/");
+        let out = Command::new("git")
+            .args(["show", &format!("{rev}:{path}")])
+            .current_dir(&self.origin)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
     fn data_dir(&self) -> PathBuf {
         self.clone.join(".aggr/data")
     }
@@ -179,7 +195,16 @@ fn wait_for_cached_site(root: &Path, timeout: Duration) {
         if walkdir::WalkDir::new(root)
             .into_iter()
             .filter_map(Result::ok)
-            .any(|entry| entry.file_name() == ".aggr-site")
+            .any(|entry| {
+                entry.file_name() == ".aggr-site"
+                    && entry.path().parent().is_some_and(|site| {
+                        site.file_name().is_some_and(|name| name == "site")
+                            && site.join(".aggr-dev-key").is_file()
+                            && entry.path().strip_prefix(root).is_ok_and(|relative| {
+                                !relative.components().any(|part| part.as_os_str() == "tmp")
+                            })
+                    })
+            })
         {
             return;
         }
@@ -210,6 +235,425 @@ fn git(dir: &Path, args: &[&str]) {
         out.status.success(),
         "git {args:?}: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn preview_image() -> Vec<u8> {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(640, 400, image::Rgb([48, 128, 96]))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    bytes.into_inner()
+}
+
+fn preview_feed(server: &MockServer, entries: &[(&str, &str, &str)]) -> String {
+    serde_json::json!({
+        "version": "https://jsonfeed.org/version/1.1",
+        "title": "Preview feed",
+        "items": entries.iter().map(|(id, image, published)| serde_json::json!({
+            "id": id,
+            "title": id,
+            "url": server.url(format!("/articles/{id}")),
+            "date_published": published,
+            "content_html": "<p>Article body with <strong>useful content</strong>.</p>",
+            "image": server.url(*image),
+        })).collect::<Vec<_>>()
+    })
+    .to_string()
+}
+
+fn item_front(repo: &TestRepo, rev: &str, title: &str) -> (String, serde_yaml_ng::Value) {
+    let path = repo
+        .origin_files(rev)
+        .into_iter()
+        .find(|path| path.starts_with("items/") && path.ends_with(&format!("-{title}.md")))
+        .unwrap();
+    let markdown = repo.origin_show(rev, &path);
+    let front = markdown
+        .strip_prefix("---\n")
+        .unwrap()
+        .split_once("\n---\n")
+        .unwrap()
+        .0;
+    (path, serde_yaml_ng::from_str(front).unwrap())
+}
+
+#[test]
+fn previews_are_new_only_optional_and_preserved_on_refresh() {
+    let server = MockServer::start();
+    let mut feed = server.mock(|when, then| {
+        when.method(GET).path("/feed.json");
+        then.status(200)
+            .header("content-type", "application/feed+json")
+            .body(preview_feed(
+                &server,
+                &[("old", "/old.png", "2026-09-01T10:00:00Z")],
+            ));
+    });
+    let old_image = server.mock(|when, then| {
+        when.method(GET).path("/old.png");
+        then.status(200).body(preview_image());
+    });
+    let image = server.mock(|when, then| {
+        when.method(GET).path("/new.png");
+        then.status(200)
+            .header("content-type", "image/png")
+            .body(preview_image());
+    });
+    let missing = server.mock(|when, then| {
+        when.method(GET).path("/missing.png");
+        then.status(404);
+    });
+    let repo = TestRepo::new();
+    let config = |previews| {
+        format!(
+            "[fetch]\ncontent = \"light\"\npreviews = {previews}\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+            server.url("/feed.json"),
+        )
+    };
+    repo.write_raw_config(&config(false));
+    repo.aggr().arg("sync").assert().success();
+    old_image.assert_calls(0);
+    assert!(item_front(&repo, "aggr", "old").1["preview"].is_null());
+
+    repo.write_raw_config(&config(true));
+    feed.delete();
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.json");
+        then.status(200)
+            .header("content-type", "application/feed+json")
+            .body(preview_feed(
+                &server,
+                &[
+                    ("missing", "/missing.png", "2026-09-03T10:00:00Z"),
+                    ("new", "/new.png", "2026-09-02T10:00:00Z"),
+                    ("old", "/old.png", "2026-09-01T10:00:00Z"),
+                ],
+            ));
+    });
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo: +2"));
+    image.assert_calls(1);
+    missing.assert_calls(1);
+    old_image.assert_calls(0);
+    assert!(item_front(&repo, "aggr", "missing").1["preview"].is_null());
+    let (path, front) = item_front(&repo, "aggr", "new");
+    let preview = &front["preview"];
+    assert_eq!(preview["width"].as_u64(), Some(256));
+    assert_eq!(preview["height"].as_u64(), Some(160));
+    let companion = Path::new(&path)
+        .parent()
+        .unwrap()
+        .join(preview["file"].as_str().unwrap());
+    let bytes = repo.origin_bytes("aggr", companion.to_str().unwrap());
+    assert!(bytes.len() <= 384 * 1024);
+    assert_eq!(
+        image::guess_format(&bytes).unwrap(),
+        image::ImageFormat::WebP
+    );
+
+    let tip = repo.origin_rev("aggr").unwrap();
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing new"));
+    assert_eq!(repo.origin_rev("aggr").unwrap(), tip);
+    image.assert_calls(1);
+    missing.assert_calls(1);
+
+    repo.aggr().args(["sync", "--refresh"]).assert().success();
+    assert_eq!(item_front(&repo, "aggr", "new").1["preview"], *preview);
+    assert_eq!(
+        repo.origin_bytes("aggr", companion.to_str().unwrap()),
+        bytes
+    );
+    assert!(item_front(&repo, "aggr", "old").1["preview"].is_null());
+    assert!(item_front(&repo, "aggr", "missing").1["preview"].is_null());
+    old_image.assert_calls(0);
+    image.assert_calls(1);
+    missing.assert_calls(1);
+}
+
+#[test]
+fn one_download_can_supply_the_article_image_and_its_feed_preview() {
+    let server = MockServer::start();
+    let source = server.url("/cover.png");
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.json");
+        then.status(200)
+            .header("content-type", "application/feed+json")
+            .json_body(serde_json::json!({
+                "version": "https://jsonfeed.org/version/1.1",
+                "title": "Image feed",
+                "items": [{
+                    "id": "shared-image",
+                    "title": "Shared image",
+                    "url": server.url("/articles/shared-image"),
+                    "date_published": "2026-09-04T10:00:00Z",
+                    "image": source,
+                    "content_html": format!(
+                        "<p>Before.</p><img src=\"{source}\" alt=\"Cover\"><p>After.</p>"
+                    ),
+                }],
+            }));
+    });
+    let image = server.mock(|when, then| {
+        when.method(GET).path("/cover.png");
+        then.status(200)
+            .header("content-type", "image/png")
+            .body(preview_image());
+    });
+    let repo = TestRepo::new();
+    repo.write_raw_config(&format!(
+        "[fetch]\ncontent = \"light\"\nimages = true\npreviews = true\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+        server.url("/feed.json")
+    ));
+
+    repo.aggr().arg("sync").assert().success();
+
+    image.assert_calls(1);
+    let (_, front) = item_front(&repo, "aggr", "shared-image");
+    assert!(!front["preview"].is_null());
+    assert_eq!(front["images"].as_sequence().map(Vec::len), Some(1));
+}
+
+#[test]
+fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
+    let server = MockServer::start();
+    let source = server.url("/diagram.png");
+    let feed = serde_json::json!({
+        "version": "https://jsonfeed.org/version/1.1",
+        "title": "Image feed",
+        "items": [{
+            "id": "illustrated",
+            "title": "Illustrated article",
+            "url": server.url("/articles/illustrated"),
+            "date_published": "2026-09-04T10:00:00Z",
+            "content_html": format!(
+                "<p>Before.</p><img src=\"{source}\" alt=\"A useful diagram\"><p>After.</p>"
+            ),
+        }],
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.json");
+        then.status(200)
+            .header("content-type", "application/feed+json")
+            .json_body(feed);
+    });
+    let master = preview_image();
+    let image = server.mock(|when, then| {
+        when.method(GET).path("/diagram.png");
+        then.status(200)
+            .header("content-type", "image/png")
+            .body(master.clone());
+    });
+    let repo = TestRepo::new();
+    repo.write_raw_config(&format!(
+        "[fetch]\ncontent = \"light\"\nimages = true\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+        server.url("/feed.json")
+    ));
+
+    repo.aggr().arg("sync").assert().success();
+    image.assert_calls(1);
+    let (path, front) = item_front(&repo, "aggr", "illustrated-article");
+    let archived = &front["images"][0];
+    let directory = Path::new(&path).parent().unwrap();
+    let original = directory.join(archived["original"]["file"].as_str().unwrap());
+    assert_eq!(
+        repo.origin_bytes("aggr", original.to_str().unwrap()),
+        master
+    );
+    let variants = archived["variants"].as_sequence().unwrap();
+    assert!(!variants.is_empty());
+    let full = variants.last().unwrap();
+    assert_eq!(
+        full["width"].as_u64(),
+        archived["original"]["width"].as_u64()
+    );
+    let full_path = directory.join(full["file"].as_str().unwrap());
+    let full_bytes = repo.origin_bytes("aggr", full_path.to_str().unwrap());
+    assert_eq!(
+        image::guess_format(&full_bytes).unwrap(),
+        image::ImageFormat::WebP
+    );
+    assert_eq!(
+        image::load_from_memory(&full_bytes).unwrap().to_rgba8(),
+        image::load_from_memory(&master).unwrap().to_rgba8()
+    );
+    assert!(repo.origin_show("aggr", &path).contains(&source));
+
+    repo.aggr().arg("build").assert().success();
+    let source_slug = path.split('/').nth(1).unwrap();
+    let item_slug = Path::new(&path).file_stem().unwrap();
+    let page = std::fs::read_to_string(
+        repo.clone
+            .join("_site/items")
+            .join(source_slug)
+            .join(item_slug)
+            .join("index.html"),
+    )
+    .unwrap();
+    assert!(
+        page.contains("<picture class=\"article-picture\""),
+        "{page}"
+    );
+    assert!(page.contains("data-placeholder=\"assets/images/"), "{page}");
+    let expected_ratio = format!(
+        "--image-ratio:{} / {}",
+        archived["original"]["width"].as_u64().unwrap(),
+        archived["original"]["height"].as_u64().unwrap()
+    );
+    assert!(page.contains(&expected_ratio), "{page}");
+    assert!(page.contains(" 48w"), "{page}");
+    assert!(page.contains("type=\"image/webp\""), "{page}");
+    assert!(page.contains("loading=\"eager\""), "{page}");
+    assert!(page.contains("fetchpriority=\"high\""), "{page}");
+    let master_asset = format!(
+        "assets/images/{}.png",
+        hex::encode(sha1::Sha1::digest(&master))
+    );
+    assert_eq!(
+        std::fs::read(repo.clone.join("_site").join(&master_asset)).unwrap(),
+        master
+    );
+    assert!(page.contains(&master_asset), "{page}");
+    assert!(
+        std::fs::read_to_string(repo.clone.join("_site/sw.js"))
+            .unwrap()
+            .contains(&master_asset)
+    );
+
+    let tip = repo.origin_rev("aggr").unwrap();
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing new"));
+    assert_eq!(repo.origin_rev("aggr").unwrap(), tip);
+    image.assert_calls(1);
+
+    repo.aggr().args(["sync", "--refresh"]).assert().success();
+    let (refreshed_path, refreshed) = item_front(&repo, "aggr", "illustrated-article");
+    assert_eq!(refreshed["images"], front["images"]);
+    assert_eq!(
+        repo.origin_bytes(
+            "aggr",
+            Path::new(&refreshed_path)
+                .parent()
+                .unwrap()
+                .join(refreshed["images"][0]["original"]["file"].as_str().unwrap())
+                .to_str()
+                .unwrap()
+        ),
+        master
+    );
+    image.assert_calls(1);
+}
+
+#[test]
+fn previews_mirror_local_bytes_and_retention_preserves_historical_blobs() {
+    let server = MockServer::start();
+    let mut feed = server.mock(|when, then| {
+        when.method(GET).path("/feed.json");
+        then.status(200)
+            .header("content-type", "application/feed+json")
+            .body(preview_feed(
+                &server,
+                &[("old", "/old.png", "2026-09-01T10:00:00Z")],
+            ));
+    });
+    let image = server.mock(|when, then| {
+        when.method(GET).path("/old.png");
+        then.status(200).body(preview_image());
+    });
+    let publisher = server.mock(|when, then| {
+        when.method(GET).path("/articles/old");
+        then.status(500);
+    });
+    let upstream = TestRepo::new();
+    upstream.write_raw_config(&format!(
+        "[fetch]\ncontent = \"light\"\npreviews = true\n[store]\nmax_items = 1\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+        server.url("/feed.json"),
+    ));
+    upstream.aggr().arg("sync").assert().success();
+    let original_tip = upstream.origin_rev("aggr").unwrap();
+    let (path, front) = item_front(&upstream, "aggr", "old");
+    let companion = Path::new(&path)
+        .parent()
+        .unwrap()
+        .join(front["preview"]["file"].as_str().unwrap());
+    let bytes = upstream.origin_bytes("aggr", companion.to_str().unwrap());
+    image.assert_calls(1);
+
+    let replica = TestRepo::new();
+    replica.write_raw_config(
+        "[fetch]\ncontent = \"heavy\"\npreviews = true\n[[sources]]\ntype = \"aggr\"\nname = \"Mirror\"\nurl = \"https://mirror.invalid/source.git\"\n",
+    );
+    let local = url::Url::from_file_path(&upstream.origin).unwrap();
+    let mirror_sync = || {
+        let mut cmd = replica.aggr();
+        cmd.env("GIT_CONFIG_COUNT", "2")
+            .env("GIT_CONFIG_KEY_0", format!("url.{local}.insteadOf"))
+            .env("GIT_CONFIG_VALUE_0", "https://mirror.invalid/source.git")
+            .env("GIT_CONFIG_KEY_1", "protocol.file.allow")
+            .env("GIT_CONFIG_VALUE_1", "always")
+            .arg("sync");
+        cmd
+    };
+    mirror_sync()
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mirror: +1"));
+    let (mirror_path, mirror_front) = item_front(&replica, "aggr", "old");
+    let mirror_companion = Path::new(&mirror_path)
+        .parent()
+        .unwrap()
+        .join(mirror_front["preview"]["file"].as_str().unwrap());
+    assert_eq!(
+        replica.origin_bytes("aggr", mirror_companion.to_str().unwrap()),
+        bytes
+    );
+    assert_eq!(mirror_front["preview"], front["preview"]);
+    image.assert_calls(1);
+    publisher.assert_calls(0);
+    let mirror_tip = replica.origin_rev("aggr").unwrap();
+    mirror_sync().assert().success();
+    assert_eq!(replica.origin_rev("aggr").unwrap(), mirror_tip);
+    image.assert_calls(1);
+    publisher.assert_calls(0);
+
+    feed.delete();
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.json");
+        then.status(200)
+            .header("content-type", "application/feed+json")
+            .body(preview_feed(
+                &server,
+                &[("new", "/old.png", "2026-09-02T10:00:00Z")],
+            ));
+    });
+    upstream
+        .aggr()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("retention: -1"));
+    let files = upstream.origin_files("aggr");
+    assert!(!files.contains(&path));
+    assert!(!files.contains(&companion.to_str().unwrap().to_string()));
+    assert_eq!(upstream.origin_rev("aggr^").unwrap(), original_tip);
+    assert_eq!(
+        upstream.origin_bytes(&original_tip, companion.to_str().unwrap()),
+        bytes
+    );
+    assert!(
+        upstream
+            .origin_show(&original_tip, &path)
+            .contains("preview:")
     );
 }
 
@@ -247,11 +691,12 @@ fn dev_uses_an_external_persistent_cache_and_stops_on_ctrl_c() {
     let repo = TestRepo::new();
     repo.write_config(&server.url("/feed.xml"), "");
     let cache = tempfile::tempdir().unwrap();
+    let cache_path = cache.path().canonicalize().unwrap();
 
     let run = |port: u16| {
         let mut command = repo.aggr();
         command
-            .env("AGGR_CACHE_DIR", cache.path())
+            .env("AGGR_CACHE_DIR", &cache_path)
             .args(["dev", "--port", &port.to_string()])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -263,7 +708,7 @@ fn dev_uses_an_external_persistent_cache_and_stops_on_ctrl_c() {
     drop(available);
     let first = run(port);
     wait_for_dev(port, Duration::from_secs(10));
-    wait_for_cached_site(cache.path(), Duration::from_secs(20));
+    wait_for_cached_site(&cache_path, Duration::from_secs(20));
     let first = stop_dev(first);
     assert!(
         first.status.success(),
@@ -560,7 +1005,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(index.contains(">aggr.toml ↗</a>"));
     assert!(index.contains(">built with aggr</a>"));
     assert!(index.contains("href=\"https://github.com/aymericbeaumet/aggr\""));
-    assert!(index.contains("href=\"sources/\""), "{index}");
+    assert!(index.contains("href=\"library/\""), "{index}");
     assert!(index.contains("href=\"preferences/\""), "{index}");
     assert!(index.contains("target=\"_blank\""), "{index}");
     assert!(!index.contains("built <time"));
@@ -584,7 +1029,9 @@ fn build_renders_the_site_and_release_needs_a_url() {
     );
     assert!(page.contains("/aggr.toml\" target=\"_blank\""), "{page}");
     assert!(!page.contains("Git record <code>"), "{page}");
-    assert!(page.contains("class=\"article-navigation\""), "{page}");
+    assert!(page.contains("class=\"article-footer\""), "{page}");
+    assert!(page.contains(">Continue reading</h2>"), "{page}");
+    assert!(!page.contains("class=\"article-navigation\""), "{page}");
     assert!(!page.contains("alert("), "{page}");
     let representation = site.join("items/demo/2026-09-01-hello-there");
     assert!(representation.with_extension("md").exists());
@@ -624,7 +1071,13 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(site.join("rss.xml").exists());
     assert!(site.join("feed.json").exists());
     assert!(site.join(".nojekyll").exists());
+    assert!(site.join("library/index.html").exists());
+    assert!(site.join("browse/index.html").exists());
     assert!(site.join("sources/demo/index.html").exists());
+    assert!(site.join("sources/index.html").exists());
+    assert!(!site.join("sources/atom.xml").exists());
+    assert!(!site.join("sources/rss.xml").exists());
+    assert!(!site.join("sources/feed.json").exists());
     assert!(site.join("preferences/index.html").exists());
     assert!(!site.join("settings/index.html").exists());
     assert!(site.join("aggr.toml").exists());
@@ -633,19 +1086,33 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(site.join("categories/demo/rss.xml").exists());
     assert!(site.join("categories/demo/feed.json").exists());
     assert!(site.join("categories/index.html").exists());
-    assert!(site.join("categories/atom.xml").exists());
-    assert!(site.join("categories/rss.xml").exists());
-    assert!(site.join("categories/feed.json").exists());
+    assert!(!site.join("categories/atom.xml").exists());
+    assert!(!site.join("categories/rss.xml").exists());
+    assert!(!site.join("categories/feed.json").exists());
     assert!(site.join("tags/index.html").exists());
-    assert!(site.join("tags/atom.xml").exists());
-    assert!(site.join("tags/rss.xml").exists());
-    assert!(site.join("tags/feed.json").exists());
+    assert!(!site.join("tags/atom.xml").exists());
+    assert!(!site.join("tags/rss.xml").exists());
+    assert!(!site.join("tags/feed.json").exists());
     assert!(site.join("tags/example/index.html").exists());
     assert!(site.join("tags/example/atom.xml").exists());
     assert!(site.join("tags/example/rss.xml").exists());
     assert!(site.join("tags/example/feed.json").exists());
-    let tags = std::fs::read_to_string(site.join("tags/index.html")).unwrap();
-    assert!(tags.contains(">#example</a>"), "{tags}");
+    let library = std::fs::read_to_string(site.join("library/index.html")).unwrap();
+    assert!(library.contains("id=\"sources\""), "{library}");
+    assert!(library.contains("id=\"categories\""), "{library}");
+    assert!(library.contains("id=\"tags\""), "{library}");
+    assert!(library.contains("href=\"sources/demo/\""), "{library}");
+    assert!(library.contains("href=\"categories/demo/\""), "{library}");
+    assert!(library.contains("href=\"tags/example/\""), "{library}");
+    assert!(library.contains(">#example</a>"), "{library}");
+    assert!(!library.contains("explore-nav"), "{library}");
+    assert!(!library.contains("directory-count"), "{library}");
+    assert!(!library.contains("directory-status"), "{library}");
+    for legacy in ["explore", "browse", "sources", "categories", "tags"] {
+        let redirect = std::fs::read_to_string(site.join(legacy).join("index.html")).unwrap();
+        assert!(redirect.contains("noindex,follow"), "{redirect}");
+        assert!(redirect.contains("url=/library/"), "{redirect}");
+    }
     let tag = std::fs::read_to_string(site.join("tags/example/index.html")).unwrap();
     let tag = tag.replace("\r\n", "\n");
     assert!(tag.contains("<h1>\n      #example\n"), "{tag}");

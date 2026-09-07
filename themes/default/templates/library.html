@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page library-page" aria-labelledby="page-title">
+  <header class="page-header">
+    <h1 id="page-title">{{ page.title }}</h1>
+    <p class="muted library-intro">Find every retained archive by source or topic.</p>
+  </header>
+  <div class="page-body library-directory" data-directory-root>
+    <form class="directory-tools" role="search" action="{{ 'library/' | url_for }}" method="get">
+      <label class="sr-only" for="directory-filter">Filter sources, categories, and tags</label>
+      <input id="directory-filter" name="q" type="search" inputmode="search" autocomplete="off" placeholder="Filter sources and topics…" data-directory-filter data-page-search>
+    </form>
+    <div class="library-groups">
+      <section class="library-group library-group-sources" id="sources" aria-labelledby="sources-title" data-directory-section>
+        <h2 id="sources-title">Sources</h2>
+        {% if sources %}
+          {% set entries = sources %}{% set directory_kind = 'sources' %}{% set directory_title = 'Sources' %}{% include "_directory.html" %}
+        {% else %}
+          <p class="empty">No sources configured. Add a <code>[[sources]]</code> entry to <code>aggr.toml</code>.</p>
+        {% endif %}
+      </section>
+      {% if site.has_categories %}
+      <section class="library-group" id="categories" aria-labelledby="categories-title" data-directory-section>
+        <h2 id="categories-title">Categories</h2>
+        {% set entries = categories %}{% set directory_kind = 'categories' %}{% set directory_title = 'Categories' %}{% include "_directory.html" %}
+      </section>
+      {% endif %}
+      <section class="library-group" id="tags" aria-labelledby="tags-title" data-directory-section>
+        <h2 id="tags-title">Tags</h2>
+        {% if tags %}
+          {% set entries = tags %}{% set directory_kind = 'tags' %}{% set directory_title = 'Tags' %}{% include "_directory.html" %}
+        {% else %}
+          <p class="empty">No tagged articles yet.</p>
+        {% endif %}
+      </section>
+    </div>
+    <p class="empty" data-directory-empty hidden>No matching sources or topics.</p>
+    <noscript><p class="muted">All collections remain available below; filtering needs JavaScript.</p></noscript>
+  </div>
+</section>
+{% endblock %}

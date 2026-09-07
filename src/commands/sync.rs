@@ -13,6 +13,9 @@ use crate::store::Outcome;
 pub const LAST_GOOD: &str = "refs/aggr/last-good";
 
 pub async fn run(project: &Project, args: &SyncArgs) -> Result<()> {
+    if args.clean {
+        super::clean::run_project(project, None, false)?;
+    }
     let worktree = project.worktree()?;
     let first = worktree.head_sha()?.is_none();
     let report = fetch::run(project, &worktree, &args.fetch).await?;

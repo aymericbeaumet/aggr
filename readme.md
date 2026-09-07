@@ -17,11 +17,9 @@ provider-neutral path is documented below.
 
 What you get:
 
-- a responsive, installable PWA with a precached shell, home feed, and newest configured entries
-  (30 by default); native pull-to-refresh where the platform provides it plus an always-available
-  refresh control;
-  one-minute deploy checks while running with catch-up checks on return or reconnect; tab-scoped
-  new-item cues; and instant Swup navigation;
+- a responsive, installable PWA with bottom navigation on mobile, comfortable article typography,
+  keyboard navigation, and a precached shell, home feed, and newest configured entries (30 by
+  default); updates arrive without interrupting reading;
 - build-time Pagefind full-text search over clean article prose, including best-effort lookup by a
   pasted original URL;
 - a recent feed plus source, category, and `#tag` archives for every visible retained item;
@@ -30,12 +28,15 @@ What you get:
   descriptor for crawlers and other readers;
 - original-page extraction by default, with the exact upstream URL and capture time kept as
   provenance;
+- local, lossless copies of safe article images by default, plus optional list/search previews;
 - immutable item versions in append-only git history, for as long as that history is retained.
 
-aggr is a readable-content archive, not a full-fidelity web crawler or WARC archive. It preserves
-the extracted article or feed content, not scripts, styles, page chrome, response headers, or
-downloaded media. If an original-page fetch fails, the saved item may contain feed content, a
-summary, or only its metadata. These limits keep every stored and rendered page safe and small.
+aggr preserves readable article or feed content rather than a complete copy of the original
+website. Scripts, styles, page chrome, and response headers are excluded. By default, safe raster
+images in newly captured articles are stored locally while their publisher URLs remain in the
+portable Markdown. Images that cannot be archived safely keep using those publisher URLs. If an
+original-page fetch fails, the saved item may contain feed content, a summary, or only its
+metadata.
 
 ## Quick start on GitHub
 
@@ -73,14 +74,19 @@ The generated workflow runs every 30 minutes and after root or nested TOML confi
 changes on the repository's actual default branch. Push events from other branches are ignored;
 scheduled and manual runs remain available.
 
-The installed reader attempts a deployment check once a minute while it is running and always
-checks again when it returns to the foreground or reconnects; operating systems may suspend
-background pages. A deployed update reloads automatically while preserving the reading position.
+The reader checks for deployments once a minute while visible and online, and checks again when
+it returns to the foreground or reconnects. An update takes effect on your next navigation or
+refresh; it never reloads the article you are reading. Use your browser's refresh command
+(`Cmd+R` or `Ctrl+R`) or native pull-to-refresh where available. The installed app provides its own
+pull-to-refresh gesture.
+
 New-item highlights and the title/favicon dot use tab-local state that disappears when the tab
 closes. Normal browser tabs request a new tab for external links; installed
 apps hand out-of-scope links to the platform's external or in-app browser UI. Presentation varies
 by operating system. Installation and service-worker caching require HTTPS (localhost is the
 development exception). A static aggr site cannot wake a closed app with background push.
+If an older installation used a site under a path such as `/reads/`, removing and reinstalling it
+may be necessary to adopt the corrected app identity and scope.
 
 Private repositories need a GitHub plan that supports private Pages. To build without Pages and
 keep the result as a workflow artifact, add the input to the generated job:
@@ -98,6 +104,41 @@ The `@v1` reference is a stable workflow contract. On every run it resolves the 
 workflow is deliberately a rolling major channel: pinning only its workflow tag does not also pin
 the binary. A custom job can use the composite action at an immutable `@vX.Y.Z` tag with the same
 exact `version` input when both pieces must be frozen.
+
+## Read comfortably
+
+Mobile navigation keeps Feed, Search, Library, and Preferences within reach. The `/library/` hub
+groups source, category, and tag archives on one filterable page. Preferences groups appearance, article text size and line width,
+feed density, page size and preview visibility, date formats, and keyboard controls. Changes save automatically
+in this browser. Compact feeds are the default; choose Comfortable for more space. Page transitions
+follow your device's reduced-motion setting and can also be switched off.
+Article headers show the visible Unicode word count and a reading estimate rounded up at 225 words
+per minute; the same values are available to themes and machine-readable article metadata.
+
+Under **Transfer preferences**, share or copy a link, save a JSON file, or import one on another
+device. Links and files include only these settings, not reading history, and imported settings
+need confirmation before applying. Preference links keep their payload in the URL fragment so
+it is not sent to the server. Older preference links still work. Reset restores the defaults
+without clearing reading history or offline articles.
+
+| Keys | Action |
+|---|---|
+| `Cmd+K` / `Ctrl+K` | Open global search. |
+| `/` | Local search. |
+| `j` / `k` in article lists | Select the next / previous item; the first press selects the first item. |
+| `o` / `Enter` in article lists | Open the selected item. |
+| `j` / `k` in articles | Open the older / newer article. At either end, the key is a no-op. |
+| `O` in articles | Open the original article. |
+| Uppercase network key in articles | Open the matched discussion, or search that enabled network for the original URL. Built-ins use `H`, `R`, and `X`. |
+| `u` / `d` in articles | Scroll up / down. |
+| `g f`, `g /`, `g l`, `g p` | Feed, global search, Library, preferences. |
+| `g 1` … `g 9` | Open one of the first nine feed entries. |
+| `?` | Show keyboard help. |
+
+List selection and reading position return with Back. Normal Tab and Enter behavior remains
+available, including on original and discussion links. Single-key shortcuts are on by default
+and can be disabled in Preferences; `Cmd+K` / `Ctrl+K` and standard keyboard controls still work.
+Keyboard focus uses an underline or surface change, without a page-sized focus border.
 
 ## Configure sources
 
@@ -123,6 +164,90 @@ conservative article discovery. In the default heavy content mode it attempts to
 original page and extract its main article; use `content = "light"` on a source to trust its feed
 content instead. The default first import considers the newest 100 entries from each feed, then
 every later run adds newly observed entries.
+
+Extraction retains article images, inline links, and code indentation, with syntax colors for
+recognized code languages. When retained HTML can recover code formatting lost in an older
+capture, builds improve the displayed article without rewriting the saved item or its git history.
+Custom source headers stay on the configured origin; redirected or linked article and image
+requests on other origins do not receive those headers.
+
+In heavy mode, a public ActivityPub/Mastodon status is expanded into its public same-author
+self-reply thread when the page advertises ActivityStreams data. Parent and reply traversal stays
+on the status origin, is tightly bounded, and falls back to ordinary article extraction if the
+server withholds or rejects any required data. aggr does not scrape X/Twitter threads; its official
+thread APIs require authentication and mutable deletion handling that is incompatible with the
+append-only archive.
+
+Article-image archiving is on by default. The explicit form, including a per-source opt-out, is:
+
+```toml
+[fetch]
+images = true
+
+[[sources]]
+url = "https://blog.rust-lang.org/"
+
+[[sources]]
+url = "https://example.com/feed.xml"
+images = false # leave this source's body images at their publisher URLs
+```
+
+For every accepted JPEG, PNG, GIF, or WebP image, aggr keeps the exact publisher response as the
+master. When the bounded media budget permits it, safe static 8-bit images also get responsive
+320, 640, 960, 1280, and 1600-pixel renditions where useful, plus a full-width rendition. These
+are resized once with a high-quality filter, encoded as lossless WebP, then decoded and
+pixel-compared before aggr offers them to the browser. The exact master always remains the
+fallback, so choosing a smaller rendition introduces no lossy compression and a high-density
+display is never forced to upscale it. A rendition is retained only when it is smaller than the
+master. For a non-WebP master, aggr offers the responsive set only when its verified full-width
+WebP is also smaller; an existing WebP master fills that full-width slot without being duplicated.
+
+Animated GIF/WebP, images with an ICC color profile, and high-bit-depth images keep only their
+exact master. SVG is left remote because it can contain active content. Other unsupported or
+invalid media also keeps its safe publisher URL. Image work is failure isolated: a timeout,
+decode error, size rejection, or failed download never prevents the article from being saved.
+
+Acquisition is intentionally bounded per article: at most 24 candidates are inspected and 12
+images retained; one response or rendition may use at most 10 MiB; downloaded and retained media
+each have a 32 MiB cumulative budget; and decoded images may not exceed 32 megapixels or 12,000
+pixels on either axis. Decoding runs at most two images concurrently with a 15-second per-image
+limit. These media limits are conservative implementation safeguards rather than configuration
+knobs.
+
+Rendered pages use intrinsic dimensions and a dominant-color placeholder to avoid layout jumps.
+The first body image loads eagerly at high priority; later images use native lazy loading and
+asynchronous decoding. Local files are content-addressed and immutable. In the PWA, media for the
+newest offline articles is cached opportunistically within a separate byte budget; other local
+media enters a bounded cache after a successful view. Offline text therefore remains available
+even when an optional image did not fit the precache. A publisher-hosted fallback is never
+guaranteed offline.
+
+Image archiving applies to newly discovered items only; enabling it does not fetch media for old
+captures. Exact masters and responsive renditions increase the append-only data branch and Git
+history, and normal retention cannot reclaim historical objects. Before publishing an archive,
+make sure storing and redistributing a source's images is compatible with its terms and your local
+law. Use `images = false` for sources whose media you should not retain.
+
+To save small local previews for newly discovered articles:
+
+```toml
+[fetch]
+previews = true
+
+[[sources]]
+url = "https://blog.rust-lang.org/"
+
+[[sources]]
+url = "https://example.com/feed.xml"
+previews = false # override the default for one source
+```
+
+Previews are off by default. aggr downloads and resizes a suitable image to at most 256 pixels per
+side, encodes it as lossless WebP (up to 384 KiB), and records its intrinsic dimensions, alt text,
+and dominant color. The color reserves a calm placeholder while the thumbnail loads. A missing or
+unusable preview never prevents saving the article. Previews appear in feed and search rows
+without adding a duplicate hero to the article page, and existing items are not backfilled when
+previews are enabled.
 
 Split a growing collection by including a TOML file as a source. Its position is preserved, and
 the category on the entry becomes the default for sources that do not set their own:
@@ -198,6 +323,8 @@ An aggr source copies every visible item retained in the other instance's curren
 default. Set `limit` only when you deliberately want the newest N items. Items that exist only in
 older commits are not copied, so this is a useful content replica rather than a clone of the other
 repository's complete history.
+When previews or article images are enabled for the mirror source, existing local companions are
+copied with the article without contacting the publisher. Disabled media stays omitted.
 
 ## Run on any Git and static host
 
@@ -275,15 +402,21 @@ contract.
 | Command | Purpose |
 |---|---|
 | `aggr init [--github] [--defaults]` | Write a minimal config, optionally the GitHub workflow; `--defaults` copies the full reference config. |
-| `aggr sync [--fetch-only] [--dry-run]` | Fetch new items. Normally commit and push them; `--fetch-only` writes locally without either, while `--dry-run` writes nothing. |
-| `aggr build [--release] [--out DIR] [--data-ref REF]` | Sync and render, or render a pinned data ref without source/discussion fetches, commits, or pushes. Matching renders are cached. |
-| `aggr dev [--release] [--port 7319]` | Sync and build in an isolated system cache, serve entirely from memory, watch dependencies, and live-reload. It never commits, pushes, or pollutes the repository. |
+| `aggr sync [--fetch-only] [--dry-run] [--clean]` | Fetch new items. Normally commit and push them; `--fetch-only` writes locally without either, while `--dry-run` writes nothing. `--clean` discards rebuildable state first. |
+| `aggr build [--release] [--out DIR] [--data-ref REF] [--clean]` | Sync and render, or render a pinned data ref without source/discussion fetches, commits, or pushes. Matching renders are cached; `--clean` starts without that cache or prior owned output. |
+| `aggr dev [--release] [--port 7319] [--clean]` | Sync and build in an isolated system cache, serve entirely from memory, watch dependencies, and live-reload. It never commits or pushes; `--clean` recreates its isolated snapshot. |
+| `aggr clean [--dry-run] [--out DIR]` | Remove this config's disposable dev state, repository build cache, and owned generated output. `--dry-run` lists exact targets. |
 | `aggr check` | Validate the config and probe every source. |
 | `aggr completions <SHELL>` | Generate shell completions. |
 
 Build uses a repository-local cache; dev uses a separate OS-standard cache keyed by the canonical
 config path. Repeated runs are designed to become nearly instant without mixing CI/build and local
-development state.
+development state. Cleanup removes the whole aggr-owned repository cache (including obsolete
+namespace versions) and this config's dev snapshot, but only after proving each target disposable. Generated
+output needs its `.aggr-site` ownership marker; an unmarked output directory is kept. Protected,
+tracked, escaping, or symlinked targets are rejected, and cleanup stops if the same dev workspace
+is active. The append-only data worktree under `.aggr/data`, archived articles, Git refs/history,
+and hand-made files are never cleanup targets.
 
 ## Git is the database
 
@@ -301,6 +434,8 @@ The precise branch, ref, recovery, concurrency, and hand-editing contract is in
 A theme is a `templates/` plus `static/` directory rendered with
 [MiniJinja](https://github.com/mitsuhiko/minijinja). Project-local files override a selected theme,
 which overrides the embedded default, so changing one template does not require copying the rest.
+See [`docs/themes.md`](docs/themes.md) for the template contract, preview fields, and navigation
+hooks to preserve when customizing the reader.
 
 For development:
 
@@ -308,6 +443,17 @@ For development:
 make check
 cargo run -- dev --config examples/aggr.toml
 ```
+
+The browser regression suite uses a local ChromeDriver and a temporary, pinned article archive:
+
+```sh
+chromedriver --port=9515 --allowed-ips=127.0.0.1
+# In another terminal:
+AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser -- --ignored
+```
+
+Set `AGGR_CHROME_BINARY` if Chrome is outside its usual location. CI installs matching browser
+and driver versions; failure screenshots and logs are saved under `target/browser-artifacts/`.
 
 Issues and pull requests are welcome. If aggr improves your reading workflow, star the repository
 and share your reader—the easiest way for someone else to begin is often to fork one that already

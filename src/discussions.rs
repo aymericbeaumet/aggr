@@ -1,6 +1,6 @@
 //! Build-time discovery of conversations about an article. Lookups are cached outside the data
-//! branch, bounded, concurrent, and strictly optional: any provider or credential failure leaves
-//! the configured search URL in place.
+//! branch, bounded, concurrent, and strictly optional: provider misses and failures omit the
+//! discussion link from that item's rendered context.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -165,7 +165,7 @@ pub async fn resolve(
             }
             Ok(Lookup::Unavailable) => {}
             Err(err) => log::debug!(
-                "{} discussion lookup for {} fell back to search: {err:#}",
+                "{} discussion lookup for {} was omitted: {err:#}",
                 job.provider.as_str(),
                 job.link
             ),

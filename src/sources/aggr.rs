@@ -3,9 +3,12 @@
 //! bounded to the newest entries. Items keep their original link, so a feed both sites follow
 //! still dedupes to one entry.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use anyhow::{Context as _, Result};
+use serde::{Deserialize, Serialize};
 use serde_yaml_ng::Value;
 use url::Url;
 
@@ -16,6 +19,11 @@ use crate::git;
 use crate::model::{Item, RawItem, sha1_hex};
 use crate::store::Store;
 
+type MirrorMutex = Mutex<()>;
+type MirrorLockRegistry = Mutex<HashMap<PathBuf, Weak<MirrorMutex>>>;
+
+static MIRROR_LOCKS: OnceLock<MirrorLockRegistry> = OnceLock::new();
+
 pub async fn fetch(
     url: &Url,
     branch: &str,
@@ -25,19 +33,20 @@ pub async fn fetch(
     ctx: &Context<'_>,
 ) -> Result<Fetch> {
     let remote = url.to_string();
-    let tip = {
+    let advertised_tip = {
         let (r, b) = (remote.clone(), branch.to_string());
         tokio::task::spawn_blocking(move || git::remote_tip(&r, &b))
             .await
             .context("git task")??
             .with_context(|| format!("{remote} has no {branch:?} branch"))?
     };
-    let validators = Validators {
-        body_hash: Some(tip.clone()),
-        ..Default::default()
-    };
-    if ctx.state.body_hash.as_deref() == Some(tip.as_str()) {
-        return Ok(Fetch::Unchanged { validators });
+    if ctx.state.body_hash.as_deref() == Some(advertised_tip.as_str()) {
+        return Ok(Fetch::Unchanged {
+            validators: Validators {
+                body_hash: Some(advertised_tip),
+                ..Default::default()
+            },
+        });
     }
 
     let dir = ctx
@@ -45,39 +54,77 @@ pub async fn fetch(
         .join("mirrors")
         .join(mirror_key(&remote, branch));
     let via = human_url(url);
-    let items = {
+    let (checked_out_tip, items) = {
+        let mirror_dir = dir.clone();
         let (remote, branch, via, only) = (
             remote.clone(),
             branch.to_string(),
             via.clone(),
             only.to_vec(),
         );
-        tokio::task::spawn_blocking(move || -> Result<Vec<RawItem>> {
-            git::mirror(&remote, &branch, &dir)?;
-            read_items(&Store::open(&dir), &via, &only, limit)
+        with_mirror_lock(dir, move || -> Result<_> {
+            let checked_out_tip = git::mirror(&remote, &branch, &mirror_dir)?;
+            let items = read_items(&Store::open(&mirror_dir), &mirror_dir, &via, &only, limit)?;
+            Ok((checked_out_tip, items))
         })
-        .await
-        .context("git task")??
+        .await?
     };
 
+    Ok(changed_fetch(url, via, checked_out_tip, items))
+}
+
+fn mirror_lock(dir: &Path) -> Arc<MirrorMutex> {
+    let mut locks = MIRROR_LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(dir).and_then(Weak::upgrade) {
+        return lock;
+    }
+
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(dir.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
+
+async fn with_mirror_lock<T, F>(dir: PathBuf, task: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    let lock = mirror_lock(&dir);
+    tokio::task::spawn_blocking(move || {
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        task()
+    })
+    .await
+    .context("git task")?
+}
+
+fn changed_fetch(url: &Url, via: String, checked_out_tip: String, items: Vec<RawItem>) -> Fetch {
     let title = url
         .path()
         .trim_matches('/')
         .trim_end_matches(".git")
         .to_string();
-    Ok(Fetch::Changed {
-        validators,
+    Fetch::Changed {
+        validators: Validators {
+            body_hash: Some(checked_out_tip),
+            ..Default::default()
+        },
         meta: SourceMeta {
             title: (!title.is_empty()).then_some(title),
             site_url: Some(via),
         },
         items,
-    })
+    }
 }
 
 /// Retained items in the mirrored tree, optionally restricted by source and newest-first limit.
 pub fn read_items(
     store: &Store,
+    store_root: &Path,
     via: &str,
     only: &[String],
     limit: Option<usize>,
@@ -97,10 +144,98 @@ pub fn read_items(
     items
         .iter()
         .map(|item| {
-            let html = store.read_html(&item.path)?;
-            Ok(convert(item, html, via))
+            let html = store.read_html(item)?;
+            let mut raw = convert(item, html, via);
+            attach_companion_locator(&mut raw, store_root, &item.path)?;
+            Ok(raw)
         })
         .collect()
+}
+
+// `RawItem` deliberately has no source-engine state. Keep this opaque value transient and remove
+// it before front matter is planned; it only bridges mirror enumeration and post-dedupe hydration.
+const COMPANION_LOCATOR_KEY: &str = "\u{e000}aggr:mirror-companions";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CompanionLocator {
+    store_root: PathBuf,
+    item_path: String,
+}
+
+pub(crate) fn attach_companion_locator(
+    raw: &mut RawItem,
+    store_root: &Path,
+    item_path: &str,
+) -> Result<()> {
+    let locator = CompanionLocator {
+        store_root: store_root.to_path_buf(),
+        item_path: item_path.to_string(),
+    };
+    raw.extra.insert(
+        COMPANION_LOCATOR_KEY.into(),
+        serde_yaml_ng::to_value(locator).context("encoding mirror companion locator")?,
+    );
+    Ok(())
+}
+
+fn take_companion_locator(raw: &mut RawItem) -> Option<CompanionLocator> {
+    raw.extra
+        .remove(COMPANION_LOCATOR_KEY)
+        .and_then(|value| serde_yaml_ng::from_value(value).ok())
+}
+
+pub(crate) fn discard_companion_locator(raw: &mut RawItem) {
+    raw.extra.remove(COMPANION_LOCATOR_KEY);
+}
+
+pub(crate) fn persistent_extra(raw: &RawItem) -> std::collections::BTreeMap<String, Value> {
+    let mut extra = raw.extra.clone();
+    extra.remove(COMPANION_LOCATOR_KEY);
+    extra
+}
+
+/// Load optional mirror companions only after the caller has decided this item will be written.
+/// All failures remain best-effort: the retained Markdown still points at publisher images.
+pub(crate) async fn hydrate_companions(mut raw: RawItem) -> RawItem {
+    let Some(locator) = take_companion_locator(&mut raw) else {
+        return raw;
+    };
+    let item_path = locator.item_path.clone();
+    let loaded = tokio::task::spawn_blocking(move || -> Result<_> {
+        let store = Store::open(locator.store_root);
+        let item = store.read_item(&locator.item_path)?;
+        let preview = match (&item.front.preview, store.read_preview(&item)?) {
+            (Some(metadata), Some(bytes)) => Some(crate::preview::Thumbnail {
+                extension: if metadata.file.ends_with(".webp") {
+                    "webp"
+                } else {
+                    "jpg"
+                },
+                bytes,
+                width: metadata.width,
+                height: metadata.height,
+                alt: metadata.alt.clone(),
+                color: metadata.color.clone().unwrap_or_else(|| "#d4d4d8".into()),
+            }),
+            _ => None,
+        };
+        let images = store.read_image_assets(&item)?;
+        Ok((preview, images))
+    })
+    .await;
+    match loaded {
+        Ok(Ok((preview, images))) => {
+            raw.preview = preview;
+            raw.images = images;
+        }
+        Ok(Err(error)) => {
+            log::debug!("ignoring unavailable mirrored media for {item_path}: {error:#}");
+        }
+        Err(error) => {
+            log::debug!("mirror media task failed for {item_path}: {error}");
+        }
+    }
+    raw
 }
 
 /// A stored item as a fresh one, with the raw HTML when the other side kept it and a rendering
@@ -135,6 +270,9 @@ pub fn convert(item: &Item, html: Option<String>, via: &str) -> RawItem {
         labels: front.labels.clone(),
         summary: front.summary.clone(),
         content_html,
+        preview_candidates: Vec::new(),
+        preview: None,
+        images: Vec::new(),
         extra,
     }
 }
@@ -282,6 +420,64 @@ mod tests {
     }
 
     #[test]
+    fn changed_fetch_uses_the_checked_out_snapshot_tip() {
+        let url = Url::parse("https://github.com/friend/reads.git").unwrap();
+        let advertised_tip = "tip-before-fetch";
+        let checked_out_tip = "tip-returned-by-mirror";
+        let fetch = changed_fetch(
+            &url,
+            "https://github.com/friend/reads".into(),
+            checked_out_tip.into(),
+            vec![],
+        );
+
+        let Fetch::Changed { validators, .. } = fetch else {
+            panic!("expected a changed fetch");
+        };
+        assert_eq!(validators.body_hash.as_deref(), Some(checked_out_tip));
+        assert_ne!(validators.body_hash.as_deref(), Some(advertised_tip));
+    }
+
+    #[tokio::test]
+    async fn shared_mirror_directory_serializes_distinct_filtered_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mirror_dir = tmp.path().join("shared-mirror");
+        let (first_entered_tx, first_entered_rx) = tokio::sync::oneshot::channel();
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+
+        let first = tokio::spawn(with_mirror_lock(mirror_dir.clone(), move || {
+            first_entered_tx.send(()).unwrap();
+            release_first_rx.recv().unwrap();
+            Ok((vec!["source-a".to_string()], Some(3_usize)))
+        }));
+        first_entered_rx.await.unwrap();
+
+        let (second_entered_tx, mut second_entered_rx) = tokio::sync::oneshot::channel();
+        let second = tokio::spawn(with_mirror_lock(mirror_dir, move || {
+            second_entered_tx.send(()).unwrap();
+            Ok((vec!["source-b".to_string()], Some(7_usize)))
+        }));
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut second_entered_rx,)
+                .await
+                .is_err(),
+            "the second read entered while the shared mirror was in use"
+        );
+
+        release_first_tx.send(()).unwrap();
+        let first_filter = first.await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut second_entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let second_filter = second.await.unwrap().unwrap();
+
+        assert_eq!(first_filter, (vec!["source-a".to_string()], Some(3)));
+        assert_eq!(second_filter, (vec!["source-b".to_string()], Some(7)));
+    }
+
+    #[test]
     fn reads_newest_items_from_a_mirror() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path());
@@ -297,14 +493,87 @@ mod tests {
                     front: &item.front,
                     body: "body",
                     html: None,
+                    preview: None,
+                    images: &[],
                 })
                 .unwrap();
         }
-        let all = read_items(&store, "v", &[], None).unwrap();
+        let all = read_items(&store, tmp.path(), "v", &[], None).unwrap();
         assert_eq!(all.len(), 3);
         assert!(all[0].id.as_deref().unwrap().ends_with("2026-09-03-x"));
-        let only_b = read_items(&store, "v", &["b".into()], None).unwrap();
+        let only_b = read_items(&store, tmp.path(), "v", &["b".into()], None).unwrap();
         assert_eq!(only_b.len(), 1);
-        assert_eq!(read_items(&store, "v", &[], Some(2)).unwrap().len(), 2);
+        assert_eq!(
+            read_items(&store, tmp.path(), "v", &[], Some(2))
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn mirror_media_stays_lazy_then_hydrates_and_degrades_on_demand() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path());
+        let image = image::DynamicImage::new_rgb8(640, 400);
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let asset = crate::media::prepare_asset(
+            &crate::media::Candidate {
+                url: Url::parse("https://publisher.invalid/diagram.png").unwrap(),
+                alt: Some("Diagram".into()),
+            },
+            encoded.into_inner(),
+            &crate::media::MediaLimits::default(),
+        )
+        .unwrap();
+        let mut front = item().front;
+        front.images = vec![asset.metadata("article")];
+        store
+            .write_item(crate::store::NewItem {
+                dir: "items/hn/2026/09",
+                stem: "article",
+                front: &front,
+                body: "![Diagram](https://publisher.invalid/diagram.png)",
+                html: None,
+                preview: None,
+                images: std::slice::from_ref(&asset),
+            })
+            .unwrap();
+
+        let mirrored = read_items(&store, tmp.path(), "https://reader.invalid", &[], None).unwrap();
+        assert_eq!(mirrored.len(), 1);
+        assert!(mirrored[0].images.is_empty());
+        let hydrated = hydrate_companions(mirrored.into_iter().next().unwrap()).await;
+        assert_eq!(hydrated.images.len(), 1);
+        assert_eq!(hydrated.images[0].source_url, asset.source_url);
+        assert_eq!(hydrated.images[0].master_bytes, asset.master_bytes);
+        assert_eq!(hydrated.images[0].renditions, asset.renditions);
+
+        let original = tmp
+            .path()
+            .join("items/hn/2026/09")
+            .join(&front.images[0].original.file);
+        std::fs::remove_file(&original).unwrap();
+        let degraded = read_items(&store, tmp.path(), "https://reader.invalid", &[], None).unwrap();
+        assert_eq!(degraded.len(), 1);
+        assert!(
+            hydrate_companions(degraded.into_iter().next().unwrap())
+                .await
+                .images
+                .is_empty()
+        );
+
+        std::fs::write(original, b"not an image").unwrap();
+        let degraded = read_items(&store, tmp.path(), "https://reader.invalid", &[], None).unwrap();
+        assert_eq!(degraded.len(), 1);
+        assert!(
+            hydrate_companions(degraded.into_iter().next().unwrap())
+                .await
+                .images
+                .is_empty()
+        );
     }
 }

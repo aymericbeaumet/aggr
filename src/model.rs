@@ -23,6 +23,12 @@ pub struct RawItem {
     pub summary: Option<String>,
     /// HTML as delivered by the source.
     pub content_html: Option<String>,
+    /// Explicit feed images, followed by article metadata and body fallbacks.
+    pub preview_candidates: Vec<crate::preview::Candidate>,
+    /// Already encoded local bytes; replicas carry these without contacting the publisher.
+    pub preview: Option<crate::preview::Thumbnail>,
+    /// Exact article image masters and verified lossless renditions for newly retained items.
+    pub images: Vec<crate::media::Asset>,
     pub extra: BTreeMap<String, serde_yaml_ng::Value>,
 }
 
@@ -63,6 +69,140 @@ pub enum ContentKind {
     None,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Preview {
+    pub file: String,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+fn deserialize_preview<'de, D>(deserializer: D) -> Result<Option<Preview>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml_ng::Value::deserialize(deserializer)?;
+    Ok(serde_yaml_ng::from_value(value).ok())
+}
+
+impl Preview {
+    /// Restrict companions to their owning item, including on Windows and untrusted mirrors.
+    pub fn is_valid_for(&self, stem: &str) -> bool {
+        let Some(suffix) = self.file.strip_prefix(&format!("{stem}.preview-")) else {
+            return false;
+        };
+        let Some((hash, extension)) = suffix.rsplit_once('.') else {
+            return false;
+        };
+        !stem.is_empty()
+            && !self.file.contains(['/', '\\', ':'])
+            && !self.file.starts_with('.')
+            && hash.len() == 12
+            && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && matches!(extension, "jpg" | "webp")
+            && self.width > 0
+            && self.height > 0
+            && self.width <= 320
+            && self.height <= 320
+            && self.color.as_deref().is_none_or(|color| {
+                color.len() == 7
+                    && color.starts_with('#')
+                    && color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageFile {
+    pub file: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArticleImage {
+    /// Absolute publisher URL kept in Markdown and used when a local companion is unavailable.
+    pub source: String,
+    /// Exact publisher bytes. Lossless renditions are optional enhancements, never replacements.
+    pub original: ImageFile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<ImageFile>,
+    /// Immediate paint beneath the image while its bytes load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+fn deserialize_images<'de, D>(deserializer: D) -> Result<Vec<ArticleImage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml_ng::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_sequence()
+        .into_iter()
+        .flatten()
+        .filter_map(|image| serde_yaml_ng::from_value(image.clone()).ok())
+        .collect())
+}
+
+impl ArticleImage {
+    /// Restrict every companion to its owning item and to browser-safe raster formats.
+    pub fn is_valid_for(&self, stem: &str) -> bool {
+        let valid_source = url::Url::parse(&self.source).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.fragment().is_none()
+        });
+        let valid_file = |image: &ImageFile, variants_only: bool| {
+            let Some(suffix) = image.file.strip_prefix(&format!("{stem}.image-")) else {
+                return false;
+            };
+            let Some((hash, extension)) = suffix.rsplit_once('.') else {
+                return false;
+            };
+            !stem.is_empty()
+                && !image.file.contains(['/', '\\', ':'])
+                && hash.len() == 12
+                && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && if variants_only {
+                    extension == "webp"
+                } else {
+                    matches!(extension, "jpg" | "png" | "gif" | "webp")
+                }
+                && image.width > 0
+                && image.height > 0
+                && image.width <= 16_384
+                && image.height <= 16_384
+                && u64::from(image.width) * u64::from(image.height) <= 32_000_000
+        };
+        let valid_color = self.color.as_deref().is_none_or(|color| {
+            color.len() == 7
+                && color.starts_with('#')
+                && color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+        let mut previous_width = 0;
+        let mut files = BTreeSet::new();
+        valid_source
+            && valid_file(&self.original, false)
+            && files.insert(&self.original.file)
+            && valid_color
+            && self.variants.iter().all(|variant| {
+                let ordered = variant.width > previous_width;
+                previous_width = variant.width;
+                valid_file(variant, true)
+                    && ordered
+                    && variant.width <= self.original.width
+                    && variant.height <= self.original.height
+                    && files.insert(&variant.file)
+            })
+    }
+}
+
 /// The YAML block at the top of every item file. Defaults are skipped on write so the table
 /// GitHub renders stays short.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -92,6 +232,19 @@ pub struct FrontMatter {
     /// File name of the raw HTML sibling, when one was written.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_preview",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub preview: Option<Preview>,
+    /// Exact publisher image companions plus optional verified lossless responsive renditions.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_images",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub images: Vec<ArticleImage>,
     #[serde(skip_serializing_if = "is_default")]
     pub html_truncated: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -397,5 +550,62 @@ mod tests {
     #[test]
     fn item_dir_uses_year_and_month() {
         assert_eq!(item_dir("rust", date(2026, 9, 2)), "items/rust/2026/09");
+    }
+
+    #[test]
+    fn article_image_companions_are_bound_to_their_item() {
+        let stem = "2026-09-02-post";
+        let image = ArticleImage {
+            source: "https://example.com/image.png".into(),
+            original: ImageFile {
+                file: format!("{stem}.image-0123456789ab.png"),
+                width: 1200,
+                height: 800,
+            },
+            variants: vec![ImageFile {
+                file: format!("{stem}.image-fedcba987654.webp"),
+                width: 480,
+                height: 320,
+            }],
+            color: Some("#285a8c".into()),
+        };
+        assert!(image.is_valid_for(stem));
+
+        let mut unsafe_image = image.clone();
+        unsafe_image.original.file = "../outside.png".into();
+        assert!(!unsafe_image.is_valid_for(stem));
+
+        let mut wrong_type = image.clone();
+        wrong_type.variants[0].file = format!("{stem}.image-fedcba987654.svg");
+        assert!(!wrong_type.is_valid_for(stem));
+
+        let mut upscale = image;
+        upscale.variants[0].width = 1600;
+        assert!(!upscale.is_valid_for(stem));
+    }
+
+    #[test]
+    fn malformed_optional_image_metadata_does_not_hide_an_article() {
+        let front: FrontMatter = serde_yaml_ng::from_str(
+            r##"
+title: Still readable
+images:
+  - source: [not, a, url]
+  - source: https://example.com/image.png
+    original:
+      file: post.image-0123456789ab.png
+      width: 640
+      height: 320
+    color: "#285a8c"
+"##,
+        )
+        .unwrap();
+        assert_eq!(front.title, "Still readable");
+        assert_eq!(front.images.len(), 1);
+        assert_eq!(front.images[0].source, "https://example.com/image.png");
+
+        let malformed: FrontMatter =
+            serde_yaml_ng::from_str("title: Still readable\nimages: broken\n").unwrap();
+        assert!(malformed.images.is_empty());
     }
 }

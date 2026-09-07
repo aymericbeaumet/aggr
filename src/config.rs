@@ -86,7 +86,7 @@ impl Default for SiteConfig {
             description: None,
             language: "en".into(),
             theme: "default".into(),
-            items_per_page: 60,
+            items_per_page: 50,
             max_items: 5000,
             max_age_days: 365,
             max_stubs: 20_000,
@@ -105,7 +105,7 @@ impl Default for SiteConfig {
 pub struct NetworkConfig {
     pub name: String,
     pub url: String,
-    /// Optional build-time lookup. A failure always falls back to `url`.
+    /// Optional build-time lookup. Item contexts expose only exact matches.
     pub provider: Option<NetworkProvider>,
 }
 
@@ -224,6 +224,10 @@ pub struct FetchConfig {
     pub allow_remote_include_chains: bool,
     /// `heavy` downloads and extracts original article pages; `light` trusts feed content.
     pub content: ContentMode,
+    /// Download a small local preview for newly retained items only.
+    pub previews: bool,
+    /// Archive safe article-body raster images and derive lossless responsive renditions.
+    pub images: bool,
 }
 
 impl Default for FetchConfig {
@@ -237,6 +241,8 @@ impl Default for FetchConfig {
             retries: 2,
             allow_remote_include_chains: false,
             content: ContentMode::Heavy,
+            previews: false,
+            images: true,
         }
     }
 }
@@ -271,6 +277,10 @@ pub struct SourceConfig {
     pub html: Option<bool>,
     /// Override `[fetch] content` for this source.
     pub content: Option<ContentMode>,
+    /// Override `[fetch] previews` for new items from this source.
+    pub previews: Option<bool>,
+    /// Override `[fetch] images` for new items from this source.
+    pub images: Option<bool>,
     /// `type = "aggr"`: `owner/repo` on GitHub (alternative to a full git `url`).
     pub repo: Option<String>,
     /// `type = "aggr"`: data branch of that repository.
@@ -297,6 +307,8 @@ pub struct Source {
     pub headers: Vec<(String, String)>,
     pub html: bool,
     pub content: ContentMode,
+    pub previews: bool,
+    pub images: bool,
     pub engine: Engine,
 }
 
@@ -382,8 +394,7 @@ impl Config {
         {
             bail!("[site.identity] name must not be empty");
         }
-        if self.site.language.trim().is_empty() || self.site.language.contains(char::is_whitespace)
-        {
+        if !is_bcp47_language_tag(&self.site.language) {
             bail!("[site] language must be a BCP 47 tag such as `en` or `fr-FR`");
         }
         if self.site.items_per_page == 0 {
@@ -397,6 +408,21 @@ impl Config {
         }
         if self.fetch.max_items_per_source == 0 {
             bail!("[fetch] max_items_per_source must be at least 1");
+        }
+        if self.fetch.max_body_bytes == 0 {
+            bail!("[fetch] max_body_bytes must be at least 1");
+        }
+        if self.fetch.max_body_bytes > crate::cache::MAX_ARTICLE_BODY_BYTES {
+            bail!(
+                "[fetch] max_body_bytes must not exceed {}",
+                crate::cache::MAX_ARTICLE_BODY_BYTES
+            );
+        }
+        if self.store.html_max_bytes > crate::store::MAX_STORED_HTML_BYTES {
+            bail!(
+                "[store] html_max_bytes must not exceed {}",
+                crate::store::MAX_STORED_HTML_BYTES
+            );
         }
         if self.store.branch.is_empty() || self.store.branch.contains(char::is_whitespace) {
             bail!(
@@ -429,8 +455,14 @@ impl Config {
         let mut seen_identities = BTreeMap::<String, (usize, String)>::new();
         let mut sources = Vec::with_capacity(self.sources.len());
         for (index, raw) in self.sources.iter().enumerate() {
-            let source = resolve_source(raw, self.fetch.content, env)
-                .with_context(|| format!("[[sources]] #{}: {}", index + 1, describe(raw)))?;
+            let source = resolve_source(
+                raw,
+                self.fetch.content,
+                self.fetch.previews,
+                self.fetch.images,
+                env,
+            )
+            .with_context(|| format!("[[sources]] #{}: {}", index + 1, describe(raw)))?;
             if let Some((first, slug)) = seen_identities.get(&source.identity) {
                 log::warn!(
                     "ignoring duplicate source [[sources]] #{} ({:?}); first declared as #{} ({:?})",
@@ -464,6 +496,135 @@ impl Config {
     }
 }
 
+fn is_bcp47_language_tag(tag: &str) -> bool {
+    const GRANDFATHERED: &[&str] = &[
+        "art-lojban",
+        "cel-gaulish",
+        "en-gb-oed",
+        "i-ami",
+        "i-bnn",
+        "i-default",
+        "i-enochian",
+        "i-hak",
+        "i-klingon",
+        "i-lux",
+        "i-mingo",
+        "i-navajo",
+        "i-pwn",
+        "i-tao",
+        "i-tay",
+        "i-tsu",
+        "no-bok",
+        "no-nyn",
+        "sgn-be-fr",
+        "sgn-be-nl",
+        "sgn-ch-de",
+        "zh-guoyu",
+        "zh-hakka",
+        "zh-min",
+        "zh-min-nan",
+        "zh-xiang",
+    ];
+
+    if !tag.is_ascii() {
+        return false;
+    }
+    if GRANDFATHERED
+        .iter()
+        .any(|known| tag.eq_ignore_ascii_case(known))
+    {
+        return true;
+    }
+
+    let subtags = tag.split('-').collect::<Vec<_>>();
+    if subtags.iter().any(|part| {
+        part.is_empty() || part.len() > 8 || !part.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    }) {
+        return false;
+    }
+    let Some(language) = subtags.first().copied() else {
+        return false;
+    };
+    if language.eq_ignore_ascii_case("x") {
+        return subtags.len() > 1;
+    }
+    if !(2..=8).contains(&language.len())
+        || !language.bytes().all(|byte| byte.is_ascii_alphabetic())
+    {
+        return false;
+    }
+
+    let mut index = 1;
+    if language.len() <= 3 {
+        for _ in 0..3 {
+            if subtags.get(index).is_some_and(|part| {
+                part.len() == 3 && part.bytes().all(|byte| byte.is_ascii_alphabetic())
+            }) {
+                index += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    if subtags
+        .get(index)
+        .is_some_and(|part| part.len() == 4 && part.bytes().all(|byte| byte.is_ascii_alphabetic()))
+    {
+        index += 1;
+    }
+    if subtags.get(index).is_some_and(|part| {
+        (part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_alphabetic()))
+            || (part.len() == 3 && part.bytes().all(|byte| byte.is_ascii_digit()))
+    }) {
+        index += 1;
+    }
+
+    let mut variants = BTreeSet::new();
+    while let Some(part) = subtags.get(index).copied()
+        && ((5..=8).contains(&part.len())
+            || (part.len() == 4 && part.as_bytes()[0].is_ascii_digit()))
+    {
+        if !variants.insert(part.to_ascii_lowercase()) {
+            return false;
+        }
+        index += 1;
+    }
+
+    let mut singletons = BTreeSet::new();
+    while let Some(singleton) = subtags
+        .get(index)
+        .copied()
+        .filter(|part| part.len() == 1 && !part.eq_ignore_ascii_case("x"))
+    {
+        if !singletons.insert(singleton.to_ascii_lowercase()) {
+            return false;
+        }
+        index += 1;
+        let start = index;
+        while subtags
+            .get(index)
+            .is_some_and(|part| (2..=8).contains(&part.len()))
+        {
+            index += 1;
+        }
+        if index == start {
+            return false;
+        }
+    }
+
+    if subtags
+        .get(index)
+        .is_some_and(|part| part.eq_ignore_ascii_case("x"))
+    {
+        index += 1;
+        if index == subtags.len() {
+            return false;
+        }
+        index = subtags.len();
+    }
+    index == subtags.len()
+}
+
 fn validate_source_file_entry(source: &SourceConfig) -> Result<()> {
     if source.url.is_some() {
         bail!("`url` and `include` are mutually exclusive");
@@ -475,6 +636,8 @@ fn validate_source_file_entry(source: &SourceConfig) -> Result<()> {
         || !source.headers.is_empty()
         || source.html.is_some()
         || source.content.is_some()
+        || source.previews.is_some()
+        || source.images.is_some()
         || source.repo.is_some()
         || source.branch.is_some()
         || !source.sources.is_empty()
@@ -500,6 +663,8 @@ fn describe(raw: &SourceConfig) -> String {
 fn resolve_source(
     raw: &SourceConfig,
     default_content: ContentMode,
+    default_previews: bool,
+    default_images: bool,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Source> {
     if raw.include.is_some() {
@@ -597,6 +762,8 @@ fn resolve_source(
         headers,
         html: raw.html.unwrap_or(true),
         content: raw.content.unwrap_or(default_content),
+        previews: raw.previews.unwrap_or(default_previews),
+        images: raw.images.unwrap_or(default_images),
         engine,
     })
 }
@@ -955,6 +1122,7 @@ mod tests {
         assert_eq!(config.site.language, compiled.site.language);
         assert_eq!(config.site.theme, compiled.site.theme);
         assert_eq!(config.site.items_per_page, compiled.site.items_per_page);
+        assert_eq!(compiled.site.items_per_page, 50);
         assert_eq!(config.site.max_items, compiled.site.max_items);
         assert_eq!(config.site.max_age_days, compiled.site.max_age_days);
         assert_eq!(config.site.max_stubs, compiled.site.max_stubs);
@@ -988,9 +1156,31 @@ mod tests {
             compiled.fetch.allow_remote_include_chains
         );
         assert_eq!(config.fetch.content, compiled.fetch.content);
+        assert_eq!(config.fetch.previews, compiled.fetch.previews);
+        assert_eq!(config.fetch.images, compiled.fetch.images);
         assert_eq!(config.networks, compiled.networks);
         assert!(compiled.networks.is_empty());
         assert!(config.sources.is_empty());
+    }
+
+    #[test]
+    fn stored_html_limit_cannot_exceed_the_reader_cap() {
+        let maximum = crate::store::MAX_STORED_HTML_BYTES;
+        assert!(Config::parse(&format!("[store]\nhtml_max_bytes = {maximum}\n")).is_ok());
+        let error =
+            Config::parse(&format!("[store]\nhtml_max_bytes = {}\n", maximum + 1)).unwrap_err();
+        assert!(error.to_string().contains("html_max_bytes"), "{error:#}");
+    }
+
+    #[test]
+    fn fetched_body_limit_matches_the_persistent_cache_cap() {
+        let maximum = crate::cache::MAX_ARTICLE_BODY_BYTES;
+        assert!(Config::parse(&format!("[fetch]\nmax_body_bytes = {maximum}\n")).is_ok());
+        for invalid in [0, maximum + 1] {
+            let error =
+                Config::parse(&format!("[fetch]\nmax_body_bytes = {invalid}\n")).unwrap_err();
+            assert!(error.to_string().contains("max_body_bytes"), "{error:#}");
+        }
     }
 
     #[test]
@@ -1007,6 +1197,30 @@ mod tests {
                 env!("CARGO_PKG_VERSION")
             )
         );
+    }
+
+    #[test]
+    fn previews_are_opt_in_and_sources_can_override_the_default() {
+        let config = Config::parse("[[sources]]\nurl = 'https://example.com/feed'\n").unwrap();
+        assert!(!config.fetch.previews);
+        assert!(!config.sources().unwrap()[0].previews);
+        let config = Config::parse("[fetch]\npreviews = true\n[[sources]]\nurl = 'https://a.example/feed'\n[[sources]]\nurl = 'https://b.example/feed'\npreviews = false\n").unwrap();
+        let sources = config.sources().unwrap();
+        assert!(sources[0].previews);
+        assert!(!sources[1].previews);
+        assert!(Config::parse("[[sources]]\ninclude = './other.toml'\npreviews = true\n").is_err());
+    }
+
+    #[test]
+    fn article_images_are_local_by_default_and_sources_can_opt_out() {
+        let config = Config::parse("[[sources]]\nurl = 'https://example.com/feed'\n").unwrap();
+        assert!(config.fetch.images);
+        assert!(config.sources().unwrap()[0].images);
+        let config = Config::parse("[fetch]\nimages = false\n[[sources]]\nurl = 'https://a.example/feed'\n[[sources]]\nurl = 'https://b.example/feed'\nimages = true\n").unwrap();
+        let sources = config.sources().unwrap();
+        assert!(!sources[0].images);
+        assert!(sources[1].images);
+        assert!(Config::parse("[[sources]]\ninclude = './other.toml'\nimages = true\n").is_err());
     }
 
     #[test]
@@ -1045,6 +1259,45 @@ same_as = ["https://social.example/@ada"]
             empty_identity.to_string().contains("identity"),
             "{empty_identity}"
         );
+    }
+
+    #[test]
+    fn site_language_requires_a_well_formed_bcp_47_tag() {
+        for language in [
+            "en",
+            "fr-FR",
+            "zh-Hant-TW",
+            "zh-cmn-Hans-CN",
+            "de-CH-1901",
+            "en-US-u-ca-gregory",
+            "x-reader-local",
+            "i-klingon",
+        ] {
+            let config = format!("[site]\nlanguage = {language:?}\n");
+            assert!(Config::parse(&config).is_ok(), "rejected {language:?}");
+        }
+
+        for language in [
+            "",
+            "e",
+            "en_US",
+            "en--US",
+            "en-",
+            "en-abcdefghi",
+            "en-u",
+            "en-u-ca-u-nu",
+            "de-1901-1901",
+            "x",
+            "123",
+            "fr-É",
+        ] {
+            let config = format!("[site]\nlanguage = {language:?}\n");
+            let error = Config::parse(&config).unwrap_err();
+            assert!(
+                error.to_string().contains("BCP 47"),
+                "{language:?}: {error}"
+            );
+        }
     }
 
     #[test]

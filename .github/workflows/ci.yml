@@ -38,6 +38,70 @@ jobs:
         if: matrix.name == 'linux-amd64'
         run: cargo run --locked -- check --config config.default.toml
 
+  browser:
+    name: browser (chrome)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      AGGR_WEBDRIVER_URL: http://127.0.0.1:9515
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install matching Chrome and ChromeDriver
+        shell: bash
+        run: |
+          set -euo pipefail
+          browser_dir="$(mktemp -d "$RUNNER_TEMP/aggr-chrome.XXXXXX")"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json \
+            --output "$browser_dir/releases.json"
+          for binary in chrome chromedriver; do
+            download="$(jq -er --arg binary "$binary" \
+              '.channels.Stable.downloads[$binary][] | select(.platform == "linux64") | .url' \
+              "$browser_dir/releases.json")"
+            curl --fail --silent --show-error --location --retry 3 \
+              "$download" --output "$browser_dir/$binary.zip"
+            unzip -q "$browser_dir/$binary.zip" -d "$browser_dir"
+          done
+          mapfile -t dependencies < "$browser_dir/chrome-linux64/deb.deps"
+          sudo apt-get update -qq
+          sudo apt-get satisfy -y --no-install-recommends "${dependencies[@]}"
+          "$browser_dir/chrome-linux64/chrome" --version
+          "$browser_dir/chromedriver-linux64/chromedriver" --version
+          echo "AGGR_CHROME_BINARY=$browser_dir/chrome-linux64/chrome" >> "$GITHUB_ENV"
+          echo "$browser_dir/chromedriver-linux64" >> "$GITHUB_PATH"
+      - name: Test reader and offline browser contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/browser-artifacts
+          chromedriver --port=9515 --allowed-ips=127.0.0.1 \
+            --log-path=target/browser-artifacts/chromedriver.log \
+            > target/browser-artifacts/chromedriver-server.log 2>&1 &
+          browser_driver_pid=$!
+          trap 'kill "$browser_driver_pid" 2>/dev/null || true' EXIT
+          for _attempt in {1..40}; do
+            if curl --fail --silent "$AGGR_WEBDRIVER_URL/status" | jq -e '.value.ready == true' > /dev/null; then
+              break
+            fi
+            kill -0 "$browser_driver_pid"
+            sleep 0.25
+          done
+          curl --fail --silent --show-error "$AGGR_WEBDRIVER_URL/status" | jq -e '.value.ready == true'
+          cargo test --locked --test browser -- --ignored --nocapture
+      - name: Upload browser failure screenshots and logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-chrome-failure
+          path: target/browser-artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 0
+
   msrv:
     runs-on: ubuntu-latest
     steps:

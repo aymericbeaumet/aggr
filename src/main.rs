@@ -6,10 +6,13 @@ mod content;
 mod discussions;
 mod git;
 mod http;
+mod media;
 mod model;
+mod preview;
 mod site;
 mod sources;
 mod store;
+mod threads;
 
 use std::process::ExitCode;
 

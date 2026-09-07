@@ -3,6 +3,7 @@
 
 pub mod build;
 pub mod check;
+pub mod clean;
 pub mod dev;
 pub mod fetch;
 pub mod init;
@@ -26,11 +27,28 @@ pub async fn run(cli: Cli) -> Result<()> {
             clap_complete::generate(shell, &mut Cli::command(), "aggr", &mut std::io::stdout());
             Ok(())
         }
-        Command::Sync(args) => sync::run(&Project::load(&cli.config).await?, &args).await,
-        Command::Build(args) => {
+        Command::Sync(mut args) => {
+            if args.clean {
+                clean::run(&cli.config, &crate::cli::CleanArgs::default())?;
+                args.clean = false;
+            }
+            sync::run(&Project::load(&cli.config).await?, &args).await
+        }
+        Command::Build(mut args) => {
+            if args.clean {
+                clean::run(
+                    &cli.config,
+                    &crate::cli::CleanArgs {
+                        out: args.out.clone(),
+                        dry_run: false,
+                    },
+                )?;
+                args.clean = false;
+            }
             build::sync_and_run(&Project::load(&cli.config).await?, &args).await
         }
-        Command::Dev(args) => dev::run(&Project::load(&cli.config).await?, &args).await,
+        Command::Dev(args) => dev::run(&cli.config, &args).await,
+        Command::Clean(args) => clean::run(&cli.config, &args),
         Command::Check => check::run(&Project::load(&cli.config).await?).await,
     }
 }
@@ -56,17 +74,30 @@ impl Project {
             .context("config file has a parent directory")?
             .to_path_buf();
         let repo = Repo::discover(&root)?;
-        Ok(Self {
+        let project = Self {
             config,
             sources,
             config_path,
             root,
             repo,
-        })
+        };
+        project.validate_layout()?;
+        Ok(project)
+    }
+
+    /// Establish that all configured persistent paths are disjoint before a command writes.
+    pub(super) fn validate_layout(&self) -> Result<()> {
+        clean::validate_project_layout(self)
     }
 
     /// The data branch checked out at `[store] dir`, created on first use.
     pub fn worktree(&self) -> Result<Worktree> {
+        // Fetch/build can write through nested cache paths after opening the archive. Reject a
+        // redirected cache tree before bootstrap makes any persistent project change.
+        clean::validate_owned_cache_dir(
+            &crate::cache::build(self.repo.root()),
+            "repository build cache",
+        )?;
         let worktree = self
             .repo
             .ensure_worktree(&self.config.store.branch, &self.config.store.dir)?;
@@ -77,6 +108,7 @@ impl Project {
     /// Repository-local cache for build/sync. It is never shared with `aggr dev`.
     pub fn build_cache_dir(&self) -> Result<PathBuf> {
         let dir = crate::cache::build(self.repo.root());
+        clean::validate_owned_cache_dir(&dir, "repository build cache")?;
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         self.repo.exclude(&dir)?;
         Ok(dir)
@@ -84,7 +116,8 @@ impl Project {
 
     /// OS-standard, project-isolated cache for dev. It never touches this repository's worktree.
     pub fn dev_cache_dir(&self) -> Result<PathBuf> {
-        let dir = crate::cache::dev(&self.config_path)?;
+        let requested = crate::cache::dev(&self.config_path)?;
+        let dir = clean::validate_dev_cache(self, &requested)?;
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         Ok(dir)
     }
