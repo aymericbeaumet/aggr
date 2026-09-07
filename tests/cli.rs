@@ -139,6 +139,7 @@ impl TestRepo {
     }
 
     fn origin_bytes(&self, rev: &str, path: &str) -> Vec<u8> {
+        let path = path.replace('\\', "/");
         let out = Command::new("git")
             .args(["show", &format!("{rev}:{path}")])
             .current_dir(&self.origin)
