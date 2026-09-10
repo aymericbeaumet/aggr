@@ -222,6 +222,7 @@ pub struct ArticlePreviewCtx {
 }
 
 impl ArticlePreviewCtx {
+    /// Social cards and small metadata images upscale badly as a full-width hero.
     pub fn lead_image(
         body_html: &str,
         base: &url::Url,
@@ -231,17 +232,27 @@ impl ArticlePreviewCtx {
             .into_iter()
             .map(|candidate| candidate.url.to_string())
             .collect::<BTreeSet<_>>();
-        let body_originals = images
+        let body_images = images
             .iter()
             .filter(|image| body_sources.contains(&image.source))
+            .collect::<Vec<_>>();
+        let body_originals = body_images
+            .iter()
             .map(|image| image.original.as_str())
             .collect::<BTreeSet<_>>();
         images
             .iter()
             .find(|image| {
                 !crate::media::is_status_badge(&image.source)
+                    && image.width >= MIN_LEAD_WIDTH
                     && !body_sources.contains(&image.source)
                     && !body_originals.contains(image.original.as_str())
+                    && !body_images.iter().any(|body| {
+                        crate::media::placeholder::same_picture(
+                            &image.placeholder.hash,
+                            &body.placeholder.hash,
+                        )
+                    })
             })
             .map(Self::from_image)
     }
@@ -274,6 +285,8 @@ impl ArticlePreviewCtx {
         }
     }
 }
+
+const MIN_LEAD_WIDTH: u32 = 800;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceCtx {
@@ -757,9 +770,53 @@ mod tests {
             ..image.clone()
         };
         assert!(
-            super::ArticlePreviewCtx::lead_image("<img src='/lead.jpg'>", &base, &[alias, image])
-                .is_none()
+            super::ArticlePreviewCtx::lead_image(
+                "<img src='/lead.jpg'>",
+                &base,
+                &[alias, image.clone()]
+            )
+            .is_none()
         );
+        // The same picture under another CDN URL (og:image versus body rendition) is no lead.
+        let mut same_picture = image.clone();
+        same_picture.source = "https://cdn.publisher.test/lead.width-1300.jpg".into();
+        same_picture.original = "assets/images/other-master.jpg".into();
+        let mut body_copy = image.clone();
+        body_copy.source = "https://publisher.test/body.width-2200.webp".into();
+        body_copy.original = "assets/images/body-master.webp".into();
+        body_copy.placeholder =
+            crate::media::placeholder::from_image(&image::DynamicImage::new_rgb8(8, 8)).unwrap();
+        assert!(
+            super::ArticlePreviewCtx::lead_image(
+                "<img src='https://publisher.test/body.width-2200.webp'>",
+                &base,
+                &[same_picture, body_copy.clone()]
+            )
+            .is_none()
+        );
+        let mut different = image.clone();
+        different.source = "https://cdn.publisher.test/other.jpg".into();
+        different.placeholder = crate::media::placeholder::from_image(
+            &image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 40, |x, y| {
+                image::Rgb([(x * 4) as u8, (y * 6) as u8, 200])
+            })),
+        )
+        .unwrap();
+        assert!(
+            super::ArticlePreviewCtx::lead_image(
+                "<img src='https://publisher.test/body.width-2200.webp'>",
+                &base,
+                &[different.clone(), body_copy]
+            )
+            .is_some()
+        );
+        // A 600px social card never becomes a full-width hero.
+        let card = crate::content::LocalImage {
+            width: 600,
+            height: 300,
+            ..different
+        };
+        assert!(super::ArticlePreviewCtx::lead_image("<p>Article</p>", &base, &[card]).is_none());
     }
 
     #[test]

@@ -475,6 +475,20 @@ import { createSelection, selectedLink } from "./selection";
     navigate(link.href);
     return true;
   }
+  // Article headings are anchors rather than links: a plain click updates the fragment.
+  document.addEventListener("click", function (event) {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const origin = event.target instanceof Element ? event.target : null;
+    if (!origin || origin.closest("a[href], button, input, select, textarea, summary, [contenteditable]")) return;
+    const heading = origin.closest<HTMLElement>(".body :is(h1, h2, h3, h4, h5, h6)[id]");
+    if (!heading || !heading.id) return;
+    const selected = window.getSelection ? window.getSelection() : null;
+    if (selected && !selected.isCollapsed && heading.contains(selected.anchorNode)) return;
+    const url = new URL(location.href);
+    url.hash = heading.id;
+    navigation.replaceLocation(url.href);
+    heading.scrollIntoView({ block: "start" });
+  });
   document.addEventListener("click", function (event) {
     let target = event.target instanceof Element && event.target.closest("[data-row-open]");
     if (target) selectRow(target.closest(".row"), false, false);
@@ -518,6 +532,8 @@ import { createSelection, selectedLink } from "./selection";
       replaceLocation: function (url) {
         navigation.replaceLocation(url);
       },
+      moveSelection: function (direction) { return selection.move(direction, false); },
+      openSelected: openSelectedResult,
       onRowsChanged: function () {
         updateMenuSelection();
         externalLinks(resultsRoot);

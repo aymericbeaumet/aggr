@@ -5,7 +5,7 @@ import type { ViewState } from './state';
 import type { Query, SearchHandle, SearchCatalog } from './types';
 import type { SearchSession } from './engine';
 
-const mocks = vi.hoisted(() => ({ mount: vi.fn(), unmount: vi.fn(), load: vi.fn(), search: vi.fn(), facetCounts: vi.fn(), prepare:vi.fn() }));
+const mocks = vi.hoisted(() => ({ mount: vi.fn(), unmount: vi.fn(), load: vi.fn(), search: vi.fn(), facetCounts: vi.fn(), prepare:vi.fn(), moveSelection: vi.fn(), openSelected: vi.fn() }));
 vi.mock('svelte', () => ({ mount: mocks.mount, unmount: mocks.unmount, tick: async () => {} }));
 vi.mock('./Controls.svelte', () => ({ default: 'controls' }));
 vi.mock('./Results.svelte', () => ({ default: 'results' }));
@@ -21,6 +21,7 @@ const manifest: SearchCatalog = {
 };
 interface Controls {
   model: Readable<ViewState>;
+  move(direction: number): boolean; open(): boolean;
   change(query: string, cursor: number, composing: boolean): void;
   choose(completion: Completion): void;
   focusInput(): void;
@@ -40,7 +41,8 @@ function setup(query = '', session = fakeSession()) {
     base: 'https://reader.test/', preferences: { values: {} },
     session,
     navigate: vi.fn(), onRowsChanged: vi.fn(), getOfflineStatus: () => null,
-    onQueryChanged: vi.fn(), replaceLocation: vi.fn()
+    onQueryChanged: vi.fn(), replaceLocation: vi.fn(),
+    moveSelection: mocks.moveSelection, openSelected: mocks.openSelected
   });
   const controls = mocks.mount.mock.calls.filter(call => call[0] === 'controls').at(-1)![1].props as Controls;
   return { controls, state: () => get(controls.model), staticFeed, root, input };
@@ -63,6 +65,26 @@ beforeEach(() => {
   });
 });
 afterEach(async () => { await handle?.destroy(); handle = undefined; vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+describe('result cursor keys in the search controller', () => {
+  it('moves and opens results only once a search has produced rows', async () => {
+    mocks.moveSelection.mockReturnValue(true);
+    mocks.openSelected.mockReturnValue(true);
+    const { controls, state } = setup();
+    expect(controls.move(1)).toBe(false);
+    expect(controls.open()).toBe(false);
+    expect(mocks.moveSelection).not.toHaveBeenCalled();
+    expect(mocks.openSelected).not.toHaveBeenCalled();
+    controls.change('rust', 4, false);
+    expect(controls.open()).toBe(false);
+    await settle();
+    expect(state().ready).toBe(true);
+    expect(controls.move(-1)).toBe(true);
+    expect(mocks.moveSelection).toHaveBeenCalledWith(-1);
+    expect(controls.open()).toBe(true);
+    expect(mocks.openSelected).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('facet completion in the search controller', () => {
   it('warms only completed query intent during debounce and cancels it on replacement', async () => {

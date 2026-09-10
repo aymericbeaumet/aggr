@@ -541,6 +541,10 @@ body[data-kind="item"] .main {
   border-radius: 0.35rem;
   background: var(--image-placeholder, var(--code));
 }
+/* High-density screens: prefer a sharp smaller image over stretching a modest master 2×. */
+@media (min-resolution: 2dppx) {
+  .body .article-picture:not(.article-badge) { inline-size: min(100%, calc(var(--image-width, 200vw) / 1.5)); }
+}
 .body .article-picture.article-badge { display: inline-block; margin: 0.25em 0.25em 0.25em 0; vertical-align: middle; border-radius: 0; }
 .progressive-image, .preview-image, .article-lead img { color: transparent; }
 .is-error .progressive-image, .is-error .preview-image, .article-lead.is-error img { color: inherit; }
@@ -582,6 +586,11 @@ body[data-kind="item"] .main {
 .body li + li { margin-top: 0.25em; }
 .body li > p { margin-block: 0.35em; }
 .body :is(h1, h2, h3, h4, h5, h6) { line-height: 1.3; margin: 1.75em 0 0.6em; text-wrap: pretty; break-after: avoid; }
+/* Headings are anchors, not links: a hover marker sits in the margin without moving the title. */
+.body :is(h1, h2, h3, h4, h5, h6)[id] { position: relative; cursor: pointer; }
+.body :is(h1, h2, h3, h4, h5, h6)[id]::before { content: "#"; position: absolute; right: 100%; top: 0; margin-right: 0.3em; color: var(--muted); font-weight: 400; opacity: 0; pointer-events: none; }
+.body :is(h1, h2, h3, h4, h5, h6)[id]:hover::before { opacity: 1; }
+.body :is(h1, h2, h3, h4, h5, h6)[id]:target::before { opacity: 1; color: var(--accent-strong); }
 .body blockquote { margin: 1.5em 0; padding-inline-start: 1em; border-inline-start: 3px solid var(--faint); color: var(--fg); }
 .body pre { margin-block: 1.5em; max-width: 100%; font-size: 0.875em; line-height: 1.6; tab-size: 4; text-align: left; overflow-wrap: normal; }
 .body table { max-width: 100%; margin-block: 1.5em; border-collapse: collapse; display: block; overflow: auto; font-size: 0.9em; line-height: 1.5; }
@@ -774,6 +783,7 @@ body[data-kind="item"] .main {
   .body .footnote-ref a::before { content: ""; position: absolute; width: var(--tap-target); height: var(--tap-target); inset: 50% auto auto 50%; transform: translate(-50%, -50%); }
   .body .footnote-backref { display: inline-flex; align-items: center; justify-content: center; min-width: var(--tap-target); min-height: var(--tap-target); }
   .domain, .page-header a, .meta a, .views a, .pager a, .directory a { text-decoration: underline; text-underline-offset: 0.14em; }
+  .itemhead .meta a { text-decoration: none; }
 }
 
 .video-player.is-loading iframe { opacity: 0; }

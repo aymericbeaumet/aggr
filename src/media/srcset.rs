@@ -90,13 +90,12 @@ fn descriptor_score(descriptors: &[&str]) -> Option<f64> {
                 return None;
             }
             density = Some(parsed);
-        } else if let Some(number) = descriptor.strip_suffix('h') {
+        } else {
+            let number = descriptor.strip_suffix('h')?;
             if height.is_some() || density.is_some() {
                 return None;
             }
             height = Some(positive_integer(number)?);
-        } else {
-            return None;
         }
     }
     if height.is_some() && width.is_none() {

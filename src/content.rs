@@ -70,6 +70,7 @@ const BLOCK_ELEMENTS: &[&str] = &[
 const LAYOUT_INLINE_ELEMENTS: &[&str] = &["a", "label", "span", "time"];
 const FOOTNOTE_REF_START: char = '\u{e000}';
 const FOOTNOTE_REF_END: char = '\u{e001}';
+const MARKDOWN_LINK_START: char = '\u{e002}';
 /// Attributes that carry URLs and therefore may smuggle `data:` payloads.
 const URL_ATTRIBUTES: &[&str] = &[
     "src",
@@ -93,6 +94,7 @@ pub fn extract_article(page: &str, url: &Url) -> Result<ExtractedArticle> {
     };
     let mut readability = Readability::new(page, Some(url.as_str()), Some(config))
         .context("parsing the original article page")?;
+    preserve_share_named_media_wrappers(&readability);
     // Figure filenames such as `replies.png` can resemble comment widgets to Readability.
     // Explicit image-and-caption structure supplies stronger evidence than those incidental IDs.
     readability.doc.select(
@@ -115,6 +117,64 @@ pub fn extract_article(page: &str, url: &Url) -> Result<ExtractedArticle> {
         html,
         image: article.image,
     })
+}
+
+/// Publishers such as Apple Newsroom wrap every article figure in a `…-sharesheet` container.
+/// Readability weighs any class or id mentioning sharing negatively and drops such low-text
+/// wrappers, taking the picture with them. A wrapper that holds real media and no sharing links
+/// is presentation, not a share widget; it is renamed to a neutral, content-positive class.
+fn preserve_share_named_media_wrappers(readability: &Readability) {
+    let share_link = |href: &str| {
+        let href = href.to_ascii_lowercase();
+        [
+            "share",
+            "/intent/",
+            "sharer",
+            "mailto:",
+            "twitter.com/",
+            "x.com/",
+            "facebook.com/",
+            "linkedin.com/",
+            "reddit.com/",
+            "pinterest.",
+            "whatsapp",
+            "t.me/",
+            "threads.net/",
+            "bsky.app/",
+        ]
+        .iter()
+        .any(|marker| href.contains(marker))
+    };
+    for wrapper in readability
+        .doc
+        .select("[class*=\"share\" i]:has(img, picture), [id*=\"share\" i]:has(img, picture)")
+        .iter()
+    {
+        let links = wrapper
+            .select("a[href]")
+            .iter()
+            .filter_map(|link| link.attr("href").map(|href| href.to_string()))
+            .collect::<Vec<_>>();
+        if links.iter().any(|href| share_link(href)) {
+            continue;
+        }
+        let class = wrapper.attr("class").map(|value| value.to_string());
+        let kept = class
+            .as_deref()
+            .unwrap_or_default()
+            .split_ascii_whitespace()
+            .filter(|token| !token.to_ascii_lowercase().contains("share"))
+            .chain(std::iter::once("aggr-figure-content"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        wrapper.set_attr("class", &kept);
+        if wrapper
+            .attr("id")
+            .is_some_and(|id| id.to_ascii_lowercase().contains("share"))
+        {
+            wrapper.remove_attr("id");
+        }
+    }
 }
 
 fn has_meaningful_extracted_content(html: &str, base: &Url) -> bool {
@@ -599,6 +659,7 @@ pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
             ..Default::default()
         })
         .add_handler(vec!["h1", "h2", "h3", "h4", "h5", "h6"], markdown_heading)
+        .add_handler(vec!["a"], markdown_link)
         .build();
     let markdown = converter
         .convert(&clean)
@@ -741,6 +802,18 @@ fn description_chapter(text: &str, video_id: &str) -> String {
         "<a href=\"https://www.youtube.com/watch?v={video_id}&amp;t={seconds}\">{timestamp}</a> {}",
         escape_html(rest)
     )
+}
+
+fn markdown_link(
+    handlers: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element<'_>,
+) -> Option<htmd::element_handler::HandlerResult> {
+    let mut result = handlers.fallback(element)?;
+    if result.content.starts_with('[') {
+        // An exclamation in an adjacent text node must not turn this link into an image.
+        result.content.insert(0, MARKDOWN_LINK_START);
+    }
+    Some(result)
 }
 
 fn markdown_heading(
@@ -1368,7 +1441,11 @@ fn strip_boundary_controls(markdown: &str) -> String {
         .map_or(trimmed, |(_, last)| last);
     if ![first, last].iter().any(|text| {
         let text = text.to_ascii_lowercase();
-        text.contains("comment") || text.contains("opens in") || text.contains("advertisement")
+        text.contains("comment")
+            || text.contains("opens in")
+            || text.contains("advertisement")
+            || text.contains("updated")
+            || text.contains("corrected")
     }) {
         return markdown.to_string();
     }
@@ -1467,7 +1544,7 @@ fn is_boundary_control<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
         return false;
     };
     let text = text.trim();
-    if is_accessibility_label(text) {
+    if is_accessibility_label(text) || is_update_notice(text) {
         return true;
     }
     let text = text
@@ -1495,6 +1572,51 @@ fn is_boundary_control<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
         return true;
     }
     linked && matches!(text, "no comments" | "leave a comment")
+}
+
+/// A standalone editorial note such as `This article was updated on 08 September 2026.` at a
+/// document boundary. Publication and update times already appear in the item metadata.
+fn is_update_notice(text: &str) -> bool {
+    let text = text.trim().trim_end_matches(['.', '!']).trim();
+    if text.len() > 160 || !text.bytes().any(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let rest = [
+        "this article",
+        "this post",
+        "this story",
+        "this piece",
+        "article",
+        "post",
+    ]
+    .into_iter()
+    .find_map(|subject| text.strip_prefix(subject))
+    .map(str::trim_start)
+    .and_then(|rest| {
+        ["was", "has been"]
+            .into_iter()
+            .find_map(|verb| rest.strip_prefix(verb))
+    })
+    .map(str::trim_start)
+    .unwrap_or(text);
+    let rest = rest.strip_prefix("last ").unwrap_or(rest);
+    let rest = ["updated", "corrected", "revised", "amended"]
+        .into_iter()
+        .find_map(|verb| rest.strip_prefix(verb));
+    let Some(rest) = rest else {
+        return false;
+    };
+    let rest = rest.trim_start_matches([':', ' ']);
+    let rest = ["on ", "at "]
+        .into_iter()
+        .find_map(|preposition| rest.strip_prefix(preposition))
+        .unwrap_or(rest);
+    // What remains must be a date/time, optionally with a short reason, never a full sentence.
+    rest.split_whitespace().count() <= 12
+        && rest
+            .split_whitespace()
+            .next()
+            .is_some_and(|word| word.bytes().any(|byte| byte.is_ascii_digit()) || word.len() >= 3)
 }
 
 /// Remove a metadata line that readability promoted to the first Markdown paragraph. This covers
@@ -1587,11 +1709,13 @@ fn date_prefixes(value: &str) -> impl Iterator<Item = &str> {
     )
 }
 
-/// Fix conversion artefacts caused by accessibility labels and leading whitespace inside links.
+/// Keep punctuation before generated links literal and restore trimmed link-label boundaries.
 /// htmd intentionally trims link labels, which can otherwise turn `than <a> 54,000…</a>` into
 /// `than[54,000…](…)`.
 fn repair_generated_markdown(markdown: &str) -> String {
-    let mut value = markdown.to_string();
+    let mut value = markdown
+        .replace(&format!("!{MARKDOWN_LINK_START}["), "\\![")
+        .replace(MARKDOWN_LINK_START, "");
     let arena = comrak::Arena::new();
     let root = comrak::parse_document(&arena, &value, &comrak::Options::default());
     let mut lines = vec![0];
@@ -1851,6 +1975,103 @@ impl PreparedMarkdown {
             enhance_rendered_images(&self.html, images, dimensions)
         }
     }
+}
+
+/// Give reader headings stable ids and turn publisher self-links (`## [Title](#title)` or a link
+/// back to the article's own page) into plain headings. Only the reader uses this; portable
+/// representations keep the original links.
+pub fn anchor_headings(html: &str, article_url: Option<&Url>) -> String {
+    let mut out = String::with_capacity(html.len() + 64);
+    let mut used = std::collections::BTreeSet::<String>::new();
+    let mut position = 0;
+    while let Some(offset) = html[position..].find("<h") {
+        let start = position + offset;
+        let Some(tag) = parse_tag(&html[start..]) else {
+            out.push_str(&html[position..start + 2]);
+            position = start + 2;
+            continue;
+        };
+        let level = tag
+            .name
+            .strip_prefix('h')
+            .filter(|rest| matches!(*rest, "1" | "2" | "3" | "4" | "5" | "6"));
+        let (Some(_), false, Some(open_end)) = (level, tag.closing, tag.end) else {
+            out.push_str(&html[position..start + 2]);
+            position = start + 2;
+            continue;
+        };
+        let closing = format!("</{}>", tag.name);
+        let Some(inner_len) = html[start + open_end..].to_ascii_lowercase().find(&closing) else {
+            out.push_str(&html[position..start + open_end]);
+            position = start + open_end;
+            continue;
+        };
+        let open = &html[start..start + open_end];
+        let inner = &html[start + open_end..start + open_end + inner_len];
+        let (inner, fragment) = unwrap_self_link(inner, article_url);
+        let mut id = attribute_value(open, "id")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or(fragment)
+            .unwrap_or_else(|| slug::slugify(html_to_text(inner)));
+        if id.is_empty() {
+            id = "section".to_string();
+        }
+        let mut unique = id.clone();
+        let mut counter = 2;
+        while !used.insert(unique.clone()) {
+            unique = format!("{id}-{counter}");
+            counter += 1;
+        }
+        out.push_str(&html[position..start]);
+        out.push_str(&set_attribute(open, "id", &unique));
+        out.push_str(inner);
+        out.push_str(&closing);
+        position = start + open_end + inner_len + closing.len();
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// A heading whose entire content is one link to its own anchor or article page.
+fn unwrap_self_link<'a>(inner: &'a str, article_url: Option<&Url>) -> (&'a str, Option<String>) {
+    let trimmed = inner.trim();
+    let Some(tag) = parse_tag(trimmed) else {
+        return (inner, None);
+    };
+    let (Some(open_end), "a", false) = (tag.end, tag.name.as_str(), tag.closing) else {
+        return (inner, None);
+    };
+    let Some(content) = trimmed[open_end..].strip_suffix("</a>") else {
+        return (inner, None);
+    };
+    if content.contains("<a ") || content.contains("<a>") {
+        return (inner, None);
+    }
+    let Some(href) = attribute_value(&trimmed[..open_end], "href") else {
+        return (inner, None);
+    };
+    let href = decode_entities(href);
+    let href = href.trim();
+    let fragment = if let Some(fragment) = href.strip_prefix('#') {
+        Some(fragment.to_string())
+    } else {
+        let Some(article) = article_url else {
+            return (inner, None);
+        };
+        let Ok(target) = Url::parse(href) else {
+            return (inner, None);
+        };
+        let mut own = article.clone();
+        own.set_fragment(None);
+        let mut page = target.clone();
+        page.set_fragment(None);
+        if own != page {
+            return (inner, None);
+        }
+        target.fragment().map(str::to_string)
+    };
+    (content, fragment.filter(|fragment| !fragment.is_empty()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2508,6 +2729,88 @@ mod tests {
     }
 
     #[test]
+    fn share_named_media_wrappers_survive_extraction_while_share_widgets_are_dropped() {
+        let prose = "Apple today introduced a new watch with an all-new health sensing system that measures more signals than before. ".repeat(12);
+        let html = format!(
+            "<html><head><title>Introducing Apple Watch</title></head><body><main><article><div class='pagebody'><figure class='image component' aria-label='Media'><div class='component-content'><div class='image-sharesheet'><div class='image-asset'><picture class='picture'><source media='(max-width: 734px)' srcset='/images/watch_small.jpg,\n\t/images/watch_small_2x.jpg 2x'><img class='picture-image' src='https://www.apple.com/newsroom/images/watch_big.jpg' alt='Two watches side by side'></picture></div><div class='image-description'><div class='image-caption'>Apple Watch delivers accurate sensing.</div><a href='/newsroom/images/watch.zip' download>Download media</a></div></div></div></figure><p>{prose}</p><p>{prose}</p></div><div class='share-tools'><a href='https://x.com/intent/post?url=https://www.apple.com/newsroom/'><img src='/icons/x.svg' alt='Share on X'></a><a href='https://www.facebook.com/sharer/sharer.php?u=x'><img src='/icons/facebook.svg' alt='Share on Facebook'></a></div></article></main></body></html>"
+        );
+        let url =
+            Url::parse("https://www.apple.com/newsroom/2026/09/introducing-apple-watch/").unwrap();
+        let article = extract_article(&html, &url).unwrap();
+        let markdown = to_markdown(&article.html, Some(&url));
+        assert!(
+            markdown.contains("https://www.apple.com/newsroom/images/watch_big.jpg"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("Two watches side by side"), "{markdown}");
+        assert!(!markdown.contains("icons/x.svg"), "{markdown}");
+        assert!(!markdown.contains("Share on Facebook"), "{markdown}");
+    }
+
+    #[test]
+    fn boundary_update_notices_are_removed_but_prose_mentions_stay() {
+        let body = "Opening paragraph.\n\nMore reporting follows here.\n\n*This article was updated on 08 September 2026.*\n";
+        assert_eq!(
+            strip_article_metadata(body, None, "spectrum"),
+            "Opening paragraph.\n\nMore reporting follows here.\n"
+        );
+        for notice in [
+            "Updated: 3 March 2026",
+            "Last updated on March 3, 2026 with new figures.",
+            "This post has been corrected on 2026-03-03.",
+            "**Updated 03/03/2026 10:15 UTC**",
+        ] {
+            let body = format!("{notice}\n\nOpening paragraph.\n");
+            assert_eq!(
+                strip_article_metadata(&body, None, "spectrum"),
+                "Opening paragraph.\n",
+                "{notice}"
+            );
+        }
+        for body in [
+            "Opening.\n\nThe database was updated on 08 September 2026 and nothing broke, which surprised the whole team on call.\n",
+            "Opening.\n\nWe updated 40 servers.\n",
+            "This article was updated on 08 September 2026 because the earlier version misstated the number of vehicles and the agency has since published corrected totals.\n\nOpening.\n",
+            "Opening.\n\nUpdated thinking\n",
+        ] {
+            assert_eq!(
+                strip_article_metadata(body, None, "spectrum"),
+                body,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn reader_headings_become_anchors_without_links() {
+        let article = Url::parse("https://cognition.com/blog/factoring-rsa-260").unwrap();
+        let html = "<h2><a href=\"https://cognition.com/blog/factoring-rsa-260#how-did-this-happen\">How did this happen?</a></h2><p>Text</p><h3><a href=\"#cost\">Cost <em>estimates</em></a></h3><h2>Cost estimates</h2><h2>Cost estimates</h2><h2><a href=\"https://example.com/paper\">External paper</a></h2><h2>See <a href=\"#x\">partial</a> link</h2><h4 id=\"keep\">Kept id</h4><h2></h2>";
+        let anchored = anchor_headings(html, Some(&article));
+        assert_eq!(
+            anchored,
+            "<h2 id=\"how-did-this-happen\">How did this happen?</h2><p>Text</p><h3 id=\"cost\">Cost <em>estimates</em></h3><h2 id=\"cost-estimates\">Cost estimates</h2><h2 id=\"cost-estimates-2\">Cost estimates</h2><h2 id=\"external-paper\"><a href=\"https://example.com/paper\">External paper</a></h2><h2 id=\"see-partial-link\">See <a href=\"#x\">partial</a> link</h2><h4 id=\"keep\">Kept id</h4><h2 id=\"section\"></h2>"
+        );
+        assert_eq!(
+            anchor_headings("<p>no headings</p><hr>", None),
+            "<p>no headings</p><hr>"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires saved upstream HTML in AGGR_ARTICLE_HTML"]
+    fn saved_apple_newsroom_share_wrapped_figures_survive_extraction() {
+        let page = std::fs::read_to_string(std::env::var("AGGR_ARTICLE_HTML").unwrap()).unwrap();
+        let url = Url::parse("https://www.apple.com/newsroom/2026/09/introducing-apple-watch-series-12-with-the-all-new-health-sensing-system/").unwrap();
+        let article = extract_article(&page, &url).unwrap();
+        let markdown = to_markdown(&article.html, Some(&url));
+        assert!(markdown.matches("![").count() >= 10, "{markdown}");
+        assert!(
+            markdown.contains("/article/Apple-Watch-Series-12-2up-260909_big.jpg"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
     #[ignore = "requires saved upstream HTML in AGGR_ARTICLE_HTML"]
     fn saved_fowler_captioned_figures_survive_extraction() {
         let page = std::fs::read_to_string(std::env::var("AGGR_ARTICLE_HTML").unwrap()).unwrap();
@@ -2707,6 +3010,29 @@ mod tests {
 
         let out = sanitize(r#"<a href="/rel">o</a>"#, None);
         assert!(out.contains(r#"href="/rel""#), "{out}");
+    }
+
+    #[test]
+    fn markdown_preserves_exclamations_before_links_and_footnotes() {
+        let base = Url::parse("https://example.com/article").unwrap();
+        for html in [
+            r##"<p>Terminal emulators!<sup><a href="#fn-1">1</a></sup></p>"##,
+            r##"<p>Terminal emulators!<a href="#fn-1">1</a></p>"##,
+            r##"<p>Terminal emulators&#33;<span><a href="#fn-1">1</a></span></p>"##,
+        ] {
+            let markdown = to_markdown(html, Some(&base));
+            let rendered = render_markdown(&markdown);
+            assert!(!rendered.contains("<img"), "{markdown}: {rendered}");
+            assert!(rendered.contains("emulators!"), "{rendered}");
+            assert!(
+                rendered.contains(r#"href="https://example.com/article#fn-1""#),
+                "{rendered}"
+            );
+        }
+        let html = r#"<p>Image!<a href="/full.png"><img src="/small.png" alt="Diagram"></a></p><pre><code>![literal](image.png)</code></pre>"#;
+        let rendered = render_markdown(&to_markdown(html, Some(&base)));
+        assert_eq!(rendered.matches("<img").count(), 1, "{rendered}");
+        assert!(rendered.contains("![literal](image.png)"), "{rendered}");
     }
 
     #[test]

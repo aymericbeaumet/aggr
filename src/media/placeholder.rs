@@ -65,6 +65,66 @@ pub(super) fn from_hash(encoded: &str) -> Result<Placeholder> {
     })
 }
 
+/// Visual distance between two ThumbHashes on a 0–255 scale: both previews are decoded and
+/// compared as coarse 8×8 luminance grids, so the same picture at another size, crop, or
+/// encoding scores low while different pictures score high. Undecodable hashes are never similar.
+pub fn distance(left: &str, right: &str) -> Option<u32> {
+    let left = luminance_grid(left)?;
+    let right = luminance_grid(right)?;
+    let total: u32 = left
+        .iter()
+        .zip(&right)
+        .map(|(a, b)| u32::from(a.abs_diff(*b)))
+        .sum();
+    Some(total / GRID.pow(2))
+}
+
+/// Same-picture pairs measured from real archives score 0–1; unrelated pictures score 38+.
+const SAME_PICTURE_DISTANCE: u32 = 12;
+const GRID: u32 = 8;
+
+/// Whether two previews show the same picture, allowing another size, crop, or encoding.
+pub fn same_picture(left: &str, right: &str) -> bool {
+    distance(left, right).is_some_and(|value| value <= SAME_PICTURE_DISTANCE)
+}
+
+fn luminance_grid(encoded: &str) -> Option<[u8; 64]> {
+    let hash = STANDARD.decode(encoded).ok()?;
+    let (width, height, pixels) = thumbhash::thumb_hash_to_rgba(&hash).ok()?;
+    if width == 0 || height == 0 || pixels.len() < width * height * 4 {
+        return None;
+    }
+    let mut grid = [0u8; 64];
+    for (index, cell) in grid.iter_mut().enumerate() {
+        let column = index as u32 % GRID;
+        let row = index as u32 / GRID;
+        let x0 = (column as usize * width) / GRID as usize;
+        let x1 = (((column + 1) as usize * width) / GRID as usize).max(x0 + 1);
+        let y0 = (row as usize * height) / GRID as usize;
+        let y1 = (((row + 1) as usize * height) / GRID as usize).max(y0 + 1);
+        let mut sum = 0u32;
+        let mut count = 0u32;
+        for y in y0..y1.min(height) {
+            for x in x0..x1.min(width) {
+                let offset = (y * width + x) * 4;
+                let [r, g, b, a] = [
+                    pixels[offset],
+                    pixels[offset + 1],
+                    pixels[offset + 2],
+                    pixels[offset + 3],
+                ];
+                // Composite over white, matching the placeholder's opaque rendering.
+                let alpha = u32::from(a);
+                let over = |channel: u8| (u32::from(channel) * alpha + 255 * (255 - alpha)) / 255;
+                sum += (over(r) * 299 + over(g) * 587 + over(b) * 114) / 1000;
+                count += 1;
+            }
+        }
+        *cell = (sum / count.max(1)).min(255) as u8;
+    }
+    Some(grid)
+}
+
 /// Bounded decoding for existing thumbnail companions, including their EXIF orientation.
 pub fn from_bytes(bytes: &[u8]) -> Result<Placeholder> {
     let limits = super::MediaLimits::default();
@@ -172,5 +232,64 @@ mod tests {
         let bottom = png.get_pixel(png.width() / 2, png.height() - 1);
         assert!(top[0] > top[2]);
         assert!(bottom[2] > bottom[0]);
+    }
+}
+
+#[cfg(test)]
+mod similarity_tests {
+    use super::{distance, same_picture};
+
+    #[test]
+    fn same_pictures_at_other_sizes_are_close_and_different_pictures_are_far() {
+        // ThumbHashes captured from archived og:image leads and their body counterparts.
+        for (lead, body) in [
+            (
+                "HSkKHYJfoXZad1l0iFeJd599+Pll",
+                "HSkKHYJfoXZad1l0iFeJd5996Pll",
+            ),
+            (
+                "BQgGDIIHuXeIaJh4l4YHi3iwmA==",
+                "BfgFDIIHuXeIaJh4l4YHiniwmA==",
+            ),
+            (
+                "//cBBIDXp6d/hVV2ipf4b5f+hg==",
+                "//cBBICXh5d/dneEeYqYf5T5Rg==",
+            ),
+        ] {
+            assert!(
+                same_picture(lead, body),
+                "{lead} vs {body}: {:?}",
+                distance(lead, body)
+            );
+        }
+        for (left, right) in [
+            (
+                "BQgGDIIHuXeIaJh4l4YHi3iwmA==",
+                "IggKBIC8yMSEWHlfV4f3U4tfpQ==",
+            ),
+            (
+                "BQgGDIIHuXeIaJh4l4YHi3iwmA==",
+                "2QcGDIJNl0OQh4VkaYlOkNsGmA==",
+            ),
+            (
+                "HSkKHYJfoXZad1l0iFeJd599+Pll",
+                "o0gFFIofszIcxaqhXYt79TsQzQ==",
+            ),
+            (
+                "//cBBIDXp6d/hVV2ipf4b5f+hg==",
+                "IggKBIC8yMSEWHlfV4f3U4tfpQ==",
+            ),
+        ] {
+            assert!(
+                !same_picture(left, right),
+                "{left} vs {right}: {:?}",
+                distance(left, right)
+            );
+        }
+        assert_eq!(
+            distance("not base64!", "HSkKHYJfoXZad1l0iFeJd599+Pll"),
+            None
+        );
+        assert!(!same_picture("", ""));
     }
 }

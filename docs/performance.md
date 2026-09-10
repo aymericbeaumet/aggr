@@ -17,13 +17,15 @@ masters. Repairs write only missing companions and preserve article bodies; unav
 after a one-hour backoff. A missing preview companion is regenerated from available local media; if
 unavailable, only its unusable metadata pointer is omitted. It cannot roll back unrelated image
 repairs, and other file-system errors still fail with the article path. Downloads allow up to 32 MiB per image and 256 MiB per article, with at most
-512 retained images from 1,024 candidates. Raster decoding permits up to 160 megapixels and a 24,000px
-axis, one article-image decoder at a time. Masters above 32 megapixels keep their exact bytes and
+512 retained images from 1,024 candidates. Raster decoding permits up to 200 megapixels and a 24,000px
+axis, one article-image decoder at a time, with a 768 MiB decoder allocation ceiling. Masters above 32 megapixels keep their exact bytes and
 bounded responsive renditions without a second full-resolution encode.
 
 Source-set parsing preserves commas inside CDN URLs. Old truncated Substack transformation URLs
 recover their safely decoded original image URL for downloading while retaining the archived alias
-for body substitution; repair never rewrites the stored article text.
+for body substitution; repair never rewrites the stored article text. A truncated transform such as
+`q_auto:good` is recovered only when preserved source sets identify one unambiguous original image.
+Same-document footnotes are excluded from image repair, including malformed images in older Markdown.
 
 Thumbnail work shares in-flight requests and successful decoding results by URL, scoped headers,
 and reusable image digest. A 64-entry per-run LRU bounds retention; failures remain retryable and

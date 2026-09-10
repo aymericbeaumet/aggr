@@ -257,6 +257,8 @@ export function mountSearch(options: SearchOptions): SearchHandle {
   root.replaceChildren();
   const controls = mount(Controls, { target: root, props: {
     model, change, choose, submit: () => { if (!composing) { dismiss(); void perform(); } },
+    move: (direction: number) => !composing && state.ready && state.page.results.length > 0 && options.moveSelection(direction),
+    open: () => !composing && state.ready && !state.busy && state.page.results.length > 0 && options.openSelected(),
     clear: () => { options.onQueryChanged(); reset(); }, caret: (cursor: number) => { if (cursor !== state.cursor) { update({ cursor }); suggestions(); } }, focusInput, revealInput,
     dismiss, blur: () => { menu = completionMenu(menu, 'blur'); update({ open: false }); }
   } });

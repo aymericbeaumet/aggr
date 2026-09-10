@@ -297,8 +297,20 @@ retain their own destinations and text remains selectable.
 
 List thumbnails and full article images serve different purposes. `item.article_preview` supplies
 a retained lead image only when that image, or an equivalent retained master, is absent from the
-rendered body. This covers metadata images that article extraction omits without duplicating an
-existing body image. Small feed previews must not replace full article masters.
+rendered body. Equivalence uses the retained ThumbHashes, so an `og:image` served from another
+CDN URL, size, or format than the first body image is still recognized as the same picture and
+skipped. Leads narrower than 800px are skipped as well: social cards and small metadata images
+upscale badly as a hero. Small feed previews must not replace full article masters.
+
+Reader headings carry stable ids. A publisher heading that is one link to its own anchor or to
+the article's own page becomes a plain heading with that anchor id; other ids come from the
+heading text. Hovering shows a `#` marker in the margin without moving the title, and a plain click
+updates the URL fragment and scrolls to the heading. Headings are never links in the reader;
+portable outputs keep the original Markdown.
+
+On screens of at least 2dppx, body pictures display at most two thirds of their intrinsic width
+so a modest master is not stretched to double its pixels; large masters still fill the measure.
+Interactive and PDF viewers caption only the original link.
 
 YouTube item pages initialize a paused native player without autoplay. Twitch and Vimeo load after
 activation. Embed URLs come from validated provider identifiers; YouTube uses its privacy-enhanced

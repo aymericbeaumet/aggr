@@ -35,7 +35,7 @@
     <span class="document-placeholder" aria-hidden="true"><svg viewBox="0 0 36 48"><path d="M5 2h17l9 9v35H5zM22 2v10h9M11 23h14M11 29h14M11 35h10"/></svg>PDF document</span>
     <embed class="document-viewer" src="{{ item.document.url }}" type="application/pdf" title="{{ item.title }} — PDF" width="768" height="720">
     </div>
-    <figcaption><a href="{{ item.document.url }}" target="_blank" rel="noopener noreferrer" aria-label="Open PDF: {{ item.title }}">Open PDF ↗</a><span> if the viewer is unavailable.</span></figcaption>
+    <figcaption><a href="{{ item.document.url }}" target="_blank" rel="noopener noreferrer" aria-label="Open PDF: {{ item.title }}">Open PDF ↗</a></figcaption>
   </figure>
   {% elif item.video %}
   <div class="video-player" data-video-provider="{{ item.video.provider }}"{% if item.metadata.consumption.seconds %} data-duration-seconds="{{ item.metadata.consumption.seconds }}"{% endif %}{% if item.preview %} data-thumbhash="{{ item.preview.placeholder.hash }}" style="--image-placeholder: {{ item.preview.color }}; --image-preview: url('{{ item.preview.placeholder.data_url }}'); background-color: var(--image-placeholder)"{% endif %}>
@@ -79,7 +79,7 @@
         <span>Open interactive page ↗</span>
       </a>
     </div>
-    <figcaption><a href="{{ item.interactive.source_url }}" target="_blank" rel="noopener noreferrer">Open original ↗</a><span> if the interactive view is unavailable.</span></figcaption>
+    <figcaption><a href="{{ item.interactive.source_url }}" target="_blank" rel="noopener noreferrer">Open original ↗</a></figcaption>
   </figure>
   {% elif item.article_preview %}
   <figure class="article-lead media-frame" data-thumbhash="{{ item.article_preview.placeholder.hash }}" style="--media-ratio: {{ item.article_preview.width }} / {{ item.article_preview.height }}; --image-placeholder: {{ item.article_preview.color }}; --image-preview: url('{{ item.article_preview.placeholder.data_url }}')">

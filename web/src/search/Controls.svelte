@@ -4,11 +4,12 @@
   import type { ViewState } from './state';
   import { selectedCompletion, type Completion } from './completion';
 
-  let { model, change, caret, choose, submit, clear, focusInput, revealInput, dismiss, blur }: {
+  let { model, change, caret, choose, submit, move, open, clear, focusInput, revealInput, dismiss, blur }: {
     model: Readable<ViewState>;
     change: (query: string, cursor: number, composing: boolean) => void;
     caret: (cursor: number) => void; choose: (item: Completion) => void;
-    submit: () => void; clear: () => void; focusInput: () => void; revealInput: () => void; dismiss: () => void; blur: () => void;
+    submit: () => void; move: (direction: number) => boolean; open: () => boolean;
+    clear: () => void; focusInput: () => void; revealInput: () => void; dismiss: () => void; blur: () => void;
   } = $props();
   let input: HTMLInputElement | null = $state(null);
   let composing = $state(false);
@@ -36,8 +37,14 @@
       if (choice) choose(choice);
       return;
     }
+    // Without suggestions the arrows walk the results and Enter opens the selected one.
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (move(event.key === 'ArrowDown' ? 1 : -1)) { event.preventDefault(); event.stopPropagation(); }
+      return;
+    }
     if (event.key === 'Enter' && (!$model.open || !$model.suggestions.length)) {
-      event.preventDefault(); event.stopPropagation(); submit();
+      event.preventDefault(); event.stopPropagation();
+      if (!open()) submit();
     }
   }
 </script>

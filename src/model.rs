@@ -607,10 +607,11 @@ mod tests {
             color: None,
         };
         assert!(image(15_197, 8_488).is_valid_for("article"));
-        assert!(image(20_000, 8_000).is_valid_for("article"));
+        assert!(image(17_277, 11_171).is_valid_for("article"));
+        assert!(image(20_000, 10_000).is_valid_for("article"));
         assert!(image(24_000, 100).is_valid_for("article"));
         assert!(!image(24_001, 100).is_valid_for("article"));
-        assert!(!image(20_000, 8_001).is_valid_for("article"));
+        assert!(!image(20_000, 10_001).is_valid_for("article"));
         assert!(!image(0, 100).is_valid_for("article"));
         assert!(!image(u32::MAX, u32::MAX).is_valid_for("article"));
     }

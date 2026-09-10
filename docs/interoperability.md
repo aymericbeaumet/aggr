@@ -60,6 +60,29 @@ but aggr does not log in, complete challenges, or query third-party Instagram br
 profile cannot be read publicly, use the creator's website or feed instead. Meta's authorized
 Instagram APIs are a separate integration and are not enabled by adding an ordinary profile URL.
 
+## Public threads
+
+Heavy article extraction joins public posts by the original author. Mastodon/ActivityPub follows
+same-origin ActivityStreams parents and replies. X/Twitter status URLs use public xcancel HTML;
+stored attribution and post links use `x.com`, and images use their original media URLs. X source
+credentials are never forwarded to xcancel. No login, browser cookies, or publisher scripts are used.
+
+X traversal follows author continuations and cursor pages, deduplicates status IDs, and orders posts
+chronologically while preserving each post's media sequence. It is bounded to 32 requests, 128 posts,
+and 30 seconds; an unavailable continuation or exhausted budget is logged as a warning and the
+retrieved posts are kept. Failure to retrieve the initial post leaves ordinary article extraction
+available. Existing entries receive new thread extraction on explicit refresh; saved content is not
+silently replaced.
+
+A thread reads as one uninterrupted article: posts are concatenated without separators, per-post
+links, or partial-thread notices, because the metadata original link already reaches the thread.
+Trailing parenthesized or bracketed counters such as `(1/3)` and standalone `2/3` paragraphs are
+removed per post before concatenation. Fractions inside prose, code, links, or nonterminal text stay
+intact. Builds apply the same presentation cleanup to archived social Markdown, including earlier
+captures that stored separators or generated links, across reader pages, search, feeds, and exports
+without rewriting stored Markdown or HTML. Media remains at its post position; a video keeps its
+poster image only; playback is not retained.
+
 ## HTTP extraction and native builds
 
 HTTP requests use reqwest with rustls first. A response explicitly marked
@@ -82,8 +105,15 @@ neighboring figure. Ordinary comment containers and sidebars still follow the no
 versions change with these rules while raw HTTP responses remain reusable. A figure already absent
 from both stored HTML and Markdown needs a fresh extraction; rendering cannot reconstruct it.
 
+Readability discards elements whose class or id mentions sharing. A wrapper that contains real
+media and no sharing links (Apple Newsroom's `image-sharesheet` figures, for example) is renamed
+before extraction so its picture survives; genuine share widgets with intent or social links are
+still removed.
+
 Shared boundary cleanup removes a compact leading `By Name Name MM.DD.YY` paragraph only when its
-date matches the item's publication date. It preserves headings, quotations, code, normal prose,
+date matches the item's publication date. A standalone editorial note at either document
+boundary such as `This article was updated on 08 September 2026.` is removed too, because the
+item metadata already shows publication and update times; the same words inside prose stay. It preserves headings, quotations, code, normal prose,
 later bylines, and existing front matter. Builds apply the same cleanup to older archived bodies
 without rewriting their stored Markdown or HTML.
 
@@ -240,7 +270,8 @@ aggr preserves a safe, readable snapshot: metadata, extracted or feed Markdown, 
 stripped HTML used to derive it. Optional image retention preserves safe raster masters and
 lossless derivatives, including a metadata lead image omitted from extracted prose. SVG diagrams
 are retained as passive rasters with their source URL; their original executable markup and
-referenced resources are not archived. It does not preserve the complete HTTP exchange,
+referenced resources are not archived. Standard SVG doctypes without internal subsets are ignored;
+entity definitions and internal DTD subsets remain rejected. It does not preserve the complete HTTP exchange,
 executable page, stylesheet, fonts, video streams, or arbitrary linked assets, and a failed
 extraction can leave only feed metadata. It is therefore not a pixel-perfect mirror or a WARC archive.
 

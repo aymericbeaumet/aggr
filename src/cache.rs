@@ -16,7 +16,7 @@ const ARTICLE_NAMESPACE: &str = "articles-v1";
 const RENDER_NAMESPACE: &str = "render-v1";
 const RENDER_KEY_FILE: &str = ".aggr-build-key";
 /// Bump when article extraction semantics change. Raw responses remain reusable across bumps.
-const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-3";
+const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-5";
 const MAX_ARTICLE_METADATA_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_ARTICLE_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXTRACTED_ARTICLE_BYTES: usize = 16 * 1024 * 1024;
@@ -115,7 +115,7 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
-fn render_implementation_sources() -> [(&'static str, &'static str); 27] {
+fn render_implementation_sources() -> [(&'static str, &'static str); 28] {
     [
         ("config", include_str!("config.rs")),
         ("preferences", include_str!("config/preferences.rs")),
@@ -144,6 +144,7 @@ fn render_implementation_sources() -> [(&'static str, &'static str); 27] {
         ("pagefind", include_str!("site/pagefind.rs")),
         ("related", include_str!("site/related.rs")),
         ("render", include_str!("site/render.rs")),
+        ("threads", include_str!("threads.rs")),
     ]
 }
 

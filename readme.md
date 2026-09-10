@@ -184,7 +184,7 @@ without clearing reading history. Resetting also restores the site's offline-dow
 | Keys | Action |
 |---|---|
 | `Cmd+K` / `Ctrl+K` | Focus global search. |
-| `↑` / `↓`, then `Enter` in search | Choose and accept a suggestion; `Escape` closes suggestions and removes focus. |
+| `↑` / `↓`, then `Enter` in search | With suggestions open, choose and accept one; otherwise move the result cursor and open the selected result. `Escape` closes suggestions and removes focus. |
 | `j` / `k` in article lists | Select the next / previous item; the first press selects the first item. |
 | `gg` / `G` | Select the first / last visible feed item; scroll to the top / bottom on article pages. |
 | `o` / `Enter` in article lists | Open the selected item. |
@@ -284,9 +284,11 @@ requests on other origins do not receive those headers.
 In heavy mode, a public ActivityPub/Mastodon status is expanded into its public same-author
 self-reply thread when the page advertises ActivityStreams data. Parent and reply traversal stays
 on the status origin, is tightly bounded, and falls back to ordinary article extraction if the
-server withholds or rejects any required data. aggr does not scrape X/Twitter threads; its official
-thread APIs require authentication and mutable deletion handling that is incompatible with the
-append-only archive.
+server withholds or rejects any required data. X/Twitter status links use publicly available
+xcancel pages to collect the author's replies, with original links pointing to `x.com`. Posts and
+their media keep their original order and read as one article: no separators, per-post links, or
+trailing thread counters such as `(1/3)`. The original link in the article metadata reaches the
+thread; unavailable continuations are logged. See [public threads](docs/interoperability.md#public-threads).
 
 Article-image archiving is on by default. The explicit form, including a per-source opt-out, is:
 
@@ -324,7 +326,7 @@ existing masters, and retry failed downloads after an hour.
 
 Acquisition is intentionally bounded per article: at most 1,024 candidates are inspected and 512
 images retained; one response or rendition may use at most 32 MiB; downloaded and retained media
-each have a 256 MiB cumulative budget; and decoded images may not exceed 160 megapixels or 24,000
+each have a 256 MiB cumulative budget; and decoded images may not exceed 200 megapixels or 24,000
 pixels on either axis. SVG parsing accepts up to 2 MiB and 20,000 XML nodes, rasterized to at most
 1,600 pixels per axis. Decoding runs one article image at a time with a 15-second per-image
 limit. These media limits are conservative implementation safeguards rather than configuration

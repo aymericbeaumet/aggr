@@ -946,6 +946,7 @@ pub fn build(
     for item in &mut all_items {
         item.body =
             content::strip_article_metadata(&item.body, item.front.published, &item.front.source);
+        item.body = crate::threads::clean_archived_thread(&item.body, &item.front.link);
     }
     all_items.sort_by(|a, b| {
         b.created_at()
@@ -1434,15 +1435,17 @@ pub fn build(
         } else {
             Vec::new()
         };
-        ctx.body_html = Some(
-            prepared_markdown.reader_html_with_images(
+        let article_url = url::Url::parse(&item.front.link).ok();
+        ctx.body_html = Some(content::anchor_headings(
+            &prepared_markdown.reader_html_with_images(
                 article_images
                     .get(&item.path)
                     .map(Vec::as_slice)
                     .unwrap_or_default(),
                 &dimensions,
             ),
-        );
+            article_url.as_ref(),
+        ));
         let dir = out.join(&ctx.url);
         let representation = out.join(ctx.url.trim_end_matches('/'));
         write(
@@ -3295,6 +3298,52 @@ category = "Science"
     }
 
     #[test]
+    fn build_cleans_archived_social_threads_without_rewriting_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let mut item = store.items().unwrap().remove(0);
+        item.front.link = "https://mathstodon.xyz/@tao/117244102901892965".into();
+        item.body = "First post preserves the fraction 1/3 and code `(1/3)`. (1/3)\n\n* * *\n\nSecond post. (2/3)\n\n* * *\n\nFinal post.\n\n3/3\n".into();
+        let retained = "<section data-aggr-thread='activitypub'><article data-aggr-thread-post><p>First post preserves the fraction 1/3 and code <code>(1/3)</code>. (1/3)</p></article><hr><article data-aggr-thread-post><p>Second post. (2/3)</p></article><hr><article data-aggr-thread-post><p>Final post.</p><p>3/3</p></article></section>";
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        item.front.html = Some(format!("{stem}.html"));
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &item.front,
+                body: &item.body,
+                html: Some(retained),
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        for path in [
+            "items/blog/2026-09-01-post-0/index.html",
+            "items/blog/2026-09-01-post-0.md",
+            "items/blog/2026-09-01-post-0.json",
+            "atom.xml",
+            "rss.xml",
+            "feed.json",
+        ] {
+            let output = std::fs::read_to_string(out.join(path)).unwrap();
+            assert!(!output.contains("(2/3)"), "counter remains in {path}");
+            assert!(!output.contains("3/3"), "counter remains in {path}");
+            assert!(!output.contains("<hr"), "separator remains in {path}");
+            assert!(!output.contains("* * *"), "separator remains in {path}");
+            assert!(
+                output.contains("fraction 1/3"),
+                "fraction missing in {path}"
+            );
+        }
+        let stored = store.items().unwrap().remove(0);
+        assert_eq!(stored.body, item.body);
+        assert_eq!(store.read_html(&stored).unwrap().as_deref(), Some(retained));
+    }
+
+    #[test]
     fn build_cleans_leading_publication_dates_from_existing_items() {
         let dir = tempfile::tempdir().unwrap();
         let (config, sources, store) = fixture(dir.path(), 1, "max_age_days = 30\npwa = false\n");
@@ -4265,7 +4314,11 @@ same_as = ["https://social.example/@ada"]
             "{interactive}"
         );
         assert!(!interactive.contains("<iframe"));
-        assert!(interactive.contains("if the interactive view is unavailable"));
+        assert!(
+            interactive.contains(">Open original ↗</a></figcaption>"),
+            "{interactive}"
+        );
+        assert!(!interactive.contains("if the interactive view is unavailable"));
         let document =
             std::fs::read_to_string(out.join("items/blog/2026-09-02-post-1/index.html")).unwrap();
         assert!(document.contains("src=\"https://papers.test/verified.pdf\""));
@@ -4308,7 +4361,8 @@ same_as = ["https://social.example/@ada"]
             "{page}"
         );
         assert!(page.contains("Open PDF"), "{page}");
-        assert!(page.contains("if the viewer is unavailable"), "{page}");
+        assert!(page.contains(">Open PDF ↗</a></figcaption>"), "{page}");
+        assert!(!page.contains("if the viewer is unavailable"), "{page}");
         assert!(
             !page.contains("This source publishes titles only"),
             "{page}"

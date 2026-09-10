@@ -63,11 +63,12 @@ export function createSelection(options: SelectionOptions) {
       if (focus && retained && !preferred && typeof state.y === 'number') win.scrollTo(0, state.y);
       return true;
     },
-    move(direction: number) {
+    /** `focus: false` keeps the keyboard where it is, e.g. in the search field. */
+    move(direction: number, focus = true) {
       const rows = options.rows();
       if (!rows.length) return false;
       const current = rows.findIndex(row => row.classList.contains('is-selected'));
-      return select(rows[current === -1 ? 0 : Math.max(0, Math.min(rows.length - 1, current + direction))], true, true);
+      return select(rows[current === -1 ? 0 : Math.max(0, Math.min(rows.length - 1, current + direction))], focus, true);
     }
   };
 }

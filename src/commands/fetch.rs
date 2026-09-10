@@ -1129,6 +1129,8 @@ async fn repair_archived_images(
             })
             .cloned()
             .collect();
+        let html = store.read_html(&existing)?.unwrap_or_default();
+        let base = url::Url::parse(&existing.front.link).ok();
         if (candidates.is_empty() && !preview_missing)
             || candidates.iter().any(|candidate| {
                 existing
@@ -1136,7 +1138,12 @@ async fn repair_archived_images(
                     .images
                     .iter()
                     .any(|image| image.source == candidate.url.as_str())
-                    && options.media_fetcher.recently_failed(candidate, source)
+                    && options.media_fetcher.recently_failed_archived(
+                        candidate,
+                        source,
+                        &html,
+                        base.as_ref(),
+                    )
             })
         {
             continue;
@@ -1150,10 +1157,17 @@ async fn repair_archived_images(
         let remaining_bytes = media::MediaLimits::default()
             .max_article_bytes
             .saturating_sub(retained_bytes);
-        let images = options
-            .media_fetcher
-            .fetch_with_budget(&candidates, source, remaining_bytes)
-            .await;
+        let images = if let Some(base) = base {
+            options
+                .media_fetcher
+                .fetch_archived_with_budget(&candidates, source, remaining_bytes, &html, &base)
+                .await
+        } else {
+            options
+                .media_fetcher
+                .fetch_with_budget(&candidates, source, remaining_bytes)
+                .await
+        };
         if images.is_empty() && !preview_missing {
             continue;
         }
@@ -1708,12 +1722,27 @@ async fn heavy_content(
             }
         };
     }
-    let preview_candidates = raw.preview_candidates.clone();
+    let mut preview_candidates = raw.preview_candidates.clone();
     let mut page_candidates = preview::HtmlCandidateGroups::default();
     let mut interactive = false;
     let mut duration = None;
+    let mut thread_link = None;
     let result = async {
         let cache = crate::cache::ArticleCache::new(cache_dir);
+        match crate::threads::expand_x(&url, source, client, &cache).await {
+            Ok(Some(expanded)) => {
+                thread_link = crate::threads::canonical_x_url(&url);
+                preview_candidates.clear();
+                page_candidates = preview::html_candidate_groups(&expanded.html, &url);
+                return Ok(expanded);
+            }
+            Ok(None) => {}
+            Err(error) => log::debug!(
+                "{}: X thread expansion failed for {}: {error:#}",
+                source.slug,
+                url
+            ),
+        }
         let headers = http::source_headers(source, &url);
         let cached = cache.load(&url, headers)?;
         let request = client.get(http::Request {
@@ -1790,6 +1819,9 @@ async fn heavy_content(
     match result {
         Ok(extracted) => {
             let mut enriched = raw.clone();
+            if let Some(link) = thread_link {
+                enriched.link = link.to_string();
+            }
             if let Some(seconds) = duration {
                 enriched
                     .extra

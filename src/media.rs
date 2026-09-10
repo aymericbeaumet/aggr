@@ -111,7 +111,7 @@ impl Default for MediaLimits {
             max_article_bytes: 256 * 1024 * 1024,
             max_candidates: 1024,
             max_assets: 512,
-            max_pixels: 160_000_000,
+            max_pixels: 200_000_000,
             max_axis: 24_000,
             download_concurrency: 8,
             decode_concurrency: 1,
@@ -784,7 +784,11 @@ fn is_data_url(value: &str) -> bool {
 }
 
 fn safe_image_url(value: &str, base: &Url) -> Option<Url> {
-    let mut url = base.join(value.trim()).ok()?;
+    let value = value.trim();
+    if value.is_empty() || value.starts_with('#') {
+        return None;
+    }
+    let mut url = base.join(value).ok()?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || !url.username().is_empty()
@@ -792,7 +796,15 @@ fn safe_image_url(value: &str, base: &Url) -> Option<Url> {
     {
         return None;
     }
+    let had_fragment = url.fragment().is_some();
     url.set_fragment(None);
+    if had_fragment {
+        let mut document = base.clone();
+        document.set_fragment(None);
+        if url == document {
+            return None;
+        }
+    }
     Some(url)
 }
 
@@ -803,6 +815,10 @@ fn image_request_url(url: &Url) -> Option<Url> {
     let Some((_, encoded)) = url.path().split_once("/fl_progressive:steep/") else {
         return Some(url.clone());
     };
+    decode_image_origin(encoded)
+}
+
+fn decode_image_origin(encoded: &str) -> Option<Url> {
     let mut parts = encoded.split('%');
     let mut decoded = parts.next()?.as_bytes().to_vec();
     for part in parts {
@@ -824,6 +840,51 @@ fn clean_alt(value: Option<&str>) -> Option<String> {
         .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(300).collect())
+}
+
+/// Old comma-split source sets sometimes retained only a CDN transform such as q_auto:good.
+/// Recover it only when the saved source set identifies exactly one original image.
+fn archived_image_request_url(url: &Url, html: &str, base: &Url) -> Option<Url> {
+    let token = url.path().rsplit('/').next()?;
+    if url.origin() != base.origin()
+        || url.query().is_some()
+        || !["w_", "h_", "c_", "f_", "q_", "fl_"]
+            .iter()
+            .any(|prefix| token.starts_with(prefix))
+        || base.join(token).ok().as_ref() != Some(url)
+    {
+        return None;
+    }
+    let document = Html::parse_fragment(html);
+    let selector = Selector::parse("img, picture source").ok()?;
+    let mut originals = BTreeSet::new();
+    for element in document.select(&selector) {
+        for srcset in ["srcset", "data-srcset", "data-lazy-srcset"]
+            .into_iter()
+            .filter_map(|name| element.value().attr(name))
+        {
+            for candidate in srcset::candidates(srcset) {
+                let Some(full) = safe_image_url(candidate.url, base) else {
+                    continue;
+                };
+                if full.host_str() != Some("substackcdn.com")
+                    || !full.path().starts_with("/image/fetch/")
+                    || !candidate
+                        .url
+                        .split(',')
+                        .skip(1)
+                        .any(|part| safe_image_url(part, base).as_ref() == Some(url))
+                {
+                    continue;
+                }
+                let (_, encoded) = full.path().split_once("fl_progressive:steep/")?;
+                originals.insert(decode_image_origin(encoded)?);
+            }
+        }
+    }
+    (originals.len() == 1)
+        .then(|| originals.pop_first())
+        .flatten()
 }
 
 pub struct Fetcher {
@@ -881,29 +942,46 @@ impl Fetcher {
         self
     }
 
-    fn failure_path(&self, candidate: &Candidate, source: &Source) -> Option<PathBuf> {
-        let url = image_request_url(&candidate.url)?;
-        let key = format!("{}\n{:?}", url, http::source_headers(source, &url));
+    fn failure_path(&self, url: &Url, source: &Source) -> Option<PathBuf> {
+        let key = format!("{}\n{:?}", url, http::source_headers(source, url));
         self.failure_cache
             .as_ref()
             .map(|root| root.join(crate::model::sha1_hex(key.as_bytes())))
     }
 
-    pub(crate) fn recently_failed(&self, candidate: &Candidate, source: &Source) -> bool {
-        self.failure_path(candidate, source)
+    fn recently_failed(&self, request_url: &Url, source: &Source) -> bool {
+        self.failure_path(request_url, source)
             .and_then(|path| std::fs::metadata(path).ok())
             .and_then(|metadata| metadata.modified().ok())
             .and_then(|modified| modified.elapsed().ok())
             .is_some_and(|age| age < Duration::from_secs(3600))
     }
 
-    fn remember_failure(&self, candidate: &Candidate, source: &Source, reason: &str) {
+    pub(crate) fn recently_failed_archived(
+        &self,
+        candidate: &Candidate,
+        source: &Source,
+        html: &str,
+        base: Option<&Url>,
+    ) -> bool {
+        base.and_then(|base| archived_image_request_url(&candidate.url, html, base))
+            .or_else(|| image_request_url(&candidate.url))
+            .is_some_and(|url| self.recently_failed(&url, source))
+    }
+
+    fn remember_failure(
+        &self,
+        candidate: &Candidate,
+        request_url: &Url,
+        source: &Source,
+        reason: &str,
+    ) {
         log::warn!(
             "{}: could not archive image {}: {reason}",
             source.slug,
             candidate.url
         );
-        if let Some(path) = self.failure_path(candidate, source) {
+        if let Some(path) = self.failure_path(request_url, source) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -920,6 +998,7 @@ impl Fetcher {
             source,
             self.limits.max_assets,
             self.limits.max_article_bytes,
+            &BTreeMap::new(),
         )
         .await
     }
@@ -935,15 +1014,47 @@ impl Fetcher {
             source,
             self.limits.max_assets,
             remaining_bytes.min(self.limits.max_article_bytes),
+            &BTreeMap::new(),
+        )
+        .await
+    }
+
+    pub async fn fetch_archived_with_budget(
+        &self,
+        candidates: &[Candidate],
+        source: &Source,
+        remaining_bytes: usize,
+        html: &str,
+        base: &Url,
+    ) -> Vec<Asset> {
+        let request_urls = candidates
+            .iter()
+            .filter_map(|candidate| {
+                archived_image_request_url(&candidate.url, html, base)
+                    .map(|url| (candidate.url.clone(), url))
+            })
+            .collect();
+        self.fetch_up_to(
+            candidates,
+            source,
+            self.limits.max_assets,
+            remaining_bytes.min(self.limits.max_article_bytes),
+            &request_urls,
         )
         .await
     }
 
     /// Alternative URLs for one image stop after the first usable response.
     pub async fn fetch_first(&self, candidates: &[Candidate], source: &Source) -> Option<Asset> {
-        self.fetch_up_to(candidates, source, 1, self.limits.max_article_bytes)
-            .await
-            .pop()
+        self.fetch_up_to(
+            candidates,
+            source,
+            1,
+            self.limits.max_article_bytes,
+            &BTreeMap::new(),
+        )
+        .await
+        .pop()
     }
 
     async fn fetch_up_to(
@@ -952,6 +1063,7 @@ impl Fetcher {
         source: &Source,
         max_assets: usize,
         max_bytes: usize,
+        request_urls: &BTreeMap<Url, Url>,
     ) -> Vec<Asset> {
         let mut assets = Vec::<Asset>::new();
         let mut downloaded = 0_usize;
@@ -962,10 +1074,14 @@ impl Fetcher {
             if !seen.insert(&candidate.url) {
                 continue;
             }
-            let Some(request_url) = image_request_url(&candidate.url) else {
+            let Some(request_url) = request_urls
+                .get(&candidate.url)
+                .cloned()
+                .or_else(|| image_request_url(&candidate.url))
+            else {
                 continue;
             };
-            if self.recently_failed(candidate, source) {
+            if self.recently_failed(&request_url, source) {
                 continue;
             }
             if assets.len() >= max_assets || downloaded >= max_bytes {
@@ -998,11 +1114,16 @@ impl Fetcher {
             let body = match response {
                 Ok(http::Response::Ok(body)) => body,
                 Ok(_) => {
-                    self.remember_failure(candidate, source, "unexpected empty response");
+                    self.remember_failure(
+                        candidate,
+                        &request_url,
+                        source,
+                        "unexpected empty response",
+                    );
                     continue;
                 }
                 Err(error) => {
-                    self.remember_failure(candidate, source, &format!("{error:#}"));
+                    self.remember_failure(candidate, &request_url, source, &format!("{error:#}"));
                     continue;
                 }
             };
@@ -1030,19 +1151,20 @@ impl Fetcher {
             let mut asset = match result {
                 Ok(Ok(Ok(asset))) => asset,
                 Ok(Ok(Err(error))) => {
-                    self.remember_failure(candidate, source, &format!("{error:#}"));
+                    self.remember_failure(candidate, &request_url, source, &format!("{error:#}"));
                     continue;
                 }
                 Ok(Err(error)) => {
                     self.remember_failure(
                         candidate,
+                        &request_url,
                         source,
                         &format!("decoder task failed: {error}"),
                     );
                     continue;
                 }
                 Err(_) => {
-                    self.remember_failure(candidate, source, "decoder timed out");
+                    self.remember_failure(candidate, &request_url, source, "decoder timed out");
                     continue;
                 }
             };
@@ -1052,7 +1174,7 @@ impl Fetcher {
                 continue;
             };
             retained += used;
-            if let Some(path) = self.failure_path(candidate, source) {
+            if let Some(path) = self.failure_path(&request_url, source) {
                 let _ = std::fs::remove_file(path);
             }
             resolved.insert(request_url, assets.len());
@@ -1408,7 +1530,7 @@ fn decoder_limits(limits: &MediaLimits) -> image::Limits {
     let mut decoder = image::Limits::default();
     decoder.max_image_width = Some(limits.max_axis);
     decoder.max_image_height = Some(limits.max_axis);
-    decoder.max_alloc = Some(limits.max_pixels.saturating_mul(8).min(512 * 1024 * 1024));
+    decoder.max_alloc = Some(limits.max_pixels.saturating_mul(8).min(768 * 1024 * 1024));
     decoder
 }
 
@@ -1419,7 +1541,11 @@ fn validate_dimensions(width: u32, height: u32, limits: &MediaLimits) -> Result<
         || height > limits.max_axis
         || u64::from(width) * u64::from(height) > limits.max_pixels
     {
-        bail!("article image dimensions exceed limits");
+        bail!(
+            "article image dimensions {width}x{height} exceed limits ({} pixels, {} per axis)",
+            limits.max_pixels,
+            limits.max_axis
+        );
     }
     Ok(())
 }
@@ -1431,7 +1557,11 @@ fn validate_stored_dimensions(width: u32, height: u32, limits: &MediaLimits) -> 
         || height > limits.max_axis
         || u64::from(width) * u64::from(height) > limits.max_pixels
     {
-        bail!("stored article image dimensions exceed limits");
+        bail!(
+            "stored article image dimensions {width}x{height} exceed limits ({} pixels, {} per axis)",
+            limits.max_pixels,
+            limits.max_axis
+        );
     }
     Ok(())
 }
@@ -1633,6 +1763,25 @@ mod tests {
         Candidate {
             url: Url::parse(url).unwrap(),
             alt: Some("An image".into()),
+        }
+    }
+
+    #[test]
+    fn image_candidates_exclude_empty_sources_and_article_footnotes() {
+        let base = Url::parse("https://mitchellh.com/writing/libghostty-is-coming").unwrap();
+        let markdown = "emulation![1](https://mitchellh.com/writing/libghostty-is-coming#user-content-fn-1)\n![2](#fn-2)\n![Empty]()\n![Chart](/chart.svg#view)";
+        let html = r##"<img src=""><img src="#fn-1"><img src="/writing/libghostty-is-coming#fn-2"><img src="/chart.svg#view">"##;
+        for candidates in [
+            markdown_candidates(markdown, &base),
+            body_candidates(html, &base),
+        ] {
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.url.as_str())
+                    .collect::<Vec<_>>(),
+                ["https://mitchellh.com/chart.svg"]
+            );
         }
     }
 
@@ -1927,6 +2076,29 @@ mod tests {
             .placeholder,
             asset.placeholder
         );
+    }
+
+    #[test]
+    fn large_chart_dimensions_fit_the_bounded_rgba_decode_budget() {
+        let limits = MediaLimits::default();
+        for (width, height) in [
+            (17_277, 11_171),
+            (17_457, 10_428),
+            (17_277, 10_523),
+            (17_277, 9_669),
+            (17_277, 10_123),
+        ] {
+            validate_dimensions(width, height, &limits).unwrap();
+            validate_stored_dimensions(width, height, &limits).unwrap();
+            decoder_limits(&limits)
+                .reserve(u64::from(width) * u64::from(height) * 4)
+                .unwrap();
+        }
+        for (width, height) in [(20_000, 10_001), (24_001, 1), (0, 1)] {
+            assert!(validate_dimensions(width, height, &limits).is_err());
+            assert!(validate_stored_dimensions(width, height, &limits).is_err());
+        }
+        assert!(decoder_limits(&limits).reserve(1024 * 1024 * 1024).is_err());
     }
 
     #[test]
@@ -2699,6 +2871,33 @@ mod tests {
     }
 
     #[test]
+    fn archived_cdn_tokens_require_one_unambiguous_saved_original() {
+        let base = Url::parse("https://www.techemails.com/p/story").unwrap();
+        let broken = base.join("q_auto:good").unwrap();
+        let first = "https://substackcdn.com/image/fetch/w_40,q_auto:good,fl_progressive:steep/https%3A%2F%2Fimages.example%2Favatar.png";
+        let second = first.replace("w_40", "w_80");
+        let html = format!(r#"<img srcset="{first} 1x, {second} 2x">"#);
+        assert_eq!(
+            archived_image_request_url(&broken, &html, &base)
+                .unwrap()
+                .as_str(),
+            "https://images.example/avatar.png"
+        );
+        let ambiguous = format!("{html}{}", html.replace("avatar.png", "another.png"));
+        assert!(archived_image_request_url(&broken, &ambiguous, &base).is_none());
+        assert!(archived_image_request_url(&broken, "<img src='avatar.png'>", &base).is_none());
+        assert!(
+            archived_image_request_url(&base.join("unrelated.png").unwrap(), &html, &base)
+                .is_none()
+        );
+        let unsafe_html = html.replace(
+            "https%3A%2F%2Fimages.example%2Favatar.png",
+            "javascript%3Aalert(1)",
+        );
+        assert!(archived_image_request_url(&broken, &unsafe_html, &base).is_none());
+    }
+
+    #[test]
     fn recovered_cdn_tail_accepts_only_safe_absolute_origins() {
         let recover = |tail: &str| {
             image_request_url(
@@ -2726,6 +2925,89 @@ mod tests {
         }
         let intact = Url::parse("https://substackcdn.com/image/fetch/w_640,c_limit,fl_progressive:steep/https%3A%2F%2Fimages.example%2Ffigure.png").unwrap();
         assert_eq!(image_request_url(&intact), Some(intact));
+    }
+
+    #[tokio::test]
+    async fn saved_srcset_repairs_a_broken_alias_without_forwarding_source_credentials() {
+        use httpmock::prelude::*;
+        let publisher = MockServer::start();
+        let origin = MockServer::start();
+        let bytes = png(&DynamicImage::new_rgba8(80, 48));
+        let image = origin.mock(|when, then| {
+            when.path("/avatar.png").header_missing("authorization");
+            then.status(200).body(bytes.clone());
+        });
+        let broken = publisher.mock(|when, then| {
+            when.path("/p/q_auto:good");
+            then.status(404);
+        });
+        let unavailable = origin.mock(|when, then| {
+            when.path("/missing.png");
+            then.status(404);
+        });
+        let encoded: String = origin
+            .url("/avatar.png")
+            .bytes()
+            .map(|byte| format!("%{byte:02X}"))
+            .collect();
+        let full = format!(
+            "https://substackcdn.com/image/fetch/w_120,q_auto:good,fl_progressive:steep/{encoded}"
+        );
+        let html = format!(r#"<img srcset="{full} 3x">"#);
+        let base = Url::parse(&publisher.url("/p/story")).unwrap();
+        let alias = publisher.url("/p/q_auto:good");
+        let config = crate::config::Config::parse(&format!(
+            "[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\" }}\n",
+            publisher.url("/feed")
+        ))
+        .unwrap();
+        let source = config.sources().unwrap().remove(0);
+        let cache = tempfile::tempdir().unwrap();
+        let fetcher = Fetcher::new(&FetchConfig::default(), MediaLimits::default())
+            .unwrap()
+            .with_cache(cache.path());
+        assert!(
+            fetcher
+                .fetch(&[candidate(&alias)], &source)
+                .await
+                .is_empty()
+        );
+        let missing: String = origin
+            .url("/missing.png")
+            .bytes()
+            .map(|byte| format!("%{byte:02X}"))
+            .collect();
+        let missing_html = html.replace(&encoded, &missing);
+        for _ in 0..2 {
+            assert!(
+                fetcher
+                    .fetch_archived_with_budget(
+                        &[candidate(&alias)],
+                        &source,
+                        MediaLimits::default().max_article_bytes,
+                        &missing_html,
+                        &base,
+                    )
+                    .await
+                    .is_empty()
+            );
+        }
+        let assets = fetcher
+            .fetch_archived_with_budget(
+                &[candidate(&alias)],
+                &source,
+                MediaLimits::default().max_article_bytes,
+                &html,
+                &base,
+            )
+            .await;
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].source_url, alias);
+        assert_eq!(assets[0].metadata("story").source, alias);
+        assert_eq!(assets[0].master_bytes, bytes);
+        image.assert_calls(1);
+        broken.assert_calls(1);
+        unavailable.assert_calls(1);
     }
 
     #[tokio::test]

@@ -96,7 +96,7 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   apply shared boundary cleanup during both fetch and rendering so old archives benefit safely.
   Remove compact bylines only from a leading prose paragraph with a matching publication date.
 - Preserve explicitly captioned image figures before Readability classifies incidental IDs such as
-  `replies.png` as boilerplate. Bump the extraction-cache version when extraction semantics change;
+  `replies.png` as boilerplate, and rename share-named wrappers that hold media but no share links. Bump the extraction-cache version when extraction semantics change;
   missing content already absent from stored HTML requires a fresh extraction.
   Publisher-feed reconciliation enriches media in place and records canonical dedupe aliases; keep article paths
   and hand-edited content, reject ambiguous matches, and leave repeats unchanged.
@@ -106,6 +106,12 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   separating them from the reader body and keep them in portable exports.
 - Apply title presentation rules once in the build context and reuse them in every published
   representation, including feeds and Markdown; preserve stored originals and article bodies.
+- A lead image must not repeat a body picture (compare ThumbHashes, not only URLs) and must be at
+  least 800px wide. Reader headings are id anchors, never links; portable outputs keep links.
+- Expand public social threads using only the original author's posts; preserve post/media order,
+  strip terminal thread counters, and keep X links canonical even when xcancel supplies the data.
+  Concatenate posts without separators, per-post links, or partial-thread notices: the metadata
+  original link is the only pointer. Keep traversal bounded and log incomplete continuations.
 - Keep source names visible below titles in feed, search, and item metadata; tags appear only
   on item pages. The feed toolbar's omission of sources does not apply to individual feed entries.
   Put separators outside links and hover targets. Share metadata typography and spacing; format
@@ -118,6 +124,8 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   HTML; placeholders must not wait for JavaScript or a separate network request. Preserve intact
   local image masters when repairing missing companions, and back off failed downloads.
   Parse `srcset` using URL and descriptor boundaries: CDN URLs may contain literal commas.
+  Preserve exclamations before links as prose when converting HTML to Markdown; article footnotes
+  are not image URLs. Recover malformed archived CDN aliases only from unambiguous saved source sets.
   Preserve fractional, untransformed header heights; integer measurements can shift media on load.
   Animate reading progress on its own transform; avoid per-frame inherited variables on the header.
 - Offline readiness means an article page and all its retained image renditions are cached.

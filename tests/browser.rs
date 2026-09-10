@@ -479,7 +479,9 @@ async fn key(client: &Client, key: &str) -> Result<()> {
         "Tab" => "\u{e004}",
         "Escape" => "\u{e00c}",
         "ArrowLeft" => "\u{e012}",
+        "ArrowUp" => "\u{e013}",
         "ArrowRight" => "\u{e014}",
+        "ArrowDown" => "\u{e015}",
         key => key,
     };
     client
@@ -1506,9 +1508,18 @@ async fn search_articles_only_appear_as_results() -> Result<()> {
         client.find(Locator::Css("#q")).await?.send_keys("Article").await?;
         wait_for(&client,"document.querySelectorAll('.search-results .row').length>1").await?;
         anyhow::ensure!(client.execute("return document.querySelectorAll('.search-completion').length",vec![]).await?==0,"matching article titles must remain in results, never autocomplete");
+        // Without suggestions the arrows move the result cursor while typing continues in the field.
+        key(&client,"ArrowDown").await?;
+        let cursor=client.execute("const rows=[...document.querySelectorAll('.search-results .row')];return {selected:rows.findIndex(row=>row.classList.contains('is-selected')),focused:document.activeElement.id,url:rows[1]?.querySelector('[data-row-open]')?.href}",vec![]).await?;
+        anyhow::ensure!(cursor["selected"]==1 && cursor["focused"]=="q","ArrowDown selects the second result without leaving the search field: {cursor}");
+        key(&client,"ArrowUp").await?;
+        anyhow::ensure!(client.execute("return [...document.querySelectorAll('.search-results .row')].findIndex(row=>row.classList.contains('is-selected'))",vec![]).await?==0,"ArrowUp moves the cursor back to the first result");
+        key(&client,"ArrowDown").await?;
         key(&client,"Enter").await?;
-        wait_for(&client,"document.querySelectorAll('.search-results .row').length>1").await?;
-        anyhow::ensure!(client.execute("return document.body.dataset.kind==='river' && document.activeElement.id==='q' && new URL(location.href).searchParams.get('q')==='Article'",vec![]).await?==true,"Enter submits text search without opening an article");
+        wait_for(&client,"document.body.dataset.kind==='item'").await?;
+        anyhow::ensure!(client.execute("return location.href",vec![]).await?==cursor["url"],"Enter opens the selected result when no suggestion is offered");
+        client.back().await?;
+        wait_for(&client,"document.body.dataset.kind==='river' && !!document.querySelector('#q') && new URL(location.href).searchParams.get('q')==='Article'").await?;
         client.execute("const q=document.querySelector('#q');q.value='source:';q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
         wait_for(&client,"document.querySelector('.search-completion')?.dataset.completionId.startsWith('source:')").await?;
         client.find(Locator::Css(".nav-primary [data-feed-action]")).await?.click().await?;

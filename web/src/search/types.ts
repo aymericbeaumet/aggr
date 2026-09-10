@@ -35,6 +35,10 @@ export interface SearchOptions {
   preferences: { values: Record<string, unknown> };
   navigate: (url: string) => void; onRowsChanged: () => void;
   getOfflineStatus: () => unknown; onQueryChanged: () => void; replaceLocation: (url: string) => void;
+  /** Move the result selection without leaving the search field; false when there are no rows. */
+  moveSelection: (direction: number) => boolean;
+  /** Open the selected result; false when nothing is selected. */
+  openSelected: () => boolean;
 }
 export interface SearchHandle { destroy(): Promise<void>; focus(options?: { restore?: boolean }): void; refresh(): void; isActive(): boolean; updateOfflineStatus(): void; updateDates(): void; select(url: string): void }
 
