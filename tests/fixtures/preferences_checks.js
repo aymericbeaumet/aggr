@@ -8,6 +8,8 @@ try {
     ["aggr:date-format", "iso"],
     ["aggr:single-key-shortcuts", "false"],
     ["aggr:density", "invalid"],
+    ["aggr:scroll-amount", "17"],
+    ["aggr:offline-items", "42"],
     ["aggr:reading-history", "private"]
   ]);
   let writes = 0;
@@ -24,20 +26,27 @@ try {
   }
   check(document.documentElement.dataset.theme === "dark", "Stored theme must apply before paint");
   check(document.documentElement.dataset.density === "compact", "Invalid stored values must fall back to defaults");
-  check(preferences.values["date-format"] === "iso" && preferences.values["single-key-shortcuts"] === false, "Existing keys must remain compatible");
-  check(Object.keys(preferences.values).length === 9 && preferences.values["feed-page-size"] === "50" && !JSON.stringify(preferences.values).includes("private"), "Only appearance/interaction preferences with a 50-item feed default belong in exported state");
+  check(preferences.values["date-format"] === "iso" && preferences.values["single-key-shortcuts"] === false, "Stored preferences retain their declared types");
+  check(Object.keys(preferences.values).length === 18 && preferences.values["feed-page-size"] === "50" && !JSON.stringify(preferences.values).includes("private"), "Only appearance/interaction preferences with a 50-item feed default belong in exported state");
+  check(preferences.values["paragraph-indent"] === false && document.documentElement.dataset.paragraphIndent === false, "Paragraph indentation defaults to off");
+  check(preferences.values["scroll-amount"] === 17 && preferences.values["offline-items"] === 42, "Numeric stored settings preserve their type");
   const full = { version: 1, preferences: {} };
   Object.keys(preferences.schema).forEach(key => {
-    full.preferences[key] = preferences.schema[key].values.slice(-1)[0];
-    preferences.schema[key].values.forEach(value => {
+    const choices = preferences.schema[key].values || [preferences.schema[key].min, preferences.schema[key].max];
+    full.preferences[key] = choices.slice(-1)[0];
+    choices.forEach(value => {
       check(preferences.validate({ version: 1, preferences: { [key]: value } })[key] === value, "Every option must round-trip with its original type");
     });
   });
   check(JSON.stringify(preferences.validate(JSON.parse(JSON.stringify(full)))) === JSON.stringify(full.preferences), "All options must share one serialization contract");
-  const legacy = preferences.validate({ "aggr:theme": "light", "aggr:date-format": "local-time", "aggr:single-key-shortcuts": "false" });
-  check(legacy.theme === "light" && legacy["single-key-shortcuts"] === false, "Old shared links must import typed preferences");
-  [null, [], {}, { version: 2, preferences: { theme: "dark" } }, { version: 1, preferences: null },
+  [null, [], {}, { theme: "dark" }, { "aggr:theme": "light", "aggr:date-format": "local-time", "aggr:single-key-shortcuts": "false" }, { version: 2, preferences: { theme: "dark" } }, { version: 1, preferences: null },
     { version: 1, preferences: { theme: "purple" } }, { version: 1, preferences: { "single-key-shortcuts": "false" } },
+    { version: 1, preferences: { "scroll-amount": 0 } },
+    { version: 1, preferences: { "scroll-amount": 101 } },
+    { version: 1, preferences: { "scroll-amount": "10" } },
+    { version: 1, preferences: { "offline-items": 1.5 } },
+    { version: 1, preferences: { "offline-items": 1001 } },
+    { version: 1, preferences: { "paragraph-indent": "true" } },
     { version: 1, preferences: { theme: "dark", history: "private" } },
     { version: 1, preferences: { theme: "dark" }, extra: true },
     { "aggr:theme": "dark", "aggr:single-key-shortcuts": false },

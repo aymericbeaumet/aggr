@@ -17,6 +17,8 @@
   </div>
 </div>
 {% endif %}
+{% include "_feed_toolbar.html" %}
+<div data-static-feed>
 {% set paginator = page.paginator %}
 {% if items %}
 <ol class="rows" role="list" start="{{ paginator.offset + 1 }}" style="--rank-indent: {{ ((paginator.offset + (items|length))|string|length) - 1 }}ch">
@@ -41,4 +43,5 @@
   </span>
 </nav>
 {% endif %}
+</div>
 {% endblock %}

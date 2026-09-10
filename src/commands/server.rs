@@ -20,14 +20,19 @@ use crate::git::Worktree;
 
 const DEV_KEY_FILE: &str = ".aggr-dev-key";
 
+mod client;
+
+type SiteFiles = BTreeMap<String, Arc<Vec<u8>>>;
+
 #[derive(Clone)]
 struct MemorySite {
-    files: Arc<RwLock<BTreeMap<String, Vec<u8>>>>,
+    files: Arc<RwLock<SiteFiles>>,
 }
 
 impl MemorySite {
     fn loading() -> Self {
         let page = b"<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>aggr dev</title><style>body{font:16px system-ui;margin:3rem;max-width:40rem}body:before{content:'';display:inline-block;width:.75rem;height:.75rem;margin-right:.6rem;border:2px solid #8ea1ff;border-top-color:transparent;border-radius:50%;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style><p>Syncing sources and building the in-memory site&hellip;</p>".to_vec();
+        let page = Arc::new(page);
         Self {
             files: Arc::new(RwLock::new(BTreeMap::from([
                 ("index.html".to_string(), page.clone()),
@@ -39,7 +44,7 @@ impl MemorySite {
     fn cached(root: &Path) -> Option<Self> {
         root.join(".aggr-site")
             .is_file()
-            .then(|| read_site(root))
+            .then(|| read_site(root, None))
             .transpose()
             .ok()
             .flatten()
@@ -50,7 +55,7 @@ impl MemorySite {
 
     #[cfg(test)]
     async fn load(staging: &Path) -> Result<Self> {
-        let files = read_site(staging)?;
+        let files = read_site(staging, None)?;
         remove_build(staging)?;
         Ok(Self {
             files: Arc::new(RwLock::new(files)),
@@ -58,39 +63,48 @@ impl MemorySite {
     }
 
     async fn replace_from(&self, staging: &Path, cached: &Path) -> Result<()> {
-        let files = read_site(staging)?;
-        let previous = cached.with_extension("previous");
-        if previous.exists() {
-            remove_build(&previous)?;
-        }
-        if let Some(parent) = cached.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-        if cached.exists() {
-            std::fs::rename(cached, &previous)
-                .with_context(|| format!("moving cached dev build {} aside", cached.display()))?;
-        }
-        if let Err(error) = std::fs::rename(staging, cached) {
+        let retained = self.files.read().await.clone();
+        let staging = staging.to_owned();
+        let cached = cached.to_owned();
+        let files = tokio::task::spawn_blocking(move || -> Result<_> {
+            let files = read_site(&staging, Some(&retained))?;
+            let previous = cached.with_extension("previous");
             if previous.exists() {
-                let _ = std::fs::rename(&previous, cached);
+                remove_build(&previous)?;
             }
-            return Err(error).with_context(|| {
-                format!(
-                    "promoting dev build {} to {}",
-                    staging.display(),
-                    cached.display()
-                )
-            });
-        }
-        if previous.exists() {
-            remove_build(&previous)?;
-        }
+            if let Some(parent) = cached.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            if cached.exists() {
+                std::fs::rename(&cached, &previous).with_context(|| {
+                    format!("moving cached dev build {} aside", cached.display())
+                })?;
+            }
+            if let Err(error) = std::fs::rename(&staging, &cached) {
+                if previous.exists() {
+                    let _ = std::fs::rename(&previous, &cached);
+                }
+                return Err(error).with_context(|| {
+                    format!(
+                        "promoting dev build {} to {}",
+                        staging.display(),
+                        cached.display()
+                    )
+                });
+            }
+            if previous.exists() {
+                remove_build(&previous)?;
+            }
+            Ok(files)
+        })
+        .await
+        .context("loading and promoting the dev snapshot")??;
         *self.files.write().await = files;
         Ok(())
     }
 
-    async fn response(&self, base: &str, path: &str) -> Option<(String, Vec<u8>)> {
+    async fn response(&self, base: &str, path: &str) -> Option<(String, Arc<Vec<u8>>)> {
         let key = resolve_key(base, path)?;
         self.files
             .read()
@@ -100,7 +114,7 @@ impl MemorySite {
             .map(|body| (key, body))
     }
 
-    async fn not_found(&self) -> (String, Vec<u8>) {
+    async fn not_found(&self) -> (String, Arc<Vec<u8>>) {
         let key = "404.html".to_string();
         let body = self
             .files
@@ -108,7 +122,7 @@ impl MemorySite {
             .await
             .get(&key)
             .cloned()
-            .unwrap_or_else(|| b"not found".to_vec());
+            .unwrap_or_else(|| Arc::new(b"not found".to_vec()));
         (key, body)
     }
 }
@@ -149,8 +163,30 @@ struct WatchPaths {
     shallow: Vec<PathBuf>,
 }
 
-fn read_site(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+fn immutable_site_file(key: &str) -> bool {
+    fn hex(value: &str, length: usize) -> bool {
+        value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+    if let Some(rest) = key.strip_prefix("pagefind/") {
+        return rest
+            .split_once('/')
+            .is_some_and(|(version, file)| hex(version, 64) && !file.is_empty());
+    }
+    let Some(asset) = key.strip_prefix("assets/") else {
+        return false;
+    };
+    let name = asset.rsplit('/').next().unwrap_or_default();
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    if (asset.starts_with("images/") || asset.starts_with("previews/")) && hex(stem, 40) {
+        return true;
+    }
+    stem.rsplit_once('-')
+        .is_some_and(|(_, digest)| hex(digest, 12))
+}
+
+fn read_site(root: &Path, previous: Option<&SiteFiles>) -> Result<SiteFiles> {
     let mut files = BTreeMap::new();
+    let mut pending = Vec::new();
     for entry in walkdir::WalkDir::new(root) {
         let entry = entry.with_context(|| format!("reading {}", root.display()))?;
         if !entry.file_type().is_file() {
@@ -162,11 +198,49 @@ fn read_site(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
             .map(|part| part.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
-        files.insert(
-            key,
-            std::fs::read(entry.path())
-                .with_context(|| format!("reading {}", entry.path().display()))?,
-        );
+        // Generated immutable names encode their content; mutable pages and manifests
+        // must always be reread even when their length has not changed.
+        if immutable_site_file(&key)
+            && let Some(body) = previous.and_then(|files| files.get(&key))
+            && entry.metadata()?.len() == body.len() as u64
+        {
+            files.insert(key, Arc::clone(body));
+        } else {
+            pending.push((key, entry.into_path()));
+        }
+    }
+    if pending.is_empty() {
+        return Ok(files);
+    }
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(4);
+    let chunks = std::thread::scope(|scope| {
+        let tasks = pending
+            .chunks(pending.len().div_ceil(workers))
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|(key, path)| {
+                            let body = std::fs::read(path)
+                                .with_context(|| format!("reading {}", path.display()))?;
+                            Ok((key.clone(), Arc::new(body)))
+                        })
+                        .collect::<Result<SiteFiles>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        tasks
+            .into_iter()
+            .map(|task| {
+                task.join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("dev snapshot reader panicked")))
+            })
+            .collect::<Vec<_>>()
+    });
+    for chunk in chunks {
+        files.extend(chunk?);
     }
     Ok(files)
 }
@@ -443,6 +517,7 @@ async fn host(
     base: &str,
     reload: broadcast::Sender<()>,
 ) -> Result<()> {
+    let client = client::ClientDev::from_env()?.map(Arc::new);
     let base = base.to_string();
     let run = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -455,8 +530,9 @@ async fn host(
         let base = base.clone();
         let run = run.clone();
         let reload = reload.clone();
+        let client = client.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle(stream, &site, &base, &run, &reload).await {
+            if let Err(err) = handle(stream, &site, &base, &run, &reload, client.as_deref()).await {
                 log::debug!("dev server: {err:#}");
             }
         });
@@ -727,6 +803,7 @@ async fn handle(
     base: &str,
     run: &str,
     reload: &broadcast::Sender<()>,
+    client: Option<&client::ClientDev>,
 ) -> Result<()> {
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
@@ -765,7 +842,10 @@ async fn handle(
         .extension()
         .is_some_and(|extension| extension == "html")
     {
-        body = inject_reload(&body, base, run);
+        body = Arc::new(inject_reload(&body, base, run));
+        if let Some(client) = client {
+            body = Arc::new(client.inject(&body));
+        }
     }
     let cache_headers = if file
         .extension()
@@ -791,7 +871,7 @@ async fn handle(
 
 fn inject_reload(body: &[u8], base: &str, run: &str) -> Vec<u8> {
     let script = format!(
-        "<script>(function(){{if(window.AGGR)window.AGGR.pwa=false;var b=new URL({0:?},location.origin),u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistration(b).then(function(r){{if(r)r.unregister()}});if('caches'in window){{var p='aggr:'+encodeURIComponent(b.pathname)+':';caches.keys().then(function(k){{k.filter(function(x){{return x.indexOf(p)===0}}).forEach(function(x){{caches.delete(x)}})}})}}new EventSource('{0}__aggr/reload?run={1}').onmessage=function(){{var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();</script>",
+        "<script>(function(){{if(window.AGGR)window.AGGR.pwa=false;var b=new URL({0:?},location.origin),u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistration(b).then(function(r){{if(r)r.unregister()}});if('caches'in window){{var p='aggr:'+encodeURIComponent(b.pathname)+':';caches.keys().then(function(k){{k.filter(function(x){{return x.indexOf(p)===0}}).forEach(function(x){{caches.delete(x)}})}})}}new EventSource('{0}__aggr/reload?run={1}').onmessage=function(){{if(!window.dispatchEvent(new Event('aggr:build',{{cancelable:true}})))return;var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();</script>",
         base, run
     );
     let html = String::from_utf8_lossy(body);
@@ -927,6 +1007,76 @@ mod tests {
         assert_eq!(resolve(root, "/repo/", "/search.json"), None);
     }
 
+    #[test]
+    fn snapshots_reuse_only_immutable_bodies_and_remove_absent_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |path: &str, body: &[u8]| {
+            let path = tmp.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        let image = format!("assets/images/{}.webp", "a".repeat(40));
+        let preview = format!("assets/previews/{}.webp", "b".repeat(40));
+        let index = format!("pagefind/{}/pagefind.js", "c".repeat(64));
+        let immutable = [&*image, &*preview, &*index, "assets/style-123456abcdef.css"];
+        let mutable = [
+            "index.html",
+            "search-manifest.json",
+            "sw.js",
+            "pagefind/pagefind.js",
+            "assets/custom.css",
+        ];
+        for path in immutable.iter().chain(mutable.iter()) {
+            write(path, b"before");
+        }
+        write("removed.html", b"gone");
+        let first = read_site(tmp.path(), None).unwrap();
+        for path in mutable {
+            write(path, b"after!");
+        }
+        std::fs::remove_file(tmp.path().join("removed.html")).unwrap();
+        let changed = "assets/style-fedcba654321.css";
+        write(changed, b"new asset");
+        let second = read_site(tmp.path(), Some(&first)).unwrap();
+        for path in immutable {
+            assert!(Arc::ptr_eq(&first[path], &second[path]), "{path}");
+        }
+        for path in mutable {
+            assert!(!Arc::ptr_eq(&first[path], &second[path]), "{path}");
+            assert_eq!(second[path].as_slice(), b"after!");
+        }
+        assert!(!second.contains_key("removed.html"));
+        assert_eq!(first["removed.html"].as_slice(), b"gone");
+        assert_eq!(first["index.html"].as_slice(), b"before");
+        assert_eq!(second[changed].as_slice(), b"new asset");
+        write(&image, b"unexpected different length");
+        let third = read_site(tmp.path(), Some(&second)).unwrap();
+        assert!(!Arc::ptr_eq(&second[&image], &third[&image]));
+        assert_eq!(third[&image].as_slice(), b"unexpected different length");
+    }
+
+    #[test]
+    fn immutable_snapshot_paths_follow_generated_content_addresses() {
+        for path in [
+            "index.html",
+            "search-manifest.json",
+            "assets/app.js",
+            "assets/style-notahash.css",
+            "assets/images/photo.jpg",
+            "pagefind/pagefind.js",
+            "pagefind/latest/pagefind.js",
+        ] {
+            assert!(!immutable_site_file(path), "{path}");
+        }
+        assert!(immutable_site_file(
+            "assets/fonts/reader-123456abcdef.woff2"
+        ));
+        assert!(immutable_site_file(&format!(
+            "pagefind/{}/fragment/one.pf_fragment",
+            "1".repeat(64)
+        )));
+    }
+
     #[tokio::test]
     async fn snapshots_and_atomically_replaces_transient_builds() {
         let tmp = tempfile::tempdir().unwrap();
@@ -938,7 +1088,12 @@ mod tests {
 
         let site = MemorySite::load(&staging).await.unwrap();
         assert!(!staging.exists());
-        assert_eq!(site.response("/", "/").await.unwrap().1, b"first");
+        let first_body = site.response("/", "/").await.unwrap().1;
+        assert_eq!(first_body.as_slice(), b"first");
+        assert!(Arc::ptr_eq(
+            &first_body,
+            &site.response("/", "/").await.unwrap().1
+        ));
 
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join("index.html"), "second").unwrap();
@@ -948,9 +1103,24 @@ mod tests {
         assert!(!staging.exists());
         assert!(cached.join("index.html").is_file());
         assert!(!cached.with_extension("previous").exists());
-        assert_eq!(site.response("/", "/").await.unwrap().1, b"second");
+        assert_eq!(
+            first_body.as_slice(),
+            b"first",
+            "in-flight responses retain their snapshot"
+        );
+        assert_eq!(
+            site.response("/", "/").await.unwrap().1.as_slice(),
+            b"second"
+        );
         assert!(site.response("/", "/404.html").await.is_none());
-        assert_eq!(site.response("/", "/search.json").await.unwrap().1, b"[]");
+        assert_eq!(
+            site.response("/", "/search.json")
+                .await
+                .unwrap()
+                .1
+                .as_slice(),
+            b"[]"
+        );
     }
 
     #[tokio::test]
@@ -991,11 +1161,11 @@ mod tests {
         assert_eq!(project.sources.len(), 1);
         assert_eq!(project.sources[0].engine.url().unwrap().path(), "/feed");
         collection.assert_calls_async(1).await;
-        feed.assert_calls_async(1).await;
+        feed.assert_calls_async(0).await;
         let retained = reload_project(project.clone(), false).await.unwrap();
         assert!(Arc::ptr_eq(&project, &retained));
         collection.assert_calls_async(1).await;
-        feed.assert_calls_async(1).await;
+        feed.assert_calls_async(0).await;
     }
 
     #[tokio::test]
@@ -1066,7 +1236,7 @@ mod tests {
         );
         let page = state.site.response("/", "/").await.unwrap().1;
         assert!(
-            String::from_utf8(page)
+            std::str::from_utf8(&page)
                 .unwrap()
                 .contains("Retained article")
         );
@@ -1103,7 +1273,7 @@ mod tests {
         let fresh = async {
             let page = state.site.response("/", "/").await.unwrap().1;
             assert!(
-                String::from_utf8(page)
+                std::str::from_utf8(&page)
                     .unwrap()
                     .contains("Newly synced article"),
                 "new articles must be visible before discussion lookups start"
@@ -1155,7 +1325,7 @@ mod tests {
             .unwrap()
             .1;
         assert!(
-            String::from_utf8(article)
+            std::str::from_utf8(&article)
                 .unwrap()
                 .contains("https://news.ycombinator.com/item?id=42")
         );
@@ -1226,6 +1396,10 @@ mod tests {
         assert!(html.contains("caches.delete"));
         assert!(html.contains("window.AGGR.pwa=false"));
         assert!(html.contains("__aggr_dev"));
+        assert!(html.contains(
+            "if(!window.dispatchEvent(new Event('aggr:build',{cancelable:true})))return;"
+        ));
+        assert!(html.contains("n.searchParams.set('__aggr_dev',Date.now());location.replace(n)"));
         assert!(html.ends_with("</body>"));
     }
 

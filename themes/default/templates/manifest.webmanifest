@@ -18,8 +18,8 @@
   ],
   "shortcuts": [
     { "name": "Feed", "short_name": "Feed", "url": "./", "icons": [{ "src": "{{ 'assets/icon-192.png' | url_for }}", "sizes": "192x192" }] },
-    { "name": "Search", "short_name": "Search", "url": "{{ 'search/' | url_for }}", "icons": [{ "src": "{{ 'assets/icon-192.png' | url_for }}", "sizes": "192x192" }] },
-    { "name": "Library", "short_name": "Library", "url": "{{ 'library/' | url_for }}", "icons": [{ "src": "{{ 'assets/icon-192.png' | url_for }}", "sizes": "192x192" }] }
+    { "name": "Search", "short_name": "Search", "url": "{{ '' | url_for }}", "icons": [{ "src": "{{ 'assets/icon-192.png' | url_for }}", "sizes": "192x192" }] },
+    { "name": "Browse", "short_name": "Browse", "url": "{{ 'browse/' | url_for }}", "icons": [{ "src": "{{ 'assets/icon-192.png' | url_for }}", "sizes": "192x192" }] }
   ],
   "categories": ["news", "productivity"],
   "prefer_related_applications": false

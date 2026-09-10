@@ -7,6 +7,7 @@ mod discussions;
 mod git;
 mod http;
 mod media;
+mod media_duration;
 mod model;
 mod preview;
 mod site;

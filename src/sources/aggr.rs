@@ -279,15 +279,10 @@ pub fn convert(item: &Item, html: Option<String>, via: &str) -> RawItem {
 
 /// `https://github.com/o/r.git` → `https://github.com/o/r`, without any credentials.
 pub fn human_url(url: &Url) -> String {
-    let mut clean = url.clone();
-    let _ = clean.set_username("");
-    let _ = clean.set_password(None);
-    clean.set_query(None);
-    clean.set_fragment(None);
-    let text = clean.to_string();
-    text.trim_end_matches('/')
-        .trim_end_matches(".git")
-        .to_string()
+    crate::config::repository_url::public(url, true)
+        .unwrap_or_else(|| crate::config::public_url(url, true))
+        .trim_end_matches('/')
+        .to_owned()
 }
 
 /// Directory name for a mirror: readable prefix plus a hash so two URLs never collide.
@@ -407,6 +402,8 @@ mod tests {
         let url = Url::parse("https://token@github.com/o/r.git").unwrap();
         assert_eq!(human_url(&url), "https://github.com/o/r");
         let url = Url::parse("https://github.com/o/r").unwrap();
+        assert_eq!(human_url(&url), "https://github.com/o/r");
+        let url = Url::parse("ssh://git@github.com/o/r.git").unwrap();
         assert_eq!(human_url(&url), "https://github.com/o/r");
     }
 

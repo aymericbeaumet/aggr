@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
+use sha1::{Digest as _, Sha1};
 
 use super::context::ItemCtx;
 
@@ -23,7 +24,25 @@ pub struct Recommendation {
 /// model used by established static-site generators: shared labels dominate, then category and
 /// uncommon title terms. An inverted index keeps this proportional to matching
 /// features rather than comparing every pair of articles.
-pub fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
+pub fn resolve(items: &[ItemCtx], bodies: &[&str]) -> Vec<Recommendation> {
+    assert_eq!(items.len(), bodies.len());
+    let identities = identities(items, bodies);
+    let mut preceding = vec![None; items.len()];
+    let mut following = vec![None; items.len()];
+    for index in 1..items.len() {
+        preceding[index] = if identities[index] == identities[index - 1] {
+            preceding[index - 1]
+        } else {
+            Some(index - 1)
+        };
+    }
+    for index in (0..items.len().saturating_sub(1)).rev() {
+        following[index] = if identities[index] == identities[index + 1] {
+            following[index + 1]
+        } else {
+            Some(index + 1)
+        };
+    }
     let newest = items.iter().map(|item| item.date).max();
     let features: Vec<Vec<String>> = items.iter().map(item_features).collect();
     let mut postings: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
@@ -37,14 +56,23 @@ pub fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let previous = index.checked_sub(1);
-            let next = (index + 1 < items.len()).then_some(index + 1);
+            let previous = preceding[index];
+            let next = following[index];
+            let eligible = |candidate: usize, articles: &[usize]| {
+                identities[candidate] != identities[index]
+                    && !articles
+                        .iter()
+                        .any(|&other| identities[other] == identities[candidate])
+                    && [previous, next].into_iter().flatten().all(|adjacent| {
+                        adjacent == candidate || identities[adjacent] != identities[candidate]
+                    })
+            };
             let mut scores = BTreeMap::<usize, u64>::new();
             for feature in &features[index] {
                 let candidates = &postings[feature.as_str()];
                 let weight = feature_weight(feature, items.len(), candidates.len());
                 for &candidate in candidates {
-                    if candidate != index {
+                    if identities[candidate] != identities[index] {
                         *scores.entry(candidate).or_default() += weight;
                     }
                 }
@@ -53,7 +81,7 @@ pub fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
             // other article. Recency decays smoothly with a seven-day half-life; a separate
             // cross-source bonus keeps suggestions diverse while build cost stays linear.
             for (candidate, candidate_item) in items.iter().enumerate().take(CROSS_SOURCE_POOL) {
-                if candidate == index {
+                if identities[candidate] == identities[index] {
                     continue;
                 }
                 let score = scores.entry(candidate).or_default();
@@ -69,16 +97,16 @@ pub fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
                     .then_with(|| items[*b_index].date.cmp(&items[*a_index].date))
                     .then_with(|| items[*a_index].path.cmp(&items[*b_index].path))
             });
-            let mut articles: Vec<_> = ranked
-                .into_iter()
-                .map(|(candidate, _)| candidate)
-                .take(RECOMMENDATION_COUNT)
-                .collect();
-            fill_fallback(&mut articles, items, index);
-            debug_assert_eq!(
-                articles.len(),
-                RECOMMENDATION_COUNT.min(items.len().saturating_sub(1))
-            );
+            let mut articles = Vec::with_capacity(RECOMMENDATION_COUNT);
+            for (candidate, _) in ranked {
+                if articles.len() == RECOMMENDATION_COUNT {
+                    break;
+                }
+                if eligible(candidate, &articles) {
+                    articles.push(candidate);
+                }
+            }
+            fill_fallback(&mut articles, items, index, eligible);
             Recommendation {
                 previous,
                 next,
@@ -88,22 +116,74 @@ pub fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
         .collect()
 }
 
+fn root(parents: &mut [usize], mut index: usize) -> usize {
+    while parents[index] != index {
+        parents[index] = parents[parents[index]];
+        index = parents[index];
+    }
+    index
+}
+
+/// Recommendations may cross retained URLs, but never repeat the same readable article. Identity
+/// joins are transitive: a canonical alias of a mirrored body is still the same article. Substantial
+/// exact text matches count; short feed teasers, similar titles and shared topics do not.
+fn identities(items: &[ItemCtx], bodies: &[&str]) -> Vec<usize> {
+    let mut parents: Vec<_> = (0..items.len()).collect();
+    let mut seen = BTreeMap::new();
+    for (index, (item, body)) in items.iter().zip(bodies).enumerate() {
+        let mut fingerprint = Sha1::new();
+        let mut words = 0;
+        for word in body.split_whitespace() {
+            fingerprint.update(word.as_bytes());
+            fingerprint.update(b" ");
+            words += 1;
+        }
+        let keys = [
+            (0, item.path.clone()),
+            (1, item.url.clone()),
+            (2, crate::model::normalize_link(&item.link)),
+            (
+                3,
+                if words >= 64 {
+                    hex::encode(fingerprint.finalize())
+                } else {
+                    String::new()
+                },
+            ),
+        ];
+        for key in keys.into_iter().filter(|(_, value)| !value.is_empty()) {
+            if let Some(&other) = seen.get(&key) {
+                let left = root(&mut parents, index);
+                let right = root(&mut parents, other);
+                parents[left.max(right)] = left.min(right);
+            } else {
+                seen.insert(key, index);
+            }
+        }
+    }
+    (0..items.len())
+        .map(|index| root(&mut parents, index))
+        .collect()
+}
+
 fn recency_bonus(newest: DateTime<Utc>, candidate: DateTime<Utc>) -> u64 {
     let age = newest.signed_duration_since(candidate).num_hours().max(0) as u64;
     RECENCY_BONUS * RECENCY_HALF_LIFE_HOURS / (RECENCY_HALF_LIFE_HOURS + age)
 }
 
-fn fill_fallback(articles: &mut Vec<usize>, items: &[ItemCtx], current: usize) {
+fn fill_fallback(
+    articles: &mut Vec<usize>,
+    items: &[ItemCtx],
+    current: usize,
+    eligible: impl Fn(usize, &[usize]) -> bool,
+) {
     for prefer_other_source in [true, false] {
         for candidate in 0..items.len() {
             if articles.len() == RECOMMENDATION_COUNT {
                 return;
             }
             let other_source = items[candidate].source != items[current].source;
-            if candidate != current
-                && other_source == prefer_other_source
-                && !articles.contains(&candidate)
-            {
+            if other_source == prefer_other_source && eligible(candidate, articles) {
                 articles.push(candidate);
             }
         }
@@ -163,6 +243,83 @@ mod tests {
 
     use super::*;
 
+    fn resolve(items: &[ItemCtx]) -> Vec<Recommendation> {
+        super::resolve(items, &vec![""; items.len()])
+    }
+
+    #[test]
+    fn chronology_and_discovery_skip_the_current_identity_and_repeated_content() {
+        let mut items = vec![
+            item("Original article", "publisher", "news", &[], 12),
+            item("Syndicated title", "aggregator", "news", &[], 11),
+            item("Retitled copy", "mirror", "news", &[], 10),
+            item("Different article", "publisher", "news", &[], 9),
+            item("More reading", "other", "news", &[], 8),
+            item("More reading mirror", "syndicated", "news", &[], 7),
+        ];
+        items[0].link = "http://www.publisher.example/story?utm_source=feed".into();
+        items[1].link = "https://publisher.example/story#comments".into();
+        items[5].link = items[4].link.clone();
+        let body = (0..80)
+            .map(|n| format!("word{n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mirrored_body = body.replace(' ', "\n  ");
+        let bodies = [
+            body.as_str(),
+            "",
+            mirrored_body.as_str(),
+            "Different prose",
+            "More prose",
+            "More prose",
+        ];
+        let recommendations = super::resolve(&items, &bodies);
+        assert_eq!(recommendations[0].next, Some(3));
+        assert_eq!(recommendations[1].previous, None);
+        assert_eq!(recommendations[2].previous, None);
+        assert!(
+            super::resolve(&items[..3], &bodies[..3])
+                .iter()
+                .all(|recommendation| {
+                    recommendation.previous.is_none()
+                        && recommendation.next.is_none()
+                        && recommendation.articles.is_empty()
+                })
+        );
+        assert!(!recommendations[0].articles.contains(&1));
+        assert!(!recommendations[0].articles.contains(&2));
+        assert_eq!(
+            recommendations[0]
+                .articles
+                .iter()
+                .filter(|&&index| index == 4 || index == 5)
+                .count(),
+            1
+        );
+        for index in [0, 1] {
+            assert!(!recommendations[index].articles.contains(&index));
+        }
+    }
+
+    #[test]
+    fn different_product_and_release_pages_remain_adjacent_and_short_teasers_are_not_identity() {
+        let mut items = vec![
+            item("Apple Unveils iPhone Duo", "hn", "news", &[], 12),
+            item("iPhone Duo", "hn", "news", &[], 11),
+            item("Another story", "hn", "news", &[], 10),
+        ];
+        items[0].link = "https://www.apple.com/newsroom/2026/09/apple-unveils-iphone-duo/".into();
+        items[1].link = "https://www.apple.com/iphone-duo/".into();
+        let bodies = [
+            "Read the full story",
+            "Read the full story",
+            "A different story",
+        ];
+        assert_eq!(super::resolve(&items, &bodies)[0].next, Some(1));
+        items[1].path = items[0].path.clone();
+        assert_eq!(super::resolve(&items, &bodies)[0].next, Some(2));
+    }
+
     fn item(title: &str, source: &str, category: &str, labels: &[&str], hour: u32) -> ItemCtx {
         let date = Utc.with_ymd_and_hms(2026, 9, 3, hour, 0, 0).unwrap();
         ItemCtx {
@@ -188,6 +345,7 @@ mod tests {
             replicated_at: None,
             authors: Vec::new(),
             labels: labels.iter().map(|label| (*label).into()).collect(),
+            resources: Vec::new(),
             discussions: Vec::new(),
             summary: None,
             excerpt: String::new(),
@@ -197,7 +355,12 @@ mod tests {
             preview: None,
             article_preview: None,
             video: None,
+            document: None,
+            interactive: None,
+            native_media: None,
+            item_type: crate::site::item_type::ItemType::Article,
             extra: BTreeMap::new(),
+            metadata: super::super::display::Metadata::default(),
             permalink: None,
             raw_url: None,
             history_url: None,

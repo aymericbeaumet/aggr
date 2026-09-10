@@ -91,8 +91,10 @@ render the static site           →  from the selected data commit
 
 ## Copying another instance
 
-A `type = "aggr"` source performs a shallow checkout of another repository's current data branch
-and republishes selected items into this one. Its Git URL may point to any supported HTTP(S) host.
+A repository URL source performs a shallow checkout of another repository's current data branch
+and republishes selected items into this one. HTTPS, SSH, and SCP-style `git@host:path` URLs work;
+Repository URLs select the aggr importer automatically. See [source normalization](interoperability.md) for
+URL inference and importing subscriptions instead of articles.
 The copied item keeps the ultimate original URL and records the intermediate repository as `via`,
 so following the same article directly and through a friend still deduplicates locally.
 

@@ -1,0 +1,59 @@
+<script id="aggr-dates">
+(function () {
+  "use strict";
+  var formatters = {};
+  function formatter(name, options) {
+    if (!formatters[name]) formatters[name] = new Intl.DateTimeFormat(undefined, options);
+    return formatters[name];
+  }
+  function text(timestamp, format) {
+    if (!isFinite(timestamp) || isNaN(new Date(timestamp).getTime())) return null;
+    if (format === "iso") return new Date(timestamp).toISOString().slice(0, 10);
+    if (format === "local") return formatter("local", { dateStyle: "medium" }).format(timestamp);
+    if (format === "local-time") return formatter("local-time", { dateStyle: "medium", timeStyle: "short" }).format(timestamp);
+    var seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+    if (seconds < 60) return "just now";
+    var minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return minutes + "m ago";
+    var hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + "h ago";
+    var days = Math.ceil(hours / 24);
+    if (days < 45) return days + "d ago";
+    var months = Math.floor(days / 30);
+    if (months < 18) return months + "mo ago";
+    return Math.floor(days / 365) + "y ago";
+  }
+  window.AGGRDates = { text: text };
+  function format(time) {
+    if (!time.textContent) return;
+    var value = text(Date.parse(time.getAttribute("datetime")), window.AGGRPreferences.values["date-format"]);
+    if (value && time.textContent !== value) time.textContent = value;
+  }
+  function collect(node, times, descendants) {
+    var element = node.nodeType === 1 ? node : node.parentElement;
+    if (!element) return;
+    var time = element.closest("time[datetime]");
+    if (time) times.add(time);
+    if (descendants && node.nodeType === 1) element.querySelectorAll("time[datetime]").forEach(function (time) { times.add(time); });
+  }
+  function changes(records) {
+    var times = new Set();
+    records.forEach(function (record) {
+      collect(record.target, times, false);
+      record.addedNodes.forEach(function (node) { collect(node, times, true); });
+    });
+    times.forEach(format);
+  }
+  function all() { document.querySelectorAll("time[datetime]").forEach(format); }
+  if (document.readyState === "loading") {
+    var observer = new MutationObserver(changes);
+    observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+    document.addEventListener("DOMContentLoaded", function () {
+      changes(observer.takeRecords());
+      observer.disconnect();
+      all();
+    }, { once: true });
+  }
+  all();
+})();
+</script>

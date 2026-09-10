@@ -13,6 +13,9 @@ use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+#[path = "content_highlight.rs"]
+mod highlight;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedArticle {
     pub html: String,
@@ -90,6 +93,17 @@ pub fn extract_article(page: &str, url: &Url) -> Result<ExtractedArticle> {
     };
     let mut readability = Readability::new(page, Some(url.as_str()), Some(config))
         .context("parsing the original article page")?;
+    // Figure filenames such as `replies.png` can resemble comment widgets to Readability.
+    // Explicit image-and-caption structure supplies stronger evidence than those incidental IDs.
+    readability.doc.select(
+        "figure:has(img):has(figcaption), div.figure:has(img):has(figcaption, .photoCaption, .caption)",
+    ).add_class("readability-content");
+    // Keep the semantic article above equally scored figure siblings. Otherwise a score tie
+    // can select a figure and discard unscored neighboring figures.
+    readability
+        .doc
+        .select("article:has(figure img), article:has(div.figure img)")
+        .add_class("readability-content");
     let article = readability
         .parse()
         .context("extracting readable article content")?;
@@ -401,7 +415,21 @@ fn cap(html: String, max_bytes: usize) -> (String, bool) {
 /// URLs resolved against `base`, only http/https/mailto schemes (so `javascript:` and `data:`
 /// are dropped), no event handlers, images lazy and referrer-free.
 pub fn sanitize(html: &str, base: Option<&Url>) -> String {
-    sanitize_with_code_classes(html, base, true)
+    let url_relative = match base {
+        Some(base) => UrlRelative::RewriteWithBase(base.clone()),
+        None => UrlRelative::PassThrough,
+    };
+    let mut builder = ammonia::Builder::default();
+    builder
+        .url_schemes(HashSet::from(["http", "https", "mailto"]))
+        .url_relative(url_relative)
+        .link_rel(Some("noopener noreferrer"))
+        .set_tag_attribute_value("a", "target", "_blank")
+        .set_tag_attribute_value("img", "loading", "lazy")
+        .set_tag_attribute_value("img", "decoding", "async")
+        .set_tag_attribute_value("img", "referrerpolicy", "no-referrer");
+    builder.add_tag_attributes("code", ["class"]);
+    builder.clean(html).to_string()
 }
 
 #[derive(Default)]
@@ -506,21 +534,12 @@ fn best_srcset_candidate(srcset: &str) -> Option<String> {
     if is_active_url(srcset) {
         return None;
     }
-    srcset
-        .split(',')
+    crate::media::srcset::candidates(srcset)
+        .into_iter()
         .enumerate()
         .filter_map(|(order, candidate)| {
-            let mut fields = candidate.split_ascii_whitespace();
-            let url = safe_image_candidate(fields.next()?)?;
-            let score = fields
-                .next()
-                .and_then(|descriptor| {
-                    descriptor
-                        .strip_suffix(['w', 'x'])
-                        .and_then(|value| value.parse::<f64>().ok())
-                })
-                .unwrap_or(order as f64);
-            Some((score, order, url))
+            let url = safe_image_candidate(candidate.url)?;
+            Some((candidate.score, order, url))
         })
         .max_by(|left, right| {
             left.0
@@ -561,26 +580,6 @@ fn set_attribute(tag: &str, name: &str, value: &str) -> String {
         value,
         &tag[insertion..]
     )
-}
-
-fn sanitize_with_code_classes(html: &str, base: Option<&Url>, code_classes: bool) -> String {
-    let url_relative = match base {
-        Some(base) => UrlRelative::RewriteWithBase(base.clone()),
-        None => UrlRelative::PassThrough,
-    };
-    let mut builder = ammonia::Builder::default();
-    builder
-        .url_schemes(HashSet::from(["http", "https", "mailto"]))
-        .url_relative(url_relative)
-        .link_rel(Some("noopener noreferrer"))
-        .set_tag_attribute_value("a", "target", "_blank")
-        .set_tag_attribute_value("img", "loading", "lazy")
-        .set_tag_attribute_value("img", "decoding", "async")
-        .set_tag_attribute_value("img", "referrerpolicy", "no-referrer");
-    if code_classes {
-        builder.add_tag_attributes("code", ["class"]);
-    }
-    builder.clean(html).to_string()
 }
 
 /// [`sanitize`] then htmd. Trailing whitespace trimmed, exactly one trailing newline, runs of
@@ -761,20 +760,6 @@ fn markdown_heading(
     Some(format!("\n\n{heading}\n\n").into())
 }
 
-pub fn has_heading_breaks(markdown: &str) -> bool {
-    markdown.lines().any(|line| {
-        let text = line.trim_start_matches(' ');
-        let hashes = text.bytes().take_while(|byte| *byte == b'#').count();
-        line.len() - text.len() <= 3
-            && (1..=6).contains(&hashes)
-            && text
-                .as_bytes()
-                .get(hashes)
-                .is_some_and(u8::is_ascii_whitespace)
-            && text.bytes().rev().take_while(|byte| *byte == b'\\').count() % 2 == 1
-    })
-}
-
 fn code_language(element: scraper::ElementRef<'_>) -> Option<String> {
     let value = element.value();
     let language = value
@@ -782,9 +767,12 @@ fn code_language(element: scraper::ElementRef<'_>) -> Option<String> {
         .or_else(|| value.attr("data-language"))
         .or_else(|| {
             value.attr("class").and_then(|classes| {
-                classes
-                    .split_whitespace()
-                    .find_map(|class| class.strip_prefix("language-"))
+                classes.split_whitespace().find_map(|class| {
+                    class
+                        .strip_prefix("language-")
+                        .or_else(|| class.strip_prefix("lang-"))
+                        .or_else(|| class.strip_prefix("highlight-source-"))
+                })
             })
         })?;
     (language.len() <= 40
@@ -887,112 +875,6 @@ fn protect_markdown_code(markdown: &str, transform: impl FnOnce(&str) -> String)
     transformed
 }
 
-/// Recover damaged code blocks, headings, or unformatted video descriptions from retained HTML.
-/// Markdown edits stay authoritative; the caller excludes truncated HTML companions.
-pub fn effective_markdown(stored: &str, retained_html: Option<&str>, base: Option<&Url>) -> String {
-    let Some(html) = retained_html else {
-        return stored.to_string();
-    };
-    let stored_blocks = fenced_blocks(stored);
-    let description = base.is_some_and(crate::sources::youtube::is_video_url)
-        && stored.lines().any(|line| line.starts_with("\\- "));
-    if stored_blocks.is_empty() && !has_heading_breaks(stored) && !description {
-        return stored.to_string();
-    }
-    let source = sanitize_with_code_classes(
-        &restore_inline_layout_boundaries(&strip_active_content(html)),
-        base,
-        false,
-    );
-    let converter = htmd::HtmlToMarkdown::builder()
-        .options(htmd::options::Options {
-            bullet_list_marker: htmd::options::BulletListMarker::Dash,
-            br_style: htmd::options::BrStyle::Backslash,
-            ul_bullet_spacing: 1,
-            ol_number_spacing: 1,
-            ..Default::default()
-        })
-        .build();
-    let Ok(legacy) = converter.convert(&source) else {
-        return stored.to_string();
-    };
-    let legacy = tidy_markdown(&repair_generated_markdown(&legacy));
-    // Captures made before inline-layout repair have no separators between highlighting spans.
-    let earlier = converter
-        .convert(&sanitize_with_code_classes(
-            &strip_active_content(html),
-            base,
-            false,
-        ))
-        .map(|markdown| tidy_markdown(&repair_generated_markdown(&markdown)))
-        .unwrap_or_default();
-    let corrected = to_markdown(html, base);
-    if (has_heading_breaks(stored) || description) && (stored == legacy || stored == earlier) {
-        return corrected;
-    }
-    let old_blocks = fenced_blocks(&legacy);
-    let earlier_blocks = fenced_blocks(&earlier);
-    let new_blocks = fenced_blocks(&corrected);
-    if old_blocks.len() != new_blocks.len() || old_blocks.len() != stored_blocks.len() {
-        return stored.to_string();
-    }
-    let mut result = stored.to_string();
-    for (index, ((old, new), kept)) in old_blocks
-        .iter()
-        .zip(&new_blocks)
-        .zip(&stored_blocks)
-        .enumerate()
-        .rev()
-    {
-        let matches =
-            |original: &FencedBlock| kept.literal == original.literal && kept.info == original.info;
-        if matches(old)
-            || (earlier_blocks.len() == old_blocks.len()
-                && earlier_blocks.get(index).is_some_and(matches))
-        {
-            result.replace_range(kept.range.clone(), &corrected[new.range.clone()]);
-        }
-    }
-    result
-}
-
-struct FencedBlock {
-    literal: String,
-    info: String,
-    range: std::ops::Range<usize>,
-}
-
-fn fenced_blocks(markdown: &str) -> Vec<FencedBlock> {
-    let arena = comrak::Arena::new();
-    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
-    let mut lines = vec![0];
-    lines.extend(markdown.match_indices('\n').map(|(index, _)| index + 1));
-    root.descendants()
-        .filter_map(|node| {
-            let data = node.data.borrow();
-            let comrak::nodes::NodeValue::CodeBlock(code) = &data.value else {
-                return None;
-            };
-            if !code.fenced {
-                return None;
-            }
-            let start = *lines.get(data.sourcepos.start.line.checked_sub(1)?)?
-                + data.sourcepos.start.column.saturating_sub(1);
-            let end =
-                *lines.get(data.sourcepos.end.line.checked_sub(1)?)? + data.sourcepos.end.column;
-            (start <= end
-                && end <= markdown.len()
-                && markdown.is_char_boundary(start)
-                && markdown.is_char_boundary(end))
-            .then(|| FencedBlock {
-                literal: code.literal.clone(),
-                info: code.info.clone(),
-                range: start..end,
-            })
-        })
-        .collect()
-}
-
 struct NormalizedHtml {
     html: String,
     footnotes: Vec<String>,
@@ -1050,10 +932,7 @@ fn normalize_extracted_controls(html: &str) -> NormalizedHtml {
             && closing.closing
             && closing.name == "span"
             && let Some(closing_length) = closing.end
-            && decode_entities(&html[tag_end..tag_end + length])
-                .replace('\u{2060}', "")
-                .trim()
-                == "(opens in a new window)"
+            && is_accessibility_label(&decode_entities(&html[tag_end..tag_end + length]))
         {
             position = tag_end + length + closing_length;
             continue;
@@ -1454,18 +1333,32 @@ fn restore_inline_layout_boundaries(html: &str) -> String {
 }
 
 /// Shared cleanup for every feed and extracted article, both on storage and when building older
-/// archives. Restrict comment controls to document boundaries, never code or body paragraphs.
+/// archives. Restrict standalone controls to document boundaries, never code or body paragraphs.
 pub fn strip_article_metadata(
     markdown: &str,
     published: Option<DateTime<Utc>>,
     source_slug: &str,
 ) -> String {
-    let markdown = strip_boundary_comment_controls(markdown);
+    let markdown = strip_boundary_controls(markdown);
     let markdown = strip_leading_metadata(&markdown, published, source_slug);
-    strip_boundary_comment_controls(&markdown)
+    strip_boundary_controls(&markdown)
 }
 
-fn strip_boundary_comment_controls(markdown: &str) -> String {
+fn is_accessibility_label(text: &str) -> bool {
+    let text = text.replace('\u{2060}', "").to_ascii_lowercase();
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = text
+        .strip_prefix('(')
+        .and_then(|text| text.strip_suffix(')'))
+        .unwrap_or(&text)
+        .trim();
+    matches!(
+        text,
+        "opens in new window" | "opens in a new window" | "opens in new tab" | "opens in a new tab"
+    )
+}
+
+fn strip_boundary_controls(markdown: &str) -> String {
     let trimmed = markdown.trim();
     let first = trimmed
         .split_once("\n\n")
@@ -1473,10 +1366,10 @@ fn strip_boundary_comment_controls(markdown: &str) -> String {
     let last = trimmed
         .rsplit_once("\n\n")
         .map_or(trimmed, |(_, last)| last);
-    if ![first, last]
-        .iter()
-        .any(|text| text.to_ascii_lowercase().contains("comment"))
-    {
+    if ![first, last].iter().any(|text| {
+        let text = text.to_ascii_lowercase();
+        text.contains("comment") || text.contains("opens in") || text.contains("advertisement")
+    }) {
         return markdown.to_string();
     }
     let arena = comrak::Arena::new();
@@ -1485,17 +1378,27 @@ fn strip_boundary_comment_controls(markdown: &str) -> String {
     if blocks.is_empty() {
         return markdown.to_string();
     }
-    let leading = blocks
-        .iter()
-        .take_while(|node| is_comment_control(node))
-        .count();
+    let mut leading = 0;
+    while leading < blocks.len() {
+        let node = blocks[leading];
+        let advertisement = boundary_paragraph_text(node)
+            .is_some_and(|(text, _)| matches!(text.as_str(), "advertisement" | "advertisement •"));
+        let ad_separator = leading > 0
+            && boundary_paragraph_text(blocks[leading - 1])
+                .is_some_and(|(text, _)| text == "advertisement")
+            && boundary_paragraph_text(node).is_some_and(|(text, _)| text == "•");
+        if !is_boundary_control(node) && !advertisement && !ad_separator {
+            break;
+        }
+        leading += 1;
+    }
     if leading == blocks.len() {
         return String::new();
     }
     let trailing = blocks
         .iter()
         .rev()
-        .take_while(|node| is_comment_control(node))
+        .take_while(|node| is_boundary_control(node))
         .count();
     if leading == 0 && trailing == 0 {
         return markdown.to_string();
@@ -1535,10 +1438,10 @@ fn strip_boundary_comment_controls(markdown: &str) -> String {
     }
 }
 
-fn is_comment_control<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
+fn boundary_paragraph_text<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<(String, bool)> {
     use comrak::nodes::NodeValue;
     if !matches!(node.data.borrow().value, NodeValue::Paragraph) {
-        return false;
+        return None;
     }
     let mut text = String::new();
     let mut linked = false;
@@ -1548,7 +1451,7 @@ fn is_comment_control<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
             NodeValue::SoftBreak | NodeValue::LineBreak => text.push(' '),
             NodeValue::Link(_) => linked = true,
             NodeValue::Paragraph | NodeValue::Emph | NodeValue::Strong => {}
-            _ => return false,
+            _ => return None,
         }
     }
     let text = text
@@ -1556,7 +1459,17 @@ fn is_comment_control<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase();
+    Some((text, linked))
+}
+
+fn is_boundary_control<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
+    let Some((text, linked)) = boundary_paragraph_text(node) else {
+        return false;
+    };
     let text = text.trim();
+    if is_accessibility_label(text) {
+        return true;
+    }
     let text = text
         .strip_prefix('[')
         .and_then(|text| text.strip_suffix(']'))
@@ -1586,7 +1499,8 @@ fn is_comment_control<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
 
 /// Remove a metadata line that readability promoted to the first Markdown paragraph. This covers
 /// a publication date (including a short suffix such as `- Link Blog`) and a source-name-only
-/// accessibility label. A standalone pipe after the date is its orphaned metadata separator.
+/// accessibility label. Compact name/date bylines require an exact publication-date match.
+/// A standalone pipe after the date is its orphaned metadata separator.
 /// Normal prose containing a date remains intact.
 pub fn strip_leading_metadata(
     markdown: &str,
@@ -1610,7 +1524,7 @@ pub fn strip_leading_metadata(
                     .unsigned_abs()
                     <= 1
             })
-        })
+        }) || matching_leading_byline(first, &plain, published.date_naive())
     });
     if !source_only && !matching_date {
         return markdown.to_string();
@@ -1620,6 +1534,49 @@ pub fn strip_leading_metadata(
         return rest.strip_prefix("|\n\n").unwrap_or(rest).to_string();
     }
     rest.to_string()
+}
+
+fn matching_leading_byline(markdown: &str, plain: &str, published: NaiveDate) -> bool {
+    let Some((author, date)) = plain
+        .trim()
+        .strip_prefix("By ")
+        .and_then(|byline| byline.rsplit_once(' '))
+    else {
+        return false;
+    };
+    let names = author.split_whitespace().collect::<Vec<_>>();
+    if !(2..=4).contains(&names.len())
+        || author.chars().count() > 80
+        || !names.iter().all(|name| {
+            name.chars().next().is_some_and(char::is_uppercase)
+                && name
+                    .chars()
+                    .all(|ch| ch.is_alphabetic() || matches!(ch, '\'' | '’' | '-' | '.'))
+        })
+        || !["%m.%d.%y", "%d.%m.%y"].iter().any(|format| {
+            NaiveDate::parse_from_str(date, format).is_ok_and(|date| date == published)
+        })
+    {
+        return false;
+    }
+    use comrak::nodes::NodeValue;
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    let Some(paragraph) = root.first_child() else {
+        return false;
+    };
+    paragraph.next_sibling().is_none()
+        && matches!(paragraph.data.borrow().value, NodeValue::Paragraph)
+        && paragraph.descendants().all(|node| {
+            matches!(
+                node.data.borrow().value,
+                NodeValue::Paragraph
+                    | NodeValue::Text(_)
+                    | NodeValue::Emph
+                    | NodeValue::Strong
+                    | NodeValue::Link(_)
+            )
+        })
 }
 
 fn date_prefixes(value: &str) -> impl Iterator<Item = &str> {
@@ -1738,6 +1695,7 @@ const READING_WORDS_PER_MINUTE: usize = 225;
 /// Count visible Unicode words in Markdown and estimate reading time, rounded up to the next
 /// minute. Empty documents deliberately report zero minutes so title-only entries can omit the
 /// metric instead of promising a one-minute article.
+#[cfg(test)]
 pub fn reading_metrics(markdown: &str) -> (usize, usize) {
     use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -1763,15 +1721,298 @@ pub struct LocalImage {
     pub width: u32,
     pub height: u32,
     pub color: String,
+    pub placeholder: crate::media::placeholder::Placeholder,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageDimensions {
+    pub source: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Recover intrinsic publisher dimensions without downloading images or changing Markdown.
+pub fn image_dimensions(html: &str, base: Option<&Url>) -> Vec<ImageDimensions> {
+    let clean = sanitize(&normalize_image_sources(html), base);
+    let document = Html::parse_fragment(&clean);
+    let Ok(selector) = Selector::parse("img[src]") else {
+        return Vec::new();
+    };
+    document
+        .select(&selector)
+        .filter_map(|image| {
+            let source = image.value().attr("src")?;
+            let (width, height) =
+                image_size(image.value().attr("width"), image.value().attr("height"))?;
+            Some(ImageDimensions {
+                source: source.to_string(),
+                width,
+                height,
+            })
+        })
+        .collect()
+}
+
+fn image_size(width: Option<&str>, height: Option<&str>) -> Option<(u32, u32)> {
+    let positive = |value: &str| value.trim().parse::<u32>().ok().filter(|value| *value > 0);
+    Some((positive(width?)?, positive(height?)?))
+}
+
+pub fn render_markdown_with_image_dimensions(
+    markdown: &str,
+    images: &[LocalImage],
+    dimensions: &[ImageDimensions],
+) -> String {
+    PreparedMarkdown::new(markdown).with_images(images, dimensions)
+}
+
+/// A safe, highlighted Markdown rendering before output-specific image substitution. Keeping the
+/// HTML private prevents callers from treating arbitrary stored HTML as an already-safe rendering.
+pub struct PreparedMarkdown {
+    html: String,
+    resource_range: Option<std::ops::Range<usize>>,
+    reader: OnceLock<String>,
+    resources: Vec<ResourceLink>,
+    text: OnceLock<String>,
+    portable: OnceLock<String>,
+}
+
+impl PreparedMarkdown {
+    pub fn new(markdown: &str) -> Self {
+        let mut plugins = comrak::options::Plugins::default();
+        plugins.render.codefence_syntax_highlighter = Some(&CodeHighlighter);
+        let html = add_link_navigation_attributes(&render_markdown_html(markdown, &plugins));
+        let (resources, resource_range) = leading_resources(&html)
+            .map(|(resources, range)| (resources, Some(range)))
+            .unwrap_or_default();
+        Self {
+            html,
+            resource_range,
+            reader: OnceLock::new(),
+            resources,
+            text: OnceLock::new(),
+            portable: OnceLock::new(),
+        }
+    }
+
+    pub fn plain_text(&self) -> &str {
+        self.text.get_or_init(|| html_to_text(self.reader_html()))
+    }
+
+    fn reader_html(&self) -> &str {
+        let Some(range) = &self.resource_range else {
+            return &self.html;
+        };
+        self.reader.get_or_init(|| {
+            let mut html = String::with_capacity(self.html.len() - range.len());
+            html.push_str(&self.html[..range.start]);
+            html.push_str(&self.html[range.end..]);
+            html
+        })
+    }
+
+    pub fn resources(&self) -> &[ResourceLink] {
+        &self.resources
+    }
+
+    /// Only the reader moves resource links into its header area. Portable representations keep
+    /// the full original paragraph, so consumers never lose destinations when copying content.
+    pub fn reader_html_with_images(
+        &self,
+        images: &[LocalImage],
+        dimensions: &[ImageDimensions],
+    ) -> String {
+        if self.resource_range.is_none() {
+            self.with_images(images, dimensions)
+        } else {
+            enhance_rendered_images(self.reader_html(), images, dimensions)
+        }
+    }
+
+    pub fn reading_metrics(&self) -> (usize, usize) {
+        use unicode_segmentation::UnicodeSegmentation as _;
+        let words = self.plain_text().unicode_words().count();
+        (words, words.div_ceil(READING_WORDS_PER_MINUTE))
+    }
+
+    pub fn excerpt(&self, max_chars: usize) -> String {
+        text_excerpt(self.plain_text(), max_chars)
+    }
+
+    pub fn portable_html(&self) -> &str {
+        self.portable
+            .get_or_init(|| enhance_rendered_images(&self.html, &[], &[]))
+    }
+
+    pub fn with_images(&self, images: &[LocalImage], dimensions: &[ImageDimensions]) -> String {
+        if images.is_empty() && dimensions.is_empty() {
+            self.portable_html().to_string()
+        } else {
+            enhance_rendered_images(&self.html, images, dimensions)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResourceLink {
+    pub label: String,
+    pub url: String,
+}
+
+fn leading_resources(html: &str) -> Option<(Vec<ResourceLink>, std::ops::Range<usize>)> {
+    let mut cursor = 0;
+    for heroes in 0..=3 {
+        let remaining = &html[cursor..];
+        let start = cursor + remaining.len() - remaining.trim_start().len();
+        let paragraph = html[start..].strip_prefix("<p>")?;
+        let end = start + 3 + paragraph.find("</p>")? + 4;
+        let fragment = &html[start..end];
+        let has_image = fragment.contains("<img ");
+        if end - start > 4096 || (!has_image && fragment.match_indices("<a ").take(2).count() < 2) {
+            return None;
+        }
+        let document = Html::parse_fragment(fragment);
+        let selector = Selector::parse("p").ok()?;
+        let paragraph = document.select(&selector).next()?;
+        if has_image && image_only_paragraph(paragraph) {
+            if heroes == 3 {
+                return None;
+            }
+            cursor = end;
+            continue;
+        }
+        return Some((paragraph_resources(paragraph)?, start..end));
+    }
+    None
+}
+
+fn image_only_paragraph(paragraph: scraper::ElementRef<'_>) -> bool {
+    let mut images = 0;
+    let image_only = paragraph
+        .descendants()
+        .skip(1)
+        .all(|node| match node.value() {
+            scraper::Node::Text(text) => text.chars().all(char::is_whitespace),
+            scraper::Node::Element(element) if element.name() == "img" => {
+                images += 1;
+                true
+            }
+            scraper::Node::Element(element) => {
+                matches!(element.name(), "a" | "picture" | "source" | "br")
+            }
+            _ => false,
+        });
+    image_only && images > 0
+}
+
+fn paragraph_resources(paragraph: scraper::ElementRef<'_>) -> Option<Vec<ResourceLink>> {
+    let mut resources = Vec::new();
+    let mut destinations = HashSet::new();
+    for node in paragraph.children() {
+        match node.value() {
+            scraper::Node::Text(text)
+                if text
+                    .chars()
+                    .all(|c| c.is_whitespace() || matches!(c, '|' | '·' | '•')) => {}
+            scraper::Node::Element(element) if element.name() == "br" => {}
+            scraper::Node::Element(element) if element.name() == "a" => {
+                let anchor = scraper::ElementRef::wrap(node)?;
+                if anchor
+                    .descendants()
+                    .skip(1)
+                    .any(|child| match child.value() {
+                        scraper::Node::Text(_) => false,
+                        scraper::Node::Element(element) => {
+                            !matches!(element.name(), "em" | "strong")
+                        }
+                        _ => true,
+                    })
+                {
+                    return None;
+                }
+                let label = anchor
+                    .text()
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if label.is_empty()
+                    || label.chars().count() > 60
+                    || label.split_whitespace().count() > 6
+                {
+                    return None;
+                }
+                let href = element.attr("href")?;
+                let url = Url::parse(href).ok()?;
+                if !resource_url(&url) {
+                    return None;
+                }
+                if destinations.insert(crate::model::normalize_link(href)) {
+                    resources.push(ResourceLink {
+                        label,
+                        url: href.to_string(),
+                    });
+                }
+                if resources.len() > 8 {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    (resources.len() >= 2).then_some(resources)
+}
+
+fn resource_url(url: &Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let parts = url.path().trim_matches('/').split('/').collect::<Vec<_>>();
+    if parts.iter().any(|part| part.is_empty()) {
+        return false;
+    }
+    match host.strip_prefix("www.").unwrap_or(host) {
+        "huggingface.co" => {
+            parts.len() >= 2 && !matches!(parts[0], "docs" | "blog" | "posts" | "organizations")
+        }
+        "modelscope.cn" | "modelscope.ai" => {
+            parts.len() >= 2
+                && matches!(parts[0], "collections" | "models" | "datasets" | "studios")
+        }
+        "github.com" | "gitlab.com" | "codeberg.org" => {
+            parts.len() >= 2
+                && !matches!(
+                    parts[0],
+                    "orgs" | "users" | "explore" | "topics" | "sponsors"
+                )
+                && !matches!(parts[1], "followers" | "following")
+        }
+        "arxiv.org" => parts.len() >= 2 && matches!(parts[0], "abs" | "pdf" | "html"),
+        "doi.org" => parts.len() >= 2 && parts[0].starts_with("10."),
+        "openreview.net" => {
+            parts == ["forum"]
+                && url
+                    .query_pairs()
+                    .any(|(key, value)| key == "id" && !value.is_empty())
+        }
+        "zenodo.org" => parts.len() == 2 && matches!(parts[0], "record" | "records"),
+        "kaggle.com" => parts.len() >= 3 && parts[0] == "datasets",
+        "pypi.org" => parts.len() >= 2 && parts[0] == "project",
+        "npmjs.com" => parts.len() >= 2 && parts[0] == "package",
+        _ => url.path().to_ascii_lowercase().ends_with(".pdf"),
+    }
 }
 
 /// Render safe Markdown and replace only validated publisher images with immutable local assets.
 /// The first image is allowed to become the LCP resource; later images use native lazy loading.
 pub fn render_markdown_with_images(markdown: &str, images: &[LocalImage]) -> String {
-    let mut plugins = comrak::options::Plugins::default();
-    plugins.render.codefence_syntax_highlighter = Some(&CodeHighlighter);
-    let html = render_markdown_html(markdown, &plugins);
-    enhance_rendered_images(&add_link_navigation_attributes(&html), images)
+    render_markdown_with_image_dimensions(markdown, images, &[])
 }
 
 fn render_markdown_html(markdown: &str, plugins: &comrak::options::Plugins<'_>) -> String {
@@ -1819,7 +2060,11 @@ fn markdown_options() -> comrak::Options<'static> {
     options
 }
 
-fn enhance_rendered_images(html: &str, images: &[LocalImage]) -> String {
+fn enhance_rendered_images(
+    html: &str,
+    images: &[LocalImage],
+    dimensions: &[ImageDimensions],
+) -> String {
     let mut out = String::with_capacity(html.len() + images.len() * 160);
     let mut position = 0;
     let mut image_index = 0;
@@ -1838,7 +2083,7 @@ fn enhance_rendered_images(html: &str, images: &[LocalImage]) -> String {
             return out;
         };
         let original = &html[start..start + end];
-        out.push_str(&render_image_tag(original, image_index, images));
+        out.push_str(&render_image_tag(original, image_index, images, dimensions));
         image_index += 1;
         position = start + end;
     }
@@ -1846,7 +2091,12 @@ fn enhance_rendered_images(html: &str, images: &[LocalImage]) -> String {
     out
 }
 
-fn render_image_tag(tag: &str, index: usize, images: &[LocalImage]) -> String {
+fn render_image_tag(
+    tag: &str,
+    index: usize,
+    images: &[LocalImage],
+    hints: &[ImageDimensions],
+) -> String {
     let fragment = Html::parse_fragment(tag);
     let Ok(selector) = Selector::parse("img") else {
         return tag.to_string();
@@ -1857,59 +2107,73 @@ fn render_image_tag(tag: &str, index: usize, images: &[LocalImage]) -> String {
     let Some(source) = image.value().attr("src") else {
         return tag.to_string();
     };
+    let badge = crate::media::is_status_badge(source);
+    let badge_class = if badge { " article-badge" } else { "" };
     let alt = image.value().attr("alt").unwrap_or_default();
     let title = image.value().attr("title");
     let key = normalized_image_url(source);
     let local = images
         .iter()
-        .find(|candidate| normalized_image_url(&candidate.source) == key);
+        .find(|candidate| normalized_image_url(&candidate.source) == key)
+        .filter(|candidate| candidate.width > 0 && candidate.height > 0);
     let loading = if index == 0 { "eager" } else { "lazy" };
     let priority = if index == 0 { "high" } else { "low" };
-    let source_dimensions = image
-        .value()
-        .attr("width")
-        .and_then(|width| width.parse::<u32>().ok())
-        .filter(|width| *width > 0)
-        .zip(
-            image
-                .value()
-                .attr("height")
-                .and_then(|height| height.parse::<u32>().ok())
-                .filter(|height| *height > 0),
-        )
+    let intrinsic = local
+        .map(|local| (local.width, local.height))
+        .or_else(|| image_size(image.value().attr("width"), image.value().attr("height")))
+        .or_else(|| {
+            hints
+                .iter()
+                .find(|hint| {
+                    normalized_image_url(&hint.source) == key && hint.width > 0 && hint.height > 0
+                })
+                .map(|hint| (hint.width, hint.height))
+        })
+        .or_else(|| badge.then_some((160, 24)));
+    let dimensions = intrinsic
         .map(|(width, height)| format!(" width=\"{width}\" height=\"{height}\""))
         .unwrap_or_default();
-    let (src, dimensions, class) = local.map_or_else(
-        || (source, source_dimensions, String::new()),
-        |local| {
-            (
-                local.original.as_str(),
-                format!(" width=\"{}\" height=\"{}\"", local.width, local.height),
-                " class=\"progressive-image\"".to_string(),
-            )
-        },
-    );
+    let src = local.map_or(source, |local| local.original.as_str());
     let title = title
         .map(|title| format!(" title=\"{}\"", escape_html(title)))
         .unwrap_or_default();
+    let responsive = local.map_or_else(String::new, |local| {
+        let mut candidates = local
+            .variants
+            .iter()
+            .filter(|variant| variant.width >= 320 && variant.width < local.width)
+            .map(|variant| (variant.width, variant.url.as_str()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if candidates.is_empty() {
+            return String::new();
+        }
+        candidates.insert(local.width, local.original.as_str());
+        let srcset = candidates
+            .into_iter()
+            .map(|(width, url)| format!("{} {width}w", escape_html(url)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" srcset=\"{srcset}\" sizes=\"(max-width: 56rem) calc(100vw - 2rem), 52rem\"")
+    });
     let tag = format!(
-        "<img src=\"{}\"{} alt=\"{}\"{} loading=\"{}\" decoding=\"async\" fetchpriority=\"{}\" referrerpolicy=\"no-referrer\"{}>",
+        "<img src=\"{}\"{} alt=\"{}\"{}{responsive} loading=\"{}\" decoding=\"async\" fetchpriority=\"{}\" referrerpolicy=\"no-referrer\" class=\"progressive-image\">",
         escape_html(src),
         dimensions,
         escape_html(alt),
         title,
         loading,
-        priority,
-        class
+        priority
     );
     let Some(local) = local else {
-        return tag;
+        return match intrinsic {
+            Some((width, height)) => format!(
+                "<picture class=\"article-picture{badge_class}\" style=\"--image-width:{width}px;--image-ratio:{width} / {height}\">{tag}</picture>"
+            ),
+            None => format!(
+                "<picture class=\"article-picture article-picture-fallback\" style=\"--image-ratio:16 / 9\">{tag}</picture>"
+            ),
+        };
     };
-    let placeholder = local
-        .variants
-        .first()
-        .map(|variant| format!(" data-placeholder=\"{}\"", escape_html(&variant.url)))
-        .unwrap_or_default();
     let source = if let Some(full) = local
         .variants
         .last()
@@ -1929,11 +2193,13 @@ fn render_image_tag(tag: &str, index: usize, images: &[LocalImage]) -> String {
         String::new()
     };
     format!(
-        "<picture class=\"article-picture\"{placeholder} style=\"--image-width:{}px;--image-ratio:{} / {};--image-placeholder:{}\">{source}{tag}</picture>",
+        "<picture class=\"article-picture{badge_class}\" data-thumbhash=\"{}\" style=\"--image-width:{}px;--image-ratio:{} / {};--image-placeholder:{};--image-preview:url('{}')\">{source}{tag}</picture>",
+        escape_html(&local.placeholder.hash),
         local.width,
         local.width,
         local.height,
-        escape_html(&local.color)
+        escape_html(&local.color),
+        escape_html(&local.placeholder.data_url)
     )
 }
 
@@ -1954,34 +2220,7 @@ impl comrak::adapters::SyntaxHighlighterAdapter for CodeHighlighter {
         language: Option<&str>,
         code: &str,
     ) -> std::fmt::Result {
-        use syntect::html::{ClassStyle, ClassedHTMLGenerator};
-        use syntect::parsing::SyntaxSet;
-        static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
-        let language = language.unwrap_or_default();
-        if language.is_empty()
-            || code.len() > 100 * 1024
-            || code.lines().any(|line| line.len() > 2_000)
-        {
-            return output.write_str(&escape_html(code));
-        }
-        let syntaxes = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
-        let Some(syntax) = syntaxes.find_syntax_by_token(language) else {
-            return output.write_str(&escape_html(code));
-        };
-        let mut generator = ClassedHTMLGenerator::new_with_class_style(
-            syntax,
-            syntaxes,
-            ClassStyle::SpacedPrefixed { prefix: "syntax-" },
-        );
-        for line in syntect::util::LinesWithEndings::from(code) {
-            if generator
-                .parse_html_for_line_which_includes_newline(line)
-                .is_err()
-            {
-                return output.write_str(&escape_html(code));
-            }
-        }
-        output.write_str(&generator.finalize())
+        highlight::write(output, language, code)
     }
 
     fn write_pre_tag(
@@ -2086,9 +2325,12 @@ fn decode_entities(text: &str) -> String {
 
 /// First `max_chars` chars of the Markdown's plain text, cut on a word boundary with `…`.
 pub fn excerpt(markdown: &str, max_chars: usize) -> String {
-    let text = html_to_text(&render_markdown(markdown));
+    PreparedMarkdown::new(markdown).excerpt(max_chars)
+}
+
+fn text_excerpt(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
-        return text;
+        return text.to_string();
     }
     let window: String = text.chars().take(max_chars).collect();
     let cut = window
@@ -2104,6 +2346,210 @@ pub fn excerpt(markdown: &str, max_chars: usize) -> String {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn leading_resource_links_move_only_in_reader_html_and_stay_in_portable_outputs() {
+        let markdown = "[HUGGING FACE](https://huggingface.co/collections/Qwen/qwen-scope) [MODELSCOPE](https://modelscope.cn/collections/Qwen/Qwen-Scope) [TECHNICAL REPORT](https://arxiv.org/abs/2605.11887)\n\nInterpretability helps us understand models.\n\nTry [Hugging Face](https://huggingface.co/collections/Qwen/qwen-scope) yourself.";
+        let prepared = PreparedMarkdown::new(markdown);
+        assert_eq!(prepared.resources().len(), 3);
+        assert_eq!(prepared.resources()[0].label, "HUGGING FACE");
+        assert_eq!(
+            prepared.resources()[1].url,
+            "https://modelscope.cn/collections/Qwen/Qwen-Scope"
+        );
+        assert_eq!(
+            prepared.resources()[2].url,
+            "https://arxiv.org/abs/2605.11887"
+        );
+        assert!(prepared.excerpt(240).starts_with("Interpretability"));
+        assert!(!prepared.plain_text().contains("TECHNICAL REPORT"));
+        let reader = prepared.reader_html_with_images(&[], &[]);
+        assert!(!reader.contains("TECHNICAL REPORT"));
+        assert!(
+            reader.contains(">Hugging Face</a>"),
+            "links in prose remain in place"
+        );
+        for html in [
+            prepared.portable_html().to_string(),
+            prepared.with_images(&[], &[]),
+            render_markdown(markdown),
+        ] {
+            for resource in prepared.resources() {
+                assert!(
+                    html.contains(&resource.url),
+                    "portable output lost {}",
+                    resource.url
+                );
+            }
+            assert!(html.contains("TECHNICAL REPORT"));
+        }
+    }
+
+    #[test]
+    fn resource_links_after_qwen_hero_preserve_images_and_all_portable_destinations() {
+        let hero =
+            "https://qianwen-res.oss-accelerate.aliyuncs.com/qwen-scope/Figures/overview.png";
+        let links = "[HUGGING FACE](https://huggingface.co/collections/Qwen/qwen-scope) [MODELSCOPE](https://modelscope.cn/collections/Qwen/Qwen-Scope) [TECHNICAL REPORT](https://arxiv.org/abs/2605.11887)";
+        let markdown = format!(
+            "![Qwen-Scope main image]({hero})\n\n{links}\n\nInterpretability research has emerged as a critical area for understanding LLM behaviors."
+        );
+        let prepared = PreparedMarkdown::new(&markdown);
+        assert_eq!(prepared.resources().len(), 3);
+        let reader = prepared.reader_html_with_images(&[], &[]);
+        assert!(reader.contains(hero));
+        assert!(reader.contains("Qwen-Scope main image"));
+        assert!(std::ptr::eq(prepared.reader_html(), prepared.reader_html()));
+        assert!(reader.contains("fetchpriority=\"high\""));
+        assert!(!reader.contains("TECHNICAL REPORT"));
+        assert!(
+            prepared
+                .excerpt(240)
+                .starts_with("Interpretability research")
+        );
+        assert!(!prepared.plain_text().contains("HUGGING FACE"));
+        let portable = prepared.portable_html();
+        assert!(portable.contains(hero));
+        for resource in prepared.resources() {
+            assert!(portable.contains(&resource.url));
+        }
+        assert!(portable.contains("TECHNICAL REPORT"));
+        assert_eq!(prepared.with_images(&[], &[]), render_markdown(&markdown));
+    }
+
+    #[test]
+    fn resource_hero_skipping_is_bounded_and_stops_at_prose_captions_and_headings() {
+        let links =
+            "[Code](https://github.com/lab/project) [Paper](https://arxiv.org/abs/1234.5678)";
+        let image = "![Hero](https://example.com/hero.png)\n\n";
+        for count in 1..=3 {
+            let prepared =
+                PreparedMarkdown::new(&format!("{}{links}\n\nArticle prose.", image.repeat(count)));
+            assert_eq!(prepared.resources().len(), 2);
+            assert_eq!(
+                prepared
+                    .reader_html_with_images(&[], &[])
+                    .matches("<img ")
+                    .count(),
+                count
+            );
+        }
+        for prefix in [
+            image.repeat(4),
+            format!("{image}Introduction.\n\n"),
+            format!("{image}## Resources\n\n"),
+            "![Hero](https://example.com/hero.png) A caption.\n\n".into(),
+        ] {
+            let prepared = PreparedMarkdown::new(&format!("{prefix}{links}\n\nArticle prose."));
+            assert!(prepared.resources().is_empty());
+            assert_eq!(
+                prepared.reader_html_with_images(&[], &[]),
+                prepared.portable_html()
+            );
+        }
+    }
+
+    #[test]
+    fn resource_detection_preserves_prose_tocs_people_code_and_untrusted_links() {
+        for markdown in [
+            "[Alice](https://github.com/alice) [Bob](https://github.com/bob)",
+            "[Introduction](#intro) [Methods](#methods)",
+            "[Code](https://github.com/lab/project) [Follow us](https://x.com/lab)",
+            "See [Code](https://github.com/lab/project) and [Paper](https://arxiv.org/abs/1234.5678).",
+            "[Code](https://github.com/lab/project)",
+            "[Code](https://github.com/lab/project) [Mirror](https://github.com/lab/project#readme)",
+            "[Code](https://evil.test/github.com/lab/project) [Paper](https://arxiv.org/abs/1234.5678)",
+            "[Code](https://user:password@github.com/lab/project) [Paper](https://arxiv.org/abs/1234.5678)",
+            "[Code](javascript:alert) [Paper](https://arxiv.org/abs/1234.5678)",
+            "`[Code](https://github.com/lab/project)` [Paper](https://arxiv.org/abs/1234.5678)",
+            "> [Code](https://github.com/lab/project) [Paper](https://arxiv.org/abs/1234.5678)",
+            "- [Code](https://github.com/lab/project)\n- [Paper](https://arxiv.org/abs/1234.5678)",
+            "```md\n[Code](https://github.com/lab/project) [Paper](https://arxiv.org/abs/1234.5678)\n```",
+            "Ordinary introduction.\n\n[Code](https://github.com/lab/project) [Paper](https://arxiv.org/abs/1234.5678)",
+        ] {
+            let prepared = PreparedMarkdown::new(markdown);
+            assert!(prepared.resources().is_empty(), "{markdown}");
+            assert_eq!(
+                prepared.reader_html_with_images(&[], &[]),
+                prepared.portable_html()
+            );
+        }
+    }
+
+    #[test]
+    fn extraction_preserves_captioned_figures_named_like_comment_widgets() {
+        let prose = "In order to let people know about new articles, I post announcements on social media. From time to time I examine traffic on these sites, comparing engagement and referrals across the platforms. ".repeat(5);
+        let page = format!(
+            "<html><head><title>Social media engagement</title></head><body><article><h1>Social media engagement</h1><p>{prose}</p><div class='figure ' id='retweets.png'><img src='2026-social-traffic/retweets.png'></img><p class='photoCaption'>Figure 1: number of retweets</p></div><div class='figure ' id='replies.png'><img src='2026-social-traffic/replies.png'></img><p class='photoCaption'>Figure 2: number of replies for the same period</p></div><figure id='comments-chart'><img src='2026-social-traffic/comments.png'><figcaption>Figure 3: comment counts</figcaption></figure><p>{prose}</p><div class='replies'><p>Unrelated visitor discussion</p></div></article><aside class='sidebar'><div class='figure'><img src='/advert.png'><p class='caption'>Advertising</p></div></aside></body></html>"
+        );
+        let url = Url::parse("https://martinfowler.com/articles/2026-social-traffic.html").unwrap();
+        let article = extract_article(&page, &url).unwrap();
+        let markdown = to_markdown(&article.html, Some(&url));
+        for (caption, image) in [
+            ("Figure 1", "retweets.png"),
+            ("Figure 2", "replies.png"),
+            ("Figure 3", "comments.png"),
+        ] {
+            assert!(markdown.contains(caption), "{markdown}");
+            assert!(
+                markdown.contains(&format!(
+                    "https://martinfowler.com/articles/2026-social-traffic/{image}"
+                )),
+                "{markdown}"
+            );
+        }
+        assert!(markdown.find("Figure 1") < markdown.find("Figure 2"));
+        assert!(markdown.find("Figure 2") < markdown.find("Figure 3"));
+        assert!(
+            !markdown.contains("Unrelated visitor discussion"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("Advertising"), "{markdown}");
+        assert!(!markdown.contains("advert.png"), "{markdown}");
+    }
+
+    #[test]
+    #[ignore = "requires saved upstream HTML in AGGR_ARTICLE_HTML"]
+    fn saved_fowler_captioned_figures_survive_extraction() {
+        let page = std::fs::read_to_string(std::env::var("AGGR_ARTICLE_HTML").unwrap()).unwrap();
+        let url = Url::parse("https://martinfowler.com/articles/2026-social-traffic.html").unwrap();
+        let article = extract_article(&page, &url).unwrap();
+        let markdown = to_markdown(&article.html, Some(&url));
+        for number in 1..=6 {
+            assert!(
+                markdown.contains(&format!("Figure {number}:")),
+                "missing figure {number}"
+            );
+        }
+        assert!(
+            markdown.contains("https://martinfowler.com/articles/2026-social-traffic/replies.png")
+        );
+        assert!(!markdown.contains("<script"));
+    }
+
+    #[test]
+    fn prepared_article_shares_visible_text_and_preserves_rendering_contracts() {
+        for markdown in [
+            "# Title\n\nText with **bold** and [link](https://example.org/target).",
+            "```rust\nfn main() { println!(\"hi\"); }\n```",
+            "![image words](https://example.org/image.jpg)\n\n日本語 café 👋 words.",
+            "A footnote[^1].\n\n[^1]: Note here.\n",
+            "<script>unsafe()</script>\n\n&amp; literal",
+            "",
+        ] {
+            let prepared = PreparedMarkdown::new(markdown);
+            assert_eq!(prepared.reading_metrics(), reading_metrics(markdown));
+            assert_eq!(
+                prepared.plain_text(),
+                html_to_text(prepared.portable_html())
+            );
+            assert_eq!(prepared.with_images(&[], &[]), render_markdown(markdown));
+            assert_eq!(
+                prepared.excerpt(20),
+                text_excerpt(prepared.plain_text(), 20)
+            );
+            assert!(std::ptr::eq(prepared.plain_text(), prepared.plain_text()));
+        }
+    }
 
     #[tokio::test]
     async fn cancelled_extraction_keeps_its_cpu_slot_until_blocking_work_finishes() {
@@ -2264,6 +2710,31 @@ mod tests {
     }
 
     #[test]
+    fn markdown_keeps_complete_cdn_urls_containing_srcset_commas() {
+        let url = "https://substackcdn.com/image/fetch/w_1456,c_limit,f_webp,q_auto:good,fl_progressive:steep/https%3A%2F%2Fimages.example%2Ffigure.png";
+        let small = url.replace("w_1456", "w_424");
+        let html = format!("<img src=\"fallback.png\" srcset=\"{small} 424w, {url} 1456w\">");
+        let base = Url::parse("https://publisher.example/p/article").unwrap();
+        let markdown = to_markdown(&html, Some(&base));
+        assert!(markdown.contains(url), "{markdown}");
+        assert!(!markdown.contains("publisher.example/p/fl_progressive"));
+        let candidates = crate::media::body_candidates(&html, &base);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].url.as_str(), url);
+        for unsafe_url in [
+            "javascript:alert(1)",
+            "data:image/png;base64,AAAA",
+            "https://user:secret@images.example/figure.png",
+        ] {
+            let html = format!("<img srcset=\"{unsafe_url} 2x\">");
+            assert!(
+                crate::media::body_candidates(&html, &base).is_empty(),
+                "{unsafe_url}"
+            );
+        }
+    }
+
+    #[test]
     fn markdown_promotes_lazy_srcsets_and_picture_sources() {
         let html = r#"
           <img alt="Responsive" src="tiny.jpg" srcset="medium.jpg 640w, large.jpg 1280w">
@@ -2363,6 +2834,40 @@ mod tests {
     }
 
     #[test]
+    fn accessibility_labels_are_removed_from_html_and_retained_article_boundaries() {
+        for marker in [
+            "opens in new window",
+            "Opens in a new window",
+            "(opens in a new window)",
+            "opens in new tab",
+        ] {
+            assert_eq!(
+                to_markdown(
+                    &format!("<p><span>{marker}</span></p><p>Article body.</p>"),
+                    None
+                ),
+                "Article body.\n"
+            );
+            assert_eq!(
+                strip_article_metadata(
+                    &format!("{marker}\n\nArticle body.\n\n{marker}\n"),
+                    None,
+                    "apple"
+                ),
+                "Article body.\n"
+            );
+        }
+        for prose in [
+            "This link opens in new window mode.\n\nArticle body.\n",
+            "`opens in new window`\n\nArticle body.\n",
+            "```text\nopens in new window\n```\n\nArticle body.\n",
+            "Article body.\n\nopens in new window\n\nMore body.\n",
+        ] {
+            assert_eq!(strip_article_metadata(prose, None, "apple"), prose);
+        }
+    }
+
+    #[test]
     fn storage_strips_entity_encoded_active_urls() {
         let (html, _) = storage_html(
             "<a href=\"jav&#x61;script:alert(1)\">bad</a><img src=\"d&#97;ta:x\">",
@@ -2383,6 +2888,66 @@ mod tests {
         assert!(html.contains("decoding=\"async\""), "{html}");
         assert!(html.contains("referrerpolicy=\"no-referrer\""), "{html}");
         assert!(html.contains("alt=\"Hero\""), "{html}");
+    }
+
+    #[test]
+    fn publisher_images_have_stable_fallback_frames_before_loading() {
+        let html = render_markdown("![Portrait](https://publisher.example/portrait.png)");
+        assert!(
+            html.contains("class=\"article-picture article-picture-fallback\""),
+            "{html}"
+        );
+        assert!(html.contains("--image-ratio:16 / 9"), "{html}");
+        assert!(html.contains("class=\"progressive-image\""), "{html}");
+        assert!(
+            !html.contains("width=\"16\""),
+            "fallback ratios are not intrinsic dimensions"
+        );
+    }
+
+    #[test]
+    fn preserved_publisher_dimensions_match_resolved_image_urls() {
+        let base = Url::parse("https://publisher.example/article/").unwrap();
+        let hints = image_dimensions(
+            r#"<img data-src="../portrait.png" width="600" height="900"><img src="bad.png" width="100%" height="400"><img src="zero.png" width="0" height="100"><img src="javascript:alert(1)" width="10" height="10">"#,
+            Some(&base),
+        );
+        assert_eq!(
+            hints,
+            [ImageDimensions {
+                source: "https://publisher.example/portrait.png".into(),
+                width: 600,
+                height: 900
+            }]
+        );
+        let html = render_markdown_with_image_dimensions(
+            "![Portrait](https://publisher.example/portrait.png#original)",
+            &[],
+            &hints,
+        );
+        assert!(html.contains("width=\"600\" height=\"900\""), "{html}");
+        assert!(
+            html.contains("--image-width:600px;--image-ratio:600 / 900"),
+            "{html}"
+        );
+        assert!(!html.contains("article-picture-fallback"), "{html}");
+    }
+
+    #[test]
+    fn linked_status_badges_keep_compact_geometry_and_link_semantics() {
+        let html = render_markdown_with_image_dimensions(
+            "[![Build](https://github.com/user/repo/actions/workflows/build.yml/badge.svg)](https://github.com/user/repo/actions)",
+            &[],
+            &[],
+        );
+        assert!(html.contains("article-picture article-badge"), "{html}");
+        assert!(html.contains("width=\"160\" height=\"24\""), "{html}");
+        assert!(html.contains("alt=\"Build\""), "{html}");
+        assert!(
+            html.contains("href=\"https://github.com/user/repo/actions\""),
+            "{html}"
+        );
+        assert!(!html.contains("article-picture-fallback"), "{html}");
     }
 
     #[test]
@@ -2410,6 +2975,10 @@ mod tests {
             width: 1200,
             height: 800,
             color: "#285a8c".into(),
+            placeholder: crate::media::placeholder::from_image(&image::DynamicImage::new_rgb8(
+                4, 4,
+            ))
+            .unwrap(),
         };
         let html = render_markdown_with_images(
             "![Useful diagram](https://publisher.example/diagram.png \"Details\")",
@@ -2420,12 +2989,12 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains("data-placeholder=\"assets/images/small.webp\""),
+            html.contains(&format!("data-thumbhash=\"{}\"", image.placeholder.hash)),
             "{html}"
         );
         assert!(
             html.contains(
-                "style=\"--image-width:1200px;--image-ratio:1200 / 800;--image-placeholder:#285a8c\""
+                "style=\"--image-width:1200px;--image-ratio:1200 / 800;--image-placeholder:#285a8c;--image-preview:url('data:image/png;base64,"
             ),
             "{html}"
         );
@@ -2449,6 +3018,21 @@ mod tests {
         assert!(html.contains("title=\"Details\""), "{html}");
         assert!(html.contains("--image-placeholder:#285a8c"), "{html}");
 
+        let hinted = render_markdown_with_image_dimensions(
+            "![Useful diagram](https://publisher.example/diagram.png)",
+            std::slice::from_ref(&image),
+            &[ImageDimensions {
+                source: image.source.clone(),
+                width: 400,
+                height: 900,
+            }],
+        );
+        assert!(
+            hinted.contains("width=\"1200\" height=\"800\""),
+            "validated image dimensions override publisher hints: {hinted}"
+        );
+        assert!(!hinted.contains("--image-ratio:400 / 900"), "{hinted}");
+
         let without_variants = LocalImage {
             variants: Vec::new(),
             ..image.clone()
@@ -2463,6 +3047,17 @@ mod tests {
         );
         assert!(!html.contains("<source "), "{html}");
 
+        let partial = LocalImage {
+            variants: image.variants[..2].to_vec(),
+            ..image.clone()
+        };
+        let partial_html = render_markdown_with_images(
+            "![Diagram](https://publisher.example/diagram.png)",
+            &[partial],
+        );
+        assert!(partial_html.contains("srcset=\"assets/images/small.webp 320w, assets/images/large.webp 640w, assets/images/original.png 1200w\""), "large masters retain responsive choices without a full-width WebP: {partial_html}");
+        assert!(!partial_html.contains("<source "), "{partial_html}");
+
         let later = render_markdown_with_images(
             "![Remote](https://publisher.example/first.png)\n\n![Useful diagram](https://publisher.example/diagram.png)",
             &[image],
@@ -2472,19 +3067,6 @@ mod tests {
             "{later}"
         );
         assert!(!later.contains("sizes=\"auto,"), "{later}");
-    }
-
-    #[test]
-    fn retained_html_recovers_only_matching_legacy_code() {
-        let html = "<p>Old prose.</p><pre><code data-lang=bash><span><span>$ z dotfiles\n</span></span><span><span>$ <span>pwd</span>\n</span></span><span><span>/Users/example/dotfiles\n</span></span></code></pre>";
-        let stored = "Edited prose stays.\n\n```\n$ z dotfiles$ pwd/Users/example/dotfiles\n```\n";
-        assert_eq!(
-            effective_markdown(stored, Some(html), None),
-            "Edited prose stays.\n\n```bash\n$ z dotfiles\n$ pwd\n/Users/example/dotfiles\n```\n"
-        );
-        let edited = stored.replace("$ z dotfiles", "$ z elsewhere");
-        assert_eq!(effective_markdown(&edited, Some(html), None), edited);
-        assert_eq!(effective_markdown(stored, None, None), stored);
     }
 
     #[test]
@@ -2536,9 +3118,14 @@ mod tests {
             html.contains("<code>https://example.com/\\</code>"),
             "{html}"
         );
-        assert!(
-            html.contains("# heading\\\nhttps://example.com/\\\n</code>"),
-            "{html}"
+        let fragment = Html::parse_fragment(&html);
+        let code = fragment
+            .select(&Selector::parse("pre code").unwrap())
+            .next()
+            .unwrap();
+        assert_eq!(
+            code.text().collect::<String>(),
+            "# heading\\\nhttps://example.com/\\\n"
         );
     }
 
@@ -2652,17 +3239,8 @@ mod tests {
     }
 
     #[test]
-    fn youtube_description_recovery_preserves_edits_and_literal_markup() {
+    fn youtube_description_preserves_code_and_literal_markup() {
         let url = Url::parse("https://www.youtube.com/watch?v=abc123").unwrap();
-        let html = "<p>References:<br>- https://example.com/a</p>";
-        let stored = to_markdown(html, None);
-        let repaired = effective_markdown(&stored, Some(html), Some(&url));
-        assert!(
-            repaired.contains("### References\n\n- https://example.com/a"),
-            "{repaired}"
-        );
-        let edited = format!("{stored}My own note.\n");
-        assert_eq!(effective_markdown(&edited, Some(html), Some(&url)), edited);
         let code = "<pre><code>Chapters:\n- 01:02 - example</code></pre>";
         assert_eq!(to_markdown(code, Some(&url)), to_markdown(code, None));
         let literal =
@@ -2674,18 +3252,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_html_repairs_only_unedited_legacy_heading_breaks() {
-        let html =
-            "<h2>40 hours, $2M+ AI credits,<br><em>solve an open problem.</em></h2><p>Details.</p>";
-        let stored = "## 40 hours, $2M+ AI credits,\\\n*solve an open problem.*\n\nDetails.\n";
-        let repaired = effective_markdown(stored, Some(html), None);
-        assert_eq!(repaired, to_markdown(html, None));
-        assert!(render_markdown(&repaired).contains(
-            "<h2>40 hours, $2M+ AI credits,<br />\n<em>solve an open problem.</em></h2>"
-        ));
-        let edited = stored.replace("Details.", "Edited details.");
-        assert_eq!(effective_markdown(&edited, Some(html), None), edited);
-        assert_eq!(effective_markdown(stored, None, None), stored);
+    fn literal_markdown_heading_breaks_remain_literal() {
         assert!(
             render_markdown("# Literal\\\nFollowing paragraph.\n")
                 .contains("<h1>Literal\\</h1>\n<p>Following paragraph.</p>")
@@ -2694,6 +3261,95 @@ mod tests {
             render_markdown("> # Literal\\\n> Following paragraph.\n")
                 .contains("<h1>Literal\\</h1>")
         );
+    }
+
+    #[test]
+    fn publisher_code_hints_survive_conversion_into_language_labels() {
+        for attribute in [
+            "data-lang=\"python\"",
+            "data-language=\"python\"",
+            "class=\"language-python\"",
+            "class=\"lang-python\"",
+            "class=\"highlight-source-python\"",
+        ] {
+            let markdown = to_markdown(
+                &format!("<pre><code {attribute}>value = 1\n</code></pre>"),
+                None,
+            );
+            assert!(
+                markdown.starts_with("```python\n"),
+                "{attribute}: {markdown}"
+            );
+            let html = render_markdown(&markdown);
+            assert!(html.contains("data-language=\"Python\""), "{html}");
+        }
+    }
+
+    #[test]
+    fn code_labels_respect_explicit_languages_and_plain_fallbacks() {
+        for (language, label) in [("JS", "JavaScript"), ("py", "Python"), ("rs", "Rust")] {
+            let html = render_markdown(&format!("```{language}\nlet value = 1;\n```\n"));
+            assert!(
+                html.contains(&format!("data-language=\"{label}\"")),
+                "{html}"
+            );
+            assert!(html.contains("syntax-"), "{html}");
+        }
+        for language in ["text", "plaintext", "unknown-language", "evil\"<img/src=x>"] {
+            let html = render_markdown(&format!("```{language}\nfn main() {{}}\n```\n"));
+            assert!(html.contains("data-language=\"Text\""), "{html}");
+            assert!(!html.contains("syntax-"), "{html}");
+            assert!(!html.contains("<img"), "{html}");
+        }
+    }
+
+    #[test]
+    fn unlabelled_code_uses_distinctive_signatures_without_guessing_prose() {
+        for (code, label) in [
+            ("fn main() {\n    println!(\"hello\");\n}", "Rust"),
+            ("def greet(name):\n    return name", "Python"),
+            ("#!/usr/bin/env bash\necho hello", "Shell"),
+            ("{\"ready\": true, \"count\": 2}", "JSON"),
+            ("SELECT title FROM articles WHERE id = 1;", "SQL"),
+            ("package main\nfunc main() {}", "Go"),
+            ("function greet(name) { return name; }", "JavaScript"),
+        ] {
+            let html = render_markdown(&format!("```\n{code}\n```\n"));
+            assert!(
+                html.contains(&format!("data-language=\"{label}\"")),
+                "{html}"
+            );
+            assert!(html.contains("syntax-"), "{html}");
+        }
+        for code in [
+            "the function returns a value",
+            "select a book from the shelf",
+            "let x = 1",
+            "[an example]",
+            "{}",
+            "42",
+        ] {
+            let html = render_markdown(&format!("```\n{code}\n```\n"));
+            assert!(html.contains("data-language=\"Text\""), "{html}");
+            assert!(!html.contains("syntax-"), "{html}");
+        }
+    }
+
+    #[test]
+    fn code_labels_do_not_change_copied_code_or_unbounded_fallback() {
+        let code = "<script>alert(1)</script>\n";
+        let html = render_markdown(&format!("```html\n{code}```\n"));
+        let fragment = Html::parse_fragment(&html);
+        let selected = fragment
+            .select(&Selector::parse("pre code").unwrap())
+            .next()
+            .unwrap();
+        assert_eq!(selected.text().collect::<String>(), code);
+        assert!(html.contains("data-language=\"HTML\""), "{html}");
+        let long = "x".repeat(2_001);
+        let html = render_markdown(&format!("```rust\n{long}\n```\n"));
+        assert!(!html.contains("syntax-"), "{html}");
+        assert!(html.contains("data-language=\"Rust\""), "{html}");
     }
 
     #[test]
@@ -2756,6 +3412,81 @@ mod tests {
                 "blog-google"
             ),
             "|\n\nBody.\n"
+        );
+    }
+
+    #[test]
+    fn strips_leading_advertisement_and_its_orphaned_bullet() {
+        let body = "Mullenweg, co-founder of WordPress, wrote in a company-wide Slack message.\n\n![Photo](https://example.com/photo.jpg)\n";
+        for prefix in [
+            "Advertisement\n\n•\n\n",
+            "**ADVERTISEMENT**\n\n•\n\n",
+            "Advertisement\n•\n\n",
+            "Advertisement\n\n",
+            "[Advertisement](/ads)\n\n•\n\n",
+        ] {
+            assert_eq!(
+                strip_article_metadata(&format!("{prefix}{body}"), None, "hnrss-org-frontpage"),
+                body,
+                "{prefix}"
+            );
+        }
+        for prefix in [
+            "•\n\n",
+            "# Advertisement\n\n•\n\n",
+            "> Advertisement\n\n•\n\n",
+            "`Advertisement`\n\n•\n\n",
+            "Advertisement is how this publication is funded.\n\n•\n\n",
+            "An introduction.\n\nAdvertisement\n\n•\n\n",
+            "```text\nAdvertisement\n•\n```\n\n",
+        ] {
+            let markdown = format!("{prefix}{body}");
+            assert_eq!(
+                strip_article_metadata(&markdown, None, "hnrss-org-frontpage"),
+                markdown
+            );
+        }
+    }
+
+    #[test]
+    fn strips_cognition_leading_byline_with_matching_publication_date() {
+        use chrono::TimeZone as _;
+
+        let published = Utc.with_ymd_and_hms(2026, 9, 9, 17, 0, 0).unwrap();
+        let markdown = to_markdown(
+            "<article><header><p><span>By Eric Lu</span><span>09.09.26</span></p></header><section><p>Over the past few weeks, the Cognition research team and I have been optimizing our job scheduler.</p></section></article>",
+            None,
+        );
+        assert!(markdown.starts_with("By Eric Lu 09.09.26\n\n"));
+        let expected = "Over the past few weeks, the Cognition research team and I have been optimizing our job scheduler.\n";
+        assert_eq!(
+            strip_article_metadata(&markdown, Some(published), "cognition-com-blog"),
+            expected
+        );
+        assert_eq!(
+            strip_article_metadata(expected, Some(published), "cognition-com-blog"),
+            expected
+        );
+
+        for body in [
+            "By Eric Lu 09.09.25\n\nBody.\n",
+            "By Eric Lu\n\nBody.\n",
+            "By using algebra we solved it on 09.09.26\n\nBody.\n",
+            "By September 09.09.26\n\nBody.\n",
+            "By Eric Lu 09.09.26 we had solved it.\n\nBody.\n",
+            "`By Eric Lu 09.09.26`\n\nBody.\n",
+            "# By Eric Lu 09.09.26\n\nBody.\n",
+            "> By Eric Lu 09.09.26\n\nBody.\n",
+            "An opening.\n\nBy Eric Lu 09.09.26\n\nBody.\n",
+        ] {
+            assert_eq!(
+                strip_article_metadata(body, Some(published), "cognition-com-blog"),
+                body
+            );
+        }
+        assert_eq!(
+            strip_article_metadata(&markdown, None, "cognition-com-blog"),
+            markdown
         );
     }
 

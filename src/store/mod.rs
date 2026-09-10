@@ -24,6 +24,7 @@ sources/*/seen.txt merge=union
 
 pub struct Store {
     root: PathBuf,
+    image_cache: Option<crate::media::StoredAssetCache>,
 }
 
 /// Per-source fetch state, stored as `sources/<slug>/state.toml`. Only rewritten when it changes,
@@ -33,7 +34,6 @@ pub struct Store {
 pub struct SourceState {
     /// Hash of unexpanded fetch inputs. A change invalidates the discovered endpoint below while
     /// literal credentials and `${ENV}` values never enter the append-only history.
-    #[serde(alias = "url")]
     pub identity: String,
     /// Feed endpoint discovered from a website, or the final page URL for HTML fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,7 +128,7 @@ struct StoredMediaBudget {
 
 impl StoredMediaBudget {
     fn new(limits: &crate::media::MediaLimits) -> Self {
-        let files_per_asset = limits.rendition_widths.len().saturating_add(2);
+        let files_per_asset = crate::media::MAX_STORED_RENDITIONS + 1;
         Self {
             files: limits.max_assets.saturating_mul(files_per_asset),
             bytes: limits.max_article_bytes,
@@ -147,7 +147,16 @@ impl StoredMediaBudget {
 
 impl Store {
     pub fn open(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            image_cache: None,
+        }
+    }
+
+    /// Reuse validated image results only in the caller's existing disposable cache boundary.
+    pub fn with_image_cache(mut self, root: impl AsRef<Path>) -> Self {
+        self.image_cache = Some(crate::media::StoredAssetCache::new(root));
+        self
     }
 
     /// Write the branch README and `.gitattributes` when missing. Returns whether anything was
@@ -250,6 +259,51 @@ impl Store {
         self.root.join(dir).join(format!("{stem}.md")).exists()
     }
 
+    /// A stat-only repair hint: optional renditions never require downloading a usable master
+    /// again. Writes and rendering still validate bytes; presence alone is not integrity proof.
+    pub fn image_files_present(&self, item_path: &str, metadata: &ArticleImage) -> bool {
+        (|| -> Result<bool> {
+            if metadata.variants.len() > crate::media::MAX_STORED_RENDITIONS {
+                return Ok(false);
+            }
+            let directory = self.stored_image_directory(item_path, metadata)?;
+            let relative = directory.strip_prefix(normalized_absolute(&self.root)?)?;
+            let path = self.checked_path(&relative.join(&metadata.original.file))?;
+            let file = fs::symlink_metadata(path)?;
+            Ok(file.file_type().is_file()
+                && file.len() > 0
+                && file.len() <= crate::media::MediaLimits::default().max_file_bytes as u64)
+        })()
+        .unwrap_or(false)
+    }
+
+    /// Retained-byte estimate for bounded repair downloads, without reading or decoding images.
+    pub fn image_bytes_present(&self, item_path: &str, metadata: &ArticleImage) -> usize {
+        if !self.image_files_present(item_path, metadata) {
+            return 0;
+        }
+        let Ok(directory) = self.stored_image_directory(item_path, metadata) else {
+            return 0;
+        };
+        let Ok(root) = normalized_absolute(&self.root) else {
+            return 0;
+        };
+        let Ok(relative) = directory.strip_prefix(root) else {
+            return 0;
+        };
+        std::iter::once(&metadata.original)
+            .chain(&metadata.variants)
+            .filter_map(|image| {
+                let path = self.checked_path(&relative.join(&image.file)).ok()?;
+                let file = fs::symlink_metadata(path).ok()?;
+                (file.file_type().is_file()
+                    && file.len() <= crate::media::MediaLimits::default().max_file_bytes as u64)
+                    .then(|| usize::try_from(file.len()).ok())
+                    .flatten()
+            })
+            .sum()
+    }
+
     pub fn write_item(&self, item: NewItem<'_>) -> Result<()> {
         let limits = crate::media::MediaLimits::default();
         if item.front.images.len() > limits.max_assets {
@@ -276,44 +330,68 @@ impl Store {
             bail!("preview bytes have no metadata");
         }
 
-        let image_files = if !item.images.is_empty() {
-            if item.front.images.len() != item.images.len() {
-                bail!("article image bytes do not match metadata");
+        let item_path = format!("{}/{}", item.dir, item.stem);
+        let existing = if item.front.images.len() > item.images.len() {
+            Some(
+                self.read_item(&item_path)
+                    .context("reading retained image metadata")?,
+            )
+        } else {
+            None
+        };
+        let mut supplied = BTreeMap::new();
+        for image in item.images {
+            if supplied.insert(image.source_url.as_str(), image).is_some() {
+                bail!("duplicate supplied article image source");
             }
-            let mut files = Vec::with_capacity(item.images.len());
-            for (metadata, image) in item.front.images.iter().zip(item.images) {
-                if metadata.variants.len() > limits.rendition_widths.len().saturating_add(1)
-                    || !metadata.is_valid_for(item.stem)
-                    || image.metadata(item.stem) != *metadata
-                {
+        }
+        let mut sources = BTreeSet::new();
+        let mut image_files = BTreeMap::new();
+        let mut budget = StoredMediaBudget::new(&limits);
+        for metadata in &item.front.images {
+            if metadata.variants.len() > crate::media::MAX_STORED_RENDITIONS
+                || !metadata.is_valid_for(item.stem)
+                || !sources.insert(metadata.source.as_str())
+            {
+                bail!("invalid or duplicate article image metadata");
+            }
+            if let Some(image) = supplied.remove(metadata.source.as_str()) {
+                if image.metadata(item.stem) != *metadata {
                     bail!("article image metadata does not match its bytes");
                 }
-                let companions = image.files(item.stem);
-                for companion in &companions {
+                for companion in image.files(item.stem) {
+                    if !budget.reserve(companion.bytes.len()) {
+                        bail!("stored article media exceeds the item budget");
+                    }
                     crate::media::validate_stored(
                         companion.bytes,
                         &companion.metadata,
                         companion.kind,
                     )?;
-                    targets.push(relative_dir.join(&companion.metadata.file));
+                    let relative = relative_dir.join(&companion.metadata.file);
+                    if !self.image_companion_matches(&relative, companion.bytes)? {
+                        if image_files
+                            .insert(relative.clone(), companion.bytes)
+                            .is_some_and(|bytes| bytes != companion.bytes)
+                        {
+                            bail!("conflicting article image companion bytes");
+                        }
+                        targets.push(relative);
+                    }
                 }
-                files.push(companions);
+            } else {
+                if !existing
+                    .as_ref()
+                    .is_some_and(|existing| existing.front.images.contains(metadata))
+                {
+                    bail!("retained article image metadata changed without supplied bytes");
+                }
+                self.validate_retained_image(&item_path, metadata, &mut budget)?;
             }
-            files
-        } else {
-            let mut budget = StoredMediaBudget::new(&limits);
-            for metadata in &item.front.images {
-                self.read_stored_image(
-                    &format!("{}/{}", item.dir, item.stem),
-                    metadata,
-                    &mut budget,
-                )
-                .with_context(|| {
-                    format!("validating article image for {}/{}", item.dir, item.stem)
-                })?;
-            }
-            Vec::new()
-        };
+        }
+        if !supplied.is_empty() {
+            bail!("supplied article image has no metadata");
+        }
 
         // Markdown is the item pair's visibility marker: write the optional sibling first, then
         // atomically publish the `.md`. A crash can leave an ignored orphan HTML file, never a
@@ -328,21 +406,20 @@ impl Store {
             self.checked_path(target)?;
         }
 
+        let markdown = frontmatter::render(item.front, item.body)?;
         if let (Some(preview), Some(bytes)) = (&item.front.preview, item.preview) {
             self.write_bytes(&relative_dir.join(&preview.file), bytes)?;
         }
-        for companions in image_files {
-            for companion in companions {
-                self.write_bytes(
-                    &relative_dir.join(&companion.metadata.file),
-                    companion.bytes,
-                )?;
-            }
+        for (relative, bytes) in image_files {
+            self.write_image_companion(&relative, bytes)?;
         }
         if let Some(html) = item.html {
             self.write_text(&relative_dir.join(format!("{}.html", item.stem)), html)?;
         }
-        self.write_text(&md, &frontmatter::render(item.front, item.body)?)?;
+        let path = self.checked_path(&md)?;
+        if !fs::read(&path).is_ok_and(|bytes| bytes == markdown.as_bytes()) {
+            self.write_text(&md, &markdown)?;
+        }
         Ok(())
     }
 
@@ -521,6 +598,37 @@ impl Store {
         }
     }
 
+    /// Repair only absent companions; unsafe paths and other filesystem failures remain errors.
+    pub fn preview_file_present(
+        &self,
+        item_path: &str,
+        preview: &crate::model::Preview,
+    ) -> Result<bool> {
+        let path = Path::new(item_path);
+        let stem = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .context("preview item path has no filename")?;
+        if !preview.is_valid_for(stem) {
+            bail!("invalid preview metadata for {item_path}");
+        }
+        let file = self.checked_path(
+            &path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(&preview.file),
+        )?;
+        match fs::symlink_metadata(&file) {
+            Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+            Ok(_) => bail!(
+                "preview companion is not a regular file: {}",
+                file.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).with_context(|| format!("inspecting preview for {item_path}")),
+        }
+    }
+
     /// Optional image failures never prevent an otherwise readable article from being built.
     pub fn read_preview(&self, item: &Item) -> Result<Option<Vec<u8>>> {
         let Some(preview) = &item.front.preview else {
@@ -602,12 +710,15 @@ impl Store {
         for metadata in item.front.images.iter().take(limits.max_assets) {
             let restored = self
                 .read_available_image_bytes(&item.path, metadata, &mut budget)
-                .and_then(|stored| {
-                    crate::media::Asset::from_stored(
+                .and_then(|stored| match &self.image_cache {
+                    Some(cache) => {
+                        cache.restore(&stored.metadata, stored.original, stored.variants)
+                    }
+                    None => crate::media::Asset::from_stored(
                         &stored.metadata,
                         stored.original,
                         stored.variants,
-                    )
+                    ),
                 });
             match restored {
                 Ok(image) => images.push(image),
@@ -620,40 +731,45 @@ impl Store {
         Ok(images)
     }
 
-    fn read_stored_image(
+    fn validate_retained_image(
         &self,
         item_path: &str,
         metadata: &ArticleImage,
         budget: &mut StoredMediaBudget,
-    ) -> Result<StoredImage> {
-        let limits = crate::media::MediaLimits::default();
-        if metadata.variants.len() > limits.rendition_widths.len().saturating_add(1) {
+    ) -> Result<()> {
+        if metadata.variants.len() > crate::media::MAX_STORED_RENDITIONS {
             bail!("stored article image has too many renditions");
         }
         let directory = self.stored_image_directory(item_path, metadata)?;
-        let original = self.read_image_file(
-            &directory,
-            &metadata.original,
-            crate::media::StoredKind::Master,
-            budget,
-        )?;
-        let variants = metadata
-            .variants
-            .iter()
-            .map(|file| {
-                self.read_image_file(
-                    &directory,
-                    file,
-                    crate::media::StoredKind::Rendition,
-                    budget,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(StoredImage {
-            metadata: metadata.clone(),
-            original,
-            variants,
-        })
+        for (index, file) in std::iter::once(&metadata.original)
+            .chain(&metadata.variants)
+            .enumerate()
+        {
+            let bytes = match self.read_image_bytes(&directory, file, budget) {
+                Ok(bytes) => bytes,
+                Err(error)
+                    if index > 0
+                        && error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            // Metadata must already match the archive. Verify its immutable content address,
+            // without decoding unchanged masters and recomputing their responsive renditions.
+            let hash = crate::model::sha1_hex(&bytes);
+            let stored_hash = file
+                .file
+                .rsplit_once(".image-")
+                .and_then(|(_, suffix)| suffix.split_once('.'))
+                .map(|(hash, _)| hash);
+            if stored_hash != Some(&hash[..12]) {
+                bail!("retained article image bytes do not match their content address");
+            }
+        }
+        Ok(())
     }
 
     fn read_available_stored_image(
@@ -662,8 +778,7 @@ impl Store {
         metadata: &ArticleImage,
         budget: &mut StoredMediaBudget,
     ) -> Result<StoredImage> {
-        let limits = crate::media::MediaLimits::default();
-        let max_renditions = limits.rendition_widths.len().saturating_add(1);
+        let max_renditions = crate::media::MAX_STORED_RENDITIONS;
         if metadata.variants.len() > max_renditions {
             bail!("stored article image has too many renditions");
         }
@@ -707,7 +822,7 @@ impl Store {
         budget: &mut StoredMediaBudget,
     ) -> Result<StoredImage> {
         let limits = crate::media::MediaLimits::default();
-        let max_renditions = limits.rendition_widths.len().saturating_add(1);
+        let max_renditions = crate::media::MAX_STORED_RENDITIONS;
         if metadata.variants.len() > max_renditions {
             bail!("stored article image has too many renditions");
         }
@@ -871,6 +986,53 @@ impl Store {
         self.write_bytes(relative, content.as_bytes())
     }
 
+    fn image_companion_matches(&self, relative: &Path, content: &[u8]) -> Result<bool> {
+        let path = self.checked_path(relative)?;
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+            Ok(metadata)
+                if !metadata.file_type().is_file() || metadata.len() != content.len() as u64 =>
+            {
+                bail!("immutable article image companion has different bytes");
+            }
+            Ok(_) => {}
+        }
+        use std::io::Read as _;
+        let mut existing = Vec::with_capacity(content.len());
+        fs::File::open(path)?
+            .take(content.len() as u64 + 1)
+            .read_to_end(&mut existing)?;
+        if existing != content {
+            bail!("immutable article image companion has different bytes");
+        }
+        Ok(true)
+    }
+
+    fn write_image_companion(&self, relative: &Path, content: &[u8]) -> Result<()> {
+        if self.image_companion_matches(relative, content)? {
+            return Ok(());
+        }
+        let path = self.checked_path(relative)?;
+        let parent = path.parent().context("image companion has a parent")?;
+        fs::create_dir_all(parent)?;
+        let path = self.checked_path(relative)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.write_all(content)?;
+        temporary.flush()?;
+        match temporary.persist_noclobber(&path) {
+            Ok(_) => Ok(()),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if self.image_companion_matches(relative, content)? {
+                    Ok(())
+                } else {
+                    bail!("article image companion disappeared during publication")
+                }
+            }
+            Err(error) => Err(error.error.into()),
+        }
+    }
+
     fn write_bytes(&self, relative: &Path, content: &[u8]) -> Result<()> {
         let path = self.checked_path(relative)?;
         let parent = path.parent().context("store file has a parent directory")?;
@@ -925,6 +1087,229 @@ fn atomic_write_bytes(path: &Path, content: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    fn repair_asset(source: &str, seed: u32) -> crate::media::Asset {
+        let image =
+            image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(640, 400, |x, y| {
+                image::Rgb([
+                    ((x + seed) % 251) as u8,
+                    ((y + seed) % 239) as u8,
+                    ((x * y + seed) % 241) as u8,
+                ])
+            }));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        crate::media::prepare_asset(
+            &crate::media::Candidate {
+                url: source.parse().unwrap(),
+                alt: None,
+            },
+            bytes.into_inner(),
+            &crate::media::MediaLimits::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn image_subset_write_preserves_companions_without_decoding_or_rewriting_existing_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path());
+        let original = repair_asset("https://publisher.example/one.png", 1);
+        let new = repair_asset("https://publisher.example/two.png", 2);
+        let mut front = FrontMatter {
+            images: vec![original.metadata("article")],
+            ..Default::default()
+        };
+        let write = |front: &FrontMatter, images: &[crate::media::Asset], html| {
+            store.write_item(NewItem {
+                dir: "items/blog/2026/09",
+                stem: "article",
+                front,
+                body: "Preserved markdown",
+                html,
+                preview: None,
+                images,
+            })
+        };
+        write(
+            &front,
+            std::slice::from_ref(&original),
+            Some("<p>Preserved HTML</p>"),
+        )
+        .unwrap();
+        let directory = dir.path().join("items/blog/2026/09");
+        let timestamp = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        for file in original.files("article") {
+            fs::File::options()
+                .write(true)
+                .open(directory.join(file.metadata.file))
+                .unwrap()
+                .set_modified(timestamp)
+                .unwrap();
+        }
+        front.images.push(new.metadata("article"));
+        crate::media::reset_stored_decode_count();
+        write(&front, std::slice::from_ref(&new), None).unwrap();
+        assert_eq!(
+            crate::media::stored_decode_count(),
+            new.files("article").len()
+        );
+        for file in original.files("article") {
+            let path = directory.join(file.metadata.file);
+            assert_eq!(fs::read(&path).unwrap(), file.bytes);
+            assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), timestamp);
+        }
+        assert_eq!(
+            fs::read_to_string(directory.join("article.html")).unwrap(),
+            "<p>Preserved HTML</p>"
+        );
+        assert_eq!(
+            store
+                .read_item("items/blog/2026/09/article")
+                .unwrap()
+                .front
+                .images,
+            front.images
+        );
+        let md = directory.join("article.md");
+        fs::File::options()
+            .write(true)
+            .open(&md)
+            .unwrap()
+            .set_modified(timestamp)
+            .unwrap();
+        crate::media::reset_stored_decode_count();
+        write(&front, &[], None).unwrap();
+        assert_eq!(crate::media::stored_decode_count(), 0);
+        assert_eq!(fs::metadata(md).unwrap().modified().unwrap(), timestamp);
+    }
+
+    #[test]
+    fn image_subset_rejects_forged_unlisted_duplicate_and_corrupt_inputs_before_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path());
+        let original = repair_asset("https://publisher.example/one.png", 1);
+        let new = repair_asset("https://publisher.example/two.png", 2);
+        let original_front = FrontMatter {
+            images: vec![original.metadata("article")],
+            ..Default::default()
+        };
+        let write = |front: &FrontMatter, images: &[crate::media::Asset]| {
+            store.write_item(NewItem {
+                dir: "items/blog/2026/09",
+                stem: "article",
+                front,
+                body: "Preserved",
+                html: None,
+                preview: None,
+                images,
+            })
+        };
+        write(&original_front, std::slice::from_ref(&original)).unwrap();
+        let mut front = original_front.clone();
+        front.images.push(new.metadata("article"));
+        let md = dir.path().join("items/blog/2026/09/article.md");
+        let saved = fs::read(&md).unwrap();
+        let mut forged = front.clone();
+        forged.images[0].color = Some("#123456".into());
+        assert!(write(&forged, std::slice::from_ref(&new)).is_err());
+        assert!(write(&original_front, std::slice::from_ref(&new)).is_err());
+        assert!(write(&front, &[new.clone(), new.clone()]).is_err());
+        let mut duplicated = front.clone();
+        duplicated.images.push(original.metadata("article"));
+        assert!(write(&duplicated, std::slice::from_ref(&new)).is_err());
+        let original_path = dir
+            .path()
+            .join("items/blog/2026/09")
+            .join(&original_front.images[0].original.file);
+        fs::write(&original_path, b"corrupt").unwrap();
+        assert!(write(&front, std::slice::from_ref(&new)).is_err());
+        assert!(
+            write(&original_front, std::slice::from_ref(&original)).is_err(),
+            "existing immutable filenames cannot be overwritten"
+        );
+        assert_eq!(fs::read(&original_path).unwrap(), b"corrupt");
+        assert_eq!(fs::read(md).unwrap(), saved);
+        for file in new.files("article") {
+            assert!(
+                !dir.path()
+                    .join("items/blog/2026/09")
+                    .join(file.metadata.file)
+                    .exists()
+            );
+        }
+    }
+
+    #[test]
+    fn image_repair_presence_and_subset_writes_distinguish_missing_optional_and_required_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path());
+        let original = repair_asset("https://publisher.example/one.png", 1);
+        let new = repair_asset("https://publisher.example/two.png", 2);
+        let mut front = FrontMatter {
+            images: vec![original.metadata("article")],
+            ..Default::default()
+        };
+        let write = |front: &FrontMatter, images: &[crate::media::Asset]| {
+            store.write_item(NewItem {
+                dir: "items/blog/2026/09",
+                stem: "article",
+                front,
+                body: "Preserved",
+                html: None,
+                preview: None,
+                images,
+            })
+        };
+        write(&front, std::slice::from_ref(&original)).unwrap();
+        let item_path = "items/blog/2026/09/article";
+        let directory = dir.path().join("items/blog/2026/09");
+        assert!(store.image_files_present(item_path, &front.images[0]));
+        let original_bytes: usize = original
+            .files("article")
+            .iter()
+            .map(|file| file.bytes.len())
+            .sum();
+        assert_eq!(
+            store.image_bytes_present(item_path, &front.images[0]),
+            original_bytes
+        );
+        let optional = directory.join(&front.images[0].variants[0].file);
+        let optional_bytes = fs::metadata(&optional).unwrap().len() as usize;
+        fs::remove_file(optional).unwrap();
+        assert!(store.image_files_present(item_path, &front.images[0]));
+        assert_eq!(
+            store.image_bytes_present(item_path, &front.images[0]),
+            original_bytes - optional_bytes
+        );
+        front.images.push(new.metadata("article"));
+        write(&front, std::slice::from_ref(&new)).unwrap();
+        assert_eq!(
+            store.read_item(item_path).unwrap().front.images,
+            front.images
+        );
+        let required = directory.join(&front.images[0].original.file);
+        fs::remove_file(&required).unwrap();
+        assert!(!store.image_files_present(item_path, &front.images[0]));
+        assert!(write(&front, &[]).is_err());
+        fs::create_dir(&required).unwrap();
+        assert!(!store.image_files_present(item_path, &front.images[0]));
+        fs::remove_dir(&required).unwrap();
+        fs::write(&required, []).unwrap();
+        assert!(!store.image_files_present(item_path, &front.images[0]));
+        assert_eq!(store.image_bytes_present(item_path, &front.images[0]), 0);
+        #[cfg(unix)]
+        {
+            fs::remove_file(&required).unwrap();
+            let outside = dir.path().join("outside.png");
+            fs::write(&outside, &original.master_bytes).unwrap();
+            std::os::unix::fs::symlink(&outside, &required).unwrap();
+            assert!(!store.image_files_present(item_path, &front.images[0]));
+            assert_eq!(store.image_bytes_present(item_path, &front.images[0]), 0);
+            assert!(write(&front, &[]).is_err());
+            assert_eq!(fs::read(outside).unwrap(), original.master_bytes);
+        }
+    }
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap()
@@ -1040,14 +1425,20 @@ mod tests {
             limits.max_assets
         );
 
-        let large = stored_asset(limits.max_article_bytes / 4 + 1);
-        let oversized = item_with_repeated_asset(temp.path(), &large, 4);
+        let large = stored_asset(limits.max_file_bytes);
+        let oversized = item_with_repeated_asset(
+            temp.path(),
+            &large,
+            limits.max_article_bytes / limits.max_file_bytes + 1,
+        );
         let stored = store.read_images(&oversized).unwrap();
         let stored_bytes = stored
             .iter()
             .map(|image| image.original.len() + image.variants.iter().map(Vec::len).sum::<usize>())
             .sum::<usize>();
         assert!(stored_bytes <= limits.max_article_bytes);
+        assert!(stored.len() < oversized.front.images.len());
+        drop(stored);
 
         let assets = store.read_image_assets(&oversized).unwrap();
         let archived_bytes = assets
@@ -1062,6 +1453,7 @@ mod tests {
             })
             .sum::<usize>();
         assert!(archived_bytes <= limits.max_article_bytes);
+        assert!(assets.len() < oversized.front.images.len());
     }
 
     #[test]
@@ -1099,7 +1491,8 @@ mod tests {
     #[test]
     fn article_images_roundtrip_and_retention_removes_current_companions() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path());
+        let cache = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).with_image_cache(cache.path());
         let image = image::DynamicImage::new_rgb8(640, 400);
         let mut bytes = std::io::Cursor::new(Vec::new());
         image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
@@ -1143,6 +1536,10 @@ mod tests {
             crate::media::stored_decode_count(),
             1 + asset.renditions.len()
         );
+        crate::media::reset_stored_decode_count();
+        let reopened = Store::open(dir.path()).with_image_cache(cache.path());
+        assert_eq!(reopened.read_image_assets(&item).unwrap(), rebuilt);
+        assert_eq!(crate::media::stored_decode_count(), 0);
         let files = asset
             .files("article")
             .into_iter()
@@ -1157,6 +1554,10 @@ mod tests {
         store.remove_item(&item.path).unwrap();
         assert!(files.iter().all(|file| !file.exists()));
         assert!(store.items().unwrap().is_empty());
+        assert!(
+            reopened.read_image_assets(&item).unwrap().is_empty(),
+            "a cached receipt cannot resurrect removed image files"
+        );
     }
 
     #[test]
@@ -1335,6 +1736,17 @@ mod tests {
                 .unwrap()
                 .contains("merge=union")
         );
+    }
+
+    #[test]
+    fn state_identity_does_not_use_obsolete_url_fields() {
+        let state: SourceState =
+            toml::from_str("identity='current-hash'\nurl='https://obsolete.example/feed'\n")
+                .unwrap();
+        assert_eq!(state.identity, "current-hash");
+        let obsolete: SourceState =
+            toml::from_str("url='https://obsolete.example/feed'\n").unwrap();
+        assert!(obsolete.identity.is_empty());
     }
 
     #[test]
