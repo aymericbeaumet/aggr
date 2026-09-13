@@ -1601,17 +1601,19 @@ pub fn strip_leading_metadata(
     }
     let plain = html_to_text(&render_markdown(first));
     let source_only = plain.chars().count() <= 80 && slug::slugify(plain.trim()) == source_slug;
-    let matching_date = published.is_some_and(|published| {
-        date_prefixes(&plain).any(|value| {
-            parse_date_only(value).is_some_and(|candidate| {
-                candidate
-                    .signed_duration_since(published.date_naive())
-                    .num_days()
-                    .unsigned_abs()
-                    <= 1
-            })
-        })
-    });
+    let matching_date = date_prefixes(&plain)
+        .filter_map(parse_date_only)
+        .any(|candidate| {
+            candidate.labelled
+                || published.is_some_and(|published| {
+                    candidate
+                        .date
+                        .signed_duration_since(published.date_naive())
+                        .num_days()
+                        .unsigned_abs()
+                        <= 1
+                })
+        });
     if !source_only && !matching_date {
         return markdown.to_string();
     }
@@ -1663,17 +1665,38 @@ fn repair_generated_markdown(markdown: &str) -> String {
     value
 }
 
-fn parse_date_only(raw: &str) -> Option<NaiveDate> {
-    let value = raw
-        .trim()
-        .trim_matches(['*', '_'])
-        .strip_prefix("Published on ")
-        .or_else(|| raw.trim().strip_prefix("Posted on "))
-        .unwrap_or(raw.trim());
+/// Bylines that introduce the date on a metadata line. They name the article's own date, which a
+/// feed aggregating submissions (Hacker News, Lobsters) does not share, so a labelled line is
+/// dropped on its own evidence instead of being matched against the item's published date.
+const DATE_LABELS: [&str; 5] = [
+    "written on ",
+    "published on ",
+    "posted on ",
+    "last updated on ",
+    "updated on ",
+];
+
+struct LeadingDate {
+    date: NaiveDate,
+    labelled: bool,
+}
+
+fn parse_date_only(raw: &str) -> Option<LeadingDate> {
+    let value = raw.trim().trim_matches(['*', '_']).trim();
+    let lowercase = value.to_ascii_lowercase();
+    let (value, labelled) = DATE_LABELS
+        .iter()
+        .find_map(|label| {
+            lowercase
+                .starts_with(label)
+                .then(|| (&value[label.len()..], true))
+        })
+        .unwrap_or((value, false));
     let value = without_ordinal_suffixes(value);
     ["%Y-%m-%d", "%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y"]
         .iter()
         .find_map(|format| NaiveDate::parse_from_str(value.trim(), format).ok())
+        .map(|date| LeadingDate { date, labelled })
 }
 
 fn without_ordinal_suffixes(value: &str) -> String {
@@ -2809,6 +2832,51 @@ mod tests {
             ),
             "OpenAI builds systems.\n\nBody.\n"
         );
+    }
+
+    #[test]
+    fn strips_a_labelled_byline_even_when_the_feed_dates_the_submission() {
+        use chrono::{TimeZone as _, Utc};
+
+        // Aggregator feeds publish the submission, days after the article itself.
+        let submitted = Utc.with_ymd_and_hms(2026, 9, 11, 6, 30, 0).unwrap();
+        for byline in [
+            "written on September 07, 2026",
+            "Written on 7 September 2026",
+            "*Published on 2026-09-07*",
+            "Posted on Sep 7, 2026",
+            "Last updated on 7th September 2026",
+        ] {
+            assert_eq!(
+                strip_leading_metadata(
+                    &format!("{byline}\n\nThe actual opening.\n"),
+                    None,
+                    "hnrss"
+                ),
+                "The actual opening.\n",
+                "{byline}"
+            );
+            assert_eq!(
+                strip_leading_metadata(
+                    &format!("{byline}\n\nThe actual opening.\n"),
+                    Some(submitted),
+                    "hnrss"
+                ),
+                "The actual opening.\n",
+                "{byline}"
+            );
+        }
+        for body in [
+            // A label without a parseable date, and prose that merely starts with one.
+            "Written on a rainy afternoon\n\nBody.\n",
+            "Written on September 07, 2026 the draft finally made sense.\n\nBody.\n",
+        ] {
+            assert_eq!(strip_leading_metadata(body, Some(submitted), "hnrss"), body);
+        }
+        // A bare date still needs the item's own published date to back it up.
+        let bare = "September 07, 2026\n\nBody.\n";
+        assert_eq!(strip_leading_metadata(bare, Some(submitted), "hnrss"), bare);
+        assert_eq!(strip_leading_metadata(bare, None, "hnrss"), bare);
     }
 
     #[test]
