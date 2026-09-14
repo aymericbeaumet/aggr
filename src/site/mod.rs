@@ -2,12 +2,17 @@
 //! The planning half (`plan`) is pure; `build` does the IO.
 
 pub mod context;
-mod derived;
+mod display;
+mod document;
+pub(crate) mod interactive;
+pub(crate) mod item_type;
+mod native_media;
 pub mod outputs;
 mod pagefind;
+mod parallel;
 mod related;
 pub mod render;
-mod video;
+pub(crate) mod video;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -102,12 +107,10 @@ pub struct BuildInfo {
     pub pagefind_cache: Option<PathBuf>,
 }
 
-/// Which items belong on the recent home feed. `stubbed` is retained for configuration and
-/// planning compatibility; archive builds render every retained item as a full page.
+/// Which items belong on the recent home feed; archives render every retained item.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Window {
     pub rendered: Vec<usize>,
-    pub stubbed: Vec<usize>,
 }
 
 /// Split items (sorted newest first, hidden already removed) into the recent feed and its tail.
@@ -116,15 +119,12 @@ pub fn window(
     now: DateTime<Utc>,
     max_items: usize,
     max_age_days: u32,
-    max_stubs: usize,
 ) -> Window {
     let cutoff = now - Duration::days(i64::from(max_age_days));
     let mut out = Window::default();
     for (index, date) in dates.iter().enumerate() {
         if out.rendered.len() < max_items && *date >= cutoff {
             out.rendered.push(index);
-        } else if out.stubbed.len() < max_stubs {
-            out.stubbed.push(index);
         }
     }
     out
@@ -203,11 +203,14 @@ pub fn precache_paths(
     item_urls: impl IntoIterator<Item = String>,
     offline_items: usize,
 ) -> Vec<String> {
-    const SHELLS: [&str; 8] = [
+    const SHELLS: [&str; 11] = [
         "",
         "aggr.json",
-        "library/",
-        "search/",
+        "updates.json",
+        "browse/",
+        "categories/",
+        "sources/",
+        "tags/",
         "preferences/",
         "404.html",
         "offline.html",
@@ -245,7 +248,7 @@ struct PrecacheEntry {
 
 /// Attach an exact content revision to every install-time resource. A new worker can copy
 /// byte-identical responses from the previous precache instead of downloading the whole offline
-/// library after every feed commit.
+/// archive after every feed commit.
 fn precache_entries(root: &Path, urls: Vec<String>) -> Result<Vec<PrecacheEntry>> {
     urls.into_iter()
         .map(|url| {
@@ -279,25 +282,26 @@ fn precache_entries(root: &Path, urls: Vec<String>) -> Result<Vec<PrecacheEntry>
 fn publish_article_images(
     out: &Path,
     assets: Vec<crate::media::Asset>,
+    written: &mut BTreeSet<String>,
 ) -> Result<Vec<content::LocalImage>> {
     let mut published = Vec::with_capacity(assets.len());
     for asset in assets {
-        let publish = |extension: &str, bytes: &[u8]| -> Result<String> {
-            let path = format!(
-                "assets/images/{}.{}",
-                crate::model::sha1_hex(bytes),
-                extension
-            );
-            write(&out.join(&path), bytes)?;
+        let mut publish = |extension: &str, hash: &str, bytes: &[u8]| -> Result<String> {
+            let path = format!("assets/images/{hash}.{extension}");
+            publish_asset(out, written, &path, bytes)?;
             Ok(path)
         };
-        let original = publish(asset.master_extension, &asset.master_bytes)?;
+        let original = publish(
+            asset.master_extension,
+            &asset.master_hash,
+            &asset.master_bytes,
+        )?;
         let mut variants = asset
             .renditions
             .iter()
             .map(|rendition| {
                 Ok(content::LocalImageVariant {
-                    url: publish(rendition.extension, &rendition.bytes)?,
+                    url: publish(rendition.extension, &rendition.hash, &rendition.bytes)?,
                     width: rendition.width,
                     height: rendition.height,
                 })
@@ -320,9 +324,36 @@ fn publish_article_images(
             width: asset.width,
             height: asset.height,
             color: asset.dominant_color,
+            placeholder: asset.placeholder,
         });
     }
     Ok(published)
+}
+
+fn preview_placeholder(
+    bytes: &[u8],
+    cache: &mut BTreeMap<String, crate::media::placeholder::Placeholder>,
+) -> Result<crate::media::placeholder::Placeholder> {
+    let hash = crate::model::sha1_hex(bytes);
+    if let Some(placeholder) = cache.get(&hash) {
+        return Ok(placeholder.clone());
+    }
+    let placeholder = crate::media::placeholder::from_bytes(bytes)?;
+    cache.insert(hash, placeholder.clone());
+    Ok(placeholder)
+}
+
+fn publish_asset(
+    out: &Path,
+    written: &mut BTreeSet<String>,
+    path: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    if !written.contains(path) {
+        write(&out.join(path), bytes)?;
+        written.insert(path.to_string());
+    }
+    Ok(())
 }
 
 /// Names the precache from durable build inputs. A no-op rebuild therefore reuses its cache,
@@ -338,6 +369,30 @@ pub fn cache_version(build: &BuildCtx) -> String {
         short(build.config_sha.as_deref()),
         short(Some(&build.generation))
     )
+}
+
+/// Reader releases depend on shipped code, never on values substituted while rendering it.
+fn app_version(binary_version: &str, layers: &Layers) -> Result<String> {
+    fn field(hash: &mut Sha1, bytes: &[u8]) {
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    let mut hash = Sha1::new();
+    field(&mut hash, b"aggr-app-v1");
+    field(&mut hash, binary_version.as_bytes());
+    for (kind, names) in [
+        ("templates", layers.template_names()?),
+        ("static", layers.static_names()?),
+    ] {
+        for name in names {
+            let bytes = layers
+                .read(kind, &name)?
+                .with_context(|| format!("{kind}/{name} vanished during build"))?;
+            field(&mut hash, format!("{kind}/{name}").as_bytes());
+            field(&mut hash, &bytes);
+        }
+    }
+    Ok(hex::encode(hash.finalize()))
 }
 
 /// Fingerprint of data that can affect rendered output, including age bands and the home-feed
@@ -399,14 +454,20 @@ pub fn relative_root(path: &str) -> String {
 }
 
 #[derive(Serialize)]
+struct SharedCtx {
+    site: minijinja::Value,
+    build: minijinja::Value,
+    sources: minijinja::Value,
+    categories: minijinja::Value,
+    tags: minijinja::Value,
+}
+
+#[derive(Serialize)]
 struct Ctx<'a> {
-    site: &'a SiteCtx,
-    build: &'a BuildCtx,
+    #[serde(flatten)]
+    shared: &'a SharedCtx,
     page: PageCtx,
-    items: &'a [ItemCtx],
-    sources: &'a [SourceCtx],
-    categories: &'a [CategoryCtx],
-    tags: &'a [CategoryCtx],
+    items: minijinja::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     item: Option<&'a ItemCtx>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -485,7 +546,7 @@ fn page_description(site: &SiteCtx, page_title: &str, kind: &str, page_number: u
             "Browse retained readable snapshots tagged {page_title} in {}.",
             site.title
         ),
-        "library" => format!(
+        "browse" => format!(
             "Browse the sources, categories, and tags collected in {}, with links to every retained archive.",
             site.title
         ),
@@ -538,7 +599,7 @@ fn structured_data(
             "@type": "SearchAction",
             "target": {
                 "@type": "EntryPoint",
-                "urlTemplate": format!("{site_url}search/?q={{search_term_string}}")
+                "urlTemplate": format!("{site_url}?q={{search_term_string}}")
             },
             "query-input": "required name=search_term_string"
         }
@@ -610,7 +671,7 @@ fn structured_data(
     } else {
         let page_type = match page.kind.as_str() {
             "search" => "SearchResultsPage",
-            "river" | "source" | "category" | "tag" | "library" => "CollectionPage",
+            "river" | "source" | "category" | "tag" | "browse" => "CollectionPage",
             _ => "WebPage",
         };
         let mut node = serde_json::json!({
@@ -700,13 +761,65 @@ fn structured_data(
     }))
 }
 
+#[derive(Serialize)]
+struct OfflineArticle {
+    url: String,
+    title: String,
+    resources: Vec<PrecacheEntry>,
+}
+
+fn offline_catalog(
+    out: &Path,
+    items: &[ItemCtx],
+    images: &BTreeMap<String, Vec<content::LocalImage>>,
+) -> Result<Vec<OfflineArticle>> {
+    let mut revisions = BTreeMap::<String, PrecacheEntry>::new();
+    items
+        .iter()
+        .take(1000)
+        .map(|item| {
+            let mut paths = BTreeSet::from([item.url.clone()]);
+            if let Some(preview) = &item.preview {
+                paths.insert(preview.url.clone());
+            }
+            for image in images.get(&item.path).into_iter().flatten() {
+                paths.insert(image.original.clone());
+                paths.extend(image.variants.iter().map(|variant| variant.url.clone()));
+            }
+            let resources = paths
+                .into_iter()
+                .map(|path| {
+                    if let Some(entry) = revisions.get(&path) {
+                        return Ok(entry.clone());
+                    }
+                    let entry = precache_entries(out, vec![path.clone()])?
+                        .pop()
+                        .context("offline resource revision")?;
+                    revisions.insert(path, entry.clone());
+                    Ok(entry)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(OfflineArticle {
+                url: item.url.clone(),
+                title: item.title.clone(),
+                resources,
+            })
+        })
+        .collect()
+}
+
 /// What `sw.js` sees: the cache name and the revisioned install-time fetch list.
 #[derive(Serialize)]
 struct SwCtx<'a> {
     site: &'a SiteCtx,
     build: &'a BuildCtx,
     version: String,
+    app_version: &'a str,
+    content_version: &'a str,
     precache: Vec<PrecacheEntry>,
+    offline_catalog: Vec<OfflineArticle>,
+    offline_count: usize,
+    search_manifest: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -723,6 +836,16 @@ pub fn build(
     project_root: &Path,
     info: &BuildInfo,
 ) -> Result<Summary> {
+    let started = std::time::Instant::now();
+    let mut phase_started = started;
+    let mut phase = |name: &str| {
+        let now = std::time::Instant::now();
+        log::debug!(
+            "build {name}: {:.3}s",
+            now.duration_since(phase_started).as_secs_f64()
+        );
+        phase_started = now;
+    };
     let out = &info.out;
     prepare_out_dir(out)?;
     let config_name = info
@@ -745,6 +868,7 @@ pub fn build(
         .unwrap_or_else(|| default_site_description(&config.site.title));
     let discussion_shortcuts = context::discussion_shortcuts(&config.networks);
     let mut site = SiteCtx {
+        preferences: config.site.preferences.browser_defaults()?,
         title: config.site.title.clone(),
         description,
         identity: config
@@ -797,9 +921,12 @@ pub fn build(
         entry_shortcuts: Vec::new(),
         params: config.site.params.clone(),
     };
-    let build_ctx = BuildCtx {
+    let layers = theme_layers(config, project_root)?;
+    let mut build_ctx = BuildCtx {
         time: info.now,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        app_version: app_version(env!("CARGO_PKG_VERSION"), &layers)?,
+        content_version: String::new(),
         config_sha: info.config_sha.clone(),
         data_sha: info.data_sha.clone(),
         generation: info.generation.clone(),
@@ -811,30 +938,15 @@ pub fn build(
         data_sha: info.data_sha.as_deref(),
     });
 
-    let renderer = Renderer::new(theme_layers(config, project_root)?, &base)?;
+    let renderer = Renderer::new(layers, &base)?;
 
     // Sources: config order, enriched with stored state and counts.
     let status = store.status()?;
     let (mut all_items, duplicate_redirects) = visible_archive(store.items()?, sources);
     for item in &mut all_items {
-        if !item.front.html_truncated
-            && (has_code(&item.body)
-                || content::has_heading_breaks(&item.body)
-                || (item.body.lines().any(|line| line.starts_with("\\- "))
-                    && url::Url::parse(&item.front.link)
-                        .is_ok_and(|url| crate::sources::youtube::is_video_url(&url))))
-        {
-            let retained_html = store.read_html(item)?;
-            let base = url::Url::parse(&item.front.link).ok();
-            item.body = derived::markdown(
-                &item.body,
-                retained_html.as_deref(),
-                base.as_ref(),
-                info.pagefind_cache.as_deref(),
-            );
-        }
         item.body =
             content::strip_article_metadata(&item.body, item.front.published, &item.front.source);
+        item.body = crate::threads::clean_archived_thread(&item.body, &item.front.link);
     }
     all_items.sort_by(|a, b| {
         b.created_at()
@@ -851,15 +963,26 @@ pub fn build(
         info.now,
         config.site.max_items,
         config.site.max_age_days,
-        config.site.max_stubs,
     );
+    phase("archive preparation");
 
     // The bounded window controls only the river. Source/category/tag pages, search, and clean
     // article pages are archives over the retained database; `[store]` retention is the explicit
     // knob for bounding those. This keeps old sources browsable without making the home feed stale.
+    let prepared_bodies = parallel::map(&all_items, |item| {
+        Ok(content::PreparedMarkdown::new(&item.body))
+    })?;
+    let prepared_by_path: BTreeMap<_, _> = all_items
+        .iter()
+        .zip(&prepared_bodies)
+        .map(|(item, prepared)| (item.path.as_str(), prepared))
+        .collect();
     let mut archive_items = Vec::with_capacity(all_items.len());
     let mut article_images = BTreeMap::<String, Vec<content::LocalImage>>::new();
-    for item in &all_items {
+    let mut media_previews = BTreeMap::new();
+    let mut image_placeholders = BTreeMap::new();
+    let mut written_assets = BTreeSet::new();
+    for (item, prepared) in all_items.iter().zip(&prepared_bodies) {
         let (source_name, category) = source_by_slug
             .get(item.front.source.as_str())
             .map(|s| (s.name.as_str(), s.category.as_deref()))
@@ -868,12 +991,14 @@ pub fn build(
             .front
             .summary
             .clone()
+            .filter(|_| prepared.resources().is_empty())
             .map(|s| content::excerpt(&s, EXCERPT_CHARS))
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| content::excerpt(&item.body, EXCERPT_CHARS));
+            .unwrap_or_else(|| prepared.excerpt(EXCERPT_CHARS));
         let mut ctx = ItemCtx::from_item(
             item,
             ItemOptions {
+                reading_metrics: prepared.reading_metrics(),
                 source_name,
                 category,
                 links: links.as_ref(),
@@ -886,6 +1011,7 @@ pub fn build(
         if let Some(source) = source_by_slug.get(item.front.source.as_str()) {
             ctx.set_source(source);
         }
+        ctx.resources = prepared.resources().to_vec();
         if let Some(preview) = &item.front.preview
             && let Some(bytes) = store.read_preview(item)?
         {
@@ -898,23 +1024,81 @@ pub fn build(
                 crate::model::sha1_hex(&bytes),
                 extension
             );
-            write(&out.join(&path), &bytes)?;
+            publish_asset(out, &mut written_assets, &path, &bytes)?;
             ctx.preview = Some(PreviewCtx {
                 url: path,
                 width: preview.width,
                 height: preview.height,
                 alt: preview.alt.clone(),
                 color: preview.color.clone(),
+                placeholder: preview_placeholder(&bytes, &mut image_placeholders)?,
             });
         }
-        let local_images = publish_article_images(out, store.read_image_assets(item)?)?;
+        let assets = store.read_image_assets(item)?;
+        let previews_enabled = sources
+            .iter()
+            .find(|source| source.slug == item.front.source)
+            .map_or(config.fetch.previews, |source| source.previews);
+        if ctx.preview.is_none() && previews_enabled {
+            for asset in assets
+                .iter()
+                .filter(|asset| !crate::media::is_status_badge(&asset.source_url))
+                .take(12)
+            {
+                let retained = asset
+                    .renditions
+                    .iter()
+                    .filter(|image| image.width >= 256 && image.height >= 32)
+                    .map(|image| image.bytes.as_slice())
+                    .chain(std::iter::once(asset.master_bytes.as_slice()));
+                for bytes in retained.filter(|bytes| bytes.len() <= 5 * 1024 * 1024) {
+                    let key = crate::model::sha1_hex(bytes);
+                    let preview = media_previews.get(&key).cloned().unwrap_or_else(|| {
+                        let preview = crate::preview::thumbnail(bytes, None).ok();
+                        if media_previews.len() < 64 {
+                            media_previews.insert(key, preview.clone());
+                        }
+                        preview
+                    });
+                    if let Some(preview) = preview {
+                        let path = format!(
+                            "assets/previews/{}.{}",
+                            crate::model::sha1_hex(&preview.bytes),
+                            preview.extension
+                        );
+                        publish_asset(out, &mut written_assets, &path, &preview.bytes)?;
+                        ctx.preview = Some(PreviewCtx {
+                            url: path,
+                            width: preview.width,
+                            height: preview.height,
+                            alt: asset.alt.clone(),
+                            color: Some(preview.color),
+                            placeholder: preview_placeholder(
+                                &preview.bytes,
+                                &mut image_placeholders,
+                            )?,
+                        });
+                        break;
+                    }
+                }
+                if ctx.preview.is_some() {
+                    break;
+                }
+            }
+        }
+        let local_images = publish_article_images(out, assets, &mut written_assets)?;
         if !local_images.is_empty() {
             article_images.insert(item.path.clone(), local_images);
         }
         archive_items.push(ctx);
     }
+    phase("media and item metadata");
 
-    let recommendations = related::resolve(&archive_items);
+    let recommendation_text: Vec<_> = prepared_bodies
+        .iter()
+        .map(content::PreparedMarkdown::plain_text)
+        .collect();
+    let recommendations = related::resolve(&archive_items, &recommendation_text);
     let article_links: Vec<_> = archive_items.iter().map(ArticleLinkCtx::from).collect();
     for (item, recommendation) in archive_items.iter_mut().zip(recommendations) {
         let previous = recommendation.previous;
@@ -940,11 +1124,6 @@ pub fn build(
         .take(9)
         .map(|item| item.url.clone())
         .collect();
-    let stored_by_path: BTreeMap<&str, &Item> = all_items
-        .iter()
-        .map(|item| (item.path.as_str(), item))
-        .collect();
-
     let source_members = source_members(&archive_items);
     let TaxonomyIndex {
         terms: categories,
@@ -957,6 +1136,31 @@ pub fn build(
     } = taxonomy_index(&archive_items, Taxonomy::Tags);
     let mut pages = 0;
     let per_page = config.site.items_per_page;
+    build_ctx.content_version = crate::model::sha1_hex(serde_json::to_vec(&(
+        &build_ctx.generation,
+        &build_ctx.data_sha,
+        &build_ctx.config_sha,
+        &site,
+        &source_ctxs,
+        &archive_items,
+        per_page,
+        config.site.max_items,
+        config.site.max_age_days,
+    ))?);
+    write(
+        &out.join("updates.json"),
+        outputs::updates(&site, &build_ctx)?.as_bytes(),
+    )?;
+    // MiniJinja values retain their prepared representation across renders. Custom article
+    // templates still receive the entire archive without serializing it again for every page.
+    let template_shared = SharedCtx {
+        site: minijinja::Value::from_serialize(&site),
+        build: minijinja::Value::from_serialize(&build_ctx),
+        sources: minijinja::Value::from_serialize(&source_ctxs),
+        categories: minijinja::Value::from_serialize(&categories),
+        tags: minijinja::Value::from_serialize(&tags),
+    };
+    let template_items = minijinja::Value::from_serialize(&archive_items);
     let mut sitemap_urls: Vec<outputs::SitemapUrl> = Vec::new();
     {
         let mut write_list = |kind: &str,
@@ -992,13 +1196,9 @@ pub fn build(
                 let html = renderer.render(
                     "index.html",
                     Ctx {
-                        site: &site,
-                        build: &build_ctx,
+                        shared: &template_shared,
                         page,
-                        items: page_items,
-                        sources: &source_ctxs,
-                        categories: &categories,
-                        tags: &tags,
+                        items: minijinja::Value::from_serialize(page_items),
                         item: None,
                         source,
                         category,
@@ -1026,7 +1226,7 @@ pub fn build(
                 Some(source),
                 None,
             )?;
-            let feed_items = feed_items(&list, &stored_by_path, per_page);
+            let feed_items = feed_items(&list, &prepared_by_path, per_page);
             write_collection_feeds(
                 out,
                 &site,
@@ -1049,7 +1249,7 @@ pub fn build(
                 None,
                 Some(category),
             )?;
-            let feed_items = feed_items(&list, &stored_by_path, per_page);
+            let feed_items = feed_items(&list, &prepared_by_path, per_page);
             write_collection_feeds(
                 out,
                 &site,
@@ -1065,14 +1265,16 @@ pub fn build(
                 tag_members.get(&tag.slug).map(Vec::as_slice),
             );
             write_list("tag", &tag.name, &tag.page, &list, None, Some(tag))?;
-            let feed_items = feed_items(&list, &stored_by_path, per_page);
+            let feed_items = feed_items(&list, &prepared_by_path, per_page);
             write_collection_feeds(out, &site, &build_ctx, &tag.name, &tag.page, &feed_items)?;
         }
     }
 
     let archive_updated = archive_items.iter().map(archive_modified_at).max();
-    if let Some(url) = canonical_url(&site, "library/") {
-        sitemap_urls.push(outputs::SitemapUrl::new(url, archive_updated));
+    for path in ["browse/", "sources/", "categories/", "tags/"] {
+        if let Some(url) = canonical_url(&site, path) {
+            sitemap_urls.push(outputs::SitemapUrl::new(url, archive_updated));
+        }
     }
 
     let simple = |kind: &str,
@@ -1115,13 +1317,11 @@ pub fn build(
         renderer.render(
             template,
             Ctx {
-                site: &site,
-                build: &build_ctx,
+                shared: &template_shared,
                 page,
-                items,
-                sources: &source_ctxs,
-                categories: &categories,
-                tags: &tags,
+                items: page_items
+                    .map(minijinja::Value::from_serialize)
+                    .unwrap_or_else(|| template_items.clone()),
                 item,
                 source: None,
                 category: None,
@@ -1132,38 +1332,37 @@ pub fn build(
     };
 
     write(
-        &out.join("library/index.html"),
+        &out.join("browse/index.html"),
         simple(
-            "library",
-            "Library",
-            "library/",
-            "library.html",
+            "browse",
+            "Browse",
+            "browse/",
+            "browse.html",
             None,
             None,
             None,
         )?
         .as_bytes(),
     )?;
-    let library_target = format!("{}library/", site.base_path);
-    for legacy in ["explore", "browse", "sources", "tags", "categories"] {
+    for (kind, title) in [
+        ("categories", "Categories"),
+        ("sources", "Sources"),
+        ("tags", "Tags"),
+    ] {
         write(
-            &out.join(legacy).join("index.html"),
-            outputs::redirect_stub(&library_target).as_bytes(),
+            &out.join(kind).join("index.html"),
+            simple(
+                kind,
+                title,
+                &format!("{kind}/"),
+                "browse.html",
+                None,
+                None,
+                None,
+            )?
+            .as_bytes(),
         )?;
     }
-    write(
-        &out.join("search/index.html"),
-        simple(
-            "search",
-            "Search",
-            "search/",
-            "shell.html",
-            None,
-            None,
-            None,
-        )?
-        .as_bytes(),
-    )?;
     write(
         &out.join("preferences/index.html"),
         simple(
@@ -1181,11 +1380,22 @@ pub fn build(
         &out.join("404.html"),
         simple("404", "Not found", "404.html", "404.html", None, None, None)?.as_bytes(),
     )?;
-    pages += 4;
+    pages += 6;
+    phase("feed and directory pages");
 
-    for (ctx, item) in archive_items.iter().zip(&all_items) {
+    let article_pairs: Vec<_> = archive_items.iter().zip(&all_items).collect();
+    let article_sitemaps = parallel::map(&article_pairs, |&(ctx, item)| {
         let mut ctx = ctx.clone();
         ctx.video = video::VideoCtx::from_url(&item.front.link);
+        ctx.interactive = interactive::InteractiveCtx::from_item(item);
+        ctx.document = document::DocumentCtx::from_item(item);
+        ctx.native_media = native_media::NativeMediaCtx::from_urls(
+            &item.front.link,
+            item.front
+                .extra
+                .get("audio_url")
+                .and_then(|value| value.as_str()),
+        );
         if ctx.is_youtube
             && let Ok(url) = url::Url::parse(&item.front.link)
             && let Some(image) = article_images.get(&item.path).and_then(|images| {
@@ -1199,12 +1409,15 @@ pub fn build(
         {
             ctx.article_preview = Some(ArticlePreviewCtx::from_image(image));
         }
-        let portable_html = content::render_markdown(&item.body);
+        let prepared_markdown = prepared_by_path[ctx.path.as_str()];
+        let portable_html = prepared_markdown.portable_html();
         if ctx.video.is_none()
+            && ctx.document.is_none()
+            && ctx.interactive.is_none()
             && let Ok(base) = url::Url::parse(&item.front.link)
         {
             ctx.article_preview = ArticlePreviewCtx::lead_image(
-                &portable_html,
+                portable_html,
                 &base,
                 article_images
                     .get(&item.path)
@@ -1212,12 +1425,27 @@ pub fn build(
                     .unwrap_or_default(),
             );
         }
-        ctx.body_html = Some(content::render_markdown_with_images(
-            &item.body,
-            article_images
-                .get(&item.path)
-                .map(Vec::as_slice)
-                .unwrap_or_default(),
+        let dimensions = if portable_html.contains("<img ") {
+            let retained_html = store.read_html(item)?;
+            let base = url::Url::parse(&item.front.link).ok();
+            retained_html
+                .as_deref()
+                .map(|html| content::image_dimensions(html, base.as_ref()))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let article_url = url::Url::parse(&item.front.link).ok();
+        let local_images = article_images
+            .get(&item.path)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        ctx.body_html = Some(content::embed_body_videos(
+            &content::anchor_headings(
+                &prepared_markdown.reader_html_with_images(local_images, &dimensions),
+                article_url.as_ref(),
+            ),
+            local_images,
         ));
         let dir = out.join(&ctx.url);
         let representation = out.join(ctx.url.trim_end_matches('/'));
@@ -1236,8 +1464,10 @@ pub fn build(
         )?;
         // Alternate representations remain portable across hosts and mirrors. Only the rendered
         // archive page substitutes immutable site-local companions for publisher image URLs.
-        ctx.body_html = Some(portable_html);
-        let markdown = crate::store::frontmatter::render(&item.front, &item.body)?;
+        ctx.body_html = Some(portable_html.to_string());
+        let mut published_front = item.front.clone();
+        published_front.title = ctx.title.clone();
+        let markdown = crate::store::frontmatter::render(&published_front, &item.body)?;
         write(&representation.with_extension("md"), markdown.as_bytes())?;
         write(
             &representation.with_extension("txt"),
@@ -1251,13 +1481,11 @@ pub fn build(
             &representation.with_extension("json"),
             outputs::item_json(&site, &build_ctx, &ctx, &item.body)?.as_bytes(),
         )?;
-        if let Some(url) = canonical_url(&site, &ctx.url) {
-            sitemap_urls.push(outputs::SitemapUrl::new(
-                url,
-                Some(archive_modified_at(&ctx)),
-            ));
-        }
-    }
+        Ok(canonical_url(&site, &ctx.url)
+            .map(|url| outputs::SitemapUrl::new(url, Some(archive_modified_at(&ctx)))))
+    })?;
+    sitemap_urls.extend(article_sitemaps.into_iter().flatten());
+    phase("article pages and representations");
 
     for (previous, target) in duplicate_redirects {
         let target = format!("{}{target}", site.base_path);
@@ -1269,13 +1497,13 @@ pub fn build(
 
     let search_documents: Vec<_> = archive_items
         .iter()
-        .zip(&all_items)
-        .map(|(item, stored)| pagefind::SearchDocument::new(item, &stored.body))
+        .zip(&prepared_bodies)
+        .map(|(item, prepared)| pagefind::SearchDocument::new(item, prepared.plain_text()))
         .collect();
 
     let stubs = 4;
 
-    let root_feed_items = feed_items(&river_items, &stored_by_path, per_page);
+    let root_feed_items = feed_items(&river_items, &prepared_by_path, per_page);
     let atom = outputs::atom_feed(&site, &build_ctx, &root_feed_items);
     write(&out.join("feed.xml"), atom.as_bytes())?;
     write(&out.join("atom.xml"), atom.as_bytes())?;
@@ -1303,7 +1531,7 @@ pub fn build(
         } else {
             &site.description
         };
-        let search_url = format!("{root}search/?q={{searchTerms}}");
+        let search_url = format!("{root}?q={{searchTerms}}");
         let opensearch_url = format!("{root}opensearch.xml");
         let opensearch = outputs::opensearch_description(&outputs::OpenSearchDescription {
             short_name: &site.title,
@@ -1344,16 +1572,20 @@ pub fn build(
         write(&out.join("CNAME"), domain.as_bytes())?;
     }
     let assets = renderer.write_static(out)?;
+    phase("feeds and static assets");
 
-    pagefind::build_cached(
+    let search_manifest = pagefind::build_cached(
         out,
         &search_documents,
         &site.language,
         info.pagefind_cache.as_deref(),
     )?;
+    phase("search index");
 
     if config.site.pwa {
-        let offline_items = &archive_items[..archive_items.len().min(config.site.offline_items)];
+        let offline_items = &archive_items[..archive_items
+            .len()
+            .min(config.site.preferences.offline_items)];
         write(
             &out.join("offline.html"),
             simple(
@@ -1385,58 +1617,19 @@ pub fn build(
             .map(|s| s.page.clone())
             .chain(categories.iter().map(|c| c.page.clone()))
             .chain(tags.iter().map(|tag| tag.page.clone()))
-            .take(config.site.offline_items.clamp(32, 256));
-        let lists = ["library/".to_string()]
-            .into_iter()
-            .chain(scoped_lists)
-            .chain(pagefind_precache_paths(out)?);
-        let mut paths = precache_paths(
-            "",
-            lists,
-            &assets,
-            archive_items.iter().map(|i| i.url.clone()),
-            config.site.offline_items,
-        );
-        let mut preview_bytes = 0;
-        for preview in archive_items
-            .iter()
-            .take(config.site.offline_items)
-            .filter_map(|item| item.preview.as_ref())
-        {
-            let size = std::fs::metadata(out.join(&preview.url))?.len();
-            if preview_bytes + size <= 4 * 1024 * 1024 && !paths.contains(&preview.url) {
-                preview_bytes += size;
-                paths.push(preview.url.clone());
-            }
-        }
-        let mut article_image_bytes = 0_u64;
-        for item in archive_items.iter().take(config.site.offline_items) {
-            let Some(images) = article_images.get(&item.path) else {
-                continue;
-            };
-            for image in images {
-                let mut group_seen = BTreeSet::new();
-                let candidates = std::iter::once(&image.original)
-                    .chain(image.variants.iter().map(|variant| &variant.url))
-                    .filter(|path| !paths.contains(path) && group_seen.insert((*path).clone()))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let bytes = candidates.iter().try_fold(0_u64, |total, path| {
-                    Ok::<_, std::io::Error>(total + std::fs::metadata(out.join(path))?.len())
-                })?;
-                // Cache complete image groups atomically so an offline browser can use every
-                // source advertised by `<picture>`, regardless of its viewport or pixel density.
-                if article_image_bytes + bytes <= 16 * 1024 * 1024 {
-                    article_image_bytes += bytes;
-                    paths.extend(candidates);
-                }
-            }
-        }
+            .take(config.site.preferences.offline_items.clamp(32, 256));
+        let lists = ["browse/".to_string()].into_iter().chain(scoped_lists);
+        let paths = precache_paths("", lists, &assets, std::iter::empty(), 0);
         let mut sw_ctx = SwCtx {
             site: &site,
             build: &build_ctx,
             version: cache_version(&build_ctx),
+            app_version: &build_ctx.app_version,
+            content_version: &build_ctx.content_version,
             precache: precache_entries(out, paths)?,
+            offline_catalog: offline_catalog(out, &archive_items, &article_images)?,
+            offline_count: config.site.preferences.offline_items.min(1000),
+            search_manifest: serde_json::json!({"version": search_manifest.version, "base": search_manifest.base}),
         };
         // Include the rendered worker and every resource revision so an installation never
         // deletes a live precache when only the theme or worker implementation changed.
@@ -1447,19 +1640,13 @@ pub fn build(
         pages += 1;
     }
 
+    phase("offline catalog and worker");
+    log::debug!("build complete: {:.3}s", started.elapsed().as_secs_f64());
     Ok(Summary {
         pages,
         items: archive_items.len(),
         stubs,
     })
-}
-
-fn has_code(markdown: &str) -> bool {
-    markdown.contains("```")
-        || markdown.contains("~~~")
-        || markdown
-            .lines()
-            .any(|line| line.starts_with("    ") || line.starts_with('\t'))
 }
 
 /// Template/static lookup order: the project's own `templates/`+`static/`, then the configured
@@ -1515,6 +1702,14 @@ fn source_contexts(
                 .clone()
                 .or_else(|| state.title.clone())
                 .unwrap_or_else(|| source.slug.clone());
+            let fallback = source
+                .public_url
+                .as_deref()
+                .or(state.site_url.as_deref())
+                .map(context::domain_of)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "Unknown source".into());
+            let name = display::title(&name, &fallback);
             Ok(SourceCtx {
                 page: format!("sources/{}/", source.slug),
                 slug: source.slug.clone(),
@@ -1544,11 +1739,18 @@ fn source_contexts(
                 .map(|url| crate::config::public_url(&url, false))
         };
         let site_url = public_url(state.site_url);
+        let url = public_url(state.resolved_url).or_else(|| site_url.clone());
+        let fallback = url
+            .as_deref()
+            .map(context::domain_of)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "Unknown source".into());
+        let name = display::title(state.title.as_deref().unwrap_or(&fallback), &fallback);
         contexts.push(SourceCtx {
             page: format!("sources/{slug}/"),
             slug: slug.to_string(),
-            name: state.title.unwrap_or_else(|| slug.to_string()),
-            url: public_url(state.resolved_url).or_else(|| site_url.clone()),
+            name,
+            url,
             site_url,
             category: None,
             engine: "web".into(),
@@ -1642,10 +1844,10 @@ fn indexed_items(items: &[ItemCtx], indices: Option<&[usize]>) -> Vec<ItemCtx> {
 }
 
 /// Prepare a bounded feed once, then hand the same identity/order/content to every serializer.
-/// This mirrors Zola's feed-scope pipeline and keeps Atom, RSS, and JSON Feed in lockstep.
+/// Article rendering is shared across every source, category, tag, and portable representation.
 fn feed_items(
     items: &[ItemCtx],
-    stored_by_path: &BTreeMap<&str, &Item>,
+    prepared_by_path: &BTreeMap<&str, &content::PreparedMarkdown>,
     limit: usize,
 ) -> Vec<ItemCtx> {
     items
@@ -1653,9 +1855,9 @@ fn feed_items(
         .take(limit)
         .cloned()
         .map(|mut item| {
-            item.body_html = stored_by_path
+            item.body_html = prepared_by_path
                 .get(item.path.as_str())
-                .map(|stored| content::render_markdown(&stored.body));
+                .map(|prepared| prepared.portable_html().to_string());
             item
         })
         .collect()
@@ -1809,57 +2011,146 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
 }
 
-fn files_under(root: &Path, directory: &str) -> Result<Vec<String>> {
-    let base = root.join(directory);
-    let mut paths = Vec::new();
-    for entry in walkdir::WalkDir::new(&base) {
-        let entry = entry.with_context(|| format!("reading {}", base.display()))?;
-        if entry.file_type().is_file() {
-            paths.push(
-                entry
-                    .path()
-                    .strip_prefix(root)?
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            );
-        }
-    }
-    paths.sort();
-    Ok(paths)
-}
-
-/// Keep install cost bounded on very large archives. Small Pagefind indexes remain completely
-/// searchable offline; once the index exceeds the budget, only its loader/runtime is installed
-/// and searches visited online naturally populate the scoped runtime cache.
-fn pagefind_precache_paths(root: &Path) -> Result<Vec<String>> {
-    const MAX_BYTES: u64 = 8 * 1024 * 1024;
-    const MAX_FILES: usize = 512;
-
-    let files = files_under(root, "pagefind")?;
-    let total_bytes = files.iter().try_fold(0_u64, |total, file| {
-        std::fs::metadata(root.join(file))
-            .map(|metadata| total.saturating_add(metadata.len()))
-            .with_context(|| format!("reading metadata for {file}"))
-    })?;
-    if files.len() <= MAX_FILES && total_bytes <= MAX_BYTES {
-        return Ok(files);
-    }
-    Ok(files
-        .into_iter()
-        .filter(|file| {
-            let name = Path::new(file)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            name == "pagefind.js" || name == "pagefind-entry.json" || name.ends_with(".wasm")
-        })
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn shared_immutable_assets_are_written_once_per_build() {
+        let root = tempfile::tempdir().unwrap();
+        let mut written = BTreeSet::new();
+        let path = "assets/images/known.png";
+        publish_asset(root.path(), &mut written, path, b"exact source bytes").unwrap();
+        let timestamp = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(root.path().join(path))
+            .unwrap()
+            .set_modified(timestamp)
+            .unwrap();
+        publish_asset(root.path(), &mut written, path, b"exact source bytes").unwrap();
+        assert_eq!(
+            std::fs::metadata(root.path().join(path))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            timestamp
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(path)).unwrap(),
+            b"exact source bytes"
+        );
+        assert_eq!(written.len(), 1);
+    }
+
+    #[test]
+    fn prepared_context_preserves_custom_theme_archive_access_without_reserializing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counted<'a>(&'a AtomicUsize);
+        impl Serialize for Counted<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                serde_json::json!({"title":"A <story>","preview":{"width":320}})
+                    .serialize(serializer)
+            }
+        }
+        let visits = AtomicUsize::new(0);
+        let items = minijinja::Value::from_serialize([Counted(&visits), Counted(&visits)]);
+        let shared = SharedCtx {
+            site: minijinja::context!(title => "Reader"),
+            build: minijinja::context!(version => "1"),
+            sources: minijinja::Value::from_serialize([serde_json::json!({"name":"Publisher"})]),
+            categories: minijinja::Value::from_serialize([serde_json::json!({"name":"news"})]),
+            tags: minijinja::Value::from_serialize(["rust"]),
+        };
+        let mut env = minijinja::Environment::new();
+        env.add_template("custom.html", "{{ site.title }} {{ build.version }} {{ sources[0].name }} {{ categories[0].name }} {{ tags[0] }} {{ items|length }} {{ items[0].title }} {{ items[1].preview.width }} {{ page.title }} {{ item is defined }}").unwrap();
+        for _ in 0..20 {
+            let page = PageCtx {
+                kind: "item".into(),
+                title: "Page".into(),
+                document_title: "Page".into(),
+                description: String::new(),
+                indexable: true,
+                path: "items/test/".into(),
+                root: "../../".into(),
+                canonical_url: None,
+                feed_path: None,
+                paginator: None,
+            };
+            let ctx = Ctx {
+                shared: &shared,
+                page,
+                items: items.clone(),
+                item: None,
+                source: None,
+                category: None,
+                html: None,
+                schema: None,
+            };
+            assert_eq!(
+                env.get_template("custom.html")
+                    .unwrap()
+                    .render(ctx)
+                    .unwrap(),
+                "Reader 1 Publisher news rust 2 A &lt;story&gt; 320 Page False"
+            );
+        }
+        assert_eq!(visits.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    #[ignore = "manual template preparation performance comparison"]
+    fn benchmark_prepared_template_context() {
+        let records: Vec<_> = (0..1000)
+            .map(|index| {
+                serde_json::json!({
+                    "title":format!("Article {index}"), "source":"publisher", "date":"2026-09-01",
+                    "url":format!("items/publisher/article-{index}/"), "labels":["reading","rust"],
+                    "preview":{"url":"assets/preview.jpg","width":320,"height":180},
+                    "next_article":{"title":"Next article","url":"items/next/"},
+                })
+            })
+            .collect();
+        #[derive(Serialize)]
+        struct Raw<'a> {
+            items: &'a [serde_json::Value],
+        }
+        #[derive(Serialize)]
+        struct Prepared {
+            items: minijinja::Value,
+        }
+        let mut env = minijinja::Environment::new();
+        env.add_template(
+            "item.html",
+            "{{ items|length }} {{ items[0].title }} {{ items[999].title }}",
+        )
+        .unwrap();
+        let template = env.get_template("item.html").unwrap();
+        let started = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert_eq!(
+                template.render(Raw { items: &records }).unwrap(),
+                "1000 Article 0 Article 999"
+            );
+        }
+        let repeated = started.elapsed();
+        let started = std::time::Instant::now();
+        let prepared = Prepared {
+            items: minijinja::Value::from_serialize(&records),
+        };
+        for _ in 0..1000 {
+            assert_eq!(
+                template.render(&prepared).unwrap(),
+                "1000 Article 0 Article 999"
+            );
+        }
+        println!(
+            "1000 pages × 1000 archive entries: repeated={repeated:?}, prepared={:?}",
+            started.elapsed()
+        );
+    }
 
     #[test]
     fn publishing_reconstructed_article_images_does_not_decode_again() {
@@ -1888,7 +2179,8 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
 
         crate::media::reset_stored_decode_count();
-        let published = publish_article_images(out.path(), vec![asset]).unwrap();
+        let published =
+            publish_article_images(out.path(), vec![asset], &mut BTreeSet::new()).unwrap();
 
         assert_eq!(crate::media::stored_decode_count(), 0);
         assert_eq!(published.len(), 1);
@@ -1943,17 +2235,27 @@ mod tests {
         assert!(archive.contains("Hacker News: Best"));
         let article =
             std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
-        assert!(article.contains("href=\"sources/blog/\""), "{article}");
+        assert!(
+            article.contains("href=\"./?q=source%3A%22blog%22\""),
+            "{article}"
+        );
         assert!(article.contains("hnrss.org/best"));
         assert!(article.contains("blog.example · via Hacker News: Best"));
-        for (html, selector) in [
-            (&article, ".itemhead .meta .domain"),
-            (&archive, ".row .domain"),
-        ] {
+        let archive_document = scraper::Html::parse_document(&archive);
+        assert!(
+            archive_document
+                .select(&scraper::Selector::parse(".row .tags").unwrap())
+                .next()
+                .is_none()
+        );
+        for html in [&archive, &article] {
             let document = scraper::Html::parse_document(html);
-            let selector = scraper::Selector::parse(selector).unwrap();
+            let selector = scraper::Selector::parse(".meta .domain").unwrap();
             let source_link = document.select(&selector).next().unwrap();
-            assert_eq!(source_link.value().attr("href"), Some("sources/blog/"));
+            assert_eq!(
+                source_link.value().attr("href"),
+                Some("./?q=source%3A%22blog%22")
+            );
             assert_eq!(
                 source_link.text().collect::<String>().trim(),
                 "blog.example via hnrss.org/best"
@@ -1972,13 +2274,42 @@ mod tests {
     }
 
     #[test]
+    fn feed_and_article_share_metadata_including_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "");
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let parse = |path: &str| {
+            scraper::Html::parse_document(&std::fs::read_to_string(out.join(path)).unwrap())
+        };
+        let feed = parse("index.html");
+        let article = parse("items/blog/2026-09-01-post-0/index.html");
+        let fields = scraper::Selector::parse(".meta > .meta-field").unwrap();
+        let source = scraper::Selector::parse(".domain").unwrap();
+        let shared = |document: &scraper::Html| {
+            document
+                .select(&fields)
+                .map(|field| field.inner_html())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shared(&feed), shared(&article));
+        assert_eq!(feed.select(&source).count(), 1);
+        assert_eq!(article.select(&source).count(), 1);
+        assert!(
+            feed.select(&scraper::Selector::parse(".reading-stats").unwrap())
+                .next()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn retained_sources_without_state_keep_archives_without_invented_urls() {
         let dir = tempfile::tempdir().unwrap();
         let (_, _, store) = fixture(dir.path(), 1, "");
         let contexts =
             source_contexts(&[], &store, &Status::default(), &store.items().unwrap()).unwrap();
         assert_eq!(contexts.len(), 1);
-        assert_eq!(contexts[0].name, "blog");
+        assert_eq!(contexts[0].name, "Unknown source");
         assert!(contexts[0].url.is_none());
         assert!(contexts[0].site_url.is_none());
     }
@@ -1989,7 +2320,7 @@ mod tests {
             ("river", 1, "Reader", "Reader | aggr"),
             ("river", 2, "Reader", "Reader — page 2 | aggr"),
             ("search", 1, "Search", "search | Reader | aggr"),
-            ("library", 1, "Library", "library | Reader | aggr"),
+            ("browse", 1, "Browse", "browse | Reader | aggr"),
             (
                 "preferences",
                 1,
@@ -2012,22 +2343,20 @@ mod tests {
     }
 
     #[test]
-    fn window_respects_count_age_and_stub_cap() {
+    fn window_respects_count_and_age() {
         let dates = vec![day(10), day(9), day(8), day(1)];
-        let w = window(&dates, day(10), 2, 30, 1);
+        let w = window(&dates, day(10), 2, 30);
         assert_eq!(
             w,
             Window {
                 rendered: vec![0, 1],
-                stubbed: vec![2]
             }
         );
-        let w = window(&dates, day(10), 10, 5, 10);
+        let w = window(&dates, day(10), 10, 5);
         assert_eq!(
             w,
             Window {
                 rendered: vec![0, 1, 2],
-                stubbed: vec![3]
             }
         );
     }
@@ -2157,7 +2486,7 @@ mod tests {
         assert_eq!(paths[0], "/repo/");
         assert!(paths.contains(&"/repo/aggr.json".to_string()));
         assert!(paths.contains(&"/repo/offline.html".to_string()));
-        assert!(paths.contains(&"/repo/library/".to_string()));
+        assert!(paths.contains(&"/repo/browse/".to_string()));
         assert!(paths.contains(&"/repo/preferences/".to_string()));
         assert!(!paths.contains(&"/repo/settings/".to_string()));
         assert!(paths.contains(&"/repo/sources/a/".to_string()));
@@ -2202,32 +2531,12 @@ mod tests {
     }
 
     #[test]
-    fn oversized_pagefind_precache_keeps_only_its_runtime() {
-        let dir = tempfile::tempdir().unwrap();
-        let pagefind = dir.path().join("pagefind");
-        std::fs::create_dir_all(&pagefind).unwrap();
-        std::fs::write(pagefind.join("pagefind.js"), "runtime").unwrap();
-        std::fs::write(pagefind.join("pagefind-entry.json"), "{}").unwrap();
-        std::fs::write(pagefind.join("pagefind.wasm"), "wasm").unwrap();
-        for index in 0..510 {
-            std::fs::write(pagefind.join(format!("fragment-{index}.pf_fragment")), "x").unwrap();
-        }
-
-        assert_eq!(
-            pagefind_precache_paths(dir.path()).unwrap(),
-            [
-                "pagefind/pagefind-entry.json",
-                "pagefind/pagefind.js",
-                "pagefind/pagefind.wasm",
-            ]
-        );
-    }
-
-    #[test]
     fn cache_version_changes_with_content_but_not_rebuild_time() {
         let build = BuildCtx {
             time: day(2),
             version: "0".into(),
+            app_version: "app".into(),
+            content_version: "content".into(),
             config_sha: Some("c".repeat(40)),
             data_sha: None,
             generation: "g".repeat(40),
@@ -2486,7 +2795,7 @@ category = "Science"
             "sources/blog/index.html",
             "categories/news/index.html",
             "categories/science/index.html",
-            "library/index.html",
+            "browse/index.html",
             "feed.xml",
             "atom.xml",
             "rss.xml",
@@ -2545,6 +2854,7 @@ category = "Science"
         let out = dir.path().join("out");
         let mut build_info = info(out.clone());
         build_info.release = true;
+        build_info.pagefind_cache = Some(dir.path().join("pagefind-cache"));
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         let original = std::fs::read_to_string(out.join("sw.js")).unwrap();
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
@@ -2578,6 +2888,114 @@ category = "Science"
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         let revised = std::fs::read_to_string(out.join("sw.js")).unwrap();
         assert_ne!(version(&revised), version(&styled));
+    }
+
+    #[test]
+    fn application_fingerprint_tracks_effective_assets_templates_and_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let theme = dir.path().join("theme");
+        std::fs::create_dir_all(project.join("static")).unwrap();
+        std::fs::create_dir_all(theme.join("static")).unwrap();
+        std::fs::create_dir_all(project.join("templates")).unwrap();
+        std::fs::write(project.join("static/style.css"), "body { color: teal; }").unwrap();
+        std::fs::write(theme.join("static/style.css"), "body { color: red; }").unwrap();
+        let layers = Layers {
+            dirs: vec![project.clone(), theme.clone()],
+        };
+        let original = app_version("1.2.3", &layers).unwrap();
+        assert_ne!(original, app_version("1.2.4", &layers).unwrap());
+
+        std::fs::write(theme.join("static/style.css"), "body { color: blue; }").unwrap();
+        assert_eq!(
+            original,
+            app_version("1.2.3", &layers).unwrap(),
+            "shadowed layer bytes do not ship"
+        );
+        std::fs::write(project.join("static/style.css"), "body { color: green; }").unwrap();
+        let styled = app_version("1.2.3", &layers).unwrap();
+        assert_ne!(original, styled);
+        std::fs::write(
+            project.join("templates/custom-include.html"),
+            "<p>Custom include</p>",
+        )
+        .unwrap();
+        let template = app_version("1.2.3", &layers).unwrap();
+        assert_ne!(styled, template);
+        std::fs::write(
+            project.join("templates/sw.js"),
+            "/* worker implementation */",
+        )
+        .unwrap();
+        assert_ne!(template, app_version("1.2.3", &layers).unwrap());
+    }
+
+    #[test]
+    fn update_manifest_distinguishes_content_from_application_releases_without_pwa() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut config, mut sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let out = dir.path().join("out");
+        let mut build_info = info(out.clone());
+        let manifest = || -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(out.join("updates.json")).unwrap()).unwrap()
+        };
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        let original = manifest();
+        assert_eq!(
+            original["entries"],
+            serde_json::json!(["items/blog/2026-09-01-post-0/"])
+        );
+
+        build_info.now += Duration::minutes(1);
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        assert_eq!(manifest(), original, "rebuild time is not a release");
+
+        config.site.title = "A new reader title".into();
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        let titled = manifest();
+        assert_eq!(titled["app_version"], original["app_version"]);
+        assert_ne!(titled["content_version"], original["content_version"]);
+
+        sources[0].name = Some("Updated publisher".into());
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        let publisher = manifest();
+        assert_eq!(publisher["app_version"], titled["app_version"]);
+        assert_ne!(publisher["content_version"], titled["content_version"]);
+
+        let front = crate::model::FrontMatter {
+            title: "Newest article".into(),
+            link: "https://blog.example/new".into(),
+            source: "blog".into(),
+            first_seen: day(19),
+            published: Some(day(19)),
+            ..Default::default()
+        };
+        store
+            .write_item(crate::store::NewItem {
+                dir: "items/blog/2026/09",
+                stem: "2026-09-19-newest-article",
+                front: &front,
+                body: "New content",
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        let article = manifest();
+        assert_eq!(article["app_version"], publisher["app_version"]);
+        assert_ne!(article["content_version"], publisher["content_version"]);
+        assert_eq!(
+            article["entries"][0],
+            "items/blog/2026-09-19-newest-article/"
+        );
+
+        std::fs::create_dir(dir.path().join("static")).unwrap();
+        std::fs::write(dir.path().join("static/style.css"), "body { color: teal; }").unwrap();
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        let application = manifest();
+        assert_ne!(application["app_version"], article["app_version"]);
+        assert_eq!(application["content_version"], article["content_version"]);
     }
 
     #[test]
@@ -2615,18 +3033,18 @@ category = "Science"
         let first_card_end = second_footer.find("</a>").unwrap();
         let first_card = &second_footer[..first_card_end];
         assert!(first_card.contains("rel=\"next\""), "{first_card}");
-        assert!(first_card.contains(">Coming next</span>"), "{first_card}");
+        assert!(first_card.contains(">Coming next</h2>"), "{first_card}");
         assert!(
             first_card.contains("items/blog/2026-09-04-post-3/"),
             "{first_card}"
         );
         let recommendation = &second_footer[first_card_end + "</a>".len()..];
         assert!(
-            recommendation.contains("class=\"article-more-link\""),
+            recommendation.contains("class=\"article-more-link title\""),
             "{recommendation}"
         );
         assert!(
-            recommendation.contains(">Discover more</span>"),
+            recommendation.contains(">Discover more</h2>"),
             "{recommendation}"
         );
         assert!(
@@ -2671,6 +3089,309 @@ category = "Science"
     }
 
     #[test]
+    fn recommendations_reuse_feed_metadata_and_reserved_previews() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 2, "pwa = false\n");
+        let mut item = store.items().unwrap().remove(0);
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 75)
+            .encode_image(&image::DynamicImage::new_rgb8(160, 80))
+            .unwrap();
+        let hash = crate::model::sha1_hex(&bytes);
+        item.front.preview = Some(crate::model::Preview {
+            file: format!("{stem}.preview-{}.jpg", &hash[..12]),
+            width: 160,
+            height: 80,
+            alt: Some("Preview".into()),
+            color: None,
+        });
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &item.front,
+                body: &item.body,
+                html: None,
+                preview: Some(&bytes),
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let feed = scraper::Html::parse_document(
+            &std::fs::read_to_string(out.join("index.html")).unwrap(),
+        );
+        let page = scraper::Html::parse_document(
+            &std::fs::read_to_string(out.join("items/blog/2026-09-02-post-1/index.html")).unwrap(),
+        );
+        let row = feed
+            .select(
+                &scraper::Selector::parse(".row[data-url='items/blog/2026-09-01-post-0/']")
+                    .unwrap(),
+            )
+            .next()
+            .unwrap();
+        let card = page
+            .select(&scraper::Selector::parse(".article-more-card").unwrap())
+            .next()
+            .unwrap();
+        let metadata = scraper::Selector::parse(".meta").unwrap();
+        assert_eq!(
+            row.select(&metadata).next().unwrap().inner_html(),
+            card.select(&metadata).next().unwrap().inner_html()
+        );
+        let preview = scraper::Selector::parse(".preview-image").unwrap();
+        let feed_image = row.select(&preview).next().unwrap();
+        let card_image = card.select(&preview).next().unwrap();
+        for attribute in ["src", "width", "height", "loading"] {
+            assert_eq!(
+                feed_image.value().attr(attribute),
+                card_image.value().attr(attribute)
+            );
+        }
+    }
+
+    #[test]
+    fn article_resources_move_below_header_without_changing_tags_or_portable_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let mut item = store.items().unwrap().remove(0);
+        item.front.labels = vec!["Interpretability".into()];
+        item.front.summary =
+            Some("HUGGING FACE MODELSCOPE TECHNICAL REPORT A publisher teaser.".into());
+        item.body = "![Qwen-Scope main image](https://qianwen-res.oss-accelerate.aliyuncs.com/qwen-scope/Figures/overview.png)\n\n[HUGGING FACE](https://huggingface.co/collections/Qwen/qwen-scope) [MODELSCOPE & DATA](https://modelscope.cn/collections/Qwen/Qwen-Scope) [TECHNICAL REPORT](https://arxiv.org/abs/2605.11887?download=1&mode=full)\n\nInterpretability helps us understand how models work.\n".into();
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &item.front,
+                body: &item.body,
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let article =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
+        let document = scraper::Html::parse_document(&article);
+        let resources = document
+            .select(&scraper::Selector::parse(".itemhead + .article-resources a").unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(resources.len(), 3);
+        assert_eq!(
+            resources[1].text().collect::<String>().trim(),
+            "MODELSCOPE & DATA ↗"
+        );
+        let destinations = [
+            "https://huggingface.co/collections/Qwen/qwen-scope",
+            "https://modelscope.cn/collections/Qwen/Qwen-Scope",
+            "https://arxiv.org/abs/2605.11887?download=1&mode=full",
+        ];
+        for (resource, destination) in resources.iter().zip(destinations) {
+            assert_eq!(resource.value().attr("href"), Some(destination));
+        }
+        let body = document
+            .select(&scraper::Selector::parse(".body").unwrap())
+            .next()
+            .unwrap();
+        assert!(
+            body.text()
+                .collect::<String>()
+                .trim()
+                .starts_with("Interpretability")
+        );
+        assert!(!body.html().contains("TECHNICAL REPORT"));
+        assert!(body.html().contains("qwen-scope/Figures/overview.png"));
+        assert!(body.html().contains("Qwen-Scope main image"));
+        let tags = document
+            .select(&scraper::Selector::parse(".item-tags .tag").unwrap())
+            .map(|tag| tag.text().collect::<String>())
+            .collect::<Vec<_>>();
+        assert_eq!(tags, ["#interpretability"]);
+        assert!(article.contains("MODELSCOPE &amp; DATA"));
+        let description = document
+            .select(&scraper::Selector::parse("meta[name='description']").unwrap())
+            .next()
+            .unwrap()
+            .value()
+            .attr("content")
+            .unwrap();
+        assert!(description.contains("Interpretability helps"));
+        assert!(!description.contains("HUGGING FACE"));
+        for path in [
+            "atom.xml",
+            "rss.xml",
+            "feed.json",
+            "items/blog/2026-09-01-post-0.md",
+            "items/blog/2026-09-01-post-0.txt",
+            "items/blog/2026-09-01-post-0.rst",
+            "items/blog/2026-09-01-post-0.json",
+        ] {
+            let output = std::fs::read_to_string(out.join(path)).unwrap();
+            assert!(output.contains("HUGGING FACE"), "lost resources in {path}");
+            assert!(
+                output.contains("huggingface.co/collections/Qwen/qwen-scope"),
+                "lost destination in {path}"
+            );
+            assert!(
+                output.contains("arxiv.org/abs/2605.11887"),
+                "lost report in {path}"
+            );
+        }
+        assert!(
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0.txt"))
+                .unwrap()
+                .contains("TECHNICAL REPORT")
+        );
+        let retained = store.items().unwrap().remove(0);
+        assert_eq!(retained.body, item.body);
+        assert_eq!(retained.front.labels, item.front.labels);
+        assert_eq!(retained.front.summary, item.front.summary);
+    }
+
+    #[test]
+    fn published_titles_share_cleanup_across_all_representations() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let mut item = store.items().unwrap().remove(0);
+        item.front.title = "🚀 Café #1 🧑🏽‍💻".into();
+        item.body = "Body emoji stays 🚀.\n".into();
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &item.front,
+                body: &item.body,
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        for path in [
+            "index.html",
+            "atom.xml",
+            "rss.xml",
+            "feed.json",
+            "sources/blog/atom.xml",
+            "sources/blog/rss.xml",
+            "sources/blog/feed.json",
+            "items/blog/2026-09-01-post-0/index.html",
+            "items/blog/2026-09-01-post-0.md",
+            "items/blog/2026-09-01-post-0.txt",
+            "items/blog/2026-09-01-post-0.rst",
+            "items/blog/2026-09-01-post-0.json",
+        ] {
+            let output = std::fs::read_to_string(out.join(path)).unwrap();
+            assert!(output.contains("Café #1"), "missing title in {path}");
+            assert!(!output.contains(&item.front.title), "raw title in {path}");
+        }
+        let markdown =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0.md")).unwrap();
+        assert!(markdown.contains("Body emoji stays 🚀."));
+        assert_eq!(store.items().unwrap()[0].front.title, item.front.title);
+    }
+
+    #[test]
+    fn body_video_links_play_inline_in_the_reader_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let mut item = store.items().unwrap().remove(0);
+        item.body = "Episode notes.\n\nhttps://youtu.be/abcDEF12345\n\nMore notes with https://youtu.be/inline1234 inline.\n".into();
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &item.front,
+                body: &item.body,
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let page =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
+        assert_eq!(page.matches("video-player-inline").count(), 1, "{page}");
+        assert!(
+            page.contains("data-video-embed=\"https://www.youtube-nocookie.com/embed/abcDEF12345?"),
+            "{page}"
+        );
+        assert!(
+            page.contains(
+                "href=\"https://youtu.be/inline1234\">https://youtu.be/inline1234</a> inline."
+            ),
+            "{page}"
+        );
+        assert!(!page.contains("<iframe"), "{page}");
+        for path in ["items/blog/2026-09-01-post-0.md", "feed.json", "atom.xml"] {
+            let output = std::fs::read_to_string(out.join(path)).unwrap();
+            assert!(
+                !output.contains("video-player"),
+                "facade leaked into {path}"
+            );
+            assert!(
+                output.contains("youtu.be/abcDEF12345"),
+                "link missing from {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_cleans_archived_social_threads_without_rewriting_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let mut item = store.items().unwrap().remove(0);
+        item.front.link = "https://mathstodon.xyz/@tao/117244102901892965".into();
+        item.body = "First post preserves the fraction 1/3 and code `(1/3)`. (1/3)\n\n* * *\n\nSecond post. (2/3)\n\n* * *\n\nFinal post.\n\n3/3\n".into();
+        let retained = "<section data-aggr-thread='activitypub'><article data-aggr-thread-post><p>First post preserves the fraction 1/3 and code <code>(1/3)</code>. (1/3)</p></article><hr><article data-aggr-thread-post><p>Second post. (2/3)</p></article><hr><article data-aggr-thread-post><p>Final post.</p><p>3/3</p></article></section>";
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        item.front.html = Some(format!("{stem}.html"));
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &item.front,
+                body: &item.body,
+                html: Some(retained),
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        for path in [
+            "items/blog/2026-09-01-post-0/index.html",
+            "items/blog/2026-09-01-post-0.md",
+            "items/blog/2026-09-01-post-0.json",
+            "atom.xml",
+            "rss.xml",
+            "feed.json",
+        ] {
+            let output = std::fs::read_to_string(out.join(path)).unwrap();
+            assert!(!output.contains("(2/3)"), "counter remains in {path}");
+            assert!(!output.contains("3/3"), "counter remains in {path}");
+            assert!(!output.contains("<hr"), "separator remains in {path}");
+            assert!(!output.contains("* * *"), "separator remains in {path}");
+            assert!(
+                output.contains("fraction 1/3"),
+                "fraction missing in {path}"
+            );
+        }
+        let stored = store.items().unwrap().remove(0);
+        assert_eq!(stored.body, item.body);
+        assert_eq!(store.read_html(&stored).unwrap().as_deref(), Some(retained));
+    }
+
+    #[test]
     fn build_cleans_leading_publication_dates_from_existing_items() {
         let dir = tempfile::tempdir().unwrap();
         let (config, sources, store) = fixture(dir.path(), 1, "max_age_days = 30\npwa = false\n");
@@ -2707,7 +3428,7 @@ category = "Science"
         let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
         let mut item = store.items().unwrap().remove(0);
         item.body =
-            "Actual article.\n\n\\[[0 comments](https://publisher.example/#comment-form)\\]\n"
+            "Advertisement\n\n•\n\nActual article.\n\n\\[[0 comments](https://publisher.example/#comment-form)\\]\n"
                 .into();
         let (directory, stem) = item.path.rsplit_once('/').unwrap();
         store
@@ -2730,11 +3451,21 @@ category = "Science"
         assert!(!html.contains("0 comments"), "{html}");
         assert!(!markdown.contains("0 comments"), "{markdown}");
         assert!(html.contains("Actual article."), "{html}");
+        for rendered in [&html, &markdown] {
+            assert!(!rendered.contains("Advertisement"));
+            assert!(!rendered.contains('•'));
+        }
+        for file in ["rss.xml", "atom.xml", "feed.json"] {
+            let feed = std::fs::read_to_string(out.join(file)).unwrap();
+            assert!(!feed.contains("Advertisement"), "{file}");
+            assert!(!feed.contains('•'), "{file}");
+            assert!(feed.contains("Actual article."), "{file}");
+        }
         assert_eq!(store.items().unwrap()[0].body, item.body);
     }
 
     #[test]
-    fn build_repairs_retained_code_without_changing_the_store() {
+    fn build_keeps_stored_markdown_authoritative_over_retained_html() {
         let dir = tempfile::tempdir().unwrap();
         let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
         let mut item = store.items().unwrap().remove(0);
@@ -2762,10 +3493,7 @@ category = "Science"
         );
         let markdown =
             std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0.md")).unwrap();
-        assert!(
-            markdown.contains("```bash\n$ z dotfiles\n$ pwd\n/private/dotfiles\n```"),
-            "{markdown}"
-        );
+        assert!(markdown.contains(body), "{markdown}");
         let json: serde_json::Value = serde_json::from_slice(
             &std::fs::read(out.join("items/blog/2026-09-01-post-0.json")).unwrap(),
         )
@@ -2774,7 +3502,7 @@ category = "Science"
             json["content_markdown"]
                 .as_str()
                 .unwrap()
-                .contains("$ z dotfiles\n$ pwd\n")
+                .contains(body.trim())
         );
     }
 
@@ -2825,36 +3553,6 @@ category = "Science"
             feed["items"][0]["image"],
             format!("https://u.github.io/repo/{path}")
         );
-    }
-
-    #[test]
-    fn build_recovers_verified_heading_breaks_without_rewriting_the_archive() {
-        let dir = tempfile::tempdir().unwrap();
-        let (config, sources, store) = fixture(dir.path(), 1, "");
-        let mut item = store.items().unwrap().remove(0);
-        let (directory, stem) = item.path.rsplit_once('/').unwrap();
-        item.body = "## First line\\\n*Second line.*\n\nDetails.\n".into();
-        item.front.html = Some(format!("{stem}.html"));
-        store
-            .write_item(crate::store::NewItem {
-                dir: directory,
-                stem,
-                front: &item.front,
-                body: &item.body,
-                html: Some("<h2>First line<br><em>Second line.</em></h2><p>Details.</p>"),
-                preview: None,
-                images: &[],
-            })
-            .unwrap();
-        let out = dir.path().join("out");
-        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
-        let page =
-            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
-        assert!(
-            page.contains("<h2>First line<br />\n<em>Second line.</em></h2>"),
-            "{page}"
-        );
-        assert_eq!(store.read_item(&item.path).unwrap().body, item.body);
     }
 
     #[test]
@@ -2961,6 +3659,13 @@ category = "Science"
         build_info.release = true;
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
 
+        let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(
+            feed.contains("assets/previews/"),
+            "archived media supplies missing preview: {feed}"
+        );
+        assert!(store.items().unwrap()[0].front.preview.is_none());
+
         let master = format!("assets/images/{}.png", asset.master_hash);
         assert_eq!(
             std::fs::read(out.join(&master)).unwrap(),
@@ -3043,39 +3748,45 @@ category = "Science"
     #[test]
     fn pwa_outputs_cover_the_shells_and_the_newest_items() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, sources, store) = fixture(dir.path(), 3, "offline_items = 2\n");
+        let (config, sources, store) = fixture(dir.path(), 3, "preferences.offline_items = 2\n");
         let out = dir.path().join("out");
         let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
         assert_eq!(summary.items, 3);
-        // River, the source page, four fixed pages, and the offline page. Retired collection
-        // indexes are redirect stubs rather than archive pages.
-        assert_eq!(summary.pages, 1 + 1 + 4 + 1);
+        // River, the source archive, six utility/directory pages, and the offline page.
+        assert_eq!(summary.pages, 1 + 1 + 6 + 1);
         assert!(!out.join("categories/blog").exists());
         let home = std::fs::read_to_string(out.join("index.html")).unwrap();
-        assert!(home.contains("href=\"library/\""), "{home}");
-        assert!(!home.contains("href=\"categories/\""), "{home}");
+        assert!(home.contains("href=\"browse/\""), "{home}");
+        assert!(home.contains(">browse</"), "{home}");
+        let document = scraper::Html::parse_document(&home);
+        let primary = scraper::Selector::parse(".nav-primary a").unwrap();
+        assert_eq!(
+            document
+                .select(&primary)
+                .filter_map(|link| link.value().attr("href"))
+                .collect::<Vec<_>>(),
+            ["", "browse/", "preferences/"]
+        );
+        let actions = scraper::Selector::parse(".nav-actions a").unwrap();
+        assert_eq!(document.select(&actions).count(), 1);
         assert!(!home.contains("<dd>Categories</dd>"), "{home}");
-        let library = std::fs::read_to_string(out.join("library/index.html")).unwrap();
-        assert!(library.contains("id=\"sources\""), "{library}");
-        assert!(library.contains("id=\"tags\""), "{library}");
-        assert!(library.contains("id=\"categories\""), "{library}");
-        assert!(library.contains("0 categories."), "{library}");
-        assert!(library.contains("0 tags."), "{library}");
-        assert!(library.contains("in <code>aggr.toml</code>"), "{library}");
-        assert!(library.contains("href=\"sources/blog/\""), "{library}");
-        assert!(!library.contains("explore-nav"), "{library}");
-        assert!(!library.contains("directory-count"), "{library}");
-        assert!(!library.contains("directory-status"), "{library}");
-        for legacy in ["explore", "browse", "sources", "tags", "categories"] {
-            let redirect = std::fs::read_to_string(out.join(legacy).join("index.html")).unwrap();
-            assert!(
-                redirect.contains("content=\"noindex,follow\""),
-                "{redirect}"
-            );
-            assert!(redirect.contains("url=/repo/library/"), "{redirect}");
+        let browse = std::fs::read_to_string(out.join("browse/index.html")).unwrap();
+        assert!(browse.contains("id=\"sources\""), "{browse}");
+        assert!(browse.contains("id=\"tags\""), "{browse}");
+        assert!(browse.contains("id=\"categories\""), "{browse}");
+        assert!(browse.contains("0 categories."), "{browse}");
+        assert!(browse.contains("0 tags."), "{browse}");
+        assert!(browse.contains("in <code>aggr.toml</code>"), "{browse}");
+        assert!(
+            browse.contains("href=\"./?q=source%3A%22blog%22\""),
+            "{browse}"
+        );
+        assert!(!browse.contains("explore-nav"), "{browse}");
+        assert!(!browse.contains("directory-count"), "{browse}");
+        assert!(!browse.contains("directory-status"), "{browse}");
+        for removed in ["explore", "library", "search"] {
+            assert!(!out.join(removed).exists());
         }
-        let search = std::fs::read_to_string(out.join("search/index.html")).unwrap();
-        assert!(!search.contains("id=\"category-filter\""), "{search}");
 
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(out.join("manifest.webmanifest")).unwrap())
@@ -3088,6 +3799,13 @@ category = "Science"
         );
         assert_eq!(manifest["start_url"], "./");
         assert_eq!(manifest["scope"], "./");
+        let browse_shortcut = manifest["shortcuts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|shortcut| shortcut["name"] == "Browse")
+            .unwrap();
+        assert_eq!(browse_shortcut["url"], "browse/");
         assert_eq!(manifest["display"], "standalone");
         assert_eq!(
             manifest["display_override"],
@@ -3134,7 +3852,7 @@ category = "Science"
         assert!(version.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert!(sw.contains("new URL(\"./\", self.registration.scope)"));
         assert!(sw.contains("\"assets/style-"));
-        assert!(sw.contains("\"pagefind/pagefind.js\""));
+        assert!(!sw.contains("\"pagefind/pagefind.js\""));
         assert!(!out.join("search-meta.json").exists());
         assert!(
             !sw.contains("assets/logo-"),
@@ -3148,24 +3866,34 @@ category = "Science"
         assert!(sw.contains("var REVISIONS = CACHE_NAMESPACE + \"revisions-\" + VERSION"));
         assert!(sw.contains("if (!response || !response.ok)"));
         assert!(sw.contains("migratePrecacheAssets"));
-        assert!(sw.contains("migrateLegacyRuntime"));
-        assert!(sw.contains("var LEGACY_RUNTIME = CACHE_NAMESPACE + \"runtime\""));
         assert!(sw.contains("var ASSETS = CACHE_NAMESPACE + \"assets\""));
         assert!(sw.contains("feed|aggr|linkset"), "{sw}");
         assert!(sw.contains("\"offline.html\""));
-        assert!(sw.contains("\"library/\""));
+        assert!(sw.contains("\"browse/\""));
         assert!(sw.contains("\"sources/blog/\""));
-        // Newest two of three: posts 2 and 1, not 0.
-        assert!(sw.contains("\"items/blog/2026-09-03-post-2/\""));
-        assert!(sw.contains("\"items/blog/2026-09-02-post-1/\""));
-        assert!(!sw.contains("post-0/\""));
-        assert_eq!(sw.matches("\"items/blog/").count(), 2);
+        let catalog: serde_json::Value = serde_json::from_str(
+            sw.split("var OFFLINE_CATALOG = ")
+                .nth(1)
+                .unwrap()
+                .split(";\n")
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(catalog.as_array().unwrap().len(), 3);
+        assert_eq!(catalog[0]["url"], "items/blog/2026-09-03-post-2/");
+        assert!(sw.contains("var OFFLINE_COUNT = 2;"));
+        assert!(
+            catalog[0]["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["url"] == catalog[0]["url"])
+        );
 
         let offline = std::fs::read_to_string(out.join("offline.html")).unwrap();
-        assert!(offline.contains("data-shell=\"offline\""));
-        assert!(offline.contains("Post 2"));
-        assert!(offline.contains("Post 1"));
-        assert!(!offline.contains("Post 0"));
+        assert!(offline.contains("id=\"offline-articles\""));
+        assert!(offline.contains("id=\"offline-download-status\""));
         assert!(offline.contains("<link rel=\"manifest\" href=\"manifest.webmanifest\">"));
         assert!(offline.contains("pwa: true"));
         assert!(offline.contains("<base id=\"aggr-base\" href=\"/repo/\">"));
@@ -3211,18 +3939,13 @@ category = "Science"
         );
         assert!(river.contains("rel=\"apple-touch-icon\""));
         assert!(river.contains("name=\"theme-color\""));
-        assert!(river.contains("href=\"library/\""), "{river}");
+        assert!(river.contains("href=\"browse/\""), "{river}");
         assert!(river.contains("href=\"preferences/\""), "{river}");
         assert!(river.contains("aggr.toml ↗</a>"), "{river}");
         assert!(out.join("preferences/index.html").is_file());
         assert!(!out.join("settings/index.html").exists());
-        assert!(out.join("pagefind/pagefind.js").is_file());
-        for path in [
-            "search/index.html",
-            "preferences/index.html",
-            "offline.html",
-            "404.html",
-        ] {
+        assert!(!out.join("pagefind/pagefind.js").exists());
+        for path in ["preferences/index.html", "offline.html", "404.html"] {
             let utility = std::fs::read_to_string(out.join(path)).unwrap();
             assert!(
                 utility.contains("name=\"robots\" content=\"noindex,follow\""),
@@ -3273,16 +3996,16 @@ category = "Science"
         assert!(atom.contains("<content type=\"html\">"), "{atom}");
         let opensearch = std::fs::read_to_string(out.join("opensearch.xml")).unwrap();
         assert!(
-            opensearch.contains("https://u.github.io/repo/search/?q={searchTerms}"),
+            opensearch.contains("https://u.github.io/repo/?q={searchTerms}"),
             "{opensearch}"
         );
         let sitemap = std::fs::read_to_string(out.join("sitemap.xml")).unwrap();
         assert!(
-            sitemap.contains("https://u.github.io/repo/library/"),
+            sitemap.contains("https://u.github.io/repo/browse/"),
             "{sitemap}"
         );
         assert!(
-            !sitemap.contains("<loc>https://u.github.io/repo/sources/</loc>"),
+            sitemap.contains("<loc>https://u.github.io/repo/sources/</loc>"),
             "{sitemap}"
         );
         assert!(
@@ -3388,7 +4111,7 @@ category = "Science"
             ("categories/computer-science/index.html", "computer science"),
             ("tags/rust/index.html", "rust"),
             ("tags/generative-ai/index.html", "generative ai"),
-            ("library/index.html", "library"),
+            ("browse/index.html", "browse"),
         ] {
             let html = std::fs::read_to_string(out.join(path)).unwrap();
             assert!(
@@ -3591,7 +4314,7 @@ same_as = ["https://social.example/@ada"]
         let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
         let out = dir.path().join("out");
         let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
-        assert_eq!(summary.pages, 1 + 1 + 4);
+        assert_eq!(summary.pages, 1 + 1 + 6);
         for name in ["manifest.webmanifest", "sw.js", "offline.html"] {
             assert!(!out.join(name).exists(), "{name} was written");
         }
@@ -3600,5 +4323,100 @@ same_as = ["https://social.example/@ada"]
         assert!(!river.contains("mobile-web-app-capable"));
         assert!(!river.contains("apple-mobile-web-app-capable"));
         assert!(river.contains("pwa: false"));
+    }
+
+    #[test]
+    fn interactive_originals_keep_fallbacks_and_document_alternates_keep_original_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 2, "pwa = false\n");
+        let mut items = store.items().unwrap();
+        items.sort_by(|left, right| left.path.cmp(&right.path));
+        items[0]
+            .front
+            .extra
+            .insert("content:interactive".into(), true.into());
+        items[1].front.extra.insert(
+            "document_url".into(),
+            "https://papers.test/verified.pdf".into(),
+        );
+        for item in &items {
+            let (directory, stem) = item.path.rsplit_once('/').unwrap();
+            store
+                .write_item(crate::store::NewItem {
+                    dir: directory,
+                    stem,
+                    front: &item.front,
+                    body: &item.body,
+                    html: None,
+                    preview: None,
+                    images: &[],
+                })
+                .unwrap();
+        }
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let interactive =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
+        assert!(
+            interactive.contains("data-interactive-embed=\"https://blog.example/0\""),
+            "{interactive}"
+        );
+        assert!(!interactive.contains("<iframe"));
+        assert!(
+            interactive.contains(">Open original ↗</a></figcaption>"),
+            "{interactive}"
+        );
+        assert!(!interactive.contains("if the interactive view is unavailable"));
+        let document =
+            std::fs::read_to_string(out.join("items/blog/2026-09-02-post-1/index.html")).unwrap();
+        assert!(document.contains("src=\"https://papers.test/verified.pdf\""));
+        assert!(document.contains("href=\"https://blog.example/1\""));
+        let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(!feed.contains("data-interactive-embed"));
+        assert!(!feed.contains("<embed"));
+    }
+
+    #[test]
+    fn pdf_articles_embed_documents_with_fallback_without_loading_them_in_feeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let mut item = store.items().unwrap().remove(0);
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        item.front.link =
+            "https://example.com/paper.PDF?token=one&filename=paper.pdf#page=2".into();
+        item.front.content = crate::model::ContentKind::None;
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &item.front,
+                body: "",
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let page =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
+        assert!(page.contains("<embed class=\"document-viewer\""), "{page}");
+        assert!(page.contains("type=\"application/pdf\""), "{page}");
+        assert!(
+            page.contains(
+                "src=\"https://example.com/paper.PDF?token=one&amp;filename=paper.pdf#page=2\""
+            ),
+            "{page}"
+        );
+        assert!(page.contains("Open PDF"), "{page}");
+        assert!(page.contains(">Open PDF ↗</a></figcaption>"), "{page}");
+        assert!(!page.contains("if the viewer is unavailable"), "{page}");
+        assert!(
+            !page.contains("This source publishes titles only"),
+            "{page}"
+        );
+        let river = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(!river.contains("<embed"), "{river}");
+        assert!(!river.contains("<object"), "{river}");
     }
 }

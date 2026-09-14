@@ -2,6 +2,9 @@ use url::Url;
 
 use crate::{content::ExtractedArticle, http};
 
+mod duration;
+pub use duration::duration_seconds;
+
 pub fn thumbnail(url: &Url) -> Option<String> {
     let id = video_id(url)?;
     Some(format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"))
@@ -84,16 +87,7 @@ async fn fetch_transcript(
 }
 
 fn caption_track(page: &str) -> Option<Url> {
-    let player = page
-        .match_indices("ytInitialPlayerResponse")
-        .find_map(|(start, _)| {
-            let tail = &page[start + "ytInitialPlayerResponse".len()..];
-            let json = &tail[tail.find('{')?..];
-            serde_json::Deserializer::from_str(json)
-                .into_iter::<serde_json::Value>()
-                .next()?
-                .ok()
-        })?;
+    let player = duration::player_responses(page).next()?;
     let captions = player.pointer("/captions/playerCaptionsTracklistRenderer")?;
     let tracks = captions.get("captionTracks")?.as_array()?;
     let preferred = captions

@@ -77,11 +77,21 @@ impl Layers {
 
     /// Every static file name across all layers, deduplicated with the most specific winning.
     pub fn static_names(&self) -> Result<Vec<String>> {
+        self.names("static")
+    }
+
+    /// Every effective template name, including custom includes and the service worker.
+    pub fn template_names(&self) -> Result<Vec<String>> {
+        self.names("templates")
+    }
+
+    fn names(&self, kind: &str) -> Result<Vec<String>> {
+        let prefix = format!("{kind}/");
         let mut names: Vec<String> = DefaultTheme::iter()
-            .filter_map(|path| path.strip_prefix("static/").map(str::to_string))
+            .filter_map(|path| path.strip_prefix(&prefix).map(str::to_string))
             .collect();
         for dir in &self.dirs {
-            let root = dir.join("static");
+            let root = dir.join(kind);
             if !root.is_dir() {
                 continue;
             }
@@ -141,6 +151,7 @@ impl Renderer {
         env.add_filter("domain", super::context::domain_of);
         env.add_filter("profile", super::context::profile_label);
         env.add_filter("slug", |value: String| slug::slugify(value));
+        env.add_filter("facet_url", facet_url);
         env.add_filter("date", date_filter);
         env.add_filter("excerpt", |text: String, max: Option<usize>| {
             crate::content::excerpt(&text, max.unwrap_or(200))
@@ -260,6 +271,15 @@ fn html_formatter(
     }
 }
 
+fn facet_url(value: String, kind: String) -> String {
+    let quoted = serde_json::to_string(&value).unwrap_or_default();
+    let query = format!("{kind}:{quoted}");
+    let encoded = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("q", &query)
+        .finish();
+    format!("./?{encoded}")
+}
+
 /// `{{ value | date }}` → `2026-09-02`; `{{ value | date("%d %b %Y") }}` for custom formats.
 /// `none` renders as nothing; other non-date values pass through unchanged.
 fn date_filter(value: Value, format: Option<String>) -> Value {
@@ -285,7 +305,7 @@ mod tests {
             "base.html",
             "index.html",
             "item.html",
-            "library.html",
+            "browse.html",
             "preferences.html",
             "404.html",
             "offline.html",
@@ -319,17 +339,6 @@ mod tests {
 
     #[test]
     fn embedded_theme_implements_touch_pull_to_refresh() {
-        let app_file = DefaultTheme::get("static/app.js").unwrap();
-        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
-        assert!(app.contains("var PULL_THRESHOLD"));
-        assert!(app.contains("var pullRefreshState = \"idle\""));
-        assert!(app.contains("document.addEventListener(\"touchstart\""));
-        assert!(app.contains("document.addEventListener(\"touchmove\""));
-        assert!(app.contains("{ passive: false }"));
-        assert!(app.contains("event.preventDefault()"));
-        assert!(app.contains("setPullRefreshState(\"armed\""));
-        assert!(app.contains("setPullRefreshState(\"refreshing\""));
-
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
         assert!(base.contains("id=\"pull-refresh\""));
@@ -377,17 +386,9 @@ mod tests {
         assert!(css.contains("aspect-ratio: var(--image-ratio)"));
         assert!(css.contains(".article-picture.is-loading.is-loaded .progressive-image"));
 
-        let app_file = DefaultTheme::get("static/app.js").unwrap();
-        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
-        assert!(app.contains("function enhanceArticleMedia(root)"));
-        assert!(app.contains("media.dataset.placeholder"));
-        assert!(app.contains("IntersectionObserver"));
-        assert!(app.contains("image.decode()"));
-
         let worker_file = DefaultTheme::get("templates/sw.js").unwrap();
         let worker = std::str::from_utf8(worker_file.data.as_ref()).unwrap();
         assert!(worker.contains("BASE + \"assets/images/\""));
-        assert!(worker.contains("if (isImageAsset(url)) return IMAGES"));
         assert!(worker.contains("cacheFirst(request, IMAGES, IMAGE_MAX"));
     }
 
@@ -396,90 +397,38 @@ mod tests {
         let worker_file = DefaultTheme::get("templates/sw.js").unwrap();
         let worker = std::str::from_utf8(worker_file.data.as_ref()).unwrap();
         assert!(worker.contains("var SEARCH = SEARCH_PREFIX + VERSION"));
-        assert!(worker.contains("name.indexOf(SEARCH_PREFIX) === 0 && name !== SEARCH"));
-        assert!(worker.contains("name === LEGACY_SEARCH"));
     }
 
     #[test]
-    fn embedded_mobile_navigation_keeps_config_without_underlines() {
+    fn embedded_navigation_keeps_config_visible() {
         let css_file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
-        assert!(css.contains(".mobile-nav a:hover { text-decoration: none"));
-        assert!(css.contains(
-            ".mobile-nav a:focus-visible { color: var(--bg); text-decoration: none; background: var(--fg)"
-        ));
+        assert!(css.contains(".nav-primary"));
+        assert!(css.contains(".nav-actions"));
         assert!(!css.contains(".nav-spacer, .nav-actions, .nav-menu { display: none; }"));
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
         assert!(base.contains("class=\"config-link\""));
         assert!(base.contains(">aggr.toml ↗</a>"));
-
-        let app_file = DefaultTheme::get("static/app.js").unwrap();
-        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
-        assert!(app.contains("baseElement.href = BASE"));
     }
 
     #[test]
     fn embedded_theme_exposes_progressive_refresh_and_update_controls() {
-        let app_file = DefaultTheme::get("static/app.js").unwrap();
-        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
-        assert!(!app.contains("beforeinstallprompt"));
-        assert!(!app.contains("Notification.requestPermission()"));
-        assert!(!app.contains("navigator.setAppBadge"));
-        assert!(app.contains("window.addEventListener(\"online\""));
-        assert!(app.contains("window.addEventListener(\"pageshow\""));
-        assert!(app.contains("link.relList.add(\"noopener\", \"noreferrer\")"));
-        assert!(app.contains("if (installed) link.removeAttribute(\"target\")"));
-        assert!(app.contains("url.pathname.indexOf(scope.pathname)"));
-        assert!(app.contains("link.setAttribute(\"data-no-swup\", \"\")"));
-        assert!(app.contains("external site"));
-        assert!(app.contains("(display-mode: minimal-ui)"));
-        assert!(!app.contains("link.rel = 'noopener noreferrer'"));
-        assert!(app.contains("'link[rel=\"original\"]'"));
-        assert!(app.contains("'meta[name=\"author\"]'"));
-
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
-        assert!(!base.contains("id=\"refresh-page\""));
-        assert!(base.contains("id=\"connection-status\""));
+        assert!(base.contains("data-connection-root"));
+        assert!(base.contains("data-shortcut-help-root"));
 
         let preferences_file = DefaultTheme::get("templates/preferences.html").unwrap();
         let preferences = std::str::from_utf8(preferences_file.data.as_ref()).unwrap();
         assert!(!preferences.contains("id=\"install-app\""));
         assert!(!preferences.contains("preferences-config"));
         assert!(!preferences.contains(">aggr.toml ↗</a>"));
-        for id in [
-            "theme-mode",
-            "date-format",
-            "text-size",
-            "reading-width",
-            "density",
-            "thumbnails",
-            "feed-page-size",
-            "motion",
-            "single-key-shortcuts",
-        ] {
-            assert!(preferences.contains(&format!("id=\"{id}\"")), "{id}");
-        }
-        for action in [
-            "share", "copy", "save", "import", "apply", "cancel", "reset",
-        ] {
-            assert!(
-                preferences.contains(&format!("data-preferences-action=\"{action}\"")),
-                "{action}"
-            );
-        }
-        assert!(preferences.contains("Review imported preferences"));
-        assert!(preferences.contains("never reading history"));
-        assert!(preferences.contains("<strong>Maximum per page</strong>"));
-        assert!(preferences.contains(
-            "<a id=\"show-shortcuts\" href=\"{{ 'preferences/' | url_for }}#shortcut-help\" aria-haspopup=\"dialog\" aria-controls=\"shortcut-help\">Keyboard shortcuts</a>"
-        ));
-        assert!(!preferences.contains("<strong>Single-key shortcuts</strong>"));
-        assert!(!preferences.contains("j/k to select, o to open, / to search."));
-        assert!(preferences.contains("<option value=\"50\">50</option>"));
-        assert!(!preferences.contains("id=\"app-badges\""));
+        assert!(preferences.contains("data-preferences-root"));
+        assert!(preferences.contains("<noscript>"));
+        assert!(!preferences.contains("<input"));
+        assert!(!preferences.contains("<select"));
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
@@ -495,37 +444,10 @@ mod tests {
         assert!(index.contains("data-static-page-size"));
         assert!(index.contains("data-total-items"));
         assert!(index.contains("data-page-status"));
-
-        assert!(app.contains("function applyFeedPagination()"));
-        assert!(app.contains("FEED_PAGE_PARAMETER = \"feed-page\""));
-        assert!(app.contains(".row:not([hidden])"));
-        assert!(app.contains("url.searchParams.set(\"q\", query)"));
-        assert!(app.contains("if (row.hidden) return;"));
-        assert!(app.contains("acknowledgeNewEntries(highlighted)"));
-
-        assert!(app.contains("url.hash = \"aggr-state=\" + encoded"));
-        assert!(app.contains("Review the imported settings before applying them."));
-        assert!(app.contains("JSON.stringify(preferencePayload(), null, 2)"));
-        assert!(app.contains("navigator.share"));
     }
 
     #[test]
     fn embedded_theme_marks_items_discovered_after_an_update() {
-        let script_file = DefaultTheme::get("static/app.js").unwrap();
-        let script = std::str::from_utf8(script_file.data.as_ref()).unwrap();
-        assert!(script.contains("entryStateKey(\"last-seen-entry\")"));
-        assert!(script.contains("entryStateKey(\"new-entries\")"));
-        assert!(script.contains("sessionStorage.getItem(key)"));
-        assert!(script.contains("sessionStorage.setItem(key"));
-        assert!(script.contains("current.indexOf(previousHead)"));
-        assert!(script.contains("row.classList.add(\"is-new\")"));
-        assert!(!script.contains("new-marker"));
-        assert!(script.contains("canvas.toDataURL(\"image/png\")"));
-        assert!(script.contains("context.fillStyle = \"#e53935\""));
-        assert!(!script.contains("document.title = \"● \" + document.title"));
-        assert!(!script.contains("navigator.setAppBadge"));
-        assert!(!script.contains("navigator.clearAppBadge"));
-
         let css_file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
         assert!(css.contains(".row.is-new"));
@@ -534,14 +456,6 @@ mod tests {
 
     #[test]
     fn embedded_theme_promotes_footnotes_to_responsive_margin_notes() {
-        let script_file = DefaultTheme::get("static/app.js").unwrap();
-        let script = std::str::from_utf8(script_file.data.as_ref()).unwrap();
-        assert!(script.contains("function enhanceMarginNotes(root)"));
-        assert!(script.contains(".footnote-ref a[data-footnote-ref]"));
-        assert!(script.contains("footnote-margin-note"));
-        assert!(script.contains(".footnote-backref"));
-        assert!(script.contains("enhanceMarginNotes($(\"#swup\") || document)"));
-
         let css_file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
         assert!(css.contains(".footnote-margin-note"));
@@ -560,7 +474,7 @@ mod tests {
         assert!(css.contains("--accent: #8ea1ff"));
         assert!(css.contains(".body a { color: var(--accent-strong); font-style: normal"));
         assert!(css.contains(".article-more"));
-        assert!(css.contains(".article-more-kicker"));
+        assert!(css.contains(".article-more-heading"));
         assert!(!css.contains(".article-navigation-home"));
         assert!(css.contains("input:focus-visible"));
         assert!(!css.contains(
@@ -569,10 +483,7 @@ mod tests {
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
-        assert!(base.contains("id=\"shortcut-help\""));
-        assert!(base.contains("Keyboard shortcuts"));
-        assert!(base.contains("data-route=\"preferences/\""));
-        assert!(base.contains("key_pair('g', '1–9', 'then')"));
+        assert!(base.contains("'preferences/'"));
         assert!(base.contains("rel=\"service-meta\""));
         assert!(base.contains("rel=\"type\""));
         assert!(base.contains("name=\"aggr:network\""));
@@ -581,8 +492,6 @@ mod tests {
         assert!(!base.contains("summary_large_image"));
         assert!(base.contains("data-nosnippet"));
         assert!(!base.contains("data-route=\"settings/\""));
-        assert!(base.contains("id=\"shortcut-lists\""));
-        assert!(base.contains("id=\"shortcut-help-title\" tabindex=\"-1\""));
 
         let item_file = DefaultTheme::get("templates/item.html").unwrap();
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
@@ -590,7 +499,6 @@ mod tests {
         let metadata_file = DefaultTheme::get("templates/_metadata.html").unwrap();
         let metadata = std::str::from_utf8(metadata_file.data.as_ref()).unwrap();
         assert!(metadata.contains("class=\"reading-stats\""));
-        assert!(metadata.contains("datetime=\"PT{{ item.reading_minutes }}M\""));
         assert!(css.contains(".shortcut-help {\n  position: fixed;\n  inset: 0;"));
         assert!(css.contains("margin: auto"));
 
@@ -598,13 +506,13 @@ mod tests {
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
         assert!(item.contains("<meta name=\"author\""));
         assert!(item.contains("for article in item.recommended_articles"));
-        assert!(item.contains(">Continue reading</h2>"));
-        assert!(item.contains("aria-labelledby=\"continue-reading-title\""));
+        assert!(!item.contains(">Continue reading</h2>"));
+        assert!(item.contains(">Coming next</h2>"));
+        assert!(item.contains(">Discover more</h2>"));
+        assert!(item.contains("aria-labelledby=\"coming-next-title\""));
         assert!(!item.contains("article-more-neighbor"));
-        assert!(item.contains("class=\"article-more-link\" rel=\"next\""));
-        assert!(
-            css.contains(".article-more { display: grid; grid-template-columns: minmax(0, 1fr)")
-        );
+        assert!(item.contains("rel=\"next\""));
+        assert!(css.contains(".article-footer { display: grid;"));
         assert!(!item.contains("class=\"article-navigation\""));
         assert!(!item.contains(">feed</a>"));
         assert!(!item.contains("class=\"archive-note\""));
@@ -614,37 +522,21 @@ mod tests {
     }
 
     #[test]
-    fn embedded_theme_routes_collection_discovery_through_library() {
+    fn embedded_theme_groups_collection_directories_under_browse() {
         let renderer = Renderer::new(Layers::default(), "").unwrap();
-        renderer.env.get_template("library.html").unwrap();
+        renderer.env.get_template("browse.html").unwrap();
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
-        assert!(base.contains("data-route=\"library/\""));
-        assert!(base.contains("data-kinds=\"library source category tag\""));
-        assert!(!base.contains("data-route=\"sources/\""));
-        assert!(!base.contains("data-route=\"tags/\""));
-        assert!(!base.contains("data-route=\"categories/\""));
+        assert!(base.contains("data-route=\"browse/\""));
+        assert!(base.contains(">browse</"));
+        assert!(base.contains("data-search-action"));
         assert!(base.contains("aria-label=\"Site navigation\""));
-        assert!(base.contains("aria-label=\"App navigation\""));
-
-        let app_file = DefaultTheme::get("static/app.js").unwrap();
-        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
-        assert!(app.contains("l: \"library/\""));
-        assert!(!app.contains("s: \"library/\""));
-        assert!(!app.contains("t: \"library/#tags\""));
-        assert!(!app.contains("c: \"library/#categories\""));
-        assert!(app.contains("if (baseElement) baseElement.href = BASE"));
-        assert!(app.contains("$(\"#aggr-base\").setAttribute(\"href\", BASE)"));
-        assert!(!app.contains("compactHeader"));
+        assert!(!base.contains("id=\"site-menu\""));
     }
 
     #[test]
     fn embedded_theme_selects_a_row_without_a_background_fill() {
-        let app_file = DefaultTheme::get("static/app.js").unwrap();
-        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
-        assert!(app.contains("var row = retained || selected || rows[0]"));
-
         let css_file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
         assert!(css.contains(".row.is-selected .title:hover"));
@@ -660,12 +552,6 @@ mod tests {
 
     #[test]
     fn embedded_theme_only_shows_resolved_discussions_without_emphasis() {
-        let app_file = DefaultTheme::get("static/app.js").unwrap();
-        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
-        assert!(app.contains("filter(function (discussion) { return discussion.found; })"));
-        assert!(app.contains("window.AGGR && window.AGGR.discussions"));
-        assert!(!app.contains("is-found"));
-
         let css_file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
         assert!(!css.contains("discussion.is-found"));
@@ -679,29 +565,6 @@ mod tests {
 
     #[test]
     fn embedded_theme_uses_jk_for_list_selection_and_article_navigation() {
-        let app_file = DefaultTheme::get("static/app.js").unwrap();
-        let app = std::str::from_utf8(app_file.data.as_ref()).unwrap();
-        assert!(app.contains("if (normalized === \"k\") return \"previous\""));
-        assert!(app.contains("if (normalized === \"j\") return \"next\""));
-        assert!(app.contains("KIND === \"item\" && articleNavigationDirection(event.key)"));
-        assert!(!app.contains("normalized === \"ArrowLeft\""));
-        assert!(!app.contains("normalized === \"ArrowRight\""));
-        assert!(app.contains("if (KIND !== \"item\")"));
-        assert!(!app.contains("dataset.navigationDirection"));
-        assert!(!app.contains("if (focusedLink && !focusedLink.hasAttribute"));
-        assert!(!app.contains("direction === \"previous\" ? BASE : null"));
-
-        let base_file = DefaultTheme::get("templates/base.html").unwrap();
-        let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
-        assert!(base.contains("<kbd>k</kbd></dt><dd>Newer article</dd>"));
-        assert!(base.contains("<kbd>j</kbd></dt><dd>Older article</dd>"));
-        assert!(base.contains("<kbd>O</kbd></dt><dd>Open original</dd>"));
-        assert!(base.contains("discussion.shortcut"));
-        assert!(!base.contains("<dt><kbd>h</kbd></dt>"));
-        assert!(!base.contains("<dt><kbd>l</kbd></dt>"));
-        assert!(!base.contains("<kbd>←</kbd>"));
-        assert!(!base.contains("<kbd>→</kbd>"));
-
         let css_file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
         assert!(!css.contains("reader-page-next-out"));
@@ -711,9 +574,6 @@ mod tests {
         assert!(css.contains(".nav .brand {"));
         assert!(css.contains("margin-inline-start: 0;"));
         assert!(css.contains("margin-inline: -0.75rem"));
-        assert!(app.contains("function articleExternalShortcut(key)"));
-        assert!(app.contains("candidate.shortcut === key"));
-        assert!(app.contains(".split(\"{url}\").join(encodeURIComponent(originalUrl))"));
 
         let item_file = DefaultTheme::get("templates/_metadata.html").unwrap();
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
@@ -743,6 +603,21 @@ mod tests {
         assert!(layers.read("templates", "../Cargo.toml").is_err());
         assert!(layers.read("templates", "/etc/passwd").is_err());
         assert!(layers.read("templates", "missing.html").unwrap().is_none());
+    }
+
+    #[test]
+    fn facet_links_preserve_nested_site_base_and_literal_values() {
+        let base = url::Url::parse("https://example.com/reader/").unwrap();
+        for value in ["rust", "C++ & web", "a \"quoted\" \\ label", "日本語 #1"] {
+            let href = facet_url(value.into(), "tag".into());
+            let url = base.join(&href).unwrap();
+            assert_eq!(url.path(), "/reader/");
+            let query = url.query_pairs().find(|(key, _)| key == "q").unwrap().1;
+            assert_eq!(
+                query,
+                format!("tag:{}", serde_json::to_string(value).unwrap())
+            );
+        }
     }
 
     #[test]

@@ -70,21 +70,22 @@ pub(super) fn parse_bytes(bytes: &[u8], document_url: &Url) -> Result<Document> 
 }
 
 fn parse_document(text: &str, document_url: Option<&Url>) -> Result<Document> {
-    let text = text.trim_start_matches('\u{feff}').trim();
-    if text.is_empty() {
+    let text = text.trim_start_matches('\u{feff}');
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
         bail!("import contains no sources");
     }
     let mut collection = true;
-    let sources = if text.starts_with('<') {
-        if xml_root(text)? == b"opml" {
-            opml_sources(text)?
+    let sources = if trimmed.starts_with('<') {
+        if xml_root(trimmed)? == b"opml" {
+            opml_sources(trimmed)?
         } else {
             collection = false;
-            feed_source(text, document_url)?
+            feed_source(trimmed, document_url)?
         }
-    } else if text.starts_with('{') {
+    } else if trimmed.starts_with('{') {
         collection = false;
-        feed_source(text, document_url)?
+        feed_source(trimmed, document_url)?
     } else if looks_like_list(text) {
         list_sources(text)?
     } else {
@@ -122,6 +123,9 @@ fn list_sources(text: &str) -> Result<Vec<SourceConfig>> {
                 bail!("source lists contain one resource per line; use [[sources]] tables for metadata");
             }
             if line.contains("://") {
+                if super::repository_url::inferred(line) {
+                    return Ok(SourceConfig { url: Some(line.to_string()), ..Default::default() });
+                }
                 let url = Url::parse(line).context("invalid URL in source list")?;
                 if !matches!(url.scheme(), "http" | "https") || line.chars().any(char::is_whitespace) {
                     bail!("remote sources must be HTTP(S) URLs without whitespace");
@@ -319,9 +323,25 @@ mod tests {
     }
 
     #[test]
+    fn imported_lists_remove_comments_before_trimming_document_whitespace() {
+        for prefix in [" #comment\n", "  #comment\r\n\t \n", "\u{feff} #comment\n"] {
+            let sources = parse_sources(
+                &format!("{prefix}  https://foobar.example/feed#section # test\n # end"),
+                None,
+            )
+            .unwrap();
+            assert_eq!(sources.len(), 1);
+            assert_eq!(
+                sources[0].url.as_deref(),
+                Some("https://foobar.example/feed#section")
+            );
+        }
+    }
+
+    #[test]
     fn plain_lists_share_line_normalization() {
         let sources = parse_sources(
-            "  https://a.example/feed\r\n\n\thttps://b.example/rss  \n",
+            "  https://a.example/feed # first\r\n\n\thttps://b.example/rss  # second\n",
             None,
         )
         .unwrap();
@@ -344,6 +364,21 @@ mod tests {
                 "./local feeds.opml",
                 "https://a.example/feed"
             ]
+        );
+        let sources = parse_sources(
+            "git@github.com:owner/reader.git # shared\nssh://git@git.example.org/team/reader.git\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(
+            sources[0].url.as_deref(),
+            Some("git@github.com:owner/reader.git")
+        );
+        assert!(
+            sources
+                .iter()
+                .all(|source| super::super::source_kind(source) == "aggr")
         );
     }
 

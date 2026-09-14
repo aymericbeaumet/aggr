@@ -1,6 +1,11 @@
 //! Shared fetch stage for sync/build/dev: every source runs in parallel and writes only its own
 //! directory. Source-local keys and shared URL reservations decide what is new; no git operations.
 
+mod duration;
+mod openreview;
+mod podcast;
+mod recording;
+
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -10,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt as _, stream};
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, OnceCell, Semaphore};
 use tokio::task::JoinSet;
 
 use super::Project;
@@ -74,6 +79,7 @@ impl Report {
 #[derive(Clone)]
 struct Options {
     archived_links: Arc<SharedLinks>,
+    existing_paths: Arc<OnceCell<ExistingPaths>>,
     dry_run: bool,
     refresh: bool,
     html: bool,
@@ -106,14 +112,16 @@ pub async fn run_with_cache(
     state_policy: StatePolicy,
 ) -> Result<Report> {
     let selected: Vec<Source> = project.sources.clone();
-    let store = Arc::new(Store::open(worktree.dir()));
+    let store = Arc::new(Store::open(worktree.dir()).with_image_cache(cache_dir));
     let client = Arc::new(http::Client::new(&project.config.fetch)?);
     let index_store = store.clone();
-    let known_links = tokio::task::spawn_blocking(move || archived_links(&index_store))
-        .await
-        .context("indexing archived article URLs")??;
+    let (known_links, existing_paths) =
+        tokio::task::spawn_blocking(move || index_store.items().map(index_archive))
+            .await
+            .context("indexing archived article URLs and paths")??;
     let options = Options {
         archived_links: Arc::new(SharedLinks::new(known_links)),
+        existing_paths: Arc::new(OnceCell::new_with(Some(existing_paths))),
         dry_run: args.dry_run,
         refresh: args.refresh,
         html: project.config.store.html,
@@ -122,10 +130,10 @@ pub async fn run_with_cache(
         preparation_limit: Arc::new(Semaphore::new(2)),
         max_items_per_source: project.config.fetch.max_items_per_source,
         preview_fetcher: Arc::new(preview::Fetcher::new()?),
-        media_fetcher: Arc::new(media::Fetcher::new(
-            &project.config.fetch,
-            media::MediaLimits::default(),
-        )?),
+        media_fetcher: Arc::new(
+            media::Fetcher::new(&project.config.fetch, media::MediaLimits::default())?
+                .with_cache(cache_dir),
+        ),
         now: Utc::now(),
     };
     let limit = Arc::new(Semaphore::new(project.config.fetch.concurrency));
@@ -479,6 +487,7 @@ struct FetchOneContext<'a> {
     state_policy: StatePolicy,
 }
 
+#[cfg(test)]
 fn archived_links(store: &Store) -> Result<HashSet<String>> {
     Ok(store
         .items()?
@@ -604,6 +613,7 @@ async fn fetch_one_inner(
 ) -> Result<SourceReport> {
     let FetchOneContext {
         store,
+        store_root,
         client,
         cache_dir,
         options,
@@ -613,7 +623,8 @@ async fn fetch_one_inner(
     } = context;
     let slug = &source.slug;
     let state = store.source_state(slug)?;
-    let request_state = source_request_state(&state, options.refresh);
+    let mut request_state = source_request_state(&state, options.refresh);
+    let parser_receipt = duration::prepare(source, &mut request_state, cache_dir)?;
     let ctx = sources::Context {
         client,
         state: &request_state,
@@ -623,7 +634,7 @@ async fn fetch_one_inner(
 
     let mut next_state = state.clone();
     next_state.identity = source.identity.clone();
-    let (report, visible_change) = match fetched {
+    let (mut report, mut visible_change) = match fetched {
         Fetch::Unchanged { validators } => {
             apply_validators(validators, &mut next_state, source);
             (
@@ -652,16 +663,60 @@ async fn fetch_one_inner(
                 next_state.title != state.title || next_state.site_url != state.site_url;
 
             let seen = store.seen(slug)?;
-            let existing_paths = if options.refresh {
-                existing_item_paths(store, slug)?
-            } else {
-                BTreeMap::new()
-            };
+            let archive = options
+                .existing_paths
+                .get_or_try_init(|| async {
+                    let root = store_root.to_path_buf();
+                    tokio::task::spawn_blocking(move || {
+                        Store::open(root)
+                            .items()
+                            .map(|items| index_archive(items).1)
+                    })
+                    .await
+                    .context("indexing archived item paths")?
+                })
+                .await?;
+            let existing_paths = archive.items.get(slug);
             let mut new_keys: Vec<String> = Vec::new();
             let mut prospective = seen.clone();
             let mut taken: HashSet<(String, String)> = HashSet::new();
             let mut added = 0;
             apply_first_import_limit(&mut items, &source.engine, options.max_items_per_source);
+            if podcast::is_source(source) {
+                let mut counts = BTreeMap::new();
+                for raw in &items {
+                    if let Some(key) = podcast::identity(&raw.title, raw.published) {
+                        *counts.entry(key).or_insert(0usize) += 1;
+                    }
+                }
+                let mut remaining = Vec::with_capacity(items.len());
+                for raw in items {
+                    let unique = podcast::identity(&raw.title, raw.published)
+                        .is_some_and(|key| counts.get(&key) == Some(&1));
+                    let path = unique.then(|| archive.podcasts.path(slug, &raw)).flatten();
+                    let reconciled = if let Some(path) = path {
+                        reconcile_podcast(
+                            &raw,
+                            path,
+                            source,
+                            store,
+                            options,
+                            transaction.as_deref_mut(),
+                            &prospective,
+                        )?
+                    } else {
+                        None
+                    };
+                    if let Some((changed, aliases)) = reconciled {
+                        added += usize::from(changed);
+                        prospective.extend(aliases.iter().cloned());
+                        new_keys.extend(aliases);
+                    } else {
+                        remaining.push(raw);
+                    }
+                }
+                items = remaining;
+            }
             // Assign paths in feed order before downloading so completion order cannot change
             // collision suffixes or make a slow article hold up later downloads.
             let mut candidates = Vec::new();
@@ -671,6 +726,18 @@ async fn fetch_one_inner(
                     let keys = dedupe_keys(&raw);
                     let known = keys.iter().any(|key| prospective.contains(key));
                     if known && !options.refresh {
+                        if let Some(path) = existing_paths
+                            .and_then(|paths| keys.iter().find_map(|key| paths.get(key)))
+                        {
+                            added += usize::from(reconcile_duration(
+                                &raw,
+                                path,
+                                source,
+                                store,
+                                options,
+                                transaction.as_deref_mut(),
+                            )?);
+                        }
                         continue;
                     }
                     if !known && archived.committed.contains(&normalize_link(&raw.link)) {
@@ -680,7 +747,11 @@ async fn fetch_one_inner(
                         prospective.extend(keys.iter().cloned());
                     }
                     let existing_path = known
-                        .then(|| keys.iter().find_map(|key| existing_paths.get(key)).cloned())
+                        .then(|| {
+                            keys.iter()
+                                .find_map(|key| existing_paths.and_then(|paths| paths.get(key)))
+                                .cloned()
+                        })
                         .flatten();
                     if known && options.refresh && existing_path.is_none() {
                         log::debug!(
@@ -748,6 +819,14 @@ async fn fetch_one_inner(
                     }
                     let (mut raw, kind) =
                         heavy_content(&raw, source, client, cache_dir, article_failures).await;
+                    if source.content == ContentMode::Light
+                        && !matches!(source.engine, Engine::Aggr { .. })
+                        && let Some(seconds) =
+                            recording::infer(&raw, source, client, cache_dir, article_failures)
+                                .await?
+                    {
+                        raw.extra.insert("duration_seconds".into(), seconds.into());
+                    }
                     if known {
                         raw.preview = None;
                         raw.images.clear();
@@ -771,15 +850,64 @@ async fn fetch_one_inner(
                         {
                             raw.images.push(poster);
                         }
-                        if (!known || options.refresh && !has_stored_images)
-                            && source.images
-                            && raw.images.is_empty()
+                        if source.images
                             && let Some(html) = raw.content_html.as_deref()
                             && let Ok(base) = url::Url::parse(&raw.link)
                         {
-                            let candidates =
-                                media::article_candidates(html, &raw.preview_candidates, &base);
-                            raw.images = options.media_fetcher.fetch(&candidates, source).await;
+                            let limits = media::MediaLimits::default();
+                            let stored_count =
+                                stored.as_ref().map_or(0, |item| item.front.images.len());
+                            let available_slots = limits
+                                .max_assets
+                                .saturating_sub(stored_count + raw.images.len());
+                            let candidates: Vec<_> =
+                                media::article_candidates(html, &raw.preview_candidates, &base)
+                                    .into_iter()
+                                    .filter(|candidate| {
+                                        !raw.images
+                                            .iter()
+                                            .any(|image| image.source_url == candidate.url.as_str())
+                                            && !stored.as_ref().is_some_and(|item| {
+                                                item.front.images.iter().any(|image| {
+                                                    image.source == candidate.url.as_str()
+                                                        && store
+                                                            .image_files_present(&item.path, image)
+                                                })
+                                            })
+                                    })
+                                    .take(available_slots)
+                                    .collect();
+                            let retained = stored.as_ref().map_or(0, |item| {
+                                item.front
+                                    .images
+                                    .iter()
+                                    .map(|image| store.image_bytes_present(&item.path, image))
+                                    .fold(0usize, usize::saturating_add)
+                            });
+                            let newly_retained = raw
+                                .images
+                                .iter()
+                                .map(|image| {
+                                    image.master_bytes.len()
+                                        + image
+                                            .renditions
+                                            .iter()
+                                            .map(|variant| variant.bytes.len())
+                                            .sum::<usize>()
+                                })
+                                .sum::<usize>();
+                            raw.images.extend(
+                                options
+                                    .media_fetcher
+                                    .fetch_with_budget(
+                                        &candidates,
+                                        source,
+                                        limits.max_article_bytes.saturating_sub(
+                                            retained.saturating_add(newly_retained),
+                                        ),
+                                    )
+                                    .await,
+                            );
                         }
                         let has_stored_preview = if let Some(item) = stored.as_ref() {
                             store.read_preview(item)?.is_some()
@@ -800,6 +928,19 @@ async fn fetch_one_inner(
                                 .preview_fetcher
                                 .fetch_with_assets(&candidates, source, &raw.images)
                                 .await;
+                            if raw.preview.is_none() {
+                                let document = raw
+                                    .extra
+                                    .get("document_url")
+                                    .and_then(serde_yaml_ng::Value::as_str)
+                                    .and_then(|value| url::Url::parse(value).ok())
+                                    .filter(preview::is_pdf_url)
+                                    .unwrap_or(base);
+                                raw.preview = options
+                                    .preview_fetcher
+                                    .fetch_document(&document, source)
+                                    .await;
+                            }
                         }
                     }
                     let (raw, mut planned) = prepare_item(raw, source, options, kind).await?;
@@ -826,11 +967,11 @@ async fn fetch_one_inner(
                     }
                 }
                 if !raw.images.is_empty() {
-                    planned.front.images = raw
-                        .images
-                        .iter()
-                        .map(|image| image.metadata(&planned.stem))
-                        .collect();
+                    if known {
+                        let path = format!("{}/{}", planned.dir, planned.stem);
+                        planned.front.images = store.read_item(&path)?.front.images;
+                    }
+                    merge_image_metadata(&mut planned.front.images, &raw.images, &planned.stem);
                 } else if known {
                     let path = format!("{}/{}", planned.dir, planned.stem);
                     if let Ok(existing) = store.read_item(&path) {
@@ -877,13 +1018,318 @@ async fn fetch_one_inner(
             )
         }
     };
+    let duration_repairs = repair_recordings(source, &context, transaction.as_deref_mut()).await?;
+    let repaired = duration_repairs
+        + repair_feed_captures(source, &context, transaction.as_deref_mut()).await?
+        + repair_archived_images(source, store, options, transaction.as_deref_mut()).await?;
+    report.added += repaired;
+    report.unchanged &= repaired == 0;
+    visible_change |= repaired > 0;
     if !options.dry_run && (visible_change || state_policy == StatePolicy::DevCache) {
         if let Some(transaction) = transaction {
             transaction.track_state(slug)?;
         }
         store.write_source_state(slug, &next_state)?;
     }
+    if !options.dry_run
+        && let Some(receipt) = parser_receipt
+    {
+        receipt.commit()?;
+    }
     Ok(report)
+}
+
+fn merge_image_metadata(
+    metadata: &mut Vec<crate::model::ArticleImage>,
+    images: &[media::Asset],
+    stem: &str,
+) {
+    for image in images {
+        let next = image.metadata(stem);
+        if let Some(existing) = metadata
+            .iter_mut()
+            .find(|existing| existing.source == next.source)
+        {
+            *existing = next;
+        } else {
+            metadata.push(next);
+        }
+    }
+}
+
+async fn repair_archived_images(
+    source: &Source,
+    store: &Store,
+    options: &Options,
+    mut transaction: Option<&mut SourceTransaction>,
+) -> Result<usize> {
+    if !source.images {
+        return Ok(0);
+    }
+    let Some(archives) = options
+        .existing_paths
+        .get()
+        .and_then(|index| index.images.get(&source.slug))
+    else {
+        return Ok(0);
+    };
+    let mut repaired = 0;
+    for archive in archives {
+        let preview_missing = archive
+            .preview
+            .as_ref()
+            .map(|preview| {
+                store
+                    .preview_file_present(&archive.path, preview)
+                    .map(|present| !present)
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if !preview_missing
+            && archive.candidates.iter().all(|candidate| {
+                archive.images.iter().any(|image| {
+                    image.source == candidate.url.as_str()
+                        && store.image_files_present(&archive.path, image)
+                })
+            })
+        {
+            continue;
+        }
+        let existing = store.read_item(&archive.path)?;
+        let preview_missing = existing
+            .front
+            .preview
+            .as_ref()
+            .map(|preview| {
+                store
+                    .preview_file_present(&archive.path, preview)
+                    .map(|present| !present)
+            })
+            .transpose()?
+            .unwrap_or(false);
+        let mut remaining_slots = media::MediaLimits::default()
+            .max_assets
+            .saturating_sub(existing.front.images.len());
+        let candidates: Vec<_> = archive
+            .candidates
+            .iter()
+            .filter(|candidate| {
+                if let Some(image) = existing
+                    .front
+                    .images
+                    .iter()
+                    .find(|image| image.source == candidate.url.as_str())
+                {
+                    return !store.image_files_present(&archive.path, image);
+                }
+                if remaining_slots == 0 {
+                    return false;
+                }
+                remaining_slots -= 1;
+                true
+            })
+            .cloned()
+            .collect();
+        let html = store.read_html(&existing)?.unwrap_or_default();
+        let base = url::Url::parse(&existing.front.link).ok();
+        if (candidates.is_empty() && !preview_missing)
+            || candidates.iter().any(|candidate| {
+                existing
+                    .front
+                    .images
+                    .iter()
+                    .any(|image| image.source == candidate.url.as_str())
+                    && options.media_fetcher.recently_failed_archived(
+                        candidate,
+                        source,
+                        &html,
+                        base.as_ref(),
+                    )
+            })
+        {
+            continue;
+        }
+        let retained_bytes = existing
+            .front
+            .images
+            .iter()
+            .map(|image| store.image_bytes_present(&archive.path, image))
+            .fold(0usize, usize::saturating_add);
+        let remaining_bytes = media::MediaLimits::default()
+            .max_article_bytes
+            .saturating_sub(retained_bytes);
+        let images = if let Some(base) = base {
+            options
+                .media_fetcher
+                .fetch_archived_with_budget(&candidates, source, remaining_bytes, &html, &base)
+                .await
+        } else {
+            options
+                .media_fetcher
+                .fetch_with_budget(&candidates, source, remaining_bytes)
+                .await
+        };
+        if images.is_empty() && !preview_missing {
+            continue;
+        }
+        let preview = if preview_missing {
+            let retained_images = if images.is_empty() && source.previews {
+                store.read_image_assets(&existing)?
+            } else {
+                Vec::new()
+            };
+            let candidates = archive
+                .candidates
+                .iter()
+                .map(|candidate| preview::Candidate {
+                    url: candidate.url.to_string(),
+                    alt: candidate.alt.clone(),
+                })
+                .collect::<Vec<_>>();
+            options
+                .preview_fetcher
+                .fetch_with_assets(
+                    &candidates,
+                    source,
+                    if images.is_empty() {
+                        &retained_images
+                    } else {
+                        &images
+                    },
+                )
+                .await
+        } else {
+            None
+        };
+        let mut planned = Planned {
+            dir: String::new(),
+            stem: String::new(),
+            front: existing.front,
+            body: existing.body,
+            html: None,
+        };
+        use_existing_path(&mut planned, &archive.path)?;
+        if preview_missing {
+            planned.front.preview = preview
+                .as_ref()
+                .map(|preview| preview.metadata(&planned.stem));
+        }
+        if planned.front.images.iter().any(|image| {
+            !store.image_files_present(&archive.path, image)
+                && !images
+                    .iter()
+                    .any(|replacement| replacement.source_url == image.source)
+        }) {
+            log::warn!(
+                "{}: deferred image repair for {} because a previously archived master is unavailable",
+                source.slug,
+                archive.path
+            );
+            continue;
+        }
+        merge_image_metadata(&mut planned.front.images, &images, &planned.stem);
+        let raw = RawItem {
+            images,
+            preview,
+            ..Default::default()
+        };
+        if !options.dry_run {
+            if let Some(transaction) = transaction.as_deref_mut() {
+                transaction.track_item(&planned, &raw)?;
+            }
+            store
+                .write_item(NewItem {
+                    dir: &planned.dir,
+                    stem: &planned.stem,
+                    front: &planned.front,
+                    body: &planned.body,
+                    html: None,
+                    preview: raw.preview.as_ref().map(|preview| preview.bytes.as_slice()),
+                    images: &raw.images,
+                })
+                .with_context(|| format!("repairing article companions for {}", archive.path))?;
+        }
+        repaired += 1;
+    }
+    Ok(repaired)
+}
+
+fn reconcile_podcast(
+    raw: &RawItem,
+    path: &str,
+    source: &Source,
+    store: &Store,
+    options: &Options,
+    transaction: Option<&mut SourceTransaction>,
+    prospective: &BTreeSet<String>,
+) -> Result<Option<(bool, Vec<String>)>> {
+    let mut existing = match store.read_item(path) {
+        Ok(item) => item,
+        Err(_) => return Ok(None),
+    };
+    if existing.front.source != source.slug
+        || !Path::new(path).starts_with(Path::new("items").join(&source.slug))
+    {
+        return Ok(None);
+    }
+    let Some(audio) = podcast::audio_change(&existing.front, raw) else {
+        return Ok(None);
+    };
+    let aliases: Vec<_> = dedupe_keys(raw)
+        .into_iter()
+        .filter(|key| !prospective.contains(key))
+        .collect();
+    let seconds = raw
+        .extra
+        .get("duration_seconds")
+        .and_then(serde_yaml_ng::Value::as_u64)
+        .filter(|seconds| *seconds > 0)
+        .filter(|seconds| {
+            existing
+                .front
+                .extra
+                .get("duration_seconds")
+                .and_then(serde_yaml_ng::Value::as_u64)
+                != Some(*seconds)
+        });
+    let changed = audio.is_some() || seconds.is_some() || !aliases.is_empty();
+    if audio.is_some() || seconds.is_some() {
+        if let Some(audio) = audio {
+            existing
+                .front
+                .extra
+                .insert("audio_url".into(), audio.into());
+        }
+        if let Some(seconds) = seconds {
+            existing
+                .front
+                .extra
+                .insert("duration_seconds".into(), seconds.into());
+        }
+        let mut planned = Planned {
+            dir: String::new(),
+            stem: String::new(),
+            front: existing.front,
+            body: existing.body,
+            html: None,
+        };
+        use_existing_path(&mut planned, path)?;
+        if !options.dry_run {
+            if let Some(transaction) = transaction {
+                transaction.track_item(&planned, &RawItem::default())?;
+            }
+            store.write_item(NewItem {
+                dir: &planned.dir,
+                stem: &planned.stem,
+                front: &planned.front,
+                body: &planned.body,
+                html: None,
+                preview: None,
+                images: &[],
+            })?;
+        }
+    }
+    Ok(Some((changed, aliases)))
 }
 
 fn source_request_state(state: &SourceState, refresh: bool) -> SourceState {
@@ -894,19 +1340,127 @@ fn source_request_state(state: &SourceState, refresh: bool) -> SourceState {
     }
 }
 
-fn existing_item_paths(store: &Store, source_slug: &str) -> Result<BTreeMap<String, String>> {
-    Ok(index_existing_item_paths(store.items()?, source_slug))
+#[derive(Default)]
+struct ExistingPaths {
+    items: BTreeMap<String, BTreeMap<String, String>>,
+    podcasts: podcast::Archive,
+    images: BTreeMap<String, Vec<ArchivedImages>>,
+    recordings: BTreeMap<String, Vec<(String, RawItem)>>,
+    /// Items still carrying only feed content because the original page was unavailable.
+    captures: BTreeMap<String, Vec<(String, RawItem)>>,
 }
 
-fn index_existing_item_paths(
+struct ArchivedImages {
+    path: String,
+    candidates: Vec<media::Candidate>,
+    images: Vec<crate::model::ArticleImage>,
+    preview: Option<crate::model::Preview>,
+}
+
+fn index_archive(
     items: impl IntoIterator<Item = crate::model::Item>,
-    source_slug: &str,
-) -> BTreeMap<String, String> {
-    let mut paths = BTreeMap::new();
-    for item in items
-        .into_iter()
-        .filter(|item| item.front.source == source_slug)
-    {
+) -> (HashSet<String>, ExistingPaths) {
+    let mut links = HashSet::new();
+    let mut paths = ExistingPaths::default();
+    for item in items {
+        use crate::site::item_type::ItemType;
+        let audio = item
+            .front
+            .extra
+            .get("audio_url")
+            .and_then(serde_yaml_ng::Value::as_str);
+        if item
+            .front
+            .extra
+            .get("duration_seconds")
+            .and_then(serde_yaml_ng::Value::as_u64)
+            .is_none_or(|value| value == 0)
+            && matches!(
+                ItemType::from_urls(&item.front.link, audio),
+                ItemType::Audio | ItemType::Video | ItemType::Podcast
+            )
+        {
+            paths
+                .recordings
+                .entry(item.front.source.clone())
+                .or_default()
+                .push((
+                    item.path.clone(),
+                    RawItem {
+                        title: item.front.title.clone(),
+                        link: item.front.link.clone(),
+                        extra: item.front.extra.clone(),
+                        ..Default::default()
+                    },
+                ));
+        }
+        // Binary links are final as feed content: heavy extraction never requests them.
+        if matches!(
+            item.front.content,
+            crate::model::ContentKind::Feed | crate::model::ContentKind::None
+        ) && item.front.replicated_at.is_none()
+            && url::Url::parse(&item.front.link).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && !preview::is_pdf_url(&url)
+                    && !url.path().rsplit_once('.').is_some_and(|(_, extension)| {
+                        matches!(
+                            extension.to_ascii_lowercase().as_str(),
+                            "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif"
+                        )
+                    })
+            })
+        {
+            paths
+                .captures
+                .entry(item.front.source.clone())
+                .or_default()
+                .push((
+                    item.path.clone(),
+                    RawItem {
+                        title: item.front.title.clone(),
+                        link: item.front.link.clone(),
+                        published: item.front.published,
+                        updated: item.front.updated,
+                        first_seen: Some(item.front.first_seen),
+                        authors: item.front.authors.clone(),
+                        labels: item.front.labels.clone(),
+                        summary: item.front.summary.clone(),
+                        extra: item.front.extra.clone(),
+                        ..Default::default()
+                    },
+                ));
+        }
+        if let Ok(base) = url::Url::parse(&item.front.link) {
+            let mut candidates = media::markdown_candidates(&item.body, &base);
+            for image in &item.front.images {
+                if let Ok(url) = url::Url::parse(&image.source)
+                    && matches!(url.scheme(), "http" | "https")
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && !candidates.iter().any(|candidate| candidate.url == url)
+                {
+                    candidates.push(media::Candidate { url, alt: None });
+                }
+            }
+            if !candidates.is_empty() {
+                paths
+                    .images
+                    .entry(item.front.source.clone())
+                    .or_default()
+                    .push(ArchivedImages {
+                        path: item.path.clone(),
+                        candidates,
+                        images: item.front.images.clone(),
+                        preview: item.front.preview.clone(),
+                    });
+            }
+        }
+        paths.podcasts.insert(&item);
+        let link = normalize_link(&item.front.link);
+        if !link.is_empty() {
+            links.insert(link);
+        }
+        let entries = paths.items.entry(item.front.source).or_default();
         let raw = RawItem {
             title: item.front.title,
             link: item.front.link,
@@ -915,10 +1469,22 @@ fn index_existing_item_paths(
             ..Default::default()
         };
         for key in dedupe_keys(&raw) {
-            paths.entry(key).or_insert_with(|| item.path.clone());
+            entries.entry(key).or_insert_with(|| item.path.clone());
         }
     }
-    paths
+    (links, paths)
+}
+
+#[cfg(test)]
+fn index_existing_item_paths(
+    items: impl IntoIterator<Item = crate::model::Item>,
+    source_slug: &str,
+) -> BTreeMap<String, String> {
+    index_archive(items)
+        .1
+        .items
+        .remove(source_slug)
+        .unwrap_or_default()
 }
 
 fn use_existing_path(planned: &mut Planned, existing_path: &str) -> Result<()> {
@@ -1010,6 +1576,328 @@ impl ArticleFailures {
     }
 }
 
+async fn repair_recordings(
+    source: &Source,
+    context: &FetchOneContext<'_>,
+    mut transaction: Option<&mut SourceTransaction>,
+) -> Result<usize> {
+    if matches!(source.engine, Engine::Aggr { .. }) {
+        return Ok(0);
+    }
+    let Some(items) = context
+        .options
+        .existing_paths
+        .get()
+        .and_then(|paths| paths.recordings.get(&source.slug))
+    else {
+        return Ok(0);
+    };
+    let mut pending = stream::iter(items.clone())
+        .map(|(path, raw)| async move {
+            let _permit = context
+                .options
+                .preparation_limit
+                .acquire()
+                .await
+                .context("acquiring recording metadata slot")?;
+            // A changed feed may already have filled this value earlier in this transaction.
+            let current = context.store.read_item(&path)?;
+            let raw = RawItem {
+                extra: current.front.extra,
+                ..raw
+            };
+            let seconds = recording::infer(
+                &raw,
+                source,
+                context.client,
+                context.cache_dir,
+                context.article_failures,
+            )
+            .await?;
+            Ok::<_, anyhow::Error>((path, raw, seconds))
+        })
+        .buffer_unordered(context.options.article_concurrency);
+    let mut repaired = 0;
+    while let Some(result) = pending.next().await {
+        let (path, mut raw, seconds) = result?;
+        if let Some(seconds) = seconds {
+            raw.extra.insert("duration_seconds".into(), seconds.into());
+            repaired += usize::from(reconcile_duration(
+                &raw,
+                &path,
+                source,
+                context.store,
+                context.options,
+                transaction.as_deref_mut(),
+            )?);
+        }
+    }
+    Ok(repaired)
+}
+
+const MAX_CAPTURE_RETRIES_PER_RUN: usize = 8;
+const MAX_CAPTURE_ATTEMPTS: u32 = 7;
+const CAPTURE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// Remembers failed original-page retries so a persistently unavailable page is tried at most
+/// once a day and gives up after a week. Success removes the record.
+struct CaptureRetries {
+    root: PathBuf,
+}
+
+impl CaptureRetries {
+    fn new(cache_dir: &Path) -> Self {
+        Self {
+            root: cache_dir.join("capture-retries-v1"),
+        }
+    }
+
+    fn path(&self, link: &str) -> PathBuf {
+        self.root.join(crate::model::sha1_hex(link.as_bytes()))
+    }
+
+    fn due(&self, link: &str) -> bool {
+        let path = self.path(link);
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            return true;
+        };
+        let attempts = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .unwrap_or(1);
+        attempts < MAX_CAPTURE_ATTEMPTS
+            && metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_none_or(|age| age >= CAPTURE_RETRY_INTERVAL)
+    }
+
+    fn failed(&self, link: &str) {
+        let path = self.path(link);
+        let attempts = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        let _ = std::fs::create_dir_all(&self.root);
+        let _ = std::fs::write(path, format!("{}\n", attempts + 1));
+    }
+
+    fn succeeded(&self, link: &str) {
+        let _ = std::fs::remove_file(self.path(link));
+    }
+}
+
+/// Retry the original page for archived items that only kept feed content. A challenge, outage,
+/// or rate limit at capture time should not permanently leave a summary where the article
+/// belongs. The upgrade rewrites body, HTML, and media but keeps the item's identity and dates.
+async fn repair_feed_captures(
+    source: &Source,
+    context: &FetchOneContext<'_>,
+    mut transaction: Option<&mut SourceTransaction>,
+) -> Result<usize> {
+    // Sources whose feed content is final by design (light mode, mirrors, Qwen's API-backed blog)
+    // are never retried.
+    if matches!(source.engine, Engine::Aggr { .. })
+        || source.content == ContentMode::Light
+        || source.engine.url().is_some_and(sources::qwen::is_blog_url)
+        || context.options.dry_run
+    {
+        return Ok(0);
+    }
+    let Some(items) = context
+        .options
+        .existing_paths
+        .get()
+        .and_then(|paths| paths.captures.get(&source.slug))
+    else {
+        return Ok(0);
+    };
+    let retries = CaptureRetries::new(context.cache_dir);
+    let due = items
+        .iter()
+        .filter(|(_, raw)| retries.due(&raw.link))
+        .take(MAX_CAPTURE_RETRIES_PER_RUN)
+        .cloned()
+        .collect::<Vec<_>>();
+    log::debug!(
+        "{}: retrying {} of {} feed-only captures",
+        source.slug,
+        due.len(),
+        items.len()
+    );
+    let mut pending = stream::iter(due)
+        .map(|(path, raw)| async move {
+            let (enriched, kind) = heavy_content(
+                &raw,
+                source,
+                context.client,
+                context.cache_dir,
+                context.article_failures,
+            )
+            .await;
+            (path, enriched, kind)
+        })
+        .buffer_unordered(context.options.article_concurrency);
+    let mut upgraded = 0;
+    while let Some((path, mut raw, kind)) = pending.next().await {
+        if kind != ContentKind::Extracted || raw.content_html.is_none() {
+            log::debug!(
+                "{}: original page still unavailable for {}; keeping feed content",
+                source.slug,
+                raw.link
+            );
+            retries.failed(&raw.link);
+            continue;
+        }
+        let existing = context.store.read_item(&path)?;
+        if existing.front.source != source.slug || existing.front.content == ContentKind::Extracted
+        {
+            continue;
+        }
+        if source.images
+            && let Some(html) = raw.content_html.as_deref()
+            && let Ok(base) = url::Url::parse(&raw.link)
+        {
+            let limits = media::MediaLimits::default();
+            let candidates = media::article_candidates(html, &raw.preview_candidates, &base)
+                .into_iter()
+                .take(limits.max_assets)
+                .collect::<Vec<_>>();
+            raw.images = context
+                .options
+                .media_fetcher
+                .fetch_with_budget(&candidates, source, limits.max_article_bytes)
+                .await;
+        }
+        let has_stored_preview = context.store.read_preview(&existing)?.is_some();
+        if source.previews
+            && !has_stored_preview
+            && let Ok(base) = url::Url::parse(&raw.link)
+        {
+            let candidates =
+                preview::candidates(&raw.preview_candidates, raw.content_html.as_deref(), &base);
+            raw.preview = context
+                .options
+                .preview_fetcher
+                .fetch_with_assets(&candidates, source, &raw.images)
+                .await;
+        }
+        let (raw, mut planned) = prepare_item(raw, source, context.options, kind).await?;
+        use_existing_path(&mut planned, &path)?;
+        planned.front.first_seen = existing.front.first_seen;
+        planned.front.labels = existing.front.labels.clone();
+        planned.front.authors = existing.front.authors.clone();
+        if planned.html.is_some() {
+            planned.front.html = Some(format!("{}.html", planned.stem));
+        }
+        planned.front.preview = match &raw.preview {
+            Some(preview) => Some(preview.metadata(&planned.stem)),
+            None if has_stored_preview => existing.front.preview.clone(),
+            None => None,
+        };
+        planned.front.images = existing.front.images.clone();
+        merge_image_metadata(&mut planned.front.images, &raw.images, &planned.stem);
+        if let Some(transaction) = transaction.as_deref_mut() {
+            transaction.track_item(&planned, &raw)?;
+        }
+        context.store.write_item(NewItem {
+            dir: &planned.dir,
+            stem: &planned.stem,
+            front: &planned.front,
+            body: &planned.body,
+            html: planned.html.as_deref(),
+            preview: raw.preview.as_ref().map(|preview| preview.bytes.as_slice()),
+            images: &raw.images,
+        })?;
+        retries.succeeded(&raw.link);
+        log::info!(
+            "{}: captured the original article for {} after an earlier failure",
+            source.slug,
+            raw.link
+        );
+        upgraded += 1;
+    }
+    Ok(upgraded)
+}
+
+fn recording_duration(page: &str, url: &url::Url, raw: &RawItem) -> Option<u64> {
+    if sources::youtube::is_video_url(url) {
+        return sources::youtube::duration_seconds(page, url);
+    }
+    let audio = raw
+        .extra
+        .get("audio_url")
+        .and_then(serde_yaml_ng::Value::as_str);
+    use crate::site::item_type::ItemType;
+    if !matches!(
+        ItemType::from_urls(url.as_str(), audio),
+        ItemType::Video | ItemType::Audio | ItemType::Podcast
+    ) {
+        return None;
+    }
+    let media: Vec<_> = audio
+        .and_then(|value| url::Url::parse(value).ok())
+        .into_iter()
+        .collect();
+    crate::media_duration::from_html(page, url, &media)
+}
+
+fn reconcile_duration(
+    raw: &RawItem,
+    path: &str,
+    source: &Source,
+    store: &Store,
+    options: &Options,
+    transaction: Option<&mut SourceTransaction>,
+) -> Result<bool> {
+    let Some(seconds) = raw
+        .extra
+        .get("duration_seconds")
+        .and_then(serde_yaml_ng::Value::as_u64)
+        .filter(|value| *value > 0)
+    else {
+        return Ok(false);
+    };
+    let mut item = store.read_item(path)?;
+    if item.front.source != source.slug
+        || item
+            .front
+            .extra
+            .get("duration_seconds")
+            .and_then(serde_yaml_ng::Value::as_u64)
+            == Some(seconds)
+    {
+        return Ok(false);
+    }
+    item.front
+        .extra
+        .insert("duration_seconds".into(), seconds.into());
+    let mut planned = Planned {
+        dir: String::new(),
+        stem: String::new(),
+        front: item.front,
+        body: item.body,
+        html: None,
+    };
+    use_existing_path(&mut planned, path)?;
+    if !options.dry_run {
+        if let Some(transaction) = transaction {
+            transaction.track_item(&planned, &RawItem::default())?;
+        }
+        store.write_item(NewItem {
+            dir: &planned.dir,
+            stem: &planned.stem,
+            front: &planned.front,
+            body: &planned.body,
+            html: None,
+            preview: None,
+            images: &[],
+        })?;
+    }
+    Ok(true)
+}
+
 async fn heavy_content(
     raw: &RawItem,
     source: &Source,
@@ -1032,13 +1920,54 @@ async fn heavy_content(
     let Ok(url) = url::Url::parse(&raw.link) else {
         return (raw.clone(), fallback);
     };
+    if preview::is_pdf_url(&url)
+        || url.path().rsplit_once('.').is_some_and(|(_, extension)| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif"
+            )
+        })
+    {
+        return (raw.clone(), fallback);
+    }
     if failures.blocked(&url) {
         return (raw.clone(), fallback);
     }
-    let preview_candidates = raw.preview_candidates.clone();
+    if let Some(id) = openreview::note_id(&url) {
+        let cache = crate::cache::ArticleCache::new(cache_dir);
+        return match openreview::enrich(raw, &id, source, client, &cache).await {
+            Ok(enriched) => (enriched, ContentKind::Extracted),
+            Err(error) => {
+                log::debug!(
+                    "{}: OpenReview paper unavailable for {}: {error:#}",
+                    source.slug,
+                    raw.link
+                );
+                (raw.clone(), fallback)
+            }
+        };
+    }
+    let mut preview_candidates = raw.preview_candidates.clone();
     let mut page_candidates = preview::HtmlCandidateGroups::default();
+    let mut interactive = false;
+    let mut duration = None;
+    let mut thread_link = None;
     let result = async {
         let cache = crate::cache::ArticleCache::new(cache_dir);
+        match crate::threads::expand_x(&url, source, client, &cache).await {
+            Ok(Some(expanded)) => {
+                thread_link = crate::threads::canonical_x_url(&url);
+                preview_candidates.clear();
+                page_candidates = preview::html_candidate_groups(&expanded.html, &url);
+                return Ok(expanded);
+            }
+            Ok(None) => {}
+            Err(error) => log::debug!(
+                "{}: X thread expansion failed for {}: {error:#}",
+                source.slug,
+                url
+            ),
+        }
         let headers = http::source_headers(source, &url);
         let cached = cache.load(&url, headers)?;
         let request = client.get(http::Request {
@@ -1073,6 +2002,16 @@ async fn heavy_content(
             anyhow::bail!("original page is not HTML");
         }
         let page = response.html_text();
+        duration = recording_duration(
+            &page,
+            if sources::youtube::is_video_url(&url) {
+                &url
+            } else {
+                &response.final_url
+            },
+            raw,
+        );
+        interactive = crate::site::interactive::is_interactive_document(&page);
         if source.previews || source.images {
             page_candidates = preview::html_candidate_groups(&page, &response.final_url);
         }
@@ -1105,6 +2044,19 @@ async fn heavy_content(
     match result {
         Ok(extracted) => {
             let mut enriched = raw.clone();
+            if let Some(link) = thread_link {
+                enriched.link = link.to_string();
+            }
+            if let Some(seconds) = duration {
+                enriched
+                    .extra
+                    .insert("duration_seconds".into(), seconds.into());
+            }
+            if interactive {
+                enriched
+                    .extra
+                    .insert(crate::site::interactive::METADATA_KEY.into(), true.into());
+            }
             enriched.content_html = Some(extracted.html);
             if source.previews || source.images {
                 enriched.preview_candidates = preview::ordered_article_candidates(
@@ -1134,6 +2086,16 @@ async fn heavy_content(
                 }
             );
             let mut enriched = raw.clone();
+            if let Some(seconds) = duration {
+                enriched
+                    .extra
+                    .insert("duration_seconds".into(), seconds.into());
+            }
+            if interactive {
+                enriched
+                    .extra
+                    .insert(crate::site::interactive::METADATA_KEY.into(), true.into());
+            }
             enriched.preview_candidates =
                 preview::ordered_article_candidates(&preview_candidates, page_candidates, None);
             (enriched, fallback)
@@ -1270,7 +2232,7 @@ mod tests {
     use httpmock::prelude::*;
     use url::Url;
 
-    fn source() -> Source {
+    pub(super) fn source() -> Source {
         Source {
             slug: "blog".into(),
             name: None,
@@ -1415,6 +2377,7 @@ mod tests {
             width: 40,
             height: 20,
             dominant_color: "#000000".into(),
+            placeholder: crate::media::placeholder::from_bytes(&preview.bytes).unwrap(),
             renditions: Vec::new(),
         };
         let disabled =
@@ -1488,6 +2451,7 @@ mod tests {
     fn options() -> Options {
         Options {
             archived_links: Arc::default(),
+            existing_paths: Arc::default(),
             dry_run: false,
             refresh: false,
             html: true,
@@ -1504,6 +2468,464 @@ mod tests {
                 .unwrap(),
             ),
             now: Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn feed_only_captures_are_retried_daily_and_upgraded_once_the_page_is_available() {
+        crate::http::install_crypto_provider();
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.path("/feed");
+                then.status(304);
+            })
+            .await;
+        let denied = server
+            .mock_async(|when, then| {
+                when.path("/post");
+                then.status(403);
+            })
+            .await;
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path());
+        let first_seen = "2026-07-16T12:00:00Z".parse().unwrap();
+        let front = FrontMatter {
+            title: "Why teens deserve safe AI".into(),
+            source: "blog".into(),
+            link: server.url("/post"),
+            first_seen,
+            labels: vec!["safety".into()],
+            content: ContentKind::Feed,
+            ..Default::default()
+        };
+        store
+            .write_item(NewItem {
+                dir: "items/blog",
+                stem: "teens",
+                front: &front,
+                body: "Feed summary only.\n",
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let configured = Source {
+            previews: false,
+            engine: Engine::Feed {
+                url: Url::parse(&server.url("/feed")).unwrap(),
+            },
+            ..source()
+        };
+        let client = http::Client::new(&crate::config::FetchConfig {
+            retries: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let run = |expected_added: usize| {
+            let store = &store;
+            let configured = &configured;
+            let client = &client;
+            let root = root.path();
+            let cache = cache.path();
+            async move {
+                let (_, archive) = index_archive(store.items().unwrap());
+                let test_options = Options {
+                    existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+                    ..options()
+                };
+                let report = fetch_one(
+                    configured,
+                    FetchOneContext {
+                        store,
+                        store_root: root,
+                        client,
+                        cache_dir: cache,
+                        options: &test_options,
+                        article_failures: &ArticleFailures::default(),
+                        state_policy: StatePolicy::DevCache,
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(report.added, expected_added);
+            }
+        };
+        // Unavailable: the feed copy stays, the failure is remembered, and the next run waits.
+        run(0).await;
+        run(0).await;
+        denied.assert_calls_async(1).await;
+        assert_eq!(
+            store.read_item("items/blog/teens").unwrap().body,
+            "Feed summary only.\n"
+        );
+        denied.delete_async().await;
+        let available = server.mock_async(|when, then| {
+            when.path("/post");
+            then.status(200).header("content-type", "text/html").body(
+                "<html><head><title>Why teens deserve safe AI</title></head><body><article><h1>Why teens deserve safe AI</h1><p>The complete article explains age-appropriate protections, learning tools, and parental controls in depth, with every paragraph the publisher wrote.</p><p>A second paragraph keeps the extraction meaningful and well above the readability thresholds used for short pages.</p></article></body></html>",
+            );
+        }).await;
+        // Still backed off: nothing is requested until a day has passed.
+        run(0).await;
+        available.assert_calls_async(0).await;
+        let marker = CaptureRetries::new(cache.path()).path(&server.url("/post"));
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        run(1).await;
+        available.assert_calls_async(1).await;
+        let upgraded = store.read_item("items/blog/teens").unwrap();
+        assert_eq!(upgraded.front.content, ContentKind::Extracted);
+        assert!(
+            upgraded.body.contains("age-appropriate protections"),
+            "{}",
+            upgraded.body
+        );
+        assert_eq!(upgraded.front.first_seen, first_seen);
+        assert_eq!(upgraded.front.labels, vec!["safety".to_string()]);
+        assert!(upgraded.front.html.is_some());
+        assert!(!marker.exists());
+        run(0).await;
+        available.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn retained_image_repairs_recover_missing_previews_without_losing_other_articles() {
+        crate::http::install_crypto_provider();
+        for previews in [true, false] {
+            let server = MockServer::start_async().await;
+            server
+                .mock_async(|when, then| {
+                    when.path("/feed");
+                    then.status(304);
+                })
+                .await;
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(40, 30)
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .unwrap();
+            let bytes = encoded.into_inner();
+            let unavailable_preview_source = server
+                .mock_async(|when, then| {
+                    when.path("/preview-only.png");
+                    then.status(404);
+                })
+                .await;
+            server
+                .mock_async(|when, then| {
+                    when.path_includes(".png");
+                    then.status(200).body(bytes.clone());
+                })
+                .await;
+            let root = tempfile::tempdir().unwrap();
+            let cache = tempfile::tempdir().unwrap();
+            let store = Store::open(root.path());
+            let original_preview = preview::thumbnail(&bytes, None).unwrap();
+            for name in ["healthy", "recover", "preview-only", "unrelated"] {
+                let asset = media::prepare_asset(
+                    &media::Candidate {
+                        url: Url::parse(&server.url(format!("/{name}.png"))).unwrap(),
+                        alt: None,
+                    },
+                    bytes.clone(),
+                    &media::MediaLimits::default(),
+                )
+                .unwrap();
+                let front = FrontMatter {
+                    title: name.into(),
+                    source: "blog".into(),
+                    link: server.url(format!("/{name}")),
+                    html: Some(format!("{name}.html")),
+                    preview: Some(original_preview.metadata(name)),
+                    images: vec![asset.metadata(name)],
+                    ..Default::default()
+                };
+                store
+                    .write_item(NewItem {
+                        dir: "items/blog",
+                        stem: name,
+                        front: &front,
+                        body: &format!("Preserved {name}.\n\n![Image]({})", asset.source_url),
+                        html: Some("<p>Original HTML.</p>"),
+                        preview: Some(&original_preview.bytes),
+                        images: &[asset],
+                    })
+                    .unwrap();
+                if matches!(name, "recover" | "preview-only") {
+                    fs::remove_file(
+                        root.path()
+                            .join("items/blog")
+                            .join(&front.preview.as_ref().unwrap().file),
+                    )
+                    .unwrap();
+                }
+                if matches!(name, "recover" | "unrelated") {
+                    fs::remove_file(
+                        root.path()
+                            .join("items/blog")
+                            .join(&front.images[0].original.file),
+                    )
+                    .unwrap();
+                }
+            }
+            let original = store.items().unwrap();
+            let healthy = root.path().join("items/blog/healthy.md");
+            let healthy_modified = fs::metadata(&healthy).unwrap().modified().unwrap();
+            let configured = Source {
+                previews,
+                engine: Engine::Feed {
+                    url: Url::parse(&server.url("/feed")).unwrap(),
+                },
+                ..source()
+            };
+            let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+            for added in [3, 0] {
+                let (_, archive) = index_archive(store.items().unwrap());
+                let test_options = Options {
+                    existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+                    ..options()
+                };
+                let report = fetch_one(
+                    &configured,
+                    FetchOneContext {
+                        store: &store,
+                        store_root: root.path(),
+                        client: &client,
+                        cache_dir: cache.path(),
+                        options: &test_options,
+                        article_failures: &ArticleFailures::default(),
+                        state_policy: StatePolicy::DevCache,
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(report.added, added);
+                assert_eq!(report.outcome, Outcome::Ok);
+            }
+            for previous in &original {
+                let repaired = store.read_item(&previous.path).unwrap();
+                assert_eq!(repaired.body, previous.body);
+                assert_eq!(
+                    store.read_html(&repaired).unwrap().as_deref(),
+                    Some("<p>Original HTML.</p>")
+                );
+                assert!(
+                    repaired
+                        .front
+                        .images
+                        .iter()
+                        .all(|image| store.image_files_present(&repaired.path, image))
+                );
+                if previews || matches!(repaired.front.title.as_str(), "healthy" | "unrelated") {
+                    assert_eq!(
+                        store.read_preview(&repaired).unwrap(),
+                        Some(original_preview.bytes.clone())
+                    );
+                } else {
+                    assert!(
+                        repaired.front.preview.is_none(),
+                        "unavailable pointer should not block media fallback"
+                    );
+                }
+            }
+            assert_eq!(
+                fs::metadata(healthy).unwrap().modified().unwrap(),
+                healthy_modified
+            );
+            unavailable_preview_source.assert_calls_async(0).await;
+            let healthy_item = store.read_item("items/blog/healthy").unwrap();
+            let file = root
+                .path()
+                .join("items/blog")
+                .join(&healthy_item.front.preview.as_ref().unwrap().file);
+            fs::remove_file(&file).unwrap();
+            fs::create_dir(&file).unwrap();
+            let (_, archive) = index_archive(store.items().unwrap());
+            let test_options = Options {
+                existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+                ..options()
+            };
+            let error = repair_archived_images(&configured, &store, &test_options, None)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("items/blog/healthy"),
+                "non-NotFound preview errors retain the article context: {error:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unchanged_feed_repairs_all_missing_body_images_without_refetching_good_files() {
+        crate::http::install_crypto_provider();
+        let server = MockServer::start_async().await;
+        let feed = server
+            .mock_async(|when, then| {
+                when.path("/feed");
+                then.status(304);
+            })
+            .await;
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = encoded.into_inner();
+        let good = server
+            .mock_async(|when, then| {
+                when.path("/good.png");
+                then.status(200).body(bytes.clone());
+            })
+            .await;
+        let missing = server
+            .mock_async(|when, then| {
+                when.path_includes("/missing-");
+                then.status(200).body(bytes.clone());
+            })
+            .await;
+        let inaccessible = server
+            .mock_async(|when, then| {
+                when.path("/unavailable.png");
+                then.status(404);
+            })
+            .await;
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).with_image_cache(cache.path());
+        let original = media::prepare_asset(
+            &media::Candidate {
+                url: Url::parse(&server.url("/good.png")).unwrap(),
+                alt: None,
+            },
+            bytes,
+            &media::MediaLimits::default(),
+        )
+        .unwrap();
+        let mut body = format!("Original body.\n\n![Good]({})\n", server.url("/good.png"));
+        for index in 0..14 {
+            body.push_str(&format!(
+                "\n![Figure {index}]({})\n",
+                server.url(format!("/missing-{index}.png"))
+            ));
+        }
+        body.push_str(&format!(
+            "\n![Unavailable]({})\n",
+            server.url("/unavailable.png")
+        ));
+        let front = FrontMatter {
+            title: "Retained article outside feed".into(),
+            html: Some("story.html".into()),
+            link: server.url("/article"),
+            source: "blog".into(),
+            images: vec![original.metadata("story")],
+            ..Default::default()
+        };
+        store
+            .write_item(NewItem {
+                dir: "items/blog",
+                stem: "story",
+                front: &front,
+                body: &body,
+                html: Some("<article>Preserved HTML companion.</article>"),
+                preview: None,
+                images: &[original],
+            })
+            .unwrap();
+        let original_file = root
+            .path()
+            .join("items/blog")
+            .join(&front.images[0].original.file);
+        let original_modified = fs::metadata(&original_file).unwrap().modified().unwrap();
+        let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let configured = Source {
+            engine: Engine::Feed {
+                url: Url::parse(&server.url("/feed")).unwrap(),
+            },
+            ..source()
+        };
+        let failures = ArticleFailures::default();
+        for expected in [1, 0] {
+            let (_, archive) = index_archive(store.items().unwrap());
+            let test_options = Options {
+                existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+                media_fetcher: Arc::new(
+                    media::Fetcher::new(
+                        &crate::config::FetchConfig::default(),
+                        media::MediaLimits::default(),
+                    )
+                    .unwrap()
+                    .with_cache(cache.path()),
+                ),
+                ..options()
+            };
+            let report = fetch_one(
+                &configured,
+                FetchOneContext {
+                    store: &store,
+                    store_root: root.path(),
+                    client: &client,
+                    cache_dir: cache.path(),
+                    options: &test_options,
+                    article_failures: &failures,
+                    state_policy: StatePolicy::PersistentBranch,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(report.added, expected);
+            assert_eq!(report.unchanged, expected == 0);
+        }
+        let repaired = store.read_item("items/blog/story").unwrap();
+        assert_eq!(repaired.body, body);
+        assert_eq!(repaired.front.images.len(), 15);
+        assert_eq!(
+            store.read_html(&repaired).unwrap().as_deref(),
+            Some("<article>Preserved HTML companion.</article>")
+        );
+        assert_eq!(
+            fs::metadata(original_file).unwrap().modified().unwrap(),
+            original_modified
+        );
+        assert_eq!(good.calls_async().await, 0);
+        assert_eq!(missing.calls_async().await, 14);
+        assert_eq!(inaccessible.calls_async().await, 1);
+        assert_eq!(feed.calls_async().await, 2);
+    }
+
+    #[test]
+    fn archive_index_scans_items_once_and_keeps_metadata_paths_per_source() {
+        let visited = std::cell::Cell::new(0);
+        let items = ["first", "second"].map(|source| crate::model::Item {
+            path: format!("items/{source}/story"),
+            front: FrontMatter {
+                source: source.into(),
+                title: "Same title".into(),
+                link: "https://example.com/shared#fragment".into(),
+                ..Default::default()
+            },
+            body: String::new(),
+        });
+        let (links, paths) = index_archive(
+            items
+                .clone()
+                .into_iter()
+                .inspect(|_| visited.set(visited.get() + 1)),
+        );
+        assert_eq!(visited.get(), 2);
+        assert_eq!(links.len(), 1);
+        assert_eq!(paths.items.len(), 2);
+        for (source, entries) in &paths.items {
+            assert!(!entries.is_empty());
+            assert!(
+                entries
+                    .values()
+                    .all(|path| path == &format!("items/{source}/story"))
+            );
         }
     }
 
@@ -1940,6 +3362,340 @@ mod tests {
         feed.assert_calls_async(2).await;
     }
 
+    #[tokio::test]
+    async fn unchanged_feed_backfills_cached_recording_duration_without_rewriting_content() {
+        crate::http::install_crypto_provider();
+        let server = MockServer::start_async().await;
+        let feed = server
+            .mock_async(|when, then| {
+                when.path("/feed");
+                then.status(304);
+            })
+            .await;
+        let page = server
+            .mock_async(|when, then| {
+                when.path("/episode");
+                then.status(500);
+            })
+            .await;
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path());
+        let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let configured = Source {
+            engine: Engine::Feed {
+                url: Url::parse(&server.url("/feed")).unwrap(),
+            },
+            ..source()
+        };
+        let raw = RawItem {
+            title: "Retained recording".into(),
+            link: server.url("/episode"),
+            content_html: Some("<p>Keep this original article.</p>".into()),
+            extra: [("audio_url".into(), server.url("/recording.mp3").into())].into(),
+            ..Default::default()
+        };
+        let mut test_options = options();
+        let planned = plan(&raw, &configured, &test_options, ContentKind::Feed);
+        store
+            .write_item(NewItem {
+                dir: &planned.dir,
+                stem: &planned.stem,
+                front: &planned.front,
+                body: &planned.body,
+                html: planned.html.as_deref(),
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let path = format!("{}/{}", planned.dir, planned.stem);
+        let url = Url::parse(&raw.link).unwrap();
+        crate::cache::ArticleCache::new(cache.path()).store(&url, &[], &http::Body {
+            final_url: url.clone(), content_type: Some("text/html".into()), etag: None, last_modified: None,
+            bytes: format!(r#"<script type="application/ld+json">{{"@type":"AudioObject","contentUrl":"{}","duration":"PT27M51S"}}</script>"#, raw.extra["audio_url"].as_str().unwrap()).into_bytes(),
+        }).unwrap();
+        test_options.existing_paths = Arc::new(OnceCell::new_with(Some(
+            index_archive(store.items().unwrap()).1,
+        )));
+        let failures = ArticleFailures::default();
+        let context = FetchOneContext {
+            store: &store,
+            store_root: root.path(),
+            client: &client,
+            cache_dir: cache.path(),
+            options: &test_options,
+            article_failures: &failures,
+            state_policy: StatePolicy::PersistentBranch,
+        };
+        let html = fs::read(root.path().join(format!("{path}.html"))).unwrap();
+        assert_eq!(fetch_one(&configured, context).await.unwrap().added, 1);
+        let retained = store.read_item(&path).unwrap();
+        assert_eq!(
+            retained.front.extra["duration_seconds"].as_u64(),
+            Some(1671)
+        );
+        assert_eq!(retained.body, planned.body);
+        assert_eq!(
+            fs::read(root.path().join(format!("{path}.html"))).unwrap(),
+            html
+        );
+        let snapshots: Vec<_> = [
+            format!("{path}.md"),
+            format!("sources/{}/state.toml", configured.slug),
+        ]
+        .into_iter()
+        .map(|path| {
+            let path = root.path().join(path);
+            let bytes = fs::read(&path).unwrap();
+            let modified = fs::metadata(&path).unwrap().modified().unwrap();
+            (path, bytes, modified)
+        })
+        .collect();
+        let unchanged = fetch_one(&configured, context).await.unwrap();
+        assert!(unchanged.unchanged);
+        assert_eq!(unchanged.added, 0);
+        for (path, bytes, modified) in snapshots {
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), modified);
+        }
+        // The feed-only capture is retried once (with the client's transient retries) on the
+        // first run, fails, and is then backed off; the duration backfill itself never refetches.
+        page.assert_calls_async(3).await;
+        feed.assert_calls_async(2).await;
+    }
+
+    #[tokio::test]
+    async fn spotify_reconciliation_preserves_items_is_transactional_and_repeats_without_writes() {
+        crate::http::install_crypto_provider();
+        let server = MockServer::start_async().await;
+        server.mock_async(|when, then| {
+            when.path("/feed");
+            then.status(200).header("content-type", "application/rss+xml").body(r#"<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Publisher podcast</title><link>https://publisher.example/</link><description>Podcast</description><item><guid>canonical-guid</guid><link>https://publisher.example/episode</link><title>AN Episode!</title><pubDate>Tue, 01 Sep 2026 12:00:00 GMT</pubDate><description>Different publisher body</description><enclosure url="https://cdn.example/episode.mp3" type="audio/mpeg" length="1200"/><itunes:duration>1:00:01</itunes:duration></item></channel></rss>"#);
+        }).await;
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path());
+        let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let configured = Source {
+            public_url: Some("https://open.spotify.com/show/1sz1NhoHqbpXbzNlpOnFoz".into()),
+            content: ContentMode::Light,
+            images: false,
+            engine: Engine::Feed {
+                url: Url::parse(&server.url("/feed")).unwrap(),
+            },
+            ..source()
+        };
+        let raw = RawItem {
+            title: "An Episode!".into(),
+            link: "https://open.spotify.com/episode/old-id".into(),
+            id: Some("spotify-old-id".into()),
+            published: Some("2026-09-01T00:00:00Z".parse().unwrap()),
+            content_html: Some("<p>Original archived body.</p>".into()),
+            extra: [("custom".into(), "kept".into())].into(),
+            ..Default::default()
+        };
+        let test_options = options();
+        let mut planned = plan(&raw, &configured, &test_options, ContentKind::Feed);
+        planned.front.labels = vec!["retained-label".into()];
+        planned.front.hidden = true;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(4, 4)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let preview = preview::thumbnail(png.get_ref(), Some("Retained preview".into())).unwrap();
+        planned.front.preview = Some(preview.metadata(&planned.stem));
+        store
+            .write_item(NewItem {
+                dir: &planned.dir,
+                stem: &planned.stem,
+                front: &planned.front,
+                body: &planned.body,
+                html: planned.html.as_deref(),
+                preview: Some(&preview.bytes),
+                images: &[],
+            })
+            .unwrap();
+        store
+            .append_seen(&configured.slug, &dedupe_keys(&raw), test_options.now)
+            .unwrap();
+        let path = format!("{}/{}", planned.dir, planned.stem);
+        let before = store.read_item(&path).unwrap();
+        let md_path = root.path().join(format!("{path}.md"));
+        let seen_path = root.path().join("sources/blog/seen.txt");
+        let original_md = fs::read(&md_path).unwrap();
+        let original_seen = fs::read(&seen_path).unwrap();
+        let original_html = fs::read(root.path().join(format!("{path}.html"))).unwrap();
+        let preview_path = root
+            .path()
+            .join(&planned.dir)
+            .join(&before.front.preview.as_ref().unwrap().file);
+        let original_preview = fs::read(&preview_path).unwrap();
+        let failures = ArticleFailures::default();
+        let run = |options| {
+            fetch_one(
+                &configured,
+                FetchOneContext {
+                    store: &store,
+                    store_root: root.path(),
+                    client: &client,
+                    cache_dir: cache.path(),
+                    options,
+                    article_failures: &failures,
+                    state_policy: StatePolicy::PersistentBranch,
+                },
+            )
+        };
+        let dry_options = Options {
+            dry_run: true,
+            ..test_options.clone()
+        };
+        assert_eq!(run(&dry_options).await.unwrap().added, 1);
+        assert_eq!(fs::read(&md_path).unwrap(), original_md);
+        assert_eq!(fs::read(&seen_path).unwrap(), original_seen);
+        assert!(!root.path().join("sources/blog/state.toml").exists());
+        // Failure after aliases were appended must restore both the existing item and seen keys.
+        let state_path = root.path().join("sources/blog/state.toml");
+        fs::create_dir(&state_path).unwrap();
+        let canonical_audio = RawItem {
+            id: Some("canonical-guid".into()),
+            link: "https://publisher.example/episode".into(),
+            title: "AN Episode!".into(),
+            published: Some("2026-09-01T12:00:00Z".parse().unwrap()),
+            extra: [("audio_url".into(), "https://cdn.example/episode.mp3".into())].into(),
+            ..Default::default()
+        };
+        let mut transaction = SourceTransaction::new(root.path()).unwrap();
+        let (_, aliases) = reconcile_podcast(
+            &canonical_audio,
+            &path,
+            &configured,
+            &store,
+            &test_options,
+            Some(&mut transaction),
+            &store.seen("blog").unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        transaction.track_seen("blog").unwrap();
+        store
+            .append_seen("blog", &aliases, test_options.now)
+            .unwrap();
+        assert_ne!(fs::read(&md_path).unwrap(), original_md);
+        assert_ne!(fs::read(&seen_path).unwrap(), original_seen);
+        assert!(transaction.track_state("blog").is_err());
+        transaction.rollback().unwrap();
+        assert_eq!(fs::read(&md_path).unwrap(), original_md);
+        assert_eq!(fs::read(&seen_path).unwrap(), original_seen);
+        fs::remove_dir(&state_path).unwrap();
+        assert_eq!(run(&test_options).await.unwrap().added, 1);
+        assert_eq!(store.items().unwrap().len(), 1);
+        let mut expected = before.clone();
+        expected
+            .front
+            .extra
+            .insert("audio_url".into(), "https://cdn.example/episode.mp3".into());
+        expected
+            .front
+            .extra
+            .insert("duration_seconds".into(), 3601.into());
+        assert_eq!(store.read_item(&path).unwrap(), expected);
+        assert_eq!(
+            fs::read(root.path().join(format!("{path}.html"))).unwrap(),
+            original_html
+        );
+        assert_eq!(fs::read(&preview_path).unwrap(), original_preview);
+        let canonical = RawItem {
+            id: Some("canonical-guid".into()),
+            link: "https://publisher.example/episode".into(),
+            title: "AN Episode!".into(),
+            published: Some("2026-09-01T12:00:00Z".parse().unwrap()),
+            ..Default::default()
+        };
+        assert!(
+            dedupe_keys(&canonical)
+                .iter()
+                .all(|key| store.seen("blog").unwrap().contains(key))
+        );
+        // A corrected duration must update even when the enclosure already matches.
+        let corrected = RawItem {
+            extra: [
+                ("audio_url".into(), "https://cdn.example/episode.mp3".into()),
+                ("duration_seconds".into(), 1671.into()),
+            ]
+            .into(),
+            ..canonical_audio.clone()
+        };
+        let reconciled = reconcile_podcast(
+            &corrected,
+            &path,
+            &configured,
+            &store,
+            &test_options,
+            None,
+            &store.seen("blog").unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(reconciled.0);
+        assert_eq!(
+            store.read_item(&path).unwrap().front.extra["duration_seconds"].as_u64(),
+            Some(1671)
+        );
+        assert_eq!(
+            fs::read(root.path().join(format!("{path}.html"))).unwrap(),
+            original_html
+        );
+        assert!(
+            !reconcile_podcast(
+                &corrected,
+                &path,
+                &configured,
+                &store,
+                &test_options,
+                None,
+                &store.seen("blog").unwrap()
+            )
+            .unwrap()
+            .unwrap()
+            .0
+        );
+        // Restore the authoritative feed value before checking the feed no-op.
+        reconcile_podcast(
+            &RawItem {
+                extra: [
+                    ("audio_url".into(), "https://cdn.example/episode.mp3".into()),
+                    ("duration_seconds".into(), 3601.into()),
+                ]
+                .into(),
+                ..corrected
+            },
+            &path,
+            &configured,
+            &store,
+            &test_options,
+            None,
+            &store.seen("blog").unwrap(),
+        )
+        .unwrap();
+        let snapshots: Vec<_> = [&md_path, &seen_path, &state_path]
+            .into_iter()
+            .map(|file| {
+                (
+                    file,
+                    fs::read(file).unwrap(),
+                    fs::metadata(file).unwrap().modified().unwrap(),
+                )
+            })
+            .collect();
+        let report = run(&test_options).await.unwrap();
+        assert_eq!(report.added, 0);
+        assert!(report.unchanged);
+        for (file, bytes, modified) in snapshots {
+            assert_eq!(fs::read(file).unwrap(), bytes);
+            assert_eq!(fs::metadata(file).unwrap().modified().unwrap(), modified);
+        }
+    }
+
     #[test]
     fn plans_paths_from_the_published_date_and_clamps_the_future() {
         let raw = RawItem {
@@ -2139,6 +3895,43 @@ mod tests {
             .expect("YouTube metadata must not await an article request");
             assert_eq!(kind, ContentKind::Feed);
             assert_eq!(kept.content_html, raw.content_html);
+        }
+        assert_eq!(fs::read_dir(cache.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn binary_articles_keep_feed_content_without_a_duplicate_html_download() {
+        use futures_util::FutureExt as _;
+        crate::http::install_crypto_provider();
+        let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let mut heavy = source();
+        heavy.content = ContentMode::Heavy;
+        for link in [
+            "https://example.com/paper.PDF?download=1",
+            "https://example.com/paper%2Epdf",
+            "https://example.com/download?filename=Paper%20One.PDF",
+            "https://example.com/photo.png",
+            "https://example.com/photo.JPEG#full",
+        ] {
+            let raw = RawItem {
+                title: "Retained article".into(),
+                link: link.into(),
+                content_html: Some("<p>Existing feed description</p>".into()),
+                ..Default::default()
+            };
+            let (kept, kind) = heavy_content(
+                &raw,
+                &heavy,
+                &client,
+                cache.path(),
+                &ArticleFailures::default(),
+            )
+            .now_or_never()
+            .expect("binary article previews must not trigger an earlier HTML download");
+            assert_eq!(kind, ContentKind::Feed);
+            assert_eq!(kept.content_html, raw.content_html);
+            assert_eq!(kept.link, raw.link);
         }
         assert_eq!(fs::read_dir(cache.path()).unwrap().count(), 0);
     }

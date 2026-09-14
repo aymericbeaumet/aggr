@@ -19,6 +19,15 @@ const AGGR_PROFILE: &str =
 const AGGR_SCHEMA: &str =
     "https://raw.githubusercontent.com/aymericbeaumet/aggr/v1/docs/aggr-instance.schema.json";
 
+/// Small network-polled update manifest shared by ordinary pages and installed readers.
+pub fn updates(site: &SiteCtx, build: &BuildCtx) -> Result<String> {
+    Ok(serde_json::to_string(&serde_json::json!({
+        "app_version": build.app_version,
+        "content_version": build.content_version,
+        "entries": site.entry_shortcuts,
+    }))?)
+}
+
 /// Public metadata that lets a crawler or another reader recognize and consume an aggr instance.
 /// URLs are absolute for release builds and descriptor-relative for portable local builds.
 pub fn instance_descriptor(site: &SiteCtx, build: &BuildCtx) -> Result<String> {
@@ -53,7 +62,11 @@ pub fn instance_descriptor(site: &SiteCtx, build: &BuildCtx) -> Result<String> {
     }
 
     let mut discovery = Map::new();
-    discovery.insert("search".into(), Value::String(endpoint("search/")));
+    discovery.insert("search".into(), Value::String(endpoint("?q=")));
+    discovery.insert(
+        "search_manifest".into(),
+        Value::String(endpoint("search-manifest.json")),
+    );
     if site.base_url.is_some() {
         discovery.insert(
             "opensearch".into(),
@@ -70,17 +83,11 @@ pub fn instance_descriptor(site: &SiteCtx, build: &BuildCtx) -> Result<String> {
     }
 
     let mut collections = Map::new();
-    collections.insert("library".into(), Value::String(endpoint("library/")));
-    collections.insert(
-        "sources".into(),
-        Value::String(endpoint("library/#sources")),
-    );
-    collections.insert("tags".into(), Value::String(endpoint("library/#tags")));
+    collections.insert("browse".into(), Value::String(endpoint("browse/")));
+    collections.insert("sources".into(), Value::String(endpoint("sources/")));
+    collections.insert("tags".into(), Value::String(endpoint("tags/")));
     if site.has_categories {
-        collections.insert(
-            "categories".into(),
-            Value::String(endpoint("library/#categories")),
-        );
+        collections.insert("categories".into(), Value::String(endpoint("categories/")));
     }
 
     serde_json::to_string_pretty(&serde_json::json!({
@@ -128,7 +135,7 @@ pub fn llms_txt(site: &SiteCtx) -> String {
         .clone()
         .unwrap_or_else(|| endpoint("aggr.toml"));
     let mut out = format!(
-        "# {}\n\n> {}\n\n## Resources\n\n- [Site]({})\n- [Instance metadata]({})\n- [Atom feed]({})\n- [RSS feed]({})\n- [JSON Feed]({})\n- [Library]({})\n- [Sources]({})\n",
+        "# {}\n\n> {}\n\n## Resources\n\n- [Site]({})\n- [Instance metadata]({})\n- [Atom feed]({})\n- [RSS feed]({})\n- [JSON Feed]({})\n- [Browse]({})\n- [Sources]({})\n",
         site.title,
         site.description,
         endpoint(""),
@@ -136,18 +143,15 @@ pub fn llms_txt(site: &SiteCtx) -> String {
         endpoint("atom.xml"),
         endpoint("rss.xml"),
         endpoint("feed.json"),
-        endpoint("library/"),
-        endpoint("library/#sources"),
+        endpoint("browse/"),
+        endpoint("sources/"),
     );
     if site.has_categories {
-        out.push_str(&format!(
-            "- [Categories]({})\n",
-            endpoint("library/#categories")
-        ));
+        out.push_str(&format!("- [Categories]({})\n", endpoint("categories/")));
     }
     out.push_str(&format!(
         "- [Tags]({})\n- [Source configuration]({config_url})\n",
-        endpoint("library/#tags")
+        endpoint("tags/")
     ));
     if site.base_url.is_some() {
         out.push_str(&format!(
@@ -733,7 +737,14 @@ pub fn text_item(item: &ItemCtx) -> String {
         .as_deref()
         .map(crate::content::html_to_text)
         .unwrap_or_default();
-    format!("{}\n\n{}\n", item.title, body.trim())
+    let mut output = format!("{}\n\n{}\n", item.title, body.trim());
+    if !item.resources.is_empty() {
+        output.push_str("\nResources\n");
+        for resource in &item.resources {
+            output.push_str(&format!("{}: {}\n", resource.label, resource.url));
+        }
+    }
+    output
 }
 
 pub fn rst_item(item: &ItemCtx) -> String {
@@ -991,6 +1002,7 @@ mod tests {
             network_url: AGGR_NETWORK,
             instance_type_url: AGGR_INSTANCE_TYPE,
             pwa: true,
+            preferences: serde_json::json!({}),
             config_page_url: None,
             config_url: None,
             has_categories: true,
@@ -1004,6 +1016,8 @@ mod tests {
         BuildCtx {
             time: at(12),
             version: "1.2.3".into(),
+            app_version: "app".into(),
+            content_version: "content".into(),
             config_sha: None,
             data_sha: None,
             generation: "generation".into(),
@@ -1035,6 +1049,7 @@ mod tests {
             replicated_at: None,
             authors: vec!["A & B".into()],
             labels: vec!["Rust".into(), "engineering".into()],
+            resources: Vec::new(),
             discussions: vec![DiscussionLinkCtx {
                 name: "hackernews".into(),
                 url: "https://news.ycombinator.com/item?id=42".into(),
@@ -1050,7 +1065,12 @@ mod tests {
             preview: None,
             article_preview: None,
             video: None,
+            document: None,
+            interactive: None,
+            native_media: None,
+            item_type: crate::site::item_type::ItemType::Article,
             extra: BTreeMap::new(),
+            metadata: super::super::display::Metadata::default(),
             permalink: None,
             raw_url: None,
             history_url: None,
@@ -1101,6 +1121,10 @@ mod tests {
             height: 180,
             alt: Some("A preview".into()),
             color: Some("#285a8c".into()),
+            placeholder: crate::media::placeholder::from_image(&image::DynamicImage::new_rgb8(
+                4, 4,
+            ))
+            .unwrap(),
         });
         let feed: Value =
             serde_json::from_str(&json_collection(&site(), "Feed", "", &[item.clone()]).unwrap())
@@ -1327,20 +1351,20 @@ mod tests {
             "https://example.test/reads/atom.xml"
         );
         assert_eq!(
-            descriptor["collections"]["library"],
-            "https://example.test/reads/library/"
+            descriptor["collections"]["browse"],
+            "https://example.test/reads/browse/"
         );
         assert_eq!(
             descriptor["collections"]["sources"],
-            "https://example.test/reads/library/#sources"
+            "https://example.test/reads/sources/"
         );
         assert_eq!(
             descriptor["collections"]["tags"],
-            "https://example.test/reads/library/#tags"
+            "https://example.test/reads/tags/"
         );
         assert_eq!(
             descriptor["collections"]["categories"],
-            "https://example.test/reads/library/#categories"
+            "https://example.test/reads/categories/"
         );
         assert_eq!(
             descriptor["discovery"]["sitemap"],
@@ -1360,21 +1384,21 @@ mod tests {
         assert_eq!(descriptor["url"], "./");
         assert_eq!(descriptor["source"]["config"], "aggr.toml");
         assert_eq!(descriptor["feeds"]["json"], "feed.json");
-        assert_eq!(descriptor["collections"]["library"], "library/");
-        assert_eq!(descriptor["collections"]["sources"], "library/#sources");
-        assert_eq!(descriptor["collections"]["tags"], "library/#tags");
+        assert_eq!(descriptor["collections"]["browse"], "browse/");
+        assert_eq!(descriptor["collections"]["sources"], "sources/");
+        assert_eq!(descriptor["collections"]["tags"], "tags/");
         assert!(descriptor["collections"].get("categories").is_none());
         assert!(descriptor["discovery"].get("sitemap").is_none());
     }
 
     #[test]
-    fn llms_inventory_points_collection_discovery_at_library() {
+    fn llms_inventory_points_to_collection_directories() {
         let inventory = llms_txt(&site());
-        assert!(inventory.contains("[Library](https://example.test/reads/library/)"));
-        assert!(inventory.contains("[Sources](https://example.test/reads/library/#sources)"));
-        assert!(inventory.contains("[Tags](https://example.test/reads/library/#tags)"));
-        assert!(inventory.contains("[Categories](https://example.test/reads/library/#categories)"));
-        assert!(!inventory.contains("[Sources](https://example.test/reads/sources/)"));
+        assert!(inventory.contains("[Browse](https://example.test/reads/browse/)"));
+        assert!(inventory.contains("[Sources](https://example.test/reads/sources/)"));
+        assert!(inventory.contains("[Tags](https://example.test/reads/tags/)"));
+        assert!(inventory.contains("[Categories](https://example.test/reads/categories/)"));
+        assert!(!inventory.contains("browse/#sources"));
     }
 
     #[test]

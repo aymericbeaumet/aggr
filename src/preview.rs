@@ -1,6 +1,8 @@
 //! Optional, bounded local article thumbnails. Publisher URLs never reach the browser.
 
-use std::collections::BTreeMap;
+mod pdf;
+
+use std::collections::{BTreeMap, VecDeque};
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use image::{DynamicImage, GenericImageView as _, ImageDecoder as _, ImageFormat, ImageReader};
 use scraper::{Html, Selector};
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, OnceCell, Semaphore};
 use tokio::time::Instant;
 use url::Url;
 
@@ -21,6 +23,8 @@ const MAX_INPUT_BYTES: usize = 5 * 1024 * 1024;
 const MAX_PIXELS: u64 = 16_000_000;
 const MAX_AXIS: u32 = 8192;
 const MAX_CANDIDATES: usize = 3;
+const MAX_ASSET_FALLBACKS: usize = 12;
+const MAX_CACHED_PREVIEWS: usize = 64;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,9 +59,27 @@ impl Thumbnail {
     }
 }
 
+#[derive(PartialEq, Eq)]
+struct CacheKey {
+    url: Url,
+    headers: Vec<(String, String)>,
+    master: Option<String>,
+    kind: PreviewKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PreviewKind {
+    Image,
+    Pdf,
+}
+
+type CachedPreview = Arc<OnceCell<Option<Thumbnail>>>;
+
 pub struct Fetcher {
     client: http::Client,
-    limit: Arc<Semaphore>,
+    download_limit: Arc<Semaphore>,
+    decode_limit: Arc<Semaphore>,
+    cache: Mutex<VecDeque<(CacheKey, CachedPreview)>>,
 }
 
 impl Fetcher {
@@ -69,7 +91,9 @@ impl Fetcher {
                 retries: 0,
                 ..FetchConfig::default()
             })?,
-            limit: Arc::new(Semaphore::new(2)),
+            download_limit: Arc::new(Semaphore::new(8)),
+            decode_limit: Arc::new(Semaphore::new(2)),
+            cache: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -81,8 +105,30 @@ impl Fetcher {
         source: &Source,
         assets: &[crate::media::Asset],
     ) -> Option<Thumbnail> {
+        if !source.previews {
+            return None;
+        }
         self.fetch_with_assets_timeout(candidates, source, assets, FETCH_TIMEOUT)
             .await
+    }
+
+    /// Render the first page of an explicitly configured PDF only when no preferred preview exists.
+    pub async fn fetch_document(&self, url: &Url, source: &Source) -> Option<Thumbnail> {
+        if !source.previews || !is_pdf_url(url) {
+            return None;
+        }
+        let url = safe_url(url.as_str(), None)?;
+        let candidate = Candidate {
+            url: url.to_string(),
+            alt: None,
+        };
+        tokio::time::timeout(
+            FETCH_TIMEOUT,
+            self.cached_candidate(&candidate, &url, source, None, PreviewKind::Pdf),
+        )
+        .await
+        .ok()
+        .flatten()
     }
 
     async fn fetch_with_assets_timeout(
@@ -94,13 +140,16 @@ impl Fetcher {
     ) -> Option<Thumbnail> {
         let candidates = candidates
             .iter()
+            .filter(|candidate| !crate::media::is_status_badge(&candidate.url))
             .take(MAX_CANDIDATES)
             .filter_map(|candidate| safe_url(&candidate.url, None).map(|url| (candidate, url)))
             .collect::<Vec<_>>();
         let deadline = Instant::now() + timeout;
         for (index, (candidate, url)) in candidates.iter().enumerate() {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let attempts = u32::try_from(candidates.len() - index).unwrap_or(1);
+            let attempts =
+                u32::try_from(candidates.len() - index + usize::from(!assets.is_empty()))
+                    .unwrap_or(1);
             let attempt_timeout = remaining / attempts;
             if attempt_timeout.is_zero() {
                 break;
@@ -111,24 +160,122 @@ impl Fetcher {
                 .map(|asset| asset.master_bytes.as_slice());
             if let Ok(Some(thumbnail)) = tokio::time::timeout(
                 attempt_timeout,
-                self.fetch_candidate(candidate, url, source, reusable),
+                self.cached_candidate(candidate, url, source, reusable, PreviewKind::Image),
             )
             .await
             {
                 return Some(thumbnail);
             }
         }
+        for asset in assets
+            .iter()
+            .filter(|asset| !crate::media::is_status_badge(&asset.source_url))
+            .take(MAX_ASSET_FALLBACKS)
+        {
+            let Some(url) = safe_url(&asset.source_url, None) else {
+                continue;
+            };
+            let candidate = Candidate {
+                url: url.to_string(),
+                alt: asset.alt.clone(),
+            };
+            let retained = std::iter::once(asset.master_bytes.as_slice()).chain(
+                asset
+                    .renditions
+                    .iter()
+                    .filter(|rendition| rendition.width >= 256 && rendition.height >= 32)
+                    .map(|rendition| rendition.bytes.as_slice()),
+            );
+            for bytes in retained {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return None;
+                }
+                if let Ok(Some(thumbnail)) = tokio::time::timeout(
+                    remaining,
+                    self.cached_candidate(
+                        &candidate,
+                        &url,
+                        source,
+                        Some(bytes),
+                        PreviewKind::Image,
+                    ),
+                )
+                .await
+                {
+                    return Some(thumbnail);
+                }
+            }
+        }
         None
     }
 
-    async fn fetch_candidate(
+    async fn cached_candidate(
         &self,
         candidate: &Candidate,
         url: &Url,
         source: &Source,
         reusable: Option<&[u8]>,
+        kind: PreviewKind,
     ) -> Option<Thumbnail> {
-        let permit = self.limit.clone().acquire_owned().await.ok()?;
+        if reusable.is_some_and(|bytes| bytes.len() > MAX_INPUT_BYTES) {
+            return None;
+        }
+        let key = CacheKey {
+            url: url.clone(),
+            headers: http::source_headers(source, url).to_vec(),
+            master: reusable.map(crate::model::sha1_hex),
+            kind,
+        };
+        let cell = {
+            let mut cache = self.cache.lock().await;
+            if let Some(index) = cache.iter().position(|(existing, _)| existing == &key) {
+                let entry = cache.remove(index)?;
+                let cell = entry.1.clone();
+                cache.push_back(entry);
+                Some(cell)
+            } else {
+                if cache.len() == MAX_CACHED_PREVIEWS
+                    && let Some(index) = cache.iter().position(|(_, cell)| cell.initialized())
+                {
+                    cache.remove(index);
+                }
+                if cache.len() < MAX_CACHED_PREVIEWS {
+                    let cell = Arc::new(OnceCell::new());
+                    cache.push_back((key, cell.clone()));
+                    Some(cell)
+                } else {
+                    None
+                }
+            }
+        };
+        let mut thumbnail = if let Some(cell) = cell {
+            let result = cell
+                .get_or_init(|| self.fetch_candidate(url, source, reusable, kind))
+                .await
+                .clone();
+            if result.is_none() {
+                self.cache
+                    .lock()
+                    .await
+                    .retain(|(_, entry)| !Arc::ptr_eq(entry, &cell));
+            }
+            result?
+        } else {
+            self.fetch_candidate(url, source, reusable, kind).await?
+        };
+        thumbnail.alt.clone_from(&candidate.alt);
+        Some(thumbnail)
+    }
+
+    async fn fetch_candidate(
+        &self,
+        url: &Url,
+        source: &Source,
+        reusable: Option<&[u8]>,
+        kind: PreviewKind,
+    ) -> Option<Thumbnail> {
+        let download_permit = self.download_limit.clone().acquire_owned().await.ok()?;
         let bytes = if let Some(bytes) = reusable {
             if bytes.len() > MAX_INPUT_BYTES {
                 return None;
@@ -149,17 +296,40 @@ impl Fetcher {
             };
             body.bytes
         };
-        let alt = candidate.alt.clone();
+        // Hold the download slot until a decoder is available, bounding queued image bytes.
+        let permit = self.decode_limit.clone().acquire_owned().await.ok()?;
+        drop(download_permit);
         tokio::task::spawn_blocking(move || {
             // A timed-out task is not cancellable. Its permit keeps all subsequent work bounded
             // until the decoder really exits.
             let _permit = permit;
-            thumbnail(&bytes, alt)
+            match kind {
+                PreviewKind::Image => thumbnail(&bytes, None),
+                PreviewKind::Pdf => pdf::thumbnail(&bytes, None),
+            }
         })
         .await
         .ok()?
         .ok()
     }
+}
+
+/// Shared document boundary for embedding, HTML-fetch bypass, and first-page previews.
+pub fn is_pdf_url(url: &Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return false;
+    }
+    url.path()
+        .to_ascii_lowercase()
+        .replace("%2e", ".")
+        .ends_with(".pdf")
+        || url.query_pairs().any(|(key, value)| {
+            key.eq_ignore_ascii_case("filename") && value.to_ascii_lowercase().ends_with(".pdf")
+        })
 }
 
 fn safe_url(value: &str, base: Option<&Url>) -> Option<Url> {
@@ -188,13 +358,34 @@ fn clean_alt(value: Option<&str>) -> Option<String> {
 pub fn candidates(explicit: &[Candidate], html: Option<&str>, base: &Url) -> Vec<Candidate> {
     let mut positions = BTreeMap::<String, usize>::new();
     let mut candidates = Vec::<Candidate>::new();
-    for candidate in explicit.iter().cloned().chain(
-        html.into_iter()
-            .flat_map(|html| html_candidates(html, base)),
-    ) {
+    let direct_image = base
+        .path()
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif"
+            )
+        })
+        .then(|| Candidate {
+            url: base.to_string(),
+            alt: None,
+        });
+    for candidate in explicit
+        .iter()
+        .cloned()
+        .chain(
+            html.into_iter()
+                .flat_map(|html| html_candidates(html, base)),
+        )
+        .chain(direct_image)
+    {
         let Some(url) = safe_url(&candidate.url, Some(base)).map(|url| url.to_string()) else {
             continue;
         };
+        if crate::media::is_status_badge(&url) {
+            continue;
+        }
         let alt = clean_alt(candidate.alt.as_deref());
         if let Some(index) = positions.get(&url).copied() {
             if candidates[index].alt.is_none() {
@@ -230,6 +421,7 @@ pub(crate) fn ordered_article_candidates(
         .chain(groups.metadata)
         .chain(extracted.map(|url| Candidate { url, alt: None }))
         .chain(groups.body)
+        .filter(|candidate| !crate::media::is_status_badge(&candidate.url))
         .collect()
 }
 
@@ -282,11 +474,22 @@ pub(crate) fn html_candidate_groups(html: &str, base: &Url) -> HtmlCandidateGrou
             _ => {}
         }
     }
-    let metadata = og.into_iter().chain(twitter).take(24).collect::<Vec<_>>();
-    let image_selector = ["article img", "main img", "body img"]
-        .into_iter()
-        .filter_map(|selector| Selector::parse(selector).ok())
-        .find(|selector| document.select(selector).next().is_some());
+    let mut metadata = og.into_iter().chain(twitter).take(24).collect::<Vec<_>>();
+    if let Ok(selector) = Selector::parse("script[type='application/ld+json']") {
+        for node in document.select(&selector) {
+            if let Ok(value) = serde_json::from_str(&node.inner_html()) {
+                video_thumbnails(&value, base, &mut metadata, 0);
+            }
+        }
+    }
+    let image_selector = [
+        "article img, article video[poster]",
+        "main img, main video[poster]",
+        "body img, body video[poster]",
+    ]
+    .into_iter()
+    .filter_map(|selector| Selector::parse(selector).ok())
+    .find(|selector| document.select(selector).next().is_some());
     let Some(image_selector) = image_selector else {
         return HtmlCandidateGroups {
             metadata,
@@ -305,21 +508,86 @@ pub(crate) fn html_candidate_groups(html: &str, base: &Url) -> HtmlCandidateGrou
             }) {
                 return None;
             }
-            let value = node
-                .value()
-                .attr("src")
-                .filter(|value| !value.trim().is_empty() && !value.starts_with("data:"))
-                .or_else(|| node.value().attr("data-src"))
-                .or_else(|| node.value().attr("data-lazy-src"))?;
+            let value = node.value().attr("poster").or_else(|| {
+                node.value()
+                    .attr("src")
+                    .filter(|value| !value.trim().is_empty() && !value.starts_with("data:"))
+                    .or_else(|| node.value().attr("data-src"))
+                    .or_else(|| node.value().attr("data-lazy-src"))
+            })?;
             let url = safe_url(value, Some(base))?;
             Some(Candidate {
                 url: url.to_string(),
-                alt: clean_alt(node.value().attr("alt")),
+                alt: clean_alt(
+                    node.value()
+                        .attr("alt")
+                        .or_else(|| node.value().attr("aria-label"))
+                        .or_else(|| node.value().attr("title")),
+                ),
             })
         })
         .take(body_limit)
         .collect();
     HtmlCandidateGroups { metadata, body }
+}
+
+fn video_thumbnails(
+    value: &serde_json::Value,
+    base: &Url,
+    output: &mut Vec<Candidate>,
+    depth: usize,
+) {
+    if depth > 16 || output.len() >= 24 {
+        return;
+    }
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                video_thumbnails(value, base, output, depth + 1);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let is_video = |kind: &serde_json::Value| {
+                kind.as_str().is_some_and(|kind| {
+                    matches!(
+                        kind,
+                        "VideoObject"
+                            | "https://schema.org/VideoObject"
+                            | "http://schema.org/VideoObject"
+                    )
+                })
+            };
+            if object.get("@type").is_some_and(|kind| {
+                is_video(kind)
+                    || kind
+                        .as_array()
+                        .is_some_and(|kinds| kinds.iter().any(is_video))
+            }) {
+                let values = object.get("thumbnailUrl").into_iter().flat_map(|value| {
+                    value
+                        .as_array()
+                        .map(Vec::as_slice)
+                        .unwrap_or(std::slice::from_ref(value))
+                });
+                for value in values {
+                    if output.len() >= 24 {
+                        break;
+                    }
+                    if let Some(url) = value.as_str().and_then(|value| safe_url(value, Some(base)))
+                    {
+                        output.push(Candidate {
+                            url: url.to_string(),
+                            alt: clean_alt(object.get("name").and_then(serde_json::Value::as_str)),
+                        });
+                    }
+                }
+            }
+            for value in object.values() {
+                video_thumbnails(value, base, output, depth + 1);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn thumbnail(bytes: &[u8], alt: Option<String>) -> Result<Thumbnail> {
@@ -450,6 +718,24 @@ mod tests {
     }
 
     #[test]
+    fn status_badges_never_displace_real_article_artwork() {
+        let base = Url::parse("https://github.com/user/repo").unwrap();
+        let badges = [Candidate {
+            url: "https://img.shields.io/badge/build-passing-green".into(),
+            alt: Some("Build".into()),
+        }];
+        let html = r#"<meta property="og:image" content="https://img.shields.io/badge/status-ok"><article><img src="https://github.com/user/repo/actions/workflows/build.yml/badge.svg"><img src="https://images.example/diagram.png"></article>"#;
+        let found = candidates(&badges, Some(html), &base);
+        assert_eq!(
+            found,
+            vec![Candidate {
+                url: "https://images.example/diagram.png".into(),
+                alt: None
+            }]
+        );
+    }
+
+    #[test]
     fn prioritizes_safe_feed_then_metadata_then_body_candidates() {
         let base = Url::parse("https://example.com/articles/post").unwrap();
         let explicit = vec![Candidate {
@@ -468,6 +754,54 @@ mod tests {
         );
         assert_eq!(found[0].alt.as_deref(), Some("Feed image"));
         assert_eq!(found[1].alt.as_deref(), Some("Article cover"));
+    }
+
+    #[test]
+    fn discovers_video_posters_and_structured_video_thumbnails() {
+        let base = Url::parse("https://example.com/articles/post").unwrap();
+        let html = r#"<script type="application/ld+json">{"@graph":[{"@type":["CreativeWork","VideoObject"],"name":"Video title","thumbnailUrl":["javascript:bad","/structured.jpg"]},{"@type":"Organization","thumbnailUrl":"/logo.jpg"}]}</script><article><video poster="/poster.jpg" title="Video poster"></video><img src="/body.png"></article>"#;
+        let found = candidates(&[], Some(html), &base);
+        assert_eq!(
+            found
+                .iter()
+                .map(|candidate| candidate.url.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "https://example.com/structured.jpg",
+                "https://example.com/poster.jpg",
+                "https://example.com/body.png"
+            ]
+        );
+        assert_eq!(found[0].alt.as_deref(), Some("Video title"));
+        assert_eq!(found[1].alt.as_deref(), Some("Video poster"));
+    }
+
+    #[test]
+    fn direct_raster_articles_supply_a_final_safe_candidate() {
+        let base = Url::parse("https://example.com/photo.JPEG?size=large#fragment").unwrap();
+        assert_eq!(
+            candidates(&[], None, &base),
+            [Candidate {
+                url: "https://example.com/photo.JPEG?size=large".into(),
+                alt: None
+            }]
+        );
+        assert!(
+            candidates(
+                &[],
+                None,
+                &Url::parse("https://example.com/paper.pdf").unwrap()
+            )
+            .is_empty()
+        );
+        assert!(
+            candidates(
+                &[],
+                None,
+                &Url::parse("https://example.com/unsafe.svg").unwrap()
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -706,6 +1040,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_previews_share_downloads_but_preserve_article_alt_text() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let network = server
+            .mock_async(|when, then| {
+                when.path("/shared.png");
+                then.status(200)
+                    .delay(Duration::from_millis(30))
+                    .body(png(64, 32, 255));
+            })
+            .await;
+        let config =
+            crate::config::Config::parse(&format!("[[sources]]\nurl={:?}\n", server.url("/feed")))
+                .unwrap();
+        let source = config.sources().unwrap().remove(0);
+        let first = [Candidate {
+            url: server.url("/shared.png"),
+            alt: Some("First article".into()),
+        }];
+        let second = [Candidate {
+            url: server.url("/shared.png"),
+            alt: Some("Second article".into()),
+        }];
+        let fetcher = Fetcher::new().unwrap();
+        let (first, second) = tokio::join!(
+            fetcher.fetch_with_assets(&first, &source, &[]),
+            fetcher.fetch_with_assets(&second, &source, &[])
+        );
+        assert_eq!(first.unwrap().alt.as_deref(), Some("First article"));
+        assert_eq!(second.unwrap().alt.as_deref(), Some("Second article"));
+        network.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn preview_cache_isolates_credentials_and_does_not_cache_failures() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let public = server
+            .mock_async(|when, then| {
+                when.path("/shared.png").header_missing("authorization");
+                then.status(200).body(png(64, 32, 255));
+            })
+            .await;
+        let private = server
+            .mock_async(|when, then| {
+                when.path("/shared.png").header("authorization", "private");
+                then.status(200).body(png(96, 48, 255));
+            })
+            .await;
+        let failed = server
+            .mock_async(|when, then| {
+                when.path("/retry.png");
+                then.status(500);
+            })
+            .await;
+        let config =
+            crate::config::Config::parse(&format!("[[sources]]\nurl={:?}\n", server.url("/feed")))
+                .unwrap();
+        let source = config.sources().unwrap().remove(0);
+        let mut authenticated = source.clone();
+        authenticated
+            .headers
+            .push(("authorization".into(), "private".into()));
+        let candidates = [Candidate {
+            url: server.url("/shared.png"),
+            alt: None,
+        }];
+        let retry = [Candidate {
+            url: server.url("/retry.png"),
+            alt: None,
+        }];
+        let fetcher = Fetcher::new().unwrap();
+        assert_eq!(
+            fetcher
+                .fetch_with_assets(&candidates, &source, &[])
+                .await
+                .unwrap()
+                .width,
+            64
+        );
+        assert_eq!(
+            fetcher
+                .fetch_with_assets(&candidates, &authenticated, &[])
+                .await
+                .unwrap()
+                .width,
+            96
+        );
+        assert!(
+            fetcher
+                .fetch_with_assets(&retry, &source, &[])
+                .await
+                .is_none()
+        );
+        failed.delete_async().await;
+        let recovered = server
+            .mock_async(|when, then| {
+                when.path("/retry.png");
+                then.status(200).body(png(64, 32, 255));
+            })
+            .await;
+        assert!(
+            fetcher
+                .fetch_with_assets(&retry, &source, &[])
+                .await
+                .is_some()
+        );
+        public.assert_calls_async(1).await;
+        private.assert_calls_async(1).await;
+        recovered.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
     async fn reuses_a_matching_article_master_without_downloading_it_again() {
         use httpmock::prelude::*;
 
@@ -749,6 +1196,141 @@ mod tests {
         assert_eq!((preview.width, preview.height), (256, 160));
         assert_eq!(preview.alt.as_deref(), Some("Cover"));
         network.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
+    async fn retained_media_fills_missing_previews_but_never_replaces_preferred_images() {
+        use httpmock::prelude::*;
+        let server = MockServer::start();
+        let preferred = server.mock(|when, then| {
+            when.path("/preferred.png");
+            then.status(200).body(png(96, 48, 255));
+        });
+        let failed = server.mock(|when, then| {
+            when.path("/failed.png");
+            then.status(404);
+        });
+        let existing = server.mock(|when, then| {
+            when.path("/existing.png");
+            then.status(500);
+        });
+        let config =
+            crate::config::Config::parse(&format!("[[sources]]\nurl={:?}", server.url("/feed")))
+                .unwrap();
+        let source = config.sources().unwrap().remove(0);
+        let asset = crate::media::prepare_asset(
+            &crate::media::Candidate {
+                url: Url::parse(&server.url("/existing.png")).unwrap(),
+                alt: Some("Existing media".into()),
+            },
+            png(640, 400, 255),
+            &crate::media::MediaLimits::default(),
+        )
+        .unwrap();
+        let fetcher = Fetcher::new().unwrap();
+        let candidate = |path: &str| Candidate {
+            url: server.url(path),
+            alt: Some("Preferred cover".into()),
+        };
+        let preview = fetcher
+            .fetch_with_assets(
+                &[candidate("/preferred.png")],
+                &source,
+                std::slice::from_ref(&asset),
+            )
+            .await
+            .unwrap();
+        assert_eq!((preview.width, preview.height), (96, 48));
+        assert_eq!(preview.alt.as_deref(), Some("Preferred cover"));
+        let fallback = fetcher
+            .fetch_with_assets(
+                &[candidate("/failed.png")],
+                &source,
+                std::slice::from_ref(&asset),
+            )
+            .await
+            .unwrap();
+        assert_eq!((fallback.width, fallback.height), (256, 160));
+        assert_eq!(fallback.alt.as_deref(), Some("Existing media"));
+
+        let mut oversized = asset.clone();
+        oversized.master_bytes = vec![0; MAX_INPUT_BYTES + 1];
+        let rendition = fetcher
+            .fetch_with_assets(&[], &source, &[oversized])
+            .await
+            .unwrap();
+        assert_eq!((rendition.width, rendition.height), (256, 160));
+
+        let mut broken = asset.clone();
+        broken.master_bytes = b"invalid cached image".to_vec();
+        broken.renditions.clear();
+        assert!(
+            fetcher
+                .fetch_with_assets(&[], &source, std::slice::from_ref(&broken))
+                .await
+                .is_none()
+        );
+        assert!(
+            fetcher
+                .fetch_with_assets(&[], &source, &[broken, asset])
+                .await
+                .is_some()
+        );
+        let mut disabled = source.clone();
+        disabled.previews = false;
+        assert!(
+            fetcher
+                .fetch_with_assets(&[candidate("/preferred.png")], &disabled, &[])
+                .await
+                .is_none()
+        );
+        preferred.assert_calls(1);
+        failed.assert_calls(1);
+        existing.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn pdf_previews_share_bounded_downloads_and_respect_disabled_previews() {
+        use httpmock::prelude::*;
+        let server = MockServer::start();
+        let document = server.mock(|when, then| {
+            when.path("/download")
+                .query_param("filename", "Paper One.PDF")
+                .header("authorization", "reader-token");
+            then.status(200)
+                .header("content-type", "application/pdf")
+                .body(pdf::test_pdf(612, 792));
+        });
+        let invalid = server.mock(|when, then| {
+            when.path("/broken.pdf");
+            then.status(200).body("not a PDF");
+        });
+        let config = crate::config::Config::parse(&format!(
+            "[[sources]]\nurl={:?}\nheaders={{Authorization='reader-token'}}",
+            server.url("/feed")
+        ))
+        .unwrap();
+        let source = config.sources().unwrap().remove(0);
+        let fetcher = Fetcher::new().unwrap();
+        let url = Url::parse(&server.url("/download?filename=Paper%20One.PDF")).unwrap();
+        let (first, second) = tokio::join!(
+            fetcher.fetch_document(&url, &source),
+            fetcher.fetch_document(&url, &source)
+        );
+        let first = first.unwrap();
+        assert_eq!(first.bytes, second.unwrap().bytes);
+        assert!(first.width <= 256 && first.height <= 256);
+        assert!(
+            fetcher
+                .fetch_document(&Url::parse(&server.url("/broken.pdf")).unwrap(), &source)
+                .await
+                .is_none()
+        );
+        let mut disabled = source.clone();
+        disabled.previews = false;
+        assert!(fetcher.fetch_document(&url, &disabled).await.is_none());
+        document.assert_calls(1);
+        invalid.assert_calls(1);
     }
 
     #[tokio::test]

@@ -16,7 +16,7 @@ const ARTICLE_NAMESPACE: &str = "articles-v1";
 const RENDER_NAMESPACE: &str = "render-v1";
 const RENDER_KEY_FILE: &str = ".aggr-build-key";
 /// Bump when article extraction semantics change. Raw responses remain reusable across bumps.
-const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-2";
+const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-6";
 const MAX_ARTICLE_METADATA_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_ARTICLE_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXTRACTED_ARTICLE_BYTES: usize = 16 * 1024 * 1024;
@@ -115,27 +115,36 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
-fn render_implementation_sources() -> [(&'static str, &'static str); 19] {
+fn render_implementation_sources() -> [(&'static str, &'static str); 28] {
     [
         ("config", include_str!("config.rs")),
+        ("preferences", include_str!("config/preferences.rs")),
+        ("repository-url", include_str!("config/repository_url.rs")),
         ("source-entries", include_str!("config/source_entries.rs")),
         ("source-formats", include_str!("config/import_formats.rs")),
         ("source-graph", include_str!("config/import_graph.rs")),
         ("defaults", include_str!("../config.default.toml")),
         ("content", include_str!("content.rs")),
+        ("content-highlight", include_str!("content_highlight.rs")),
         ("media", include_str!("media.rs")),
         ("model", include_str!("model.rs")),
         ("youtube", include_str!("sources/youtube.rs")),
         ("preview", include_str!("preview.rs")),
+        ("pdf-preview", include_str!("preview/pdf.rs")),
         ("store", include_str!("store/mod.rs")),
         ("frontmatter", include_str!("store/frontmatter.rs")),
         ("site", include_str!("site/mod.rs")),
-        ("derived", include_str!("site/derived.rs")),
         ("context", include_str!("site/context.rs")),
+        ("display", include_str!("site/display.rs")),
+        ("document", include_str!("site/document.rs")),
+        ("interactive", include_str!("site/interactive.rs")),
+        ("native-media", include_str!("site/native_media.rs")),
+        ("item-type", include_str!("site/item_type.rs")),
         ("outputs", include_str!("site/outputs.rs")),
         ("pagefind", include_str!("site/pagefind.rs")),
         ("related", include_str!("site/related.rs")),
         ("render", include_str!("site/render.rs")),
+        ("threads", include_str!("threads.rs")),
     ]
 }
 

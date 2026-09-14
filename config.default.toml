@@ -21,9 +21,6 @@ items_per_page = 50
 max_items = 5000
 # Entries older than this leave the home feed but remain in archive pages.
 max_age_days = 365
-# Legacy compatibility knob. Source/category/tag archives now render complete pages; use
-# `[store]` retention below to bound the database itself.
-max_stubs = 20000
 # "owner/repo" for permalinks; auto-detected from $GITHUB_REPOSITORY in Actions.
 # repository = "owner/repo"
 # Public URL used by `aggr build --release` (the workflow passes it automatically for
@@ -33,7 +30,30 @@ max_stubs = 20000
 out = "_site"
 # In a secure context, emit install metadata and cache a bounded offline reading set.
 pwa = true
-# Newest item pages cached ahead of time for offline reading (the feed and assets always are).
+
+# Initial reader settings. Every preference and its default is documented here.
+# Each visitor's saved preferences override these defaults; Reset restores these site values.
+[site.preferences]
+theme = "auto" # auto, light, dark, sepia
+date_format = "relative" # relative, iso, local, local-time
+text_size = "default" # default, large, largest
+reading_width = "standard" # narrow, standard, wide
+font_family = "sans" # sans, serif, mono
+line_spacing = "standard" # compact, standard, relaxed
+paragraph_spacing = "standard" # compact, standard, relaxed
+paragraph_indent = false
+text_align = "left" # left, justify
+letter_spacing = "normal" # normal, wide
+word_spacing = "normal" # normal, wide
+density = "compact" # compact, comfortable
+thumbnails = "show" # show, hide
+feed_page_size = 50 # 10, 25, 50
+motion = "auto" # auto, off
+single_key_shortcuts = true
+scroll_amount = 10 # 1–100 lines for d/u, capped at half the available viewport
+# Recent-article download count; 0 disables automatic downloads, maximum 1000.
+# Positive values also save the complete archive search index; only the newest N
+# article pages and retained images are available to read offline.
 offline_items = 30
 
 # Optional public identity for Schema.org metadata. `type` is "person" or "organization".
@@ -98,20 +118,23 @@ content = "heavy"
 # Preview failures never prevent an article from being retained. Enabled mirrored previews reuse
 # their existing local bytes without contacting the publisher.
 previews = true
-# Archive safe raster images referenced by new articles. The exact publisher bytes remain the
-# fallback; responsive derivatives use lossless encoding and failures keep the publisher URL.
+# Archive article images and repair missing copies during ordinary sync/build/dev, including
+# retained items absent from the latest feed. Existing local masters are reused. Failed image
+# requests warn and retry after a one-hour backoff; exact raster originals remain the fallback.
+# SVG diagrams are converted to safe local PNGs with no external resources.
+# Responsive copies use lossless encoding; every local image gets an inline ThumbHash preview.
 images = true
 
 # Each table's `url` names one or more resources: websites, RSS/Atom/JSON feeds, aggr TOML,
 # OPML subscriptions, or newline-separated URL lists. Resources can be local paths or remote
 # URLs; aggr detects the content automatically. Accepts a string, multiline string, or array of
-# strings (including multiline strings): split into lines, trim whitespace, discard empty lines.
+# strings (including multiline strings): split lines, strip trailing " #" comments, trim, discard blanks.
+# Hashes without a preceding space remain part of the URL.
 # Options on the table apply to every expanded source. Place complete [[sources]] tables between
 # any other sections. Use separate tables for groups. Normal website URLs discover feeds and
 # conservatively discover article cards when no feed is available.
 # [[sources]]
 # url = "https://blog.rust-lang.org"
-# type = "feed"              # optional; the auto-discovering web source is the default
 # name = "Rust Blog"          # display name; the feed title when unset
 # slug = "rust-blog"          # directory under items/; derived from name or url when unset
 # category = "rust"           # optional; an item belongs to at most one category
@@ -135,17 +158,23 @@ images = true
 # labels = ["science"]
 
 # Collections expand at this position; a feed document registers one source. Local paths resolve
-# relative to the file that names them. Local and GitHub wildcards work; a bare GitHub repository
-# URL implies its aggr.toml. Source options become defaults for expanded sources that do not set
+# relative to the file that names them. Local and GitHub wildcards work; name aggr.toml explicitly
+# when importing subscriptions from a repository. Bare repository URLs import retained articles. Source options become defaults for expanded sources that do not set
 # their own. Invalid, repeated and cyclic resources warn and are skipped. Remote collections may
 # reference relative resources on the same origin (and GitHub repository); broader remote chains
 # require `[fetch] allow_remote_source_chains` in this root config.
 # [[sources]]
 # url = ["./aggr-ai.toml", "./subscriptions.opml", "./feeds.txt"]
 # category = "ai"
+# Remote .toml/.opml/.txt URLs and GitHub config paths also expand automatically.
+# Ordinary feed/page URLs are fetched only by sync, never while reading configuration.
+# Mark an extensionless subscription endpoint explicitly; this flag does not pass to its sources.
+# [[sources]]
+# url = "https://example.com/subscriptions"
+# collection = true
 # [[sources]]
 # url = """
-# https://github.com/owner/aggr-instance
+# https://github.com/owner/aggr-instance/blob/main/aggr.toml
 # https://example.com/subscriptions.opml
 # """
 # GitHub requests automatically use $GITHUB_TOKEN or $GH_TOKEN when present. Cross-repository
@@ -155,9 +184,8 @@ images = true
 
 # Another aggr repository: its data branch is mirrored and its items flow into this site.
 # [[sources]]
-# type = "aggr"
-# repo = "friend/reads"       # GitHub shorthand; mutually exclusive with `url`
-# url = "https://host/x/reads.git" # full git URL alternative to `repo`
+# url = "https://github.com/friend/reads" # git@github.com:friend/reads.git and SSH also work
+# Alternative URL: git@github.com:friend/reads.git or https://host/x/reads.git
 # branch = "aggr"             # its data branch
 # sources = []                # only these of its source slugs; all when empty
 # limit = 200                 # optional newest-item limit; omitted imports every retained item

@@ -47,7 +47,7 @@ async fn run_prevalidated(project: &Project, args: &BuildArgs) -> Result<Summary
     };
     let config_sha = project.config_sha();
     let cache_dir = project.build_cache_dir()?;
-    let store = Store::open(&data_dir);
+    let store = Store::open(&data_dir).with_image_cache(&cache_dir);
     let now = Utc::now();
     let generation = site::render_generation(&store.items()?, &project.config.site, now);
     let discussions = if args.data_ref.is_some() {
@@ -127,7 +127,7 @@ pub fn run_ephemeral(
     cache_dir: &Path,
     discussions: crate::discussions::ResolutionSet,
 ) -> Result<Summary> {
-    let store = Store::open(data_dir);
+    let store = Store::open(data_dir).with_image_cache(cache_dir);
     let now = Utc::now();
     let generation = site::render_generation(&store.items()?, &project.config.site, now);
     let info = BuildInfo {

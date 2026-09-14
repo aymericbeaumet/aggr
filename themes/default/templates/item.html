@@ -19,16 +19,26 @@
 <article class="item h-entry" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}"{% if item.previous_article %} data-previous-url="{{ item.previous_article.url | url_for }}"{% endif %}{% if item.next_article %} data-next-url="{{ item.next_article.url | url_for }}"{% endif %}>
   <a class="u-uid" href="{{ item.url | url_for }}" hidden></a>
   <header class="itemhead">
-    <h1 class="p-name" tabindex="-1"><span class="itemhead-title">{{ item.title }}</span></h1>
+    <h1 class="p-name" tabindex="-1"><span class="itemhead-title">{% for word in item.title | split(' ') %}{% if not loop.first %} {% endif %}{% if '/' in word %}<span class="itemhead-title-term">{{ word }}</span>{% else %}{{ word }}{% endif %}{% endfor %}</span></h1>
     {% include "_metadata.html" %}
-    {% if item.labels %}<div class="item-tags" aria-label="Topics"><div class="item-tags-inner">{% for label in item.labels %}<a class="tag p-category" rel="tag" href="{{ ('tags/' ~ (label | slug) ~ '/') | url_for }}">#{{ label }}</a>{% endfor %}</div></div>{% endif %}
+    {% if item.labels %}<div class="item-tags" aria-label="Topics"><div class="item-tags-inner">{% for label in item.labels %}<a class="tag p-category" rel="tag" href="{{ (label | slug) | facet_url('tag') }}">#{{ label }}</a>{% endfor %}</div></div>{% endif %}
+    <span class="itemhead-progress" aria-hidden="true"></span>
     <span class="itemhead-fade" aria-hidden="true"></span>
   </header>
-  {% if item.content == 'none' and not item.body_html %}
+  {% if item.resources %}<nav class="article-resources" aria-label="Article resources"><span class="article-resources-label">Resources</span>{% for resource in item.resources %}<a href="{{ resource.url }}" title="{{ resource.url }}" target="_blank" rel="noopener noreferrer">{{ resource.label }} <span aria-hidden="true">↗</span></a>{% endfor %}</nav>{% endif %}
+  {% if item.content == 'none' and not item.body_html and not item.video and not item.document and not item.native_media and not item.interactive %}
   <p class="empty">This source publishes titles only — <a href="{{ item.link }}" title="{{ item.link }}" target="_blank" rel="noopener noreferrer">open the original</a>.</p>
   {% endif %}
-  {% if item.video %}
-  <div class="video-player" data-video-provider="{{ item.video.provider }}">
+  {% if item.document %}
+  <figure class="document-reader" aria-label="PDF document">
+    <div class="document-frame media-frame"{% if item.preview %} data-thumbhash="{{ item.preview.placeholder.hash }}" style="--image-placeholder: {{ item.preview.color }}; --image-preview: url('{{ item.preview.placeholder.data_url }}')"{% endif %}>
+    <span class="document-placeholder" aria-hidden="true"><svg viewBox="0 0 36 48"><path d="M5 2h17l9 9v35H5zM22 2v10h9M11 23h14M11 29h14M11 35h10"/></svg>PDF document</span>
+    <embed class="document-viewer" src="{{ item.document.url }}" type="application/pdf" title="{{ item.title }} — PDF" width="768" height="720">
+    </div>
+    <figcaption><a href="{{ item.document.url }}" target="_blank" rel="noopener noreferrer" aria-label="Open PDF: {{ item.title }}">Open PDF ↗</a></figcaption>
+  </figure>
+  {% elif item.video %}
+  <div class="video-player" data-video-provider="{{ item.video.provider }}"{% if item.metadata.consumption.seconds %} data-duration-seconds="{{ item.metadata.consumption.seconds }}"{% endif %}{% if item.preview %} data-thumbhash="{{ item.preview.placeholder.hash }}" style="--image-placeholder: {{ item.preview.color }}; --image-preview: url('{{ item.preview.placeholder.data_url }}'); background-color: var(--image-placeholder)"{% endif %}>
     <a class="video-preview" data-video-embed="{{ item.video.embed_url }}"{% if item.video.requires_parent %} data-video-parent{% endif %} href="{{ item.link }}" title="{{ item.link }}" target="_blank" rel="noopener noreferrer" aria-label="Play {{ item.title }} on {{ item.video.title }}">
       {% if item.article_preview %}
       <img src="{{ item.article_preview.url | url_for }}" srcset="{{ item.article_preview.srcset }}" sizes="(max-width: 48rem) 100vw, 48rem" width="{{ item.article_preview.width }}" height="{{ item.article_preview.height }}" alt="" decoding="async" fetchpriority="high">
@@ -40,33 +50,67 @@
       <span class="video-preview-play" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>
     </a>
   </div>
+  <div class="media-timing" data-media-timing></div>
+  {% elif item.native_media %}
+  {% if item.native_media.kind == 'video' %}
+  <div class="native-video media-frame"{% if item.preview %} data-thumbhash="{{ item.preview.placeholder.hash }}" style="--image-preview: url('{{ item.preview.placeholder.data_url }}')"{% endif %}>
+    <video controls playsinline preload="none"{% if item.metadata.consumption.seconds %} data-duration-seconds="{{ item.metadata.consumption.seconds }}"{% endif %} src="{{ item.native_media.url }}" aria-label="{{ item.title }}" width="1280" height="720"{% if item.preview %} poster="{{ item.preview.url | url_for }}"{% endif %}>
+      <a href="{{ item.native_media.url }}" target="_blank" rel="noopener noreferrer">Open video</a>
+    </video>
+  </div>
+  <div class="media-timing" data-media-timing></div>
+  {% else %}
+  <div class="native-audio{% if item.preview %} has-artwork{% endif %}" data-audio-player data-audio-component{% if item.preview %} data-thumbhash="{{ item.preview.placeholder.hash }}" style="--image-preview: url('{{ item.preview.placeholder.data_url }}')"{% endif %}>
+    {% if item.preview %}<div class="audio-cover"><img class="audio-artwork" src="{{ item.preview.url | url_for }}" alt="" loading="lazy" decoding="async"></div>{% endif %}
+    <div class="audio-panel">
+      <div class="audio-heading">
+        <div><strong>Listen</strong><p class="audio-status" data-audio-status role="status" aria-live="polite">Ready when you are</p></div>
+      </div>
+      <audio controls preload="none"{% if item.metadata.consumption.seconds %} data-duration-seconds="{{ item.metadata.consumption.seconds }}"{% endif %} src="{{ item.native_media.url }}" aria-label="{{ item.title }}">
+        <a href="{{ item.native_media.url }}" target="_blank" rel="noopener noreferrer">Open audio</a>
+      </audio>
+    </div>
+  </div>
+  {% endif %}
+  {% elif item.interactive %}
+  <figure class="interactive-reader" aria-label="Interactive page">
+    <div class="interactive-frame media-frame">
+      <a class="interactive-preview" data-interactive-embed="{{ item.interactive.source_url }}" href="{{ item.interactive.source_url }}" target="_blank" rel="noopener noreferrer" aria-label="Explore {{ item.title }}">
+        <span>Open interactive page ↗</span>
+      </a>
+    </div>
+    <figcaption><a href="{{ item.interactive.source_url }}" target="_blank" rel="noopener noreferrer">Open original ↗</a></figcaption>
+  </figure>
   {% elif item.article_preview %}
-  <figure class="article-lead">
+  <figure class="article-lead media-frame" data-thumbhash="{{ item.article_preview.placeholder.hash }}" style="--media-ratio: {{ item.article_preview.width }} / {{ item.article_preview.height }}; --image-placeholder: {{ item.article_preview.color }}; --image-preview: url('{{ item.article_preview.placeholder.data_url }}')">
     <img src="{{ item.article_preview.url | url_for }}" srcset="{{ item.article_preview.srcset }}" sizes="(max-width: 48rem) 100vw, 48rem" width="{{ item.article_preview.width }}" height="{{ item.article_preview.height }}" alt="" decoding="async" fetchpriority="high">
   </figure>
   {% endif %}
   <div class="body e-content">{{ item.body_html | safe }}</div>
-  {% if item.next_article or item.recommended_articles %}
+  {% set discover = namespace(articles=[]) %}
+  {% for article in item.recommended_articles %}
+  {% if (not item.previous_article or article.url != item.previous_article.url) and (not item.next_article or article.url != item.next_article.url) %}{% set discover.articles = discover.articles + [article] %}{% endif %}
+  {% endfor %}
+  {% if item.next_article or discover.articles %}
   <footer class="article-footer">
-    <h2 class="article-more-heading" id="continue-reading-title">Continue reading</h2>
-    <nav class="article-more" aria-labelledby="continue-reading-title">
-      {% if item.next_article %}
-      <a class="article-more-link" rel="next" href="{{ item.next_article.url | url_for }}">
-        <span class="article-more-kicker">Coming next</span>
-        <span class="article-more-title">{{ item.next_article.title }}</span>
-        <span class="article-more-domain" title="{{ item.next_article.source_title }}">{% if item.next_article.domain %}{{ item.next_article.domain }} · {% endif %}<time datetime="{{ item.next_article.date }}" title="{{ item.next_article.date }}">{{ item.next_article.date | date }}</time></span>
-      </a>
-      {% endif %}
-      {% for article in item.recommended_articles %}
-      {% if (not item.previous_article or article.url != item.previous_article.url) and (not item.next_article or article.url != item.next_article.url) %}
-      <a class="article-more-link" href="{{ article.url | url_for }}">
-        <span class="article-more-kicker">Discover more</span>
-        <span class="article-more-title">{{ article.title }}</span>
-        <span class="article-more-domain" title="{{ article.source_title }}">{% if article.domain %}{{ article.domain }} · {% endif %}<time datetime="{{ article.date }}" title="{{ article.date }}">{{ article.date | date }}</time></span>
-      </a>
-      {% endif %}
-      {% endfor %}
-    </nav>
+    {% if item.next_article %}
+    <section class="article-more-section" aria-labelledby="coming-next-title">
+      <h2 class="article-more-heading" id="coming-next-title">Coming next</h2>
+      <nav class="article-more" aria-labelledby="coming-next-title">
+        {% with item = item.next_article, coming_next = true %}{% include "_related_item.html" %}{% endwith %}
+      </nav>
+    </section>
+    {% endif %}
+    {% if discover.articles %}
+    <section class="article-more-section" aria-labelledby="discover-more-title">
+      <h2 class="article-more-heading" id="discover-more-title">Discover more</h2>
+      <nav class="article-more" aria-labelledby="discover-more-title">
+        {% for article in discover.articles %}
+        {% with item = article, coming_next = false %}{% include "_related_item.html" %}{% endwith %}
+        {% endfor %}
+      </nav>
+    </section>
+    {% endif %}
   </footer>
   {% endif %}
 </article>

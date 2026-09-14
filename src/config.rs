@@ -2,8 +2,11 @@
 
 mod import_formats;
 mod import_graph;
+mod preferences;
+pub(crate) mod repository_url;
 mod source_entries;
 
+pub use preferences::ReaderPreferences;
 use source_entries::deserialize_sources;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,7 +53,6 @@ pub struct SiteConfig {
     /// Items shown in the recent home feed. Source/category/tag archives remain complete.
     pub max_items: usize,
     pub max_age_days: u32,
-    pub max_stubs: usize,
     /// `owner/repo`; defaults to `$GITHUB_REPOSITORY` when unset.
     pub repository: Option<String>,
     /// Public URL of the site (`--release` builds). A custom domain here also writes `CNAME`.
@@ -58,8 +60,8 @@ pub struct SiteConfig {
     pub out: PathBuf,
     /// Emit install metadata and cache a bounded offline set in a secure context.
     pub pwa: bool,
-    /// Newest item pages the service worker caches ahead of time for offline reading.
-    pub offline_items: usize,
+    /// Initial browser preferences; saved reader choices take precedence.
+    pub preferences: ReaderPreferences,
     /// Optional public identity attached to the site's Schema.org metadata.
     pub identity: Option<SiteIdentityConfig>,
     /// Free-form values exposed to templates as `site.params`.
@@ -94,12 +96,11 @@ impl Default for SiteConfig {
             items_per_page: 50,
             max_items: 5000,
             max_age_days: 365,
-            max_stubs: 20_000,
             repository: None,
             url: None,
             out: PathBuf::from("_site"),
             pwa: true,
-            offline_items: 30,
+            preferences: ReaderPreferences::default(),
             identity: None,
             params: toml::Table::new(),
         }
@@ -157,7 +158,6 @@ impl<'de> Deserialize<'de> for NetworkConfig {
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkProvider {
-    #[serde(alias = "hn")]
     HackerNews,
     Reddit,
     X,
@@ -225,7 +225,6 @@ pub struct FetchConfig {
     pub max_body_bytes: usize,
     pub retries: u32,
     /// Allow a remote collection to expand collections outside its own origin or repository.
-    #[serde(alias = "allow_remote_include_chains")]
     pub allow_remote_source_chains: bool,
     /// `heavy` downloads and extracts original article pages; `light` trusts feed content.
     pub content: ContentMode,
@@ -265,9 +264,12 @@ pub enum ContentMode {
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SourceConfig {
-    #[serde(rename = "type")]
-    pub kind: Option<String>,
+    /// Internal dispatch hint after URL and environment resolution.
+    #[serde(skip)]
+    pub(crate) kind: Option<String>,
     pub url: Option<String>,
+    /// Inspect an opaque URL as a subscription collection; applies to this entry only.
+    pub collection: bool,
     /// Local feed documents are produced only by imports, never by deserializing a URL.
     #[serde(skip)]
     pub(crate) local_feed: Option<PathBuf>,
@@ -287,13 +289,11 @@ pub struct SourceConfig {
     pub previews: Option<bool>,
     /// Override `[fetch] images` for new items from this source.
     pub images: Option<bool>,
-    /// `type = "aggr"`: `owner/repo` on GitHub (alternative to a full git `url`).
-    pub repo: Option<String>,
-    /// `type = "aggr"`: data branch of that repository.
+    /// Repository source: data branch of that repository.
     pub branch: Option<String>,
-    /// `type = "aggr"`: only take items from these of its sources (all when empty).
+    /// Repository source: only take items from these of its sources (all when empty).
     pub sources: Vec<String>,
-    /// `type = "aggr"`: optional newest-item limit; omitted imports every retained item.
+    /// Repository source: optional newest-item limit; omitted imports every retained item.
     pub limit: Option<usize>,
 }
 
@@ -401,6 +401,7 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        self.site.preferences.validate()?;
         if self
             .site
             .description
@@ -652,7 +653,6 @@ fn describe(raw: &SourceConfig) -> String {
 
 fn validate_source_options(raw: &SourceConfig) -> Result<()> {
     let aggr_keys = [
-        ("repo", raw.repo.is_some()),
         ("branch", raw.branch.is_some()),
         ("sources", !raw.sources.is_empty()),
         ("limit", raw.limit.is_some()),
@@ -660,12 +660,12 @@ fn validate_source_options(raw: &SourceConfig) -> Result<()> {
     let only = |owner: &str, keys: &[(&str, bool)]| -> Result<()> {
         for (key, set) in keys {
             if *set {
-                bail!("`{key}` only applies to `type = \"{owner}\"` sources");
+                bail!("`{key}` only applies to {owner} repository sources");
             }
         }
         Ok(())
     };
-    match raw.kind.as_deref().unwrap_or("feed") {
+    match source_kind(raw) {
         "feed" => only("aggr", &aggr_keys)?,
         "aggr" => {
             if raw.limit == Some(0) {
@@ -683,6 +683,16 @@ fn validate_source_options(raw: &SourceConfig) -> Result<()> {
     Ok(())
 }
 
+fn source_kind(raw: &SourceConfig) -> &str {
+    raw.kind.as_deref().unwrap_or_else(|| {
+        if raw.url.as_deref().is_some_and(repository_url::inferred) {
+            "aggr"
+        } else {
+            "feed"
+        }
+    })
+}
+
 fn resolve_source(
     raw: &SourceConfig,
     default_content: ContentMode,
@@ -690,7 +700,20 @@ fn resolve_source(
     default_images: bool,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Source> {
-    let kind = raw.kind.as_deref().unwrap_or("feed");
+    let inferred;
+    let raw = if raw.kind.is_none()
+        && let Some(url) = raw.url.as_deref()
+        && repository_url::inferred(&expand_env(url, env)?)
+    {
+        inferred = SourceConfig {
+            kind: Some("aggr".into()),
+            ..raw.clone()
+        };
+        &inferred
+    } else {
+        raw
+    };
+    let kind = source_kind(raw);
     let identity = source_identity(raw, kind);
     validate_source_options(raw)?;
     let engine = match kind {
@@ -702,21 +725,10 @@ fn resolve_source(
             },
         },
         "aggr" => {
-            let url = match (&raw.repo, &raw.url) {
-                (Some(repo), None) => {
-                    let repo = expand_env(repo, env)?;
-                    if repo.split('/').filter(|part| !part.is_empty()).count() != 2
-                        || repo.contains("://")
-                    {
-                        bail!("`repo` must be `owner/repo`, got {repo:?}");
-                    }
-                    Url::parse(&format!("https://github.com/{}", repo.trim_matches('/')))
-                        .context("building the GitHub URL")?
-                }
-                (None, Some(_)) => http_url(raw, env)?,
-                (Some(_), Some(_)) => bail!("set either `repo` or `url`, not both"),
-                (None, None) => bail!("`repo` (owner/repo) or `url` (git URL) is required"),
-            };
+            let url = repository_url::parse(&expand_env(
+                raw.url.as_deref().context("`url` is required")?,
+                env,
+            )?)?;
             Engine::Aggr {
                 url,
                 branch: raw.branch.clone().unwrap_or_else(|| "aggr".into()),
@@ -778,9 +790,12 @@ fn resolve_source(
             .and_then(crate::model::normalize_category),
         labels: crate::model::normalize_labels(&raw.labels),
         identity,
-        public_url: effective_url
-            .filter(|url| matches!(url.scheme(), "http" | "https"))
-            .map(|url| public_url(url, !persist_endpoint)),
+        public_url: effective_url.and_then(|url| match &engine {
+            Engine::Aggr { .. } => repository_url::public(url, !persist_endpoint),
+            Engine::Feed { .. } => {
+                matches!(url.scheme(), "http" | "https").then(|| public_url(url, !persist_endpoint))
+            }
+        }),
         persist_endpoint,
         headers,
         html: raw.html.unwrap_or(true),
@@ -801,11 +816,18 @@ fn source_identity(raw: &SourceConfig, kind: &str) -> String {
         .map(|(name, value)| format!("{name}:{value}"))
         .collect::<Vec<_>>()
         .join("\n");
+    let repository = (kind == "aggr")
+        .then(|| raw.url.as_deref().and_then(repository_url::identity))
+        .flatten();
     crate::model::sha1_hex(format!(
-        "source-v2\0{kind}\0{}\0{}\0{}\0{}\0{headers}",
-        raw.url.as_deref().unwrap_or_default(),
-        raw.repo.as_deref().unwrap_or_default(),
-        raw.branch.as_deref().unwrap_or_default(),
+        "source-v2\0{kind}\0{}\0\0{}\0{}\0{headers}",
+        repository
+            .as_deref()
+            .or(raw.url.as_deref())
+            .unwrap_or_default(),
+        raw.branch
+            .as_deref()
+            .unwrap_or(if kind == "aggr" { "aggr" } else { "" }),
         raw.sources.join(",")
     ))
 }
@@ -1036,6 +1058,8 @@ labels = ["#Rust", "RUST", "Generative AI"]
                 r#"[" https://one.example/feed#part ", "", "https://two.example/"]"#,
                 r#"[" \nhttps://one.example/feed#part\n https://two.example/\n", " "]"#,
                 "'''\n  https://one.example/feed#part\n\n  https://two.example/\n'''",
+                "'''\n  https://one.example/feed#part # first\n # comment\n  https://two.example/ # second\n'''",
+                r#"["https://one.example/feed#part # first", "https://two.example/ # second"]"#,
             ] {
                 let text =
                     format!("[[sources]]\n{key}={value}\ncategory='AI'\nlabels=['research']");
@@ -1123,7 +1147,6 @@ images = false
             let key = "url";
             for invalid in [
                 r##"#[category="ai"]"##,
-                r##"https://one.example/ #[category="ai"]"##,
                 "https://one.example/ https://two.example/",
                 "file:///tmp/feed.xml",
                 "ftp://example.com/feed",
@@ -1150,17 +1173,87 @@ images = false
     }
 
     #[tokio::test]
-    async fn legacy_include_and_remote_chain_setting_remain_compatible() {
+    async fn ordinary_remote_sources_resolve_without_any_preflight_requests() {
+        use httpmock::prelude::*;
+        crate::http::install_crypto_provider();
+        let server = MockServer::start_async().await;
+        let preflight = server
+            .mock_async(|when, then| {
+                when.method(GET);
+                then.status(500);
+            })
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aggr.toml");
+        let urls = [
+            server.url("/"),
+            server.url("/feed.xml"),
+            server.url("/rss"),
+            server.url("/feed.json"),
+            server.url("/opaque-subscriptions"),
+        ];
+        std::fs::write(&path, format!("[[sources]]\nurl={urls:?}\n")).unwrap();
+        let config = Config::load(&path).await.unwrap();
+        assert_eq!(config.sources.len(), urls.len());
+        assert!(config.loaded_remote.is_empty());
+        preflight.assert_calls_async(0).await;
+        for (source, expected) in config.sources.iter().zip(urls) {
+            assert_eq!(source.url.as_deref(), Some(expected.as_str()));
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_opaque_collections_expand_once_without_fetching_their_leaves() {
+        use httpmock::prelude::*;
+        crate::http::install_crypto_provider();
+        let server = MockServer::start_async().await;
+        let collection = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/subscriptions");
+                then.status(200)
+                    .body("[[sources]]\nurl=['./feed', './page']\nlabels=['leaf']\n");
+            })
+            .await;
+        let leaves = server
+            .mock_async(|when, then| {
+                when.method(GET).path_matches("/(feed|page)$");
+                then.status(500);
+            })
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aggr.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[[sources]]\nurl={:?}\ncollection=true\ncategory='news'\n",
+                server.url("/subscriptions")
+            ),
+        )
+        .unwrap();
+        let config = Config::load(&path).await.unwrap();
+        assert_eq!(config.sources.len(), 2);
+        assert_eq!(config.loaded_remote.len(), 1);
+        for source in &config.sources {
+            assert!(!source.collection);
+            assert_eq!(source.category.as_deref(), Some("news"));
+            assert_eq!(source.labels, ["leaf"]);
+        }
+        collection.assert_calls_async(1).await;
+        leaves.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
+    async fn url_collections_and_remote_chain_setting_expand_sources() {
         crate::http::install_crypto_provider();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("aggr.toml");
         std::fs::write(
             &root,
-            "[fetch]\nallow_remote_include_chains = true\n[[sources]]\ninclude = './topics.toml'\ncategory = 'Programming'\n",
+            "[fetch]\nallow_remote_source_chains = true\n[[sources]]\nurl = './topics.toml'\ncategory = 'Programming'\n",
         ).unwrap();
         std::fs::write(
             dir.path().join("topics.toml"),
-            "[[sources]]\ninclude = './nested.toml'\n",
+            "[[sources]]\nurl = './nested.toml'\n",
         )
         .unwrap();
         std::fs::write(
@@ -1180,8 +1273,15 @@ images = false
     }
 
     #[test]
-    fn legacy_aliases_reject_ambiguous_and_unknown_fields() {
+    fn rejects_removed_configuration_aliases() {
         for text in [
+            "[[sources]]\ninclude = './a.toml'",
+            "[[sources]]\nrepo = 'friend/reads'",
+            "[[sources]]\ntype = 'aggr'\nurl = 'https://github.com/friend/reads'",
+            "[fetch]\nallow_remote_include_chains = true",
+            "[site]\noffline_items = 30",
+            "[site]\nmax_stubs = 20000",
+            "[[networks]]\nprovider = 'hn'",
             "[[sources]]\nurl = './a.toml'\ninclude = './b.toml'",
             "[fetch]\nallow_remote_source_chains = false\nallow_remote_include_chains = true",
             "[[sources]]\ninclude = './a.toml'\ninculde = './b.toml'",
@@ -1199,27 +1299,17 @@ images = false
     }
 
     #[test]
-    fn rejects_unknown_source_type() {
-        let config =
-            Config::parse("[[sources]]\ntype = \"telegram\"\nurl = \"https://a.b/\"\n").unwrap();
-        let err = config.resolve_sources(&no_env).unwrap_err();
+    fn source_engines_are_inferred_from_urls() {
+        for kind in ["feed", "aggr", "html", "telegram"] {
+            let err = Config::parse(&format!(
+                "[[sources]]\ntype={kind:?}\nurl='https://example.org/feed'\n"
+            ))
+            .unwrap_err();
+            assert!(err.to_string().contains("type"), "{err:#}");
+        }
         assert!(
-            format!("{err:#}").contains("unknown source type \"telegram\""),
-            "{err:#}"
+            Config::parse("[[sources]]\nurl='https://example.org/feed'\nitems='li'\n").is_err()
         );
-    }
-
-    #[test]
-    fn configured_html_engine_is_no_longer_needed() {
-        let err =
-            Config::parse("[[sources]]\ntype = \"html\"\nurl = \"https://a.b/\"\nitems = \"li\"\n")
-                .unwrap_err();
-        assert!(err.to_string().contains("items"), "{err:#}");
-
-        let config =
-            Config::parse("[[sources]]\ntype = \"html\"\nurl = \"https://a.b/\"\n").unwrap();
-        let err = config.resolve_sources(&no_env).unwrap_err();
-        assert!(format!("{err:#}").contains("known types: feed, aggr"));
     }
 
     #[test]
@@ -1356,12 +1446,10 @@ images = false
         assert_eq!(compiled.site.items_per_page, 50);
         assert_eq!(config.site.max_items, compiled.site.max_items);
         assert_eq!(config.site.max_age_days, compiled.site.max_age_days);
-        assert_eq!(config.site.max_stubs, compiled.site.max_stubs);
         assert_eq!(config.site.repository, compiled.site.repository);
         assert_eq!(config.site.url, compiled.site.url);
         assert_eq!(config.site.out, compiled.site.out);
         assert_eq!(config.site.pwa, compiled.site.pwa);
-        assert_eq!(config.site.offline_items, compiled.site.offline_items);
         assert_eq!(config.site.identity, compiled.site.identity);
         assert_eq!(config.site.params, compiled.site.params);
         assert_eq!(config.store.branch, compiled.store.branch);
@@ -1782,7 +1870,7 @@ url = "{}/forbidden.toml"
         let path = dir.path().join("aggr.toml");
         std::fs::write(
             &path,
-            "[[sources]]\nurl = \"https://github.com/owner/reading\"\ncategory = \"shared\"\n",
+            "[[sources]]\nurl = \"https://github.com/owner/reading/aggr.toml\"\ncategory = \"shared\"\n",
         )
         .unwrap();
         let config = Config::load_with_github_api(
@@ -1903,8 +1991,8 @@ url = "{}/forbidden.toml"
     #[test]
     fn resolves_aggr_sources() {
         let config = Config::parse(
-            "[[sources]]\ntype = \"aggr\"\nrepo = \"friend/reads\"\ncategory = \"friends\"\n\n\
-             [[sources]]\ntype = \"aggr\"\nurl = \"https://git.example.com/x/reads.git\"\nbranch = \"data\"\nsources = [\"hn\"]\nlimit = 5\n",
+            "[[sources]]\nurl = \"https://github.com/friend/reads\"\ncategory = \"friends\"\n\n\
+             [[sources]]\nurl = \"https://git.example.com/x/reads.git\"\nbranch = \"data\"\nsources = [\"hn\"]\nlimit = 5\n",
         )
         .unwrap();
         let sources = config.resolve_sources(&no_env).unwrap();
@@ -1929,22 +2017,71 @@ url = "{}/forbidden.toml"
             }
         );
 
-        let bad = |toml: &str| {
-            Config::parse(toml)
-                .unwrap()
-                .resolve_sources(&no_env)
-                .is_err()
-        };
-        assert!(bad("[[sources]]\ntype = \"aggr\"\n"));
-        assert!(bad("[[sources]]\ntype = \"aggr\"\nrepo = \"friend\"\n"));
-        assert!(bad(
-            "[[sources]]\ntype = \"aggr\"\nrepo = \"a/b\"\nurl = \"https://x/\"\n"
-        ));
-        assert!(bad(
-            "[[sources]]\ntype = \"aggr\"\nrepo = \"a/b\"\nlimit = 0\n"
-        ));
-        assert!(bad(
-            "[[sources]]\nurl = \"https://x/feed\"\nrepo = \"a/b\"\n"
-        ));
+        for text in [
+            "[[sources]]\nurl='https://github.com/friend/reads'\nlimit=0",
+            "[[sources]]\nurl='https://example.org/feed'\nbranch='archive'",
+            "[[sources]]\nurl='https://github.com/friend/reads'\nsources=['INVALID']",
+        ] {
+            assert!(
+                Config::parse(text)
+                    .and_then(|config| config.resolve_sources(&no_env))
+                    .is_err(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_urls_infer_aggr_and_share_identity() {
+        let urls = [
+            "https://github.com/friend/reads",
+            "https://github.com/friend/reads.git/",
+            "git@github.com:friend/reads.git",
+            "ssh://git@github.com/friend/reads.git",
+        ];
+        let mut identities = BTreeSet::new();
+        for url in urls {
+            let config = Config::parse(&format!("[[sources]]\nurl={url:?}\ncategory=' Friends '\nbranch='archive'\nsources=['news']\nlimit=5")).unwrap();
+            let sources = config.resolve_sources(&no_env).unwrap();
+            assert_eq!(sources[0].slug, "friend-reads");
+            assert_eq!(sources[0].category.as_deref(), Some("friends"));
+            assert_eq!(
+                sources[0].public_url.as_deref(),
+                Some("https://github.com/friend/reads")
+            );
+            assert!(
+                matches!(&sources[0].engine, Engine::Aggr { branch, sources, limit: Some(5), .. } if branch == "archive" && sources == &["news"])
+            );
+            identities.insert(sources[0].identity.clone());
+        }
+        assert_eq!(identities.len(), 1);
+        let config = Config::parse(&format!("[[sources]]\nurl={urls:?}")).unwrap();
+        assert_eq!(config.resolve_sources(&no_env).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn repository_inference_preserves_feed_and_explicit_collection_urls() {
+        for url in [
+            "https://github.com/friend/reads/releases.atom",
+            "https://github.com/friend/reads/blob/main/aggr.toml",
+            "https://example.org/posts/article",
+        ] {
+            let config = Config::parse(&format!("[[sources]]\nurl={url:?}")).unwrap();
+            assert!(matches!(
+                config.resolve_sources(&no_env).unwrap()[0].engine,
+                Engine::Feed { .. }
+            ));
+        }
+        for url in [
+            "git@git.example.org:team/reads.git",
+            "ssh://git@git.example.org:2222/team/reads.git",
+            "https://git.example.org/team/reads.git",
+        ] {
+            let config = Config::parse(&format!("[[sources]]\nurl={url:?}")).unwrap();
+            assert!(matches!(
+                config.resolve_sources(&no_env).unwrap()[0].engine,
+                Engine::Aggr { .. }
+            ));
+        }
     }
 }

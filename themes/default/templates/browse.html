@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page browse-page" aria-labelledby="page-title">
+  <header class="page-header">
+    <h1 id="page-title">{{ page.title }}</h1>
+    <p class="muted browse-intro">{% if page.kind == 'categories' %}Categories group sources by subject. Choose one to see all matching articles in the feed.{% elif page.kind == 'sources' %}Sources are the feeds and sites you follow. Choose one to see its articles in the feed.{% elif page.kind == 'tags' %}Tags describe topics attached to articles. Choose one to see matching articles across sources.{% else %}Browse by category, source, or tag to filter the main feed.{% endif %}</p>
+  </header>
+  <div class="page-body browse-directory">
+    <div class="browse-groups">
+      {% for directory_kind, directory_title, entries in [['categories', 'Categories', categories], ['sources', 'Sources', sources], ['tags', 'Tags', tags]] %}
+      {% if page.kind == 'browse' or page.kind == directory_kind %}
+      <section class="browse-group browse-group-{{ directory_kind }}" id="{{ directory_kind }}" aria-labelledby="{{ directory_kind ~ '-title' if page.kind == 'browse' else 'page-title' }}">
+        {% if page.kind == 'browse' %}<h2 id="{{ directory_kind }}-title">{{ directory_title }}</h2>{% endif %}
+        {% if entries %}
+          <ul class="browse-entries" aria-label="{{ entries | length }} {{ directory_title | lower }}">
+          {% for entry in entries %}
+            {% if entry.count > 0 or directory_kind == 'sources' %}
+            <li class="browse-entry" data-directory-entry>
+              <div class="browse-entry-heading">
+                <a class="browse-entry-link" href="{{ entry.slug | facet_url('source' if directory_kind == 'sources' else 'category' if directory_kind == 'categories' else 'tag') }}">{{ '#' if directory_kind == 'tags' else '/' if directory_kind == 'categories' }}{{ entry.name }}</a>
+                {% if directory_kind == 'sources' and entry.site_url %}<a class="browse-entry-website" href="{{ entry.site_url }}" title="{{ entry.site_url }}" target="_blank" rel="noopener noreferrer" data-aggr-external-label="Open {{ entry.name }} website" aria-label="Open {{ entry.name }} website, opens in a new tab">↗</a>{% endif %}
+              </div>
+              <p class="browse-entry-meta"><span>{{ entry.count }} {{ 'item' if entry.count == 1 else 'items' }}</span>{% if entry.latest %}<span><span class="sr-only">Latest: </span><time datetime="{{ entry.latest }}" title="{{ entry.latest }}">{{ entry.latest | date }}</time></span>{% endif %}{% if directory_kind == 'sources' %}<span>{{ entry.engine }}</span>{% if entry.category %}<span><a href="{{ (entry.category | slug) | facet_url('category') }}">/{{ entry.category }}</a></span>{% endif %}{% endif %}</p>
+              {% if directory_kind == 'sources' and entry.error %}<p class="browse-entry-error error" title="{{ entry.error.message }}">error since <time datetime="{{ entry.error.since }}" title="{{ entry.error.since }}">{{ entry.error.since | date }}</time></p>{% endif %}
+            </li>
+            {% endif %}
+          {% endfor %}
+          </ul>
+        {% else %}
+          <p class="empty">0 {{ directory_kind }}. {% if directory_kind == 'sources' %}Add a <code>[[sources]]</code> table with <code>url = "…"</code>{% elif directory_kind == 'categories' %}Add <code>category = "…"</code> to a source{% else %}Add <code>labels = ["…"]</code> to a source{% endif %} in <code>aggr.toml</code>.</p>
+        {% endif %}
+      </section>
+      {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endblock %}

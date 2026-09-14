@@ -518,14 +518,22 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
         page.contains("<picture class=\"article-picture\""),
         "{page}"
     );
-    assert!(page.contains("data-placeholder=\"assets/images/"), "{page}");
+    assert!(page.contains("data-thumbhash=\""), "{page}");
+    assert!(
+        page.contains("--image-preview:url('data:image/png;base64,"),
+        "{page}"
+    );
     let expected_ratio = format!(
         "--image-ratio:{} / {}",
         archived["original"]["width"].as_u64().unwrap(),
         archived["original"]["height"].as_u64().unwrap()
     );
     assert!(page.contains(&expected_ratio), "{page}");
-    assert!(page.contains(" 48w"), "{page}");
+    assert!(page.contains(" 320w"), "{page}");
+    assert!(
+        !page.contains(" 48w"),
+        "inline previews need no separate 48px file"
+    );
     assert!(page.contains("type=\"image/webp\""), "{page}");
     assert!(page.contains("loading=\"eager\""), "{page}");
     assert!(page.contains("fetchpriority=\"high\""), "{page}");
@@ -608,14 +616,14 @@ fn previews_mirror_local_bytes_and_retention_preserves_historical_blobs() {
 
     let replica = TestRepo::new();
     replica.write_raw_config(
-        "[fetch]\ncontent = \"heavy\"\npreviews = true\n[[sources]]\ntype = \"aggr\"\nname = \"Mirror\"\nurl = \"https://mirror.invalid/source.git\"\n",
+        "[fetch]\ncontent = \"heavy\"\npreviews = true\n[[sources]]\nname = \"Mirror\"\nurl = \"git@mirror.invalid:source.git # shared archive\"\n",
     );
     let local = url::Url::from_file_path(&upstream.origin).unwrap();
     let mirror_sync = || {
         let mut cmd = replica.aggr();
         cmd.env("GIT_CONFIG_COUNT", "2")
             .env("GIT_CONFIG_KEY_0", format!("url.{local}.insteadOf"))
-            .env("GIT_CONFIG_VALUE_0", "https://mirror.invalid/source.git")
+            .env("GIT_CONFIG_VALUE_0", "ssh://git@mirror.invalid/source.git")
             .env("GIT_CONFIG_KEY_1", "protocol.file.allow")
             .env("GIT_CONFIG_VALUE_1", "always")
             .arg("sync");
@@ -768,33 +776,6 @@ fn sync_reports_finished_sources_while_another_source_is_still_waiting() {
     let slow_url = format!("http://{}/feed", slow.local_addr().unwrap());
     let (release, released) = std::sync::mpsc::channel();
     let slow_server = std::thread::spawn(move || {
-        // Classification reads the document before sync fetches the resolved sources.
-        let probe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        let mut probe = loop {
-            match slow.accept() {
-                Ok((socket, _)) => break socket,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(std::time::Instant::now() < probe_deadline);
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                Err(error) => panic!("accepting classification request: {error}"),
-            }
-        };
-        probe.set_nonblocking(false).unwrap();
-        probe
-            .set_read_timeout(Some(std::time::Duration::from_secs(15)))
-            .unwrap();
-        let mut request = BufReader::new(&mut probe);
-        loop {
-            let mut line = String::new();
-            request.read_line(&mut line).unwrap();
-            if line == "\r\n" {
-                break;
-            }
-        }
-        let body = r#"{"version":"https://jsonfeed.org/version/1.1","title":"Slow","items":[]}"#;
-        write!(probe, "HTTP/1.1 200 OK\r\nContent-Type: application/feed+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-        drop(probe);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         let mut socket = loop {
             match slow.accept() {
@@ -1260,7 +1241,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(index.contains(">aggr.toml ↗</a>"));
     assert!(index.contains(">built with aggr</a>"));
     assert!(index.contains("href=\"https://github.com/aymericbeaumet/aggr\""));
-    assert!(index.contains("href=\"library/\""), "{index}");
+    assert!(index.contains("href=\"browse/\""), "{index}");
     assert!(index.contains("href=\"preferences/\""), "{index}");
     assert!(index.contains("target=\"_blank\""), "{index}");
     assert!(!index.contains("built <time"));
@@ -1285,7 +1266,8 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(page.contains("/aggr.toml\" target=\"_blank\""), "{page}");
     assert!(!page.contains("Git record <code>"), "{page}");
     assert!(page.contains("class=\"article-footer\""), "{page}");
-    assert!(page.contains(">Continue reading</h2>"), "{page}");
+    assert!(page.contains(">Coming next</h2>"), "{page}");
+    assert!(!page.contains(">Continue reading</h2>"), "{page}");
     assert!(!page.contains("class=\"article-navigation\""), "{page}");
     assert!(!page.contains("alert("), "{page}");
     let representation = site.join("items/demo/2026-09-01-hello-there");
@@ -1320,13 +1302,12 @@ fn build_renders_the_site_and_release_needs_a_url() {
     );
     assert!(page.contains("title=\"Published: 2026-09-01T"), "{page}");
     assert!(!page.contains("blob "), "{page}");
-    assert!(site.join("pagefind/pagefind.js").exists());
+    assert!(!site.join("pagefind/pagefind.js").exists());
     assert!(site.join("feed.xml").exists());
     assert!(site.join("atom.xml").exists());
     assert!(site.join("rss.xml").exists());
     assert!(site.join("feed.json").exists());
     assert!(site.join(".nojekyll").exists());
-    assert!(site.join("library/index.html").exists());
     assert!(site.join("browse/index.html").exists());
     assert!(site.join("sources/demo/index.html").exists());
     assert!(site.join("sources/index.html").exists());
@@ -1352,27 +1333,49 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(site.join("tags/example/atom.xml").exists());
     assert!(site.join("tags/example/rss.xml").exists());
     assert!(site.join("tags/example/feed.json").exists());
-    let library = std::fs::read_to_string(site.join("library/index.html")).unwrap();
-    assert!(library.contains("id=\"sources\""), "{library}");
-    assert!(library.contains("id=\"categories\""), "{library}");
-    assert!(library.contains("id=\"tags\""), "{library}");
-    assert!(library.contains("href=\"sources/demo/\""), "{library}");
-    assert!(library.contains("href=\"categories/demo/\""), "{library}");
-    assert!(library.contains("href=\"tags/example/\""), "{library}");
-    assert!(library.contains(">#example</a>"), "{library}");
-    assert!(!library.contains("explore-nav"), "{library}");
-    assert!(!library.contains("directory-count"), "{library}");
-    assert!(!library.contains("directory-status"), "{library}");
-    for legacy in ["explore", "browse", "sources", "categories", "tags"] {
-        let redirect = std::fs::read_to_string(site.join(legacy).join("index.html")).unwrap();
-        assert!(redirect.contains("noindex,follow"), "{redirect}");
-        assert!(redirect.contains("url=/library/"), "{redirect}");
+    let browse = std::fs::read_to_string(site.join("browse/index.html")).unwrap();
+    assert!(browse.contains("id=\"sources\""), "{browse}");
+    assert!(browse.contains("id=\"categories\""), "{browse}");
+    assert!(browse.contains("id=\"tags\""), "{browse}");
+    assert!(
+        browse.contains("href=\"./?q=source%3A%22demo%22\""),
+        "{browse}"
+    );
+    assert!(
+        browse.contains("href=\"./?q=category%3A%22demo%22\""),
+        "{browse}"
+    );
+    assert!(
+        browse.contains("href=\"./?q=tag%3A%22example%22\""),
+        "{browse}"
+    );
+    assert!(browse.contains(">#example</a>"), "{browse}");
+    assert!(!browse.contains("explore-nav"), "{browse}");
+    assert!(!browse.contains("directory-count"), "{browse}");
+    assert!(!browse.contains("directory-status"), "{browse}");
+    for removed in ["explore", "library", "search"] {
+        assert!(!site.join(removed).exists());
     }
+    for directory in ["sources", "categories", "tags"] {
+        let page = std::fs::read_to_string(site.join(directory).join("index.html")).unwrap();
+        assert!(page.contains(&format!("id=\"{directory}\"")), "{page}");
+        assert!(!page.contains("http-equiv=\"refresh\""), "{page}");
+    }
+    assert!(!index.contains("aria-label=\"Feed categories\""));
+    assert!(!index.contains(">Latest</a>"));
+    assert!(index.contains("id=\"q\""));
     let tag = std::fs::read_to_string(site.join("tags/example/index.html")).unwrap();
     let tag = tag.replace("\r\n", "\n");
     assert!(tag.contains("<h1>\n      #example\n"), "{tag}");
-    let search = std::fs::read_to_string(site.join("search/index.html")).unwrap();
-    assert!(search.contains(">#example (2)</option>"), "{search}");
+    let search_manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("search-manifest.json")).unwrap()).unwrap();
+    assert!(
+        search_manifest["facets"]["tag"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag["value"] == "example" && tag["count"] == 2)
+    );
     assert!(!site.join("CNAME").exists());
     // Installable and readable offline: manifest, worker precaching the newest pages, fallback.
     assert!(index.contains("rel=\"manifest\""), "{index}");
@@ -1488,7 +1491,31 @@ fn build_data_ref_is_offline_and_side_effect_free() {
     });
     let log_before = repo.origin_log("refs/heads/aggr");
 
-    repo.aggr()
+    let mut build = repo.aggr();
+    #[cfg(unix)]
+    let frontend_tools = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for name in ["node", "npm", "npx", "bun", "deno"] {
+            let path = frontend_tools.path().join(name);
+            std::fs::write(
+                &path,
+                "#!/bin/sh\nprintf '%s\\n' \"$0\" >> \"$AGGR_FRONTEND_TOOL_LOG\"\nexit 97\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut paths = vec![frontend_tools.path().to_path_buf()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        build.env("PATH", std::env::join_paths(paths).unwrap()).env(
+            "AGGR_FRONTEND_TOOL_LOG",
+            frontend_tools.path().join("called"),
+        );
+    }
+    build
         .args([
             "build",
             "--data-ref",
@@ -1499,6 +1526,11 @@ fn build_data_ref_is_offline_and_side_effect_free() {
         .assert()
         .success();
 
+    #[cfg(unix)]
+    assert!(
+        !frontend_tools.path().join("called").exists(),
+        "site generation must use the embedded browser bundle without executing a frontend tool"
+    );
     offline.assert_calls(0);
     assert_eq!(
         repo.origin_rev("refs/heads/aggr").as_deref(),
@@ -1598,9 +1630,9 @@ fn smart_source_groups_expand_mixed_documents_and_preserve_the_archive_on_repeat
         });
     }
     server.mock(|when, then| {
-        when.method(GET).path("/collection");
+        when.method(GET).path("/collection.toml");
         then.status(200)
-            .body("[[sources]]\nurl = ['toml-feed', 'collection']\n");
+            .body("[[sources]]\nurl = ['toml-feed', 'collection.toml']\n");
     });
     let repo = TestRepo::new();
     std::fs::write(
@@ -1622,7 +1654,7 @@ fn smart_source_groups_expand_mixed_documents_and_preserve_the_archive_on_repeat
 title = "Mixed sources"
 repository = "o/r"
 [[sources]]
-url = [" ./subscriptions.opml\n{origin}/collection ", "./feeds.txt", "{origin}/direct-feed"]
+url = [" ./subscriptions.opml\n{origin}/collection.toml ", "./feeds.txt", "{origin}/direct-feed"]
 category = "reading"
 labels = ["shared"]
 [fetch]

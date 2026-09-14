@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use super::SourceConfig;
@@ -11,7 +11,10 @@ enum Entries {
 }
 
 pub(super) fn split_lines(text: &str) -> impl Iterator<Item = &str> {
-    text.lines().map(str::trim).filter(|line| !line.is_empty())
+    text.lines()
+        .map(|line| line.split_once(" #").map_or(line, |(value, _)| value))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
 }
 
 pub(super) fn deserialize_sources<'de, D>(
@@ -34,12 +37,6 @@ where
 }
 
 fn expand_entry(mut table: toml::Table) -> Result<Vec<SourceConfig>> {
-    if let Some(include) = table.remove("include") {
-        if table.contains_key("url") {
-            bail!("`url` and its legacy alias `include` are mutually exclusive");
-        }
-        table.insert("url".into(), include);
-    }
     let Some(value) = table.remove("url") else {
         return Ok(vec![table.try_into()?]);
     };
@@ -67,4 +64,43 @@ fn expand_entry(mut table: toml::Table) -> Result<Vec<SourceConfig>> {
             source
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comments_are_removed_from_raw_lines_before_whitespace_is_trimmed() {
+        assert_eq!(
+            split_lines(" #comment\n  https://foobar # test\n\t # another\n#literal\nhttps://example.org/#fragment\n").collect::<Vec<_>>(),
+            ["https://foobar", "#literal", "https://example.org/#fragment"]
+        );
+    }
+
+    #[test]
+    fn string_array_and_multiline_forms_share_comment_ordering() {
+        for value in [
+            r#"" #comment\n  https://foobar # test\n # end""#,
+            r#"[" #comment", "  https://foobar # test", " # end"]"#,
+            "''' #comment\n  https://foobar # test\n # end'''",
+        ] {
+            {
+                let key = "url";
+                let table = toml::from_str(&format!("{key} = {value}\ncategory = 'News'")).unwrap();
+                let sources = expand_entry(table).unwrap();
+                assert_eq!(sources.len(), 1, "{key} = {value}");
+                assert_eq!(sources[0].url.as_deref(), Some("https://foobar"));
+                assert_eq!(sources[0].category.as_deref(), Some("News"));
+            }
+        }
+    }
+
+    #[test]
+    fn comments_require_an_ascii_space_and_preserve_fragments() {
+        assert_eq!(
+            split_lines(" https://example.org/feed#part # a comment\r\n # full comment\nhttps://example.org/next\t#fragment\n").collect::<Vec<_>>(),
+            ["https://example.org/feed#part", "https://example.org/next\t#fragment"]
+        );
+    }
 }

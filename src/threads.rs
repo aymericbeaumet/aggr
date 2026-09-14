@@ -3,8 +3,11 @@
 //! Publishers remain the source of truth: every followed URL stays on the status' origin,
 //! traversal is tightly bounded, and an unavailable or unfamiliar representation simply leaves
 //! the normal article extraction path in charge.
-//! X requires authenticated official APIs and Bluesky uses AT Protocol, so neither is scraped by
-//! this ActivityPub adapter.
+//! X threads use a separate public HTML adapter; Bluesky uses AT Protocol.
+
+mod x;
+pub use x::canonical_url as canonical_x_url;
+pub use x::expand as expand_x;
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 
@@ -625,11 +628,8 @@ fn render(posts: &[Post], order: &[usize]) -> ExtractedArticle {
             .map(|attachment| attachment.url.to_string())
     });
     let mut html = String::from("<section data-aggr-thread=\"activitypub\">");
-    for (position, index) in order.iter().enumerate() {
+    for index in order {
         let post = &posts[*index];
-        if position > 0 {
-            html.push_str("<hr>");
-        }
         html.push_str("<article data-aggr-thread-post>");
         if let Some(warning) = &post.warning {
             html.push_str("<p><strong>Content warning:</strong> ");
@@ -638,7 +638,7 @@ fn render(posts: &[Post], order: &[usize]) -> ExtractedArticle {
         } else if post.sensitive {
             html.push_str("<p><strong>Sensitive content</strong></p>");
         }
-        html.push_str(&post.content);
+        html.push_str(&strip_thread_counter(&post.content));
         for attachment in &post.attachments {
             html.push_str("<figure><img src=\"");
             html.push_str(&escape_html(attachment.url.as_str()));
@@ -654,6 +654,210 @@ fn render(posts: &[Post], order: &[usize]) -> ExtractedArticle {
     }
     html.push_str("</section>");
     ExtractedArticle { html, image }
+}
+
+/// Present an archived social thread as uninterrupted prose: remove terminal post counters,
+/// post separators, and generated per-post links or partial-thread notices from earlier
+/// captures. The metadata original link already reaches the thread. Stored sources stay intact.
+pub fn clean_archived_thread(markdown: &str, link: &str) -> String {
+    let Ok(url) = Url::parse(link) else {
+        return markdown.to_string();
+    };
+    if canonical_x_url(&url).is_none() && !conservative_status_url(&url) {
+        return markdown.to_string();
+    }
+    let Ok(counter) = regex::Regex::new(
+        r"(?:^|\s)(\(([0-9]{1,4})/([0-9]{1,4})\)|\\?\[([0-9]{1,4})/([0-9]{1,4})\\?\]|([0-9]{1,4})/([0-9]{1,4}))\s*$",
+    ) else {
+        return markdown.to_string();
+    };
+    use comrak::nodes::NodeValue;
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    let blocks = root.children().collect::<Vec<_>>();
+    let mut lines = vec![0];
+    lines.extend(markdown.match_indices('\n').map(|(index, _)| index + 1));
+    let source_range = |node: &comrak::nodes::AstNode<'_>| {
+        let position = node.data.borrow().sourcepos;
+        let line_start = *lines.get(position.start.line.saturating_sub(1))?;
+        let line_end = *lines.get(position.end.line.saturating_sub(1))?;
+        let start = line_start + position.start.column.saturating_sub(1);
+        let end = line_end + position.end.column;
+        markdown.get(start..end).map(|_| start..end)
+    };
+    let mut removed = Vec::new();
+    for post in blocks.split(|node| matches!(node.data.borrow().value, NodeValue::ThematicBreak)) {
+        if let Some(paragraph) = post
+            .iter()
+            .rev()
+            .find(|node| !thread_footer_paragraph(node) && !media_only_paragraph(node))
+            && matches!(paragraph.data.borrow().value, NodeValue::Paragraph)
+            && paragraph
+                .last_child()
+                .is_some_and(|node| matches!(node.data.borrow().value, NodeValue::Text(_)))
+            && let Some(range) = source_range(paragraph)
+            && let Some(captures) = counter.captures(&markdown[range.clone()])
+            && let Some(marker) = captures.get(1)
+        {
+            let raw = &markdown[range.clone()];
+            let numbers = [2, 4, 6].into_iter().find_map(|index| {
+                Some((
+                    captures.get(index)?.as_str().parse::<u32>().ok()?,
+                    captures.get(index + 1)?.as_str().parse::<u32>().ok()?,
+                ))
+            });
+            let valid = numbers
+                .is_some_and(|(position, total)| position > 0 && total > 1 && position <= total);
+            let bare_on_shared_line = captures.get(6).is_some()
+                && raw[..marker.start()]
+                    .rsplit('\n')
+                    .next()
+                    .is_some_and(|line| !line.trim().is_empty());
+            if valid && !bare_on_shared_line {
+                removed.push((range.start + raw[..marker.start()].trim_end().len())..range.end);
+            }
+        }
+    }
+    for node in &blocks {
+        let generated = matches!(node.data.borrow().value, NodeValue::ThematicBreak)
+            || thread_footer_paragraph(node);
+        if generated && let Some(range) = source_range(node) {
+            // Consume the blank lines after a removed block so spacing does not accumulate.
+            let trailing = markdown[range.end..]
+                .bytes()
+                .take_while(|byte| *byte == b'\n')
+                .count();
+            removed.push(range.start..range.end + trailing);
+        }
+    }
+    removed.sort_by_key(|range| range.start);
+    let mut cleaned = markdown.to_string();
+    for range in removed.into_iter().rev() {
+        cleaned.replace_range(range, "");
+    }
+    let trimmed = cleaned.trim_end();
+    if trimmed.len() != cleaned.len() {
+        cleaned.truncate(trimmed.len());
+        cleaned.push('\n');
+    }
+    cleaned
+}
+
+fn media_only_paragraph<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
+    use comrak::nodes::NodeValue;
+    matches!(node.data.borrow().value, NodeValue::Paragraph)
+        && node
+            .children()
+            .all(|child| match &child.data.borrow().value {
+                NodeValue::Image(_) | NodeValue::SoftBreak | NodeValue::LineBreak => true,
+                NodeValue::Text(text) => text.trim().is_empty(),
+                _ => false,
+            })
+}
+
+/// Paragraphs written by earlier thread expansion rather than the author: per-post links and the
+/// partial-thread notice.
+fn thread_footer_paragraph<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
+    use comrak::nodes::NodeValue;
+    if !matches!(node.data.borrow().value, NodeValue::Paragraph) {
+        return false;
+    }
+    let children = node.children().collect::<Vec<_>>();
+    match children.as_slice() {
+        [prefix, link, suffix] => {
+            matches!(&prefix.data.borrow().value, NodeValue::Text(text) if text == "Some replies could not be loaded. ")
+                && matches!(&suffix.data.borrow().value, NodeValue::Text(text) if text == ".")
+                && thread_footer_link(link, &["View the full thread on X"])
+        }
+        [link] => thread_footer_link(link, &["View post on X", "Watch video on X"]),
+        _ => false,
+    }
+}
+
+fn thread_footer_link<'a>(node: &'a comrak::nodes::AstNode<'a>, labels: &[&str]) -> bool {
+    use comrak::nodes::NodeValue;
+    let data = node.data.borrow();
+    let NodeValue::Link(link) = &data.value else {
+        return false;
+    };
+    let children = node.children().collect::<Vec<_>>();
+    matches!(children.as_slice(), [text] if matches!(&text.data.borrow().value, NodeValue::Text(text) if labels.contains(&text.as_ref())))
+        && Url::parse(&link.url)
+            .ok()
+            .and_then(|url| canonical_x_url(&url))
+            .is_some()
+}
+
+fn strip_thread_counter(html: &str) -> String {
+    let document = Html::parse_fragment(html);
+    let Some(last) = document.tree.nodes().rfind(
+        |node| matches!(node.value(), scraper::node::Node::Text(text) if !text.trim().is_empty()),
+    ) else {
+        return html.to_string();
+    };
+    if last
+        .ancestors()
+        .filter_map(scraper::ElementRef::wrap)
+        .any(|element| matches!(element.value().name(), "code" | "pre" | "a"))
+    {
+        return html.to_string();
+    }
+    let scraper::node::Node::Text(text) = last.value() else {
+        return html.to_string();
+    };
+    let Ok(counter) = regex::Regex::new(
+        r"(?:^|\s)(\(([0-9]{1,4})/([0-9]{1,4})\)|\[([0-9]{1,4})/([0-9]{1,4})\]|^([0-9]{1,4})/([0-9]{1,4}))\s*$",
+    ) else {
+        return html.to_string();
+    };
+    let Some(captures) = counter.captures(text) else {
+        return html.to_string();
+    };
+    let Some(marker) = captures.get(1) else {
+        return html.to_string();
+    };
+    if captures.get(6).is_some() {
+        let block = last
+            .ancestors()
+            .filter_map(scraper::ElementRef::wrap)
+            .find(|element| {
+                matches!(
+                    element.value().name(),
+                    "p" | "div" | "li" | "section" | "article"
+                )
+            });
+        let standalone = block.map_or_else(
+            || document.root_element().text().collect::<String>(),
+            |element| element.text().collect::<String>(),
+        );
+        let starts_line = last
+            .prev_sibling()
+            .and_then(scraper::ElementRef::wrap)
+            .is_some_and(|element| element.value().name() == "br");
+        if standalone.trim() != marker.as_str() && !starts_line {
+            return html.to_string();
+        }
+    }
+    let numbers = [2, 4, 6].into_iter().find_map(|index| {
+        Some((
+            captures.get(index)?.as_str().parse::<u32>().ok()?,
+            captures.get(index + 1)?.as_str().parse::<u32>().ok()?,
+        ))
+    });
+    if !numbers.is_some_and(|(position, total)| position > 0 && total > 1 && position <= total) {
+        return html.to_string();
+    }
+    let Some(start) = html.rfind(marker.as_str()) else {
+        return html.to_string();
+    };
+    let end = start + marker.len();
+    let Ok(closing) = regex::Regex::new(r"(?i)^(?:\s|</[a-z][a-z0-9]*\s*>|<br\s*/?>)*$") else {
+        return html.to_string();
+    };
+    if !closing.is_match(&html[end..]) {
+        return html.to_string();
+    }
+    format!("{}{}", html[..start].trim_end(), &html[end..])
 }
 
 fn preorder(index: usize, children: &[Vec<usize>], order: &mut Vec<usize>) {
@@ -829,6 +1033,78 @@ fn escape_html(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cleans_archived_x_threads_into_uninterrupted_prose() {
+        let markdown = "First post preserves `1/3` and the fraction 1/3. (1/3)\n\n![Original media](https://pbs.twimg.com/media/one.jpg)\n\n[View post on X](https://x.com/author/status/100)\n\n* * *\n\nEdited second post. \\[2/3\\]\n\n[Watch video on X](https://x.com/author/status/101)\n\n* * *\n\nFinal post.\n3/3\n\n[View post on X](https://x.com/author/status/102)\n\nSome replies could not be loaded. [View the full thread on X](https://x.com/author/status/100).\n";
+        let cleaned = super::clean_archived_thread(markdown, "https://x.com/author/status/100");
+        assert_eq!(
+            cleaned,
+            "First post preserves `1/3` and the fraction 1/3.\n\n![Original media](https://pbs.twimg.com/media/one.jpg)\n\nEdited second post.\n\nFinal post.\n"
+        );
+        assert_eq!(
+            super::clean_archived_thread(markdown, "https://example.com/math"),
+            markdown
+        );
+        let mastodon = "Opening. (1/2)\n\n* * *\n\nClosing.\n\n2/2\n";
+        assert_eq!(
+            super::clean_archived_thread(
+                mastodon,
+                "https://mathstodon.xyz/@tao/117244102901892965"
+            ),
+            "Opening.\n\nClosing.\n"
+        );
+    }
+
+    #[test]
+    fn archived_thread_cleanup_preserves_nonterminal_markers_fractions_code_and_links() {
+        for markdown in [
+            "Use 1/3",
+            "Use *1/3*",
+            "Use `(1/3)`",
+            "[1/3](https://example.com)",
+            "First paragraph. (1/3)\n\nMore prose follows.",
+            "First paragraph. (1/3)\n\n```text\n2/3\n```",
+            "First paragraph. (1/3)\n\nSome replies could not be loaded, but this is my own explanation.",
+            "First paragraph. (1/3)\n\nSome replies could not be loaded. [View the full thread on X](https://example.com).",
+            "[View post on X](https://example.com/not-x)\n\nMy own [View post on X](https://x.com/author/status/1) sentence.",
+        ] {
+            assert_eq!(
+                super::clean_archived_thread(
+                    markdown,
+                    "https://mathstodon.xyz/@tao/117244102901892965"
+                ),
+                markdown,
+                "{markdown}"
+            );
+        }
+    }
+
+    #[test]
+    fn removes_only_terminal_thread_counters() {
+        for (before, after) in [
+            ("<p>Opening. (1/3)</p>", "<p>Opening.</p>"),
+            ("<p>Continued. [2/3]</p>", "<p>Continued.</p>"),
+            ("<p>Ending.</p><p>3/3</p>", "<p>Ending.</p><p></p>"),
+            ("<p>Use 1/3</p>", "<p>Use 1/3</p>"),
+            ("<p>Use <em>1/3</em></p>", "<p>Use <em>1/3</em></p>"),
+            ("Opening<br><br>1/3", "Opening<br><br>"),
+            ("<p>Opening<br>1/3</p>", "<p>Opening<br></p>"),
+            (
+                "<p>Use (1/3) of the input.</p>",
+                "<p>Use (1/3) of the input.</p>",
+            ),
+            (
+                "<p>Division: <code>(1/3)</code></p>",
+                "<p>Division: <code>(1/3)</code></p>",
+            ),
+            ("<pre>(1/3)</pre>", "<pre>(1/3)</pre>"),
+            ("<p>Invalid (4/3)</p>", "<p>Invalid (4/3)</p>"),
+            ("<p>Single (1/1)</p>", "<p>Single (1/1)</p>"),
+        ] {
+            assert_eq!(super::strip_thread_counter(before), after, "{before}");
+        }
+    }
+
     use super::*;
     use httpmock::prelude::*;
 

@@ -17,7 +17,7 @@ provider-neutral path is documented below.
 
 What you get:
 
-- a responsive, installable PWA with bottom navigation on mobile, comfortable article typography,
+- a responsive, installable PWA with unified search and a navigation menu, comfortable article typography,
   keyboard navigation, and a precached shell, home feed, and newest configured entries (30 by
   default); updates arrive without interrupting reading;
 - build-time Pagefind full-text search over clean article prose, including best-effort lookup by a
@@ -110,11 +110,11 @@ gap, over complete days. Workflow creation time modulo the cron interval measure
 a five-minute delay and a 65-minute delay look identical on a 30-minute schedule. Daily run counts
 show a delivery shortfall but cannot distinguish delayed events from dropped ones.
 
-The reader checks for deployments once a minute while visible and online, and checks again when
-it returns to the foreground or reconnects. An update takes effect on your next navigation or
-refresh; it never reloads the article you are reading. Use your browser's refresh command
-(`Cmd+R` or `Ctrl+R`) or native pull-to-refresh where available. The installed app provides its own
-pull-to-refresh gesture.
+The reader checks for deployments every 15 seconds while visible and online, and checks again when
+it returns to the foreground or reconnects. New articles appear automatically in open feeds and
+search results, preserving selection and reading position. An open article stays in place.
+Application releases show a separate “Refresh to update” pill; feed updates continue while that
+pill is visible. Browser refresh and the installed app's pull-to-refresh remain available.
 
 New-item highlights and the title/favicon dot use tab-local state that disappears when the tab
 closes. Normal browser tabs request a new tab for external links; installed
@@ -143,31 +143,56 @@ exact `version` input when both pieces must be frozen.
 
 ## Read comfortably
 
-Mobile navigation keeps Feed, Search, Library, and Preferences within reach. The `/library/` hub
-groups source, category, and tag archives on one filterable page. Preferences groups appearance, article text size and line width,
-feed density, page size and preview visibility, date formats, and keyboard controls. Changes save automatically
-in this browser. Compact feeds are the default; choose Comfortable for more space. Page transitions
-follow your device's reduced-motion setting and can also be switched off.
-Article headers show the visible Unicode word count and a reading estimate rounded up at 225 words
-per minute; the same values are available to themes and machine-readable article metadata.
+The header links to **browse** (categories, sources, and tags), **preferences**, and `aggr.toml`.
+On mobile, feed, search, browse, and preferences sit in the bottom tab bar; feed numbers are hidden.
+Search sits above the first feed item and filters in place. Choosing a category, source, or tag fills
+the search field on the main feed; its URL can be shared. Static archives remain available without
+JavaScript.
+
+Combine full text with `source:`, `category:`, `tag:`, `date:`, `sort:`, quoted phrases, and exclusions
+such as `-tag:sponsored`. Completion suggests real archive values and dates; hover over the field
+for syntax help. See [search syntax and client development](docs/client.md).
+
+Preferences controls theme (system/light/dark/sepia), text size and typeface, line width, line and
+paragraph spacing, indentation, alignment, letter and word spacing, feed density and thumbnails,
+dates, page size, motion, keyboard shortcuts, and d/u scroll distance. Paragraph indentation is
+off by default. Settings stay on the device; all initial values can be set in `aggr.toml`:
+
+```toml
+[site.preferences]
+paragraph_indent = false
+font_family = "serif"
+line_spacing = "relaxed"
+scroll_amount = 10 # lines, capped at half the viewport
+offline_items = 50 # newest pages/images + full archive search index; 0 disables downloads
+```
+
+See [`config.default.toml`](config.default.toml) for every setting. In **Offline reading**, choose
+0–1000 recent articles to keep and wait for the available count to finish. Their pages, previews,
+and retained image renditions are downloaded together, in browser tabs and installed PWAs.
+Incomplete downloads are reported and retried when reconnecting. Browser storage limits still
+apply; external images and embedded audio/video are not downloaded.
+Any positive limit also saves the complete archive search index, with readiness reported separately.
+Offline results distinguish saved article pages from indexed articles whose pages are unavailable.
 
 Under **Transfer preferences**, share or copy a link, save a JSON file, or import one on another
 device. Links and files include only these settings, not reading history, and imported settings
 need confirmation before applying. Preference links keep their payload in the URL fragment so
 it is not sent to the server. Older preference links still work. Reset restores the defaults
-without clearing reading history or offline articles.
+without clearing reading history. Resetting also restores the site's offline-download count.
 
 | Keys | Action |
 |---|---|
-| `Cmd+K` / `Ctrl+K` | Open global search. |
-| `/` | Local search. |
+| `Cmd+K` / `Ctrl+K` | Focus global search. |
+| `↑` / `↓`, then `Enter` in search | With suggestions open, choose and accept one; otherwise move the result cursor and open the selected result. `Escape` closes suggestions, then removes focus. |
 | `j` / `k` in article lists | Select the next / previous item; the first press selects the first item. |
+| `gg` / `G` | Select the first / last visible feed item; scroll to the top / bottom on article pages. |
 | `o` / `Enter` in article lists | Open the selected item. |
 | `j` / `k` in articles | Open the older / newer article. At either end, the key is a no-op. |
-| `O` in articles | Open the original article. |
-| Uppercase network key in articles | Open the matched discussion, or search that enabled network for the original URL. Built-ins use `H`, `R`, and `X`. |
+| `O` | Open the original for the selected feed item or current article. |
+| Uppercase network key | Open the selected/current item's matched discussion, or search that enabled network for its original URL. Built-ins use `H`, `R`, and `X`. |
 | `u` / `d` in articles | Scroll up / down. |
-| `g f`, `g /`, `g l`, `g p` | Feed, global search, Library, preferences. |
+| `g f`, `g l`, `g p` | Feed, browse, preferences. |
 | `g 1` … `g 9` | Open one of the first nine feed entries. |
 | `?` | Show keyboard help. |
 
@@ -210,14 +235,14 @@ url = ["https://example.net/feed.xml", "https://example.edu/rss"]
 ```
 
 `url` accepts a string, a multiline string, or an array of strings, including multiline
-strings within an array. Each string is split into lines, surrounding whitespace is trimmed,
-and empty lines are discarded. URLs retain their
-fragments. Put comments and options in the TOML table, outside the strings; use another
-`[[sources]]` table to start a group with different options.
+strings within an array. All forms share one normalization path: split lines, remove a trailing
+comment beginning with exactly ` #`, trim whitespace, discard empty entries, then parse and expand
+sources. `https://example.com/feed#section` retains its hash; `https://example.com/feed # note`
+removes the comment. Use another `[[sources]]` table to start a group with different options.
 
-Existing configs can keep `include` as an alias for `url` and
-`[fetch].allow_remote_include_chains` as an alias for `allow_remote_source_chains`.
-Do not set both names of an alias in the same table.
+Ordinary remote feed/page URLs are resolved without config-time downloads. Remote `.toml`, `.opml`,
+and `.txt` paths expand automatically. For an opaque collection endpoint, add `collection = true`
+to its `[[sources]]` table. This flag is not inherited by the contained sources.
 
 The table's options apply to every source it expands. Collections inherit these defaults unless
 their entries set explicit options. Complete source tables can be mixed with other sections
@@ -238,6 +263,14 @@ Articles are deduplicated across sources by normalized original URL, so followin
 News and a publisher keeps one copy. Existing archived duplicates appear once in the reader;
 their previous item URLs redirect to the selected copy.
 
+Public show URLs work for Apple Podcasts, Spotify, YouTube, SoundCloud, Podbean, Buzzsprout,
+Spreaker, Acast, Libsyn, and Simplecast. They resolve to publisher RSS where available. Spotify
+can discover a full publisher feed through Apple's public catalog, verifying show/publisher
+identity and matching episodes before using it; its public episode listing remains a fallback.
+Podcast enclosures play inside articles. See [podcast sources](docs/podcasts.md) for accepted
+URLs and provider limits. Episode text and artwork are archived; audio/video playback is not
+available offline through these adapters.
+
 YouTube videos use their feed descriptions instead of article extraction. YouTube Shorts links
 are always excluded, including from other feeds and mirrored archives, with no setting to enable
 them. Previously archived Shorts are omitted when the site is rebuilt.
@@ -251,9 +284,11 @@ requests on other origins do not receive those headers.
 In heavy mode, a public ActivityPub/Mastodon status is expanded into its public same-author
 self-reply thread when the page advertises ActivityStreams data. Parent and reply traversal stays
 on the status origin, is tightly bounded, and falls back to ordinary article extraction if the
-server withholds or rejects any required data. aggr does not scrape X/Twitter threads; its official
-thread APIs require authentication and mutable deletion handling that is incompatible with the
-append-only archive.
+server withholds or rejects any required data. X/Twitter status links use publicly available
+xcancel pages to collect the author's replies, with original links pointing to `x.com`. Posts and
+their media keep their original order and read as one article: no separators, per-post links, or
+trailing thread counters such as `(1/3)`. The original link in the article metadata reaches the
+thread; unavailable continuations are logged. See [public threads](docs/interoperability.md#public-threads).
 
 Article-image archiving is on by default. The explicit form, including a per-source opt-out, is:
 
@@ -276,31 +311,37 @@ are resized once with a high-quality filter, encoded as lossless WebP, then deco
 pixel-compared before aggr offers them to the browser. The exact master always remains the
 fallback, so choosing a smaller rendition introduces no lossy compression and a high-density
 display is never forced to upscale it. A rendition is retained only when it is smaller than the
-master. For a non-WebP master, aggr offers the responsive set only when its verified full-width
-WebP is also smaller; an existing WebP master fills that full-width slot without being duplicated.
+master. Masters above 32 megapixels skip the full-width encode and pair bounded responsive copies
+with the original as the largest candidate; an existing WebP master is not duplicated.
 
 Animated GIF/WebP, images with an ICC color profile, and high-bit-depth images keep only their
-exact master. SVG is left remote because it can contain active content. Other unsupported or
+exact master. SVG diagrams become passive local PNGs with a bundled font; scripts, external images,
+and embedded resources are ignored, and original SVG markup is never published. Other unsupported or
 invalid media also keeps its safe publisher URL. Image work is failure isolated: a timeout,
 decode error, size rejection, or failed download never prevents the article from being saved.
 
-Acquisition is intentionally bounded per article: at most 24 candidates are inspected and 12
-images retained; one response or rendition may use at most 10 MiB; downloaded and retained media
-each have a 32 MiB cumulative budget; and decoded images may not exceed 32 megapixels or 12,000
-pixels on either axis. Decoding runs at most two images concurrently with a 15-second per-image
+Every local image gets an inline ThumbHash preview at build time, visible before scripts or image
+requests finish. Ordinary sync/build/dev runs repair missing images in retained articles, reuse
+existing masters, and retry failed downloads after an hour.
+
+Acquisition is intentionally bounded per article: at most 1,024 candidates are inspected and 512
+images retained; one response or rendition may use at most 32 MiB; downloaded and retained media
+each have a 256 MiB cumulative budget; and decoded images may not exceed 200 megapixels or 24,000
+pixels on either axis. SVG parsing accepts up to 2 MiB and 20,000 XML nodes, rasterized to at most
+1,600 pixels per axis. Decoding runs one article image at a time with a 15-second per-image
 limit. These media limits are conservative implementation safeguards rather than configuration
 knobs.
 
-Rendered pages use intrinsic dimensions and a dominant-color placeholder to avoid layout jumps.
+Rendered pages use intrinsic dimensions and an inline ThumbHash preview to avoid layout jumps.
 The first body image loads eagerly at high priority; later images use native lazy loading and
 asynchronous decoding. Local files are content-addressed and immutable. In the PWA, media for the
-newest offline articles is cached opportunistically within a separate byte budget; other local
-media enters a bounded cache after a successful view. Offline text therefore remains available
-even when an optional image did not fit the precache. A publisher-hosted fallback is never
+selected recent articles is downloaded with every retained image rendition into a dedicated cache;
+other local media enters a bounded cache after a successful view. Preferences reports an article
+ready only when its full retained resource set is saved. A publisher-hosted fallback is never
 guaranteed offline.
 
-Image archiving applies to newly discovered items only; enabling it does not fetch media for old
-captures. Exact masters and responsive renditions increase the append-only data branch and Git
+Enabling image archiving also fills missing media in retained captures. Exact raster masters and
+responsive renditions increase the append-only data branch and Git
 history, and normal retention cannot reclaim historical objects. Before publishing an archive,
 make sure storing and redistributing a source's images is compatible with its terms and your local
 law. Use `images = false` for sources whose media you should not retain.
@@ -322,7 +363,12 @@ previews = false # override the default for one source
 aggr downloads and resizes a suitable image to at most 256 pixels per side, encodes it as lossless WebP (up to 384 KiB), and records its intrinsic dimensions, alt text,
 and dominant color. The color reserves a calm placeholder while the thumbnail loads. A missing or
 unusable preview never prevents saving the article. Previews appear in feed and search rows
-and YouTube article pages. Enabling previews applies to new items; run with `--refresh` to fill
+and article pages. If the publisher supplies no usable preview, aggr tries video posters and
+article images; a direct PDF can supply its first page. PDF rasterization uses a bounded input
+and output size with two concurrent decoders; rendering itself has no hard CPU or allocation
+limit. Existing retained images also supply missing previews during builds without modifying the
+archive. Videos without published artwork or a poster do not yet provide frame thumbnails.
+Enabling remote previews applies to new items; run with `--refresh` to fill
 missing previews on existing items without replacing stored previews.
 
 In heavy mode, YouTube articles also include a timed transcript when the public video page
@@ -357,13 +403,13 @@ category = "research" # an explicit category wins
 ```
 
 Local paths resolve relative to the file that names them. Local globs and direct HTTP(S) URLs
-are supported. A bare GitHub repository URL finds its `aggr.toml` automatically, and GitHub-hosted
-configs can use relative wildcards just like local ones. Collections and feeds can share a table:
+are supported. Link to the repository's `aggr.toml` file explicitly; GitHub-hosted configs can use relative
+wildcards just like local ones. Collections and feeds can share a table:
 
 ```toml
 [[sources]]
 url = """
-https://github.com/aymericbeaumet/aggr-instance
+https://github.com/aymericbeaumet/aggr-instance/blob/main/aggr.toml
 https://example.com/subscriptions.opml
 https://example.org/feed.xml
 """
@@ -392,24 +438,27 @@ An aggr instance can be a source for another one. The copied items keep their ul
 URLs and gain provenance pointing to the instance they came through. If both instances already
 follow the same article, URL deduplication keeps one local copy.
 
-GitHub repositories have a shorthand:
+Use the repository URL; HTTPS, SSH, and `git@host:path` clone addresses are recognized:
 
 ```toml
 [[sources]]
-type = "aggr"
-repo = "friend/reads"
+url = "https://github.com/friend/reads"
 category = "friends"
 ```
 
-For any public HTTP(S) Git remote, use its clone URL:
+For example, an SSH clone URL can name the same source:
 
 ```toml
 [[sources]]
-type = "aggr"
-url = "https://codeberg.org/friend/reads.git"
+url = "git@github.com:friend/reads.git"
 branch = "aggr"
 category = "friends"
 ```
+
+Equivalent GitHub URL spellings share one source identity. For a custom Git host, use an explicit
+`.git` or SSH URL. Sources use `url`; explicit `type` and `repo` fields are not supported.
+To import subscriptions instead of stored articles, name the repository's `aggr.toml` file explicitly
+(for example, `https://github.com/friend/reads/blob/main/aggr.toml`). Bare repository URLs import data.
 
 An aggr source copies every visible item retained in the other instance's current data tree by
 default. Set `limit` only when you deliberately want the newest N items. Items that exist only in
@@ -536,9 +585,15 @@ hooks to preserve when customizing the reader.
 For development:
 
 ```sh
+npm ci --prefix web
 make check
 cargo run -- dev --config examples/aggr.toml
 ```
+
+The reader uses Svelte, TypeScript, and Vite; Rust still generates the complete static site. Frontend
+contributors rebuild the committed assets with `make client-build`, or use `make client-dev` with
+`AGGR_VITE_URL=http://127.0.0.1:5173` for live updates. Normal Cargo builds and published aggr binaries
+use embedded assets and require no Node runtime. See [`docs/client.md`](docs/client.md).
 
 The browser regression suite uses a local ChromeDriver and a temporary, pinned article archive:
 

@@ -160,6 +160,8 @@ where
 impl ArticleImage {
     /// Restrict every companion to its owning item and to browser-safe raster formats.
     pub fn is_valid_for(&self, stem: &str) -> bool {
+        static LIMITS: std::sync::LazyLock<crate::media::MediaLimits> =
+            std::sync::LazyLock::new(crate::media::MediaLimits::default);
         let valid_source = url::Url::parse(&self.source).is_ok_and(|url| {
             matches!(url.scheme(), "http" | "https")
                 && url.host_str().is_some()
@@ -185,9 +187,9 @@ impl ArticleImage {
                 }
                 && image.width > 0
                 && image.height > 0
-                && image.width <= 16_384
-                && image.height <= 16_384
-                && u64::from(image.width) * u64::from(image.height) <= 32_000_000
+                && image.width <= LIMITS.max_axis
+                && image.height <= LIMITS.max_axis
+                && u64::from(image.width) * u64::from(image.height) <= LIMITS.max_pixels
         };
         let valid_color = self.color.as_deref().is_none_or(|color| {
             color.len() == 7
@@ -232,7 +234,6 @@ pub struct FrontMatter {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[serde(alias = "tags")]
     pub labels: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -591,6 +592,37 @@ mod tests {
         let mut upscale = image;
         upscale.variants[0].width = 1600;
         assert!(!upscale.is_valid_for(stem));
+    }
+
+    #[test]
+    fn article_image_dimensions_match_archive_limits() {
+        let image = |width, height| ArticleImage {
+            source: "https://example.com/figure.jpg".into(),
+            original: ImageFile {
+                file: "article.image-0123456789ab.jpg".into(),
+                width,
+                height,
+            },
+            variants: Vec::new(),
+            color: None,
+        };
+        assert!(image(15_197, 8_488).is_valid_for("article"));
+        assert!(image(17_277, 11_171).is_valid_for("article"));
+        assert!(image(20_000, 10_000).is_valid_for("article"));
+        assert!(image(24_000, 100).is_valid_for("article"));
+        assert!(!image(24_001, 100).is_valid_for("article"));
+        assert!(!image(20_000, 10_001).is_valid_for("article"));
+        assert!(!image(0, 100).is_valid_for("article"));
+        assert!(!image(u32::MAX, u32::MAX).is_valid_for("article"));
+    }
+
+    #[test]
+    fn front_matter_uses_labels_without_interpreting_obsolete_tags() {
+        let front: FrontMatter =
+            serde_yaml_ng::from_str("labels: [current]\ntags: [obsolete]\n").unwrap();
+        assert_eq!(front.labels, ["current"]);
+        let obsolete: FrontMatter = serde_yaml_ng::from_str("tags: [obsolete]\n").unwrap();
+        assert!(obsolete.labels.is_empty());
     }
 
     #[test]

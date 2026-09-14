@@ -1,11 +1,14 @@
 //! One HTTP client for the whole run: conditional GETs, body caps, retries on transient
 //! failures, and a per-host pacing lock.
 
-use std::collections::HashMap;
+mod transport;
+
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use futures_util::StreamExt;
 use reqwest::header::{
     CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH,
     LAST_MODIFIED, LOCATION, RETRY_AFTER,
@@ -14,9 +17,12 @@ use tokio::time::Instant;
 use url::Url;
 
 use crate::config::FetchConfig;
+use transport::Received;
 
 pub struct Client {
     inner: reqwest::Client,
+    compatible: tokio::sync::OnceCell<wreq::Client>,
+    compatible_origins: Mutex<HashSet<url::Origin>>,
     max_body_bytes: usize,
     retries: u32,
     timeout: Duration,
@@ -199,8 +205,8 @@ impl Body {
 }
 
 /// reqwest is built with `rustls-no-provider`: a process-wide crypto provider must exist before
-/// the first client. `ring` keeps the release matrix free of aws-lc-rs' native toolchain
-/// requirements. Installing twice is a harmless error.
+/// the first client. Keep the normal transport on `ring`; the compatible transport configures
+/// its own TLS stack. Installing twice is a harmless error.
 pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
@@ -232,6 +238,8 @@ impl Client {
             .context("building HTTP client")?;
         Ok(Self {
             inner,
+            compatible: tokio::sync::OnceCell::new(),
+            compatible_origins: Mutex::new(HashSet::new()),
             max_body_bytes: config.max_body_bytes,
             retries: config.retries,
             timeout: Duration::from_secs(config.timeout_secs),
@@ -274,8 +282,12 @@ impl Client {
         }
 
         let mut attempt = 0;
+        let mut challenged_origin = None;
         loop {
-            let result = match self.send(request.url, headers.clone()).await {
+            let result = match self
+                .send(request.url, headers.clone(), &mut challenged_origin)
+                .await
+            {
                 Ok(response) => self.read(response).await,
                 Err(err) => Err(err),
             };
@@ -301,25 +313,56 @@ impl Client {
         }
     }
 
-    async fn send(&self, url: &Url, mut headers: HeaderMap) -> Result<reqwest::Response> {
+    async fn send(
+        &self,
+        url: &Url,
+        mut headers: HeaderMap,
+        challenged_origin: &mut Option<url::Origin>,
+    ) -> Result<Received> {
         let mut url = url.clone();
         for redirects in 0..=10 {
             self.hosts.wait(&url).await;
-            let response = self
-                .inner
-                .get(url.clone())
-                .headers(headers.clone())
-                .send()
-                .await
-                .map_err(reqwest::Error::without_url)
-                .context("sending request")?;
-            if !response.status().is_redirection()
-                || response.status() == reqwest::StatusCode::NOT_MODIFIED
+            let mut compatible = self
+                .compatible_origins
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains(&url.origin())
+                || challenged_origin.as_ref() == Some(&url.origin());
+            let mut response = self.send_once(&url, headers.clone(), compatible).await?;
+            if response.is_challenge() && !compatible && challenged_origin.is_none() {
+                *challenged_origin = Some(url.origin());
+                compatible = true;
+                log::debug!(
+                    "{}: retrying challenge with a compatible TLS/HTTP2 profile",
+                    url.origin().ascii_serialization()
+                );
+                drop(response);
+                self.hosts.wait(&url).await;
+                response = self.send_once(&url, headers.clone(), true).await?;
+            }
+            if compatible
+                && !response.is_challenge()
+                && (response.status.is_success()
+                    || response.status == reqwest::StatusCode::NOT_MODIFIED)
+            {
+                // A run can encounter many linked origins. Keep successful transport hints
+                // bounded and in memory; no challenge cookies or pages are persisted.
+                let mut origins = self
+                    .compatible_origins
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if origins.len() < 256 {
+                    origins.insert(url.origin());
+                }
+            }
+            if response.is_challenge()
+                || !response.status.is_redirection()
+                || response.status == reqwest::StatusCode::NOT_MODIFIED
             {
                 return Ok(response);
             }
             let Some(location) = response
-                .headers()
+                .headers
                 .get(LOCATION)
                 .and_then(|value| value.to_str().ok())
             else {
@@ -344,14 +387,47 @@ impl Client {
         bail!("too many redirects")
     }
 
-    async fn read(&self, mut response: reqwest::Response) -> Result<Response> {
-        let status = response.status();
+    async fn send_once(&self, url: &Url, headers: HeaderMap, compatible: bool) -> Result<Received> {
+        if compatible {
+            let client = self
+                .compatible
+                .get_or_try_init(|| async { transport::emulated_client(self.timeout) })
+                .await?;
+            let response = client
+                .get(url.as_str())
+                .headers(headers)
+                .send()
+                .await
+                .map_err(wreq::Error::without_uri)
+                .context("sending compatible request")?;
+            Received::emulated(response)
+        } else {
+            let response = self
+                .inner
+                .get(url.clone())
+                .headers(headers)
+                .send()
+                .await
+                .map_err(reqwest::Error::without_url)
+                .context("sending request")?;
+            Ok(Received::ordinary(response))
+        }
+    }
+
+    async fn read(&self, mut response: Received) -> Result<Response> {
+        // The header is authoritative, including on 200 responses. Successful articles can
+        // themselves include Cloudflare scripts, which are not evidence of a challenge.
+        if response.is_challenge() {
+            return Err(anyhow::Error::new(HttpStatus(403, None))
+                .context("publisher returned a Cloudflare challenge"));
+        }
+        let status = response.status;
         if status == reqwest::StatusCode::NOT_MODIFIED {
             return Ok(Response::NotModified);
         }
         if !status.is_success() {
             let retry_after = response
-                .headers()
+                .headers
                 .get(RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
                 .and_then(retry_after);
@@ -359,7 +435,7 @@ impl Client {
         }
         let header = |name| {
             response
-                .headers()
+                .headers
                 .get(name)
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string)
@@ -367,15 +443,11 @@ impl Client {
         let etag = header(ETAG);
         let last_modified = header(LAST_MODIFIED);
         let content_type = header(CONTENT_TYPE);
-        let final_url = response.url().clone();
+        let final_url = response.url;
 
         let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(reqwest::Error::without_url)
-            .context("reading body")?
-        {
+        while let Some(chunk) = response.body.next().await {
+            let chunk = chunk.context("reading body")?;
             if bytes.len() + chunk.len() > self.max_body_bytes {
                 bail!("body exceeds {} bytes", self.max_body_bytes);
             }
@@ -425,6 +497,8 @@ fn is_transient(err: &anyhow::Error) -> bool {
         return *code >= 500 || *code == 429;
     }
     err.downcast_ref::<reqwest::Error>().is_some_and(|e| {
+        e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() || e.is_decode()
+    }) || err.downcast_ref::<wreq::Error>().is_some_and(|e| {
         e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() || e.is_decode()
     })
 }
@@ -746,7 +820,13 @@ mod tests {
 
     async fn interrupted_body_server(
         responses: Vec<&'static [u8]>,
-    ) -> (Url, tokio::task::JoinHandle<()>) {
+    ) -> (Url, tokio::task::JoinHandle<Vec<String>>) {
+        response_sequence(responses.into_iter().map(<[u8]>::to_vec).collect()).await
+    }
+
+    async fn response_sequence(
+        responses: Vec<Vec<u8>>,
+    ) -> (Url, tokio::task::JoinHandle<Vec<String>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = Url::parse(&format!(
@@ -755,17 +835,273 @@ mod tests {
         ))
         .unwrap();
         let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
             for response in responses {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = vec![];
                 while !request.ends_with(b"\r\n\r\n") {
                     request.push(stream.read_u8().await.unwrap());
                 }
-                stream.write_all(response).await.unwrap();
+                requests.push(String::from_utf8(request).unwrap().to_ascii_lowercase());
+                stream.write_all(&response).await.unwrap();
                 stream.shutdown().await.unwrap();
             }
+            requests
         });
         (url, task)
+    }
+
+    #[tokio::test]
+    async fn challenge_fallback_recovers_the_article_and_its_validators() {
+        let (url, server) = interrupted_body_server(vec![
+            b"HTTP/1.1 403 Forbidden\r\nCf-Mitigated: challenge\r\nContent-Length: 9\r\nConnection: close\r\n\r\nchallenge",
+            b"HTTP/1.1 200 OK\r\nETag: \"article-v1\"\r\nContent-Type: text/html\r\nContent-Length: 8\r\nConnection: close\r\n\r\ncomplete",
+        ]).await;
+        let result = client().get(Request::get(&url)).await;
+        server.abort();
+        let Response::Ok(body) = result.unwrap() else {
+            panic!("expected article");
+        };
+        assert_eq!(body.text(), "complete");
+        assert_eq!(body.etag.as_deref(), Some("\"article-v1\""));
+        assert_eq!(body.content_type.as_deref(), Some("text/html"));
+        assert_eq!(body.final_url, url);
+    }
+
+    #[tokio::test]
+    async fn persistent_challenges_are_bounded_and_never_become_article_content() {
+        for status in [200, 403, 503] {
+            let server = MockServer::start_async().await;
+            let challenge = server
+                .mock_async(|when, then| {
+                    when.method(GET);
+                    then.status(status)
+                        .header("cf-mitigated", "challenge")
+                        .body("challenge");
+                })
+                .await;
+            let error = client()
+                .get(Request::get(&Url::parse(&server.url("/article")).unwrap()))
+                .await
+                .unwrap_err();
+            assert_eq!(status_code(&error), Some(403));
+            assert!(error.to_string().contains("challenge"));
+            assert_eq!(challenge.calls_async().await, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_denials_and_cloudflare_scripts_do_not_trigger_fallback() {
+        let server = MockServer::start_async().await;
+        let denial = server
+            .mock_async(|when, then| {
+                when.path("/denied");
+                then.status(403).header("server", "cloudflare");
+            })
+            .await;
+        let page = server
+            .mock_async(|when, then| {
+                when.path("/article");
+                then.status(200)
+                    .body("<main>Article</main><script src='/cdn-cgi/challenge-platform/'>");
+            })
+            .await;
+        let client = client();
+        let error = client
+            .get(Request::get(&Url::parse(&server.url("/denied")).unwrap()))
+            .await
+            .unwrap_err();
+        assert_eq!(status_code(&error), Some(403));
+        let Response::Ok(body) = client
+            .get(Request::get(&Url::parse(&server.url("/article")).unwrap()))
+            .await
+            .unwrap()
+        else {
+            panic!("expected article");
+        };
+        assert!(body.text().contains("<main>Article</main>"));
+        denial.assert_async().await;
+        page.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn challenge_fallback_shares_the_decoded_body_limit() {
+        let (url, server) = interrupted_body_server(vec![
+            b"HTTP/1.1 403 Forbidden\r\nCf-Mitigated: challenge\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 24\r\nConnection: close\r\n\r\n\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xffKL\xa4=\x00\x00dzp\xafd\x00\x00\x00",
+        ]).await;
+        let error = client().get(Request::get(&url)).await.unwrap_err();
+        server.abort();
+        assert!(error.to_string().contains("exceeds 64 bytes"));
+    }
+
+    #[tokio::test]
+    async fn challenge_fallback_shares_the_total_deadline() {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET);
+                then.status(403)
+                    .header("cf-mitigated", "challenge")
+                    .delay(Duration::from_millis(600));
+            })
+            .await;
+        let client = Client::new(&FetchConfig {
+            timeout_secs: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let started = Instant::now();
+        let error = client
+            .get(Request::get(&Url::parse(&server.url("/article")).unwrap()))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("total timeout"));
+        assert!(started.elapsed() < Duration::from_millis(1500));
+    }
+
+    #[tokio::test]
+    async fn compatible_transport_survives_same_origin_redirects() {
+        let server = MockServer::start_async().await;
+        let challenged = server
+            .mock_async(|when, then| {
+                when.header("user-agent", user_agent());
+                then.status(403).header("cf-mitigated", "challenge");
+            })
+            .await;
+        let first = server
+            .mock_async(|when, then| {
+                when.path("/start").header("user-agent", "compatible-test");
+                then.status(302).header("location", "/article");
+            })
+            .await;
+        let complete = server
+            .mock_async(|when, then| {
+                when.header("user-agent", "compatible-test");
+                then.status(200).body("complete");
+            })
+            .await;
+        let client = client();
+        assert!(
+            client
+                .compatible
+                .set(
+                    wreq::Client::builder()
+                        .user_agent("compatible-test")
+                        .redirect(wreq::redirect::Policy::none())
+                        .build()
+                        .unwrap()
+                )
+                .is_ok()
+        );
+        let url = Url::parse(&server.url("/start")).unwrap();
+        let Response::Ok(body) = client.get(Request::get(&url)).await.unwrap() else {
+            panic!("expected article");
+        };
+        assert_eq!(body.text(), "complete");
+        challenged.assert_async().await;
+        complete.assert_async().await;
+        first.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn compatible_transport_survives_transient_retries() {
+        let (url, server) = interrupted_body_server(vec![
+            b"HTTP/1.1 403 Forbidden\r\nCf-Mitigated: challenge\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            b"HTTP/1.1 503 Unavailable\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ncomplete",
+        ]).await;
+        let client = client();
+        assert!(
+            client
+                .compatible
+                .set(
+                    wreq::Client::builder()
+                        .user_agent("compatible-test")
+                        .build()
+                        .unwrap()
+                )
+                .is_ok()
+        );
+        let Response::Ok(body) = client.get(Request::get(&url)).await.unwrap() else {
+            panic!("expected article");
+        };
+        assert_eq!(body.text(), "complete");
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests[1..]
+                .iter()
+                .all(|request| request.contains("user-agent: compatible-test"))
+        );
+    }
+
+    #[tokio::test]
+    async fn compatible_transport_uses_auth_without_persisting_url_credentials() {
+        let (mut url, server) = interrupted_body_server(vec![
+            b"HTTP/1.1 403 Forbidden\r\nCf-Mitigated: challenge\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ncomplete",
+        ]).await;
+        url.set_username("user").unwrap();
+        url.set_password(Some("pass")).unwrap();
+        let Response::Ok(body) = client().get(Request::get(&url)).await.unwrap() else {
+            panic!("expected article");
+        };
+        assert!(body.final_url.username().is_empty());
+        assert!(body.final_url.password().is_none());
+        for request in server.await.unwrap() {
+            assert!(request.contains("authorization: basic dxnlcjpwyxnz"));
+        }
+    }
+
+    #[tokio::test]
+    async fn challenge_fallback_preserves_headers_then_drops_them_on_cross_origin_redirect() {
+        let other = MockServer::start_async().await;
+        let article = other
+            .mock_async(|when, then| {
+                when.path("/article")
+                    .header_missing("authorization")
+                    .header_missing("cookie")
+                    .header_missing("if-none-match")
+                    .header("user-agent", user_agent());
+                then.status(200).body("article");
+            })
+            .await;
+        let (url, server) = response_sequence(vec![
+            b"HTTP/1.1 403 Forbidden\r\nCf-Mitigated: challenge\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+            format!("HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", other.url("/article")).into_bytes(),
+        ]).await;
+        let headers = vec![
+            ("User-Agent".into(), "configured-reader".into()),
+            ("Authorization".into(), "Bearer private".into()),
+            ("Cookie".into(), "session=private".into()),
+        ];
+        let Response::Ok(body) = client()
+            .get(Request {
+                url: &url,
+                headers: &headers,
+                etag: Some("\"v1\""),
+                last_modified: None,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected article");
+        };
+        assert_eq!(body.final_url.as_str(), other.url("/article"));
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            for header in [
+                "user-agent: configured-reader",
+                "authorization: bearer private",
+                "cookie: session=private",
+                "if-none-match: \"v1\"",
+            ] {
+                assert!(request.contains(header), "missing {header}");
+            }
+        }
+        article.assert_async().await;
     }
 
     #[tokio::test]

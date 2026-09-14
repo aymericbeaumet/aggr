@@ -1,15 +1,14 @@
 //! The template contract: everything a theme can see, as plain serializable structs. Documented
 //! for theme authors in `docs/themes.md`; changing a field here is a theme-facing change.
 
+#[cfg(test)]
+use crate::content;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::{
-    content,
-    model::{ContentKind, Item, normalize_category, normalize_labels},
-};
+use crate::model::{ContentKind, Item, normalize_category, normalize_labels};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SiteCtx {
@@ -30,6 +29,8 @@ pub struct SiteCtx {
     pub instance_type_url: &'static str,
     /// Whether `manifest.webmanifest` and `sw.js` are built (`[site] pwa`).
     pub pwa: bool,
+    /// Typed initial browser settings, keyed with the same names as preference exports.
+    pub preferences: serde_json::Value,
     /// Browser-facing GitHub page for the source config when the build commit is known.
     pub config_page_url: Option<String>,
     /// Raw source config URL used by machine-readable discovery metadata.
@@ -52,7 +53,7 @@ pub struct SiteIdentityCtx {
     pub same_as: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiscussionLinkCtx {
     pub name: String,
     pub url: String,
@@ -68,6 +69,10 @@ pub struct DiscussionLinkCtx {
 pub struct BuildCtx {
     pub time: DateTime<Utc>,
     pub version: String,
+    /// Binary release and effective template/static bytes, independent of feed or config data.
+    pub app_version: String,
+    /// Semantic content and rendered configuration, independent of rebuild time and app bytes.
+    pub content_version: String,
     pub config_sha: Option<String>,
     pub data_sha: Option<String>,
     /// Content + semantic-time fingerprint used to version offline caches exactly when output
@@ -78,7 +83,7 @@ pub struct BuildCtx {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PageCtx {
-    /// `river`, `source`, `category`, `tag`, `library`, `item`, `search`, `preferences`, `404`,
+    /// `river`, `source`, `category`, `tag`, `browse`, `item`, `search`, `preferences`, `404`,
     /// or `offline`.
     pub kind: String,
     pub title: String,
@@ -152,10 +157,14 @@ pub struct ItemCtx {
     pub replicated_at: Option<DateTime<Utc>>,
     pub authors: Vec<String>,
     pub labels: Vec<String>,
+    /// Validated opening links to models, code, datasets, or papers; separate from topic labels.
+    pub resources: Vec<crate::content::ResourceLink>,
     pub discussions: Vec<DiscussionLinkCtx>,
     pub summary: Option<String>,
     pub excerpt: String,
     pub content: ContentKind,
+    /// Primary format used only for search/filtering, never a visible metadata label.
+    pub item_type: super::item_type::ItemType,
     /// Visible body words and a rounded-up estimate at 225 words per minute.
     pub word_count: usize,
     pub reading_minutes: usize,
@@ -167,7 +176,14 @@ pub struct ItemCtx {
     /// Validated provider settings, populated only on the article page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video: Option<super::video::VideoCtx>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document: Option<super::document::DocumentCtx>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<super::interactive::InteractiveCtx>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_media: Option<super::native_media::NativeMediaCtx>,
     pub extra: BTreeMap<String, serde_yaml_ng::Value>,
+    pub metadata: super::display::Metadata,
     /// GitHub URLs pinned to the data commit; `None` when the repository is unknown.
     pub permalink: Option<String>,
     pub raw_url: Option<String>,
@@ -185,13 +201,14 @@ pub struct ItemCtx {
     pub body_html: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PreviewCtx {
     pub url: String,
     pub width: u32,
     pub height: u32,
     pub alt: Option<String>,
     pub color: Option<String>,
+    pub placeholder: crate::media::placeholder::Placeholder,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -201,9 +218,11 @@ pub struct ArticlePreviewCtx {
     pub height: u32,
     pub srcset: String,
     pub color: String,
+    pub placeholder: crate::media::placeholder::Placeholder,
 }
 
 impl ArticlePreviewCtx {
+    /// Social cards and small metadata images upscale badly as a full-width hero.
     pub fn lead_image(
         body_html: &str,
         base: &url::Url,
@@ -213,16 +232,27 @@ impl ArticlePreviewCtx {
             .into_iter()
             .map(|candidate| candidate.url.to_string())
             .collect::<BTreeSet<_>>();
-        let body_originals = images
+        let body_images = images
             .iter()
             .filter(|image| body_sources.contains(&image.source))
+            .collect::<Vec<_>>();
+        let body_originals = body_images
+            .iter()
             .map(|image| image.original.as_str())
             .collect::<BTreeSet<_>>();
         images
             .iter()
             .find(|image| {
-                !body_sources.contains(&image.source)
+                !crate::media::is_status_badge(&image.source)
+                    && image.width >= MIN_LEAD_WIDTH
+                    && !body_sources.contains(&image.source)
                     && !body_originals.contains(image.original.as_str())
+                    && !body_images.iter().any(|body| {
+                        crate::media::placeholder::same_picture(
+                            &image.placeholder.hash,
+                            &body.placeholder.hash,
+                        )
+                    })
             })
             .map(Self::from_image)
     }
@@ -251,9 +281,13 @@ impl ArticlePreviewCtx {
                 .collect::<Vec<_>>()
                 .join(", "),
             color: image.color.clone(),
+            placeholder: image.placeholder.clone(),
         }
     }
 }
+
+/// Social cards (600px and narrower) upscale badly as a hero; ordinary 640px+ leads are kept.
+const MIN_LEAD_WIDTH: u32 = 640;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceCtx {
@@ -428,6 +462,25 @@ fn url_label(url: &url::Url) -> String {
     format!("{}{}", source_host(url), url.path().trim_end_matches('/'))
 }
 
+fn source_profile_label(url: &url::Url, title: &str) -> String {
+    let host = source_host(url);
+    let path = url.path();
+    let provider = match host {
+        "open.spotify.com" | "spotify.com" if path.starts_with("/show/") => "spotify.com",
+        "podcasts.apple.com" if path.contains("/podcast/") => "podcasts.apple.com",
+        "pca.st" | "pocketcasts.com" | "play.pocketcasts.com" => "pocketcasts.com",
+        "overcast.fm" if path.starts_with("/itunes") => "overcast.fm",
+        "castbox.fm" if path.contains("/channel/") => "castbox.fm",
+        _ => return url_label(url),
+    };
+    let name = slug::slugify(title.split(['|', ':']).next().unwrap_or(title));
+    if name.is_empty() || title.contains("://") || title == host {
+        return url_label(url);
+    }
+    // This is a publisher label, not a synthesized destination: links keep their real URL.
+    format!("{provider}/{name}")
+}
+
 pub fn profile_label(value: &str) -> String {
     profile_url(value)
         .as_ref()
@@ -441,10 +494,13 @@ fn source_identity(
     configured: Option<&str>,
     website: Option<&str>,
 ) -> SourceIdentity {
+    let title = super::display::title(title, &domain_of(configured.or(website).unwrap_or(article)));
     let configured_profile = configured.and_then(profile_url);
     let website_profile = website.and_then(profile_url);
     let profile = configured_profile.as_ref().or(website_profile.as_ref());
-    let feed_display = profile.map(url_label).unwrap_or_else(|| title.to_string());
+    let feed_display = profile
+        .map(|url| source_profile_label(url, &title))
+        .unwrap_or_else(|| title.clone());
     let article_url = url::Url::parse(article).ok();
     let matching_profile = [configured_profile.as_ref(), website_profile.as_ref()]
         .into_iter()
@@ -456,13 +512,13 @@ fn source_identity(
         });
     let is_aggregated = profile.is_some() && matching_profile.is_none();
     let display = matching_profile
-        .map(url_label)
+        .map(|url| source_profile_label(url, &title))
         .unwrap_or_else(|| domain_of(article));
     SourceIdentity {
         title: if is_aggregated {
             format!("{display} · via {title}")
         } else {
-            title.to_string()
+            title
         },
         url: matching_profile
             .map(ToString::to_string)
@@ -484,9 +540,13 @@ pub fn category_slug(name: &str) -> String {
 
 impl ItemCtx {
     pub fn set_source(&mut self, source: &SourceCtx) {
+        self.source_name = super::display::title(
+            &source.name,
+            &domain_of(source.url.as_deref().unwrap_or(&self.link)),
+        );
         let identity = source_identity(
             &self.link,
-            &source.name,
+            &self.source_name,
             source.url.as_deref(),
             source.site_url.as_deref(),
         );
@@ -495,23 +555,25 @@ impl ItemCtx {
         self.source_url = identity.url;
         self.feed_display = identity.feed_display;
         self.is_aggregated = identity.is_aggregated;
+        self.metadata = super::display::Metadata::from(&*self);
     }
 
     pub fn from_item(item: &Item, options: ItemOptions<'_>) -> Self {
         let md = item.md_path();
-        let (word_count, reading_minutes) = content::reading_metrics(&item.body);
-        Self {
+        let (word_count, reading_minutes) = options.reading_metrics;
+        let source_name = super::display::title(options.source_name, &domain_of(&item.front.link));
+        let mut context = Self {
             path: item.path.clone(),
             url: item_url(&item.path),
-            title: item.front.title.clone(),
+            title: super::display::title(&item.front.title, "Untitled"),
             link: item.front.link.clone(),
             domain: domain_of(&item.front.link),
             source: item.front.source.clone(),
-            source_name: options.source_name.to_string(),
+            source_name: source_name.clone(),
             source_display: domain_of(&item.front.link),
-            source_title: options.source_name.to_string(),
+            source_title: source_name.clone(),
             source_url: publisher_url(&item.front.link),
-            feed_display: options.source_name.to_string(),
+            feed_display: source_name,
             is_aggregated: false,
             is_youtube: url::Url::parse(&item.front.link)
                 .is_ok_and(|url| crate::sources::youtube::is_video_url(&url)),
@@ -524,6 +586,7 @@ impl ItemCtx {
             replicated_at: item.front.replicated_at,
             authors: item.front.authors.clone(),
             labels: normalize_labels(&item.front.labels),
+            resources: Vec::new(),
             discussions: options
                 .discussions
                 .iter()
@@ -542,12 +605,27 @@ impl ItemCtx {
             summary: item.front.summary.clone(),
             excerpt: options.excerpt,
             content: item.front.content,
+            item_type: if super::document::DocumentCtx::from_item(item).is_some() {
+                super::item_type::ItemType::Document
+            } else {
+                super::item_type::ItemType::from_urls(
+                    &item.front.link,
+                    item.front
+                        .extra
+                        .get("audio_url")
+                        .and_then(serde_yaml_ng::Value::as_str),
+                )
+            },
             word_count,
             reading_minutes,
             preview: None,
             article_preview: None,
             video: None,
+            document: None,
+            interactive: None,
+            native_media: None,
             extra: item.front.extra.clone(),
+            metadata: super::display::Metadata::default(),
             permalink: options.links.map(|l| l.permalink(&md)),
             raw_url: options.links.map(|l| l.raw(&md)),
             history_url: options.links.map(|l| l.history(&md)),
@@ -556,7 +634,9 @@ impl ItemCtx {
             next_article: None,
             recommended_articles: Vec::new(),
             body_html: None,
-        }
+        };
+        context.metadata = super::display::Metadata::from(&context);
+        context
     }
 }
 
@@ -564,10 +644,9 @@ impl ItemCtx {
 pub struct ArticleLinkCtx {
     pub title: String,
     pub url: String,
-    pub domain: String,
-    pub source_title: String,
-    pub source: String,
-    pub date: DateTime<Utc>,
+    pub metadata: super::display::Metadata,
+    pub excerpt: String,
+    pub preview: Option<PreviewCtx>,
 }
 
 impl From<&ItemCtx> for ArticleLinkCtx {
@@ -575,16 +654,16 @@ impl From<&ItemCtx> for ArticleLinkCtx {
         Self {
             title: item.title.clone(),
             url: item.url.clone(),
-            domain: item.source_display.clone(),
-            source_title: item.source_title.clone(),
-            source: item.source.clone(),
-            date: item.date,
+            metadata: super::display::Metadata::from(item),
+            excerpt: item.excerpt.clone(),
+            preview: item.preview.clone(),
         }
     }
 }
 
 pub struct ItemOptions<'a> {
     pub source_name: &'a str,
+    pub reading_metrics: (usize, usize),
     pub category: Option<&'a str>,
     pub links: Option<&'a GitHubLinks<'a>>,
     pub excerpt: String,
@@ -648,6 +727,10 @@ mod tests {
             width: 1200,
             height: 800,
             color: "#123456".into(),
+            placeholder: crate::media::placeholder::from_image(&image::DynamicImage::new_rgb8(
+                4, 4,
+            ))
+            .unwrap(),
         };
         let lead = super::ArticlePreviewCtx::lead_image(
             "<p>Article</p>",
@@ -656,6 +739,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(lead.url, "assets/images/master.jpg");
+        let badge = crate::content::LocalImage {
+            source: "https://github.com/owner/project/actions/workflows/build.yml/badge.svg".into(),
+            original: "assets/images/build.png".into(),
+            ..image.clone()
+        };
+        assert!(
+            super::ArticlePreviewCtx::lead_image(
+                "<p>Article</p>",
+                &base,
+                std::slice::from_ref(&badge)
+            )
+            .is_none()
+        );
+        assert_eq!(
+            super::ArticlePreviewCtx::lead_image("<p>Article</p>", &base, &[badge, image.clone()])
+                .unwrap()
+                .url,
+            image.original
+        );
         assert!(
             super::ArticlePreviewCtx::lead_image(
                 "<img src='/lead.jpg#photo'>",
@@ -669,9 +771,53 @@ mod tests {
             ..image.clone()
         };
         assert!(
-            super::ArticlePreviewCtx::lead_image("<img src='/lead.jpg'>", &base, &[alias, image])
-                .is_none()
+            super::ArticlePreviewCtx::lead_image(
+                "<img src='/lead.jpg'>",
+                &base,
+                &[alias, image.clone()]
+            )
+            .is_none()
         );
+        // The same picture under another CDN URL (og:image versus body rendition) is no lead.
+        let mut same_picture = image.clone();
+        same_picture.source = "https://cdn.publisher.test/lead.width-1300.jpg".into();
+        same_picture.original = "assets/images/other-master.jpg".into();
+        let mut body_copy = image.clone();
+        body_copy.source = "https://publisher.test/body.width-2200.webp".into();
+        body_copy.original = "assets/images/body-master.webp".into();
+        body_copy.placeholder =
+            crate::media::placeholder::from_image(&image::DynamicImage::new_rgb8(8, 8)).unwrap();
+        assert!(
+            super::ArticlePreviewCtx::lead_image(
+                "<img src='https://publisher.test/body.width-2200.webp'>",
+                &base,
+                &[same_picture, body_copy.clone()]
+            )
+            .is_none()
+        );
+        let mut different = image.clone();
+        different.source = "https://cdn.publisher.test/other.jpg".into();
+        different.placeholder = crate::media::placeholder::from_image(
+            &image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 40, |x, y| {
+                image::Rgb([(x * 4) as u8, (y * 6) as u8, 200])
+            })),
+        )
+        .unwrap();
+        assert!(
+            super::ArticlePreviewCtx::lead_image(
+                "<img src='https://publisher.test/body.width-2200.webp'>",
+                &base,
+                &[different.clone(), body_copy]
+            )
+            .is_some()
+        );
+        // A 600px social card never becomes a full-width hero.
+        let card = crate::content::LocalImage {
+            width: 600,
+            height: 300,
+            ..different
+        };
+        assert!(super::ArticlePreviewCtx::lead_image("<p>Article</p>", &base, &[card]).is_none());
     }
 
     #[test]
@@ -690,6 +836,10 @@ mod tests {
             width: 1280,
             height: 720,
             color: "#123456".into(),
+            placeholder: crate::media::placeholder::from_image(&image::DynamicImage::new_rgb8(
+                4, 4,
+            ))
+            .unwrap(),
         };
         let poster = super::ArticlePreviewCtx::from_image(&image);
         assert_eq!(poster.url, "assets/images/640.webp");
@@ -851,6 +1001,44 @@ mod tests {
     }
 
     #[test]
+    fn podcast_source_labels_use_show_names_without_changing_destinations() {
+        for (configured, article, title, expected) in [
+            (
+                "https://open.spotify.com/show/1sz1nhohqbpxbznlponfoz",
+                "https://open.spotify.com/episode/abc",
+                "Underscore_",
+                "spotify.com/underscore",
+            ),
+            (
+                "https://podcasts.apple.com/us/podcast/a-show/id123456",
+                "https://podcasts.apple.com/us/podcast/a-show/id123456?i=789",
+                "A Show: Conversations | Technology",
+                "podcasts.apple.com/a-show",
+            ),
+            (
+                "https://pca.st/abc123",
+                "https://pca.st/episode/xyz",
+                "A Show",
+                "pocketcasts.com/a-show",
+            ),
+        ] {
+            let identity = source_identity(article, title, Some(configured), None);
+            assert_eq!(identity.display, expected);
+            assert_eq!(identity.feed_display, expected);
+            assert_eq!(identity.url, configured);
+            assert!(!identity.is_aggregated);
+        }
+        let identity = source_identity(
+            "https://publisher.example/episodes/one",
+            "Underscore_",
+            Some("https://open.spotify.com/show/abc123"),
+            Some("https://publisher.example/"),
+        );
+        assert_eq!(identity.display, "publisher.example");
+        assert_eq!(identity.feed_display, "spotify.com/underscore");
+    }
+
+    #[test]
     fn source_identity_uses_discovered_profile_for_feed_endpoints() {
         let identity = source_identity(
             "https://example.social/@alice/123",
@@ -868,6 +1056,66 @@ mod tests {
             item_url("items/techmeme/2026/09/2026-09-02-a-story"),
             "items/techmeme/2026-09-02-a-story/"
         );
+    }
+
+    #[test]
+    fn display_titles_remove_emoji_without_changing_archived_metadata() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
+        let item = Item {
+            path: "items/example/2026/09/article".into(),
+            front: crate::model::FrontMatter {
+                title: "🚀 Café #1 🧑🏽‍💻".into(),
+                link: "https://example.com/article".into(),
+                source: "example".into(),
+                first_seen: now,
+                ..Default::default()
+            },
+            body: "Keep body emoji 🚀".into(),
+        };
+        let mut context = ItemCtx::from_item(
+            &item,
+            ItemOptions {
+                reading_metrics: content::reading_metrics(&item.body),
+                source_name: "📰 Example",
+                category: None,
+                links: None,
+                excerpt: String::new(),
+                discussions: &[],
+                resolutions: &crate::discussions::ResolutionSet::default(),
+                now,
+            },
+        );
+        assert_eq!(context.title, "Café #1");
+        assert_eq!(context.source_name, "Example");
+        assert_eq!(context.source_title, "Example");
+        assert_eq!(context.feed_display, "Example");
+        context.set_source(&SourceCtx {
+            slug: "example".into(),
+            name: "☀ Daily News 🗞️".into(),
+            url: Some("https://news.example/feed.xml".into()),
+            site_url: Some("https://news.example/".into()),
+            category: None,
+            engine: "web".into(),
+            count: 1,
+            latest: Some(now),
+            error: None,
+            page: "sources/example/".into(),
+        });
+        assert_eq!(context.source_name, "Daily News");
+        assert_eq!(context.source_title, "example.com · via Daily News");
+        let related = ArticleLinkCtx::from(&context);
+        assert_eq!(related.title, context.title);
+        assert_eq!(related.metadata.source_title, context.source_title);
+        let search = crate::site::pagefind::SearchDocument::new(
+            &context,
+            content::PreparedMarkdown::new(&item.body).plain_text(),
+        );
+        assert_eq!(search.meta["title"], context.title);
+        let search_display: serde_json::Value =
+            serde_json::from_slice(&hex::decode(&search.meta["aggr_display"]).unwrap()).unwrap();
+        assert_eq!(search_display["source_title"], context.source_title);
+        assert_eq!(item.front.title, "🚀 Café #1 🧑🏽‍💻");
+        assert_eq!(item.body, "Keep body emoji 🚀");
     }
 
     #[test]
@@ -922,6 +1170,7 @@ mod tests {
         let context = ItemCtx::from_item(
             &item,
             ItemOptions {
+                reading_metrics: content::reading_metrics(&item.body),
                 source_name: "Example",
                 category: None,
                 links: None,

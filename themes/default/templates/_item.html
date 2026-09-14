@@ -1,4 +1,4 @@
-{# Keep this structure in sync with renderResult() in app.js. #}
+{# Keep this structure aligned with web/src/search/Results.svelte. #}
 <li class="row h-entry age-{{ item.age_band }}" data-age="{{ item.age_band }}" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}">
   <a class="u-uid" href="{{ item.url | url_for }}" hidden></a>
   <div class="cell">
@@ -11,7 +11,7 @@
     {% if site.params.excerpts and item.excerpt %}<p class="excerpt">{{ item.excerpt }}</p>{% endif %}
     {% include "_metadata.html" %}
     </div>
-    {% if item.preview %}<span class="preview-media"{% if item.preview.color %} style="--preview-color: {{ item.preview.color }}"{% endif %}><img class="preview-image" src="{{ item.preview.url | url_for }}" width="{{ item.preview.width }}" height="{{ item.preview.height }}" alt="{{ item.preview.alt or '' }}" loading="lazy" decoding="async"></span>{% endif %}
+    {% if item.preview %}<span class="preview-media" data-thumbhash="{{ item.preview.placeholder.hash }}" style="--preview-color: {{ item.preview.color }}; --image-preview: url('{{ item.preview.placeholder.data_url }}')"><img class="preview-image" src="{{ item.preview.url | url_for }}" width="{{ item.preview.width }}" height="{{ item.preview.height }}" alt="{{ item.preview.alt or '' }}" loading="lazy" decoding="async"></span>{% endif %}
     </div>
     {% if item.category %}<data class="p-category" value="{{ item.category }}" hidden></data>{% endif %}
     {% for label in item.labels %}<data class="p-category" value="{{ label }}" hidden></data>{% endfor %}

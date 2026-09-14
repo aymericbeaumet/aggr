@@ -82,7 +82,9 @@ impl Loader {
                 if let Some(defaults) = &defaults {
                     apply_defaults(&mut source, defaults);
                 }
-                if source.kind.as_deref() == Some("aggr") || source.local_feed.is_some() {
+                if (!source.collection && super::source_kind(&source) == "aggr")
+                    || source.local_feed.is_some()
+                {
                     expanded.push(source);
                     continue;
                 }
@@ -98,11 +100,19 @@ impl Loader {
                         continue;
                     }
                 };
+                if !source.collection
+                    && source.kind.is_none()
+                    && super::repository_url::inferred(&resolved)
+                {
+                    source.kind = Some("aggr".into());
+                    expanded.push(source);
+                    continue;
+                }
                 if !self.load_remote && remote_url(&resolved).ok().flatten().is_some() {
                     expanded.push(source);
                     continue;
                 }
-                let targets = match self.targets(&declaring, &resolved).await {
+                let targets = match self.targets(&declaring, &resolved, source.collection).await {
                     Ok(targets) => targets,
                     Err(err) => {
                         warn(
@@ -116,6 +126,18 @@ impl Loader {
                     let mut source = source.clone();
                     if declaring.is_remote() && !declaring.same_origin(&target) {
                         source.headers = explicit_headers.clone();
+                    }
+                    if let Location::Generic(url) = &target
+                        && !source.collection
+                        && !collection_path(url.path())
+                    {
+                        source.url = if remote_url(&resolved).ok().flatten().is_some() {
+                            Some(pattern.clone())
+                        } else {
+                            Some(url.to_string())
+                        };
+                        expanded.push(source);
+                        continue;
                     }
                     let headers = source
                         .headers
@@ -143,7 +165,6 @@ impl Loader {
                         log::warn!("ignoring repeated or cyclic source {target}");
                         continue;
                     }
-                    let remote = target.is_remote();
                     let absolute = remote_url(&resolved).ok().flatten().is_some();
                     let original_url = if absolute {
                         Some(pattern.clone())
@@ -157,20 +178,18 @@ impl Loader {
                     let (document, actual, digest) = match self.read(target, &headers).await {
                         Ok(value) => value,
                         Err(err) => {
-                            if remote && !err.is::<super::import_formats::InvalidCollection>() {
-                                // Feed and site failures remain ordinary runtime source failures.
-                                let mut leaf = source.clone();
-                                leaf.url = original_url.clone().or_else(|| Some(pattern.clone()));
-                                expanded.push(leaf);
-                            } else {
-                                warn(
-                                    &format!("source {} from {declaring}", import_label(&pattern)),
-                                    &err,
-                                );
-                            }
+                            warn(
+                                &format!("source {} from {declaring}", import_label(&pattern)),
+                                &err,
+                            );
                             continue;
                         }
                     };
+                    if source.collection && !document.collection {
+                        log::warn!("ignoring {actual}: expected a subscription collection");
+                        continue;
+                    }
+                    source.collection = false;
                     if document.collection {
                         if !requested.same_origin(&actual) && requested.is_remote() {
                             source.headers.clear();
@@ -226,7 +245,12 @@ impl Loader {
         })
     }
 
-    async fn targets(&mut self, declaring: &Location, pattern: &str) -> Result<Vec<Location>> {
+    async fn targets(
+        &mut self,
+        declaring: &Location,
+        pattern: &str,
+        collection: bool,
+    ) -> Result<Vec<Location>> {
         if pattern.trim().is_empty() {
             bail!("`url` must name a source or collection");
         }
@@ -241,7 +265,7 @@ impl Loader {
             return Ok(vec![Location::Local(path)]);
         }
         if let Some(url) = remote_url(pattern)? {
-            return self.remote_targets(url).await;
+            return self.remote_targets(url, collection).await;
         }
         match declaring {
             Location::Local(file) => {
@@ -276,8 +300,16 @@ impl Loader {
         }
     }
 
-    async fn remote_targets(&mut self, url: Url) -> Result<Vec<Location>> {
-        if let Some(location) = github_location(&url, self.github_api.as_ref())? {
+    async fn remote_targets(&mut self, url: Url, collection: bool) -> Result<Vec<Location>> {
+        let segments: Vec<_> = url.path_segments().into_iter().flatten().collect();
+        let github_config = collection
+            || collection_path(url.path())
+            || (url.host_str() == Some("github.com") && segments.get(2) == Some(&"tree"))
+            || (url.host_str() == Some("raw.githubusercontent.com") && segments.len() == 3);
+        if github_config
+            && let Some(location) = github_location(&url, self.github_api.as_ref())?
+            && (collection || collection_path(&location.path))
+        {
             return self.github_targets(location.repo, location.path).await;
         }
         if has_glob(url.path()) {
@@ -483,6 +515,18 @@ impl Loader {
             }
         }
     }
+}
+
+fn collection_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "toml" | "opml" | "txt"
+            )
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -785,7 +829,6 @@ fn apply_defaults(source: &mut SourceConfig, defaults: &SourceConfig) {
     source.content = source.content.or(defaults.content);
     source.previews = source.previews.or(defaults.previews);
     source.images = source.images.or(defaults.images);
-    source.repo = source.repo.take().or_else(|| defaults.repo.clone());
     source.branch = source.branch.take().or_else(|| defaults.branch.clone());
     if source.sources.is_empty() {
         source.sources = defaults.sources.clone();
@@ -857,7 +900,7 @@ mod tests {
             when.path("/collection")
                 .header("Authorization", "Bearer secret");
             then.status(200).body(format!(
-                "[[sources]]\nurl = ['./feed', {:?}, {:?}]\n",
+                "[[sources]]\nurl = ['./feed', {:?}]\n[[sources]]\nurl={:?}\ncollection=true\n",
                 other.url("/feed"),
                 other.url("/collection")
             ));
@@ -884,6 +927,7 @@ mod tests {
         let expansion = expand(
             vec![SourceConfig {
                 url: Some(trusted.url("/collection")),
+                collection: true,
                 headers: BTreeMap::from([("Authorization".into(), "Bearer secret".into())]),
                 category: Some("science".into()),
                 ..Default::default()
@@ -897,8 +941,8 @@ mod tests {
         .unwrap();
         leaked.assert_calls(0);
         collection.assert_calls(1);
-        local_feed.assert_calls(1);
-        remote_feed.assert_calls(1);
+        local_feed.assert_calls(0);
+        remote_feed.assert_calls(0);
         rejected_collection.assert_calls(1);
         assert_eq!(expansion.sources.len(), 2);
         assert_eq!(expansion.sources[0].headers.len(), 1);
@@ -938,6 +982,7 @@ mod tests {
         let expansion = expand(
             vec![SourceConfig {
                 url: Some(trusted.url("/collection")),
+                collection: true,
                 headers: BTreeMap::from([("Authorization".into(), "Bearer secret".into())]),
                 ..Default::default()
             }],
@@ -949,7 +994,7 @@ mod tests {
         .await
         .unwrap();
         leaked.assert_calls(0);
-        feed.assert_calls(1);
+        feed.assert_calls(0);
         assert_eq!(expansion.sources.len(), 1);
         assert!(expansion.sources[0].headers.is_empty());
     }
@@ -962,7 +1007,7 @@ mod tests {
         server.mock(|when, then| {
             when.method(GET).path("/collection");
             then.status(200)
-                .body("[[sources]]\nurl = ['./feed', './alias', 'file:///tmp/private-feed.xml']\n");
+                .body("[[sources]]\nurl = ['./feed', 'file:///tmp/private-feed.xml']\n[[sources]]\nurl='./alias'\ncollection=true\n");
         });
         server.mock(|when, then| {
             when.method(GET).path("/alias");
@@ -980,6 +1025,7 @@ mod tests {
         let expansion = expand(
             vec![SourceConfig {
                 url: Some(server.url("/collection")),
+                collection: true,
                 ..Default::default()
             }],
             root,
@@ -991,7 +1037,7 @@ mod tests {
         .unwrap();
         assert_eq!(expansion.sources.len(), 1);
         assert_eq!(expansion.remote.len(), 1);
-        feed.assert_calls(1);
+        feed.assert_calls(0);
     }
 
     #[tokio::test]
@@ -1097,7 +1143,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_collection_detection_is_content_based_and_preserves_leaf_failures() {
+    async fn explicit_remote_collections_preserve_unfetched_leaf_sources() {
         use httpmock::prelude::*;
         crate::http::install_crypto_provider();
         let server = MockServer::start();
@@ -1128,6 +1174,7 @@ mod tests {
         let expansion = expand(
             vec![SourceConfig {
                 url: Some(server.url("/subscriptions")),
+                collection: true,
                 headers: BTreeMap::from([("x-test".into(), "secret".into())]),
                 category: Some("group".into()),
                 ..Default::default()
@@ -1173,6 +1220,7 @@ mod tests {
         let expansion = expand(
             vec![SourceConfig {
                 url: Some(server.url("/collections/news")),
+                collection: true,
                 ..Default::default()
             }],
             root,
@@ -1193,7 +1241,7 @@ mod tests {
                 Some(edition)
             );
         }
-        feed.assert_calls(2);
+        feed.assert_calls(0);
     }
 
     #[tokio::test]

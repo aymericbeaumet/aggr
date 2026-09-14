@@ -1,5 +1,6 @@
 //! RSS / Atom / JSON Feed via feed-rs, with conditional GET and a body-hash short circuit.
 
+use std::borrow::Cow;
 use std::io::Read;
 
 use anyhow::{Context as _, Result, bail};
@@ -135,7 +136,7 @@ async fn fetch_fresh(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fe
     interpret(response, source, ctx, Validators::default()).await
 }
 
-async fn request(
+pub(super) async fn request(
     url: &Url,
     source: &Source,
     ctx: &Context<'_>,
@@ -149,6 +150,21 @@ async fn request(
             last_modified: previous.last_modified.as_deref(),
         })
         .await
+}
+
+/// Read a discovered publisher endpoint without accepting an unrelated HTML listing.
+pub(super) async fn fetch_endpoint(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
+    let Response::Ok(body) = request(url, source, ctx, &Validators::default()).await? else {
+        bail!("publisher endpoint returned no feed");
+    };
+    let feed = parse(&body.bytes, &body.final_url).context("parsing publisher podcast feed")?;
+    let validators = Validators {
+        etag: body.etag.clone(),
+        last_modified: body.last_modified.clone(),
+        body_hash: Some(sha1_hex(&body.bytes)),
+        resolved_url: Some(body.final_url.to_string()),
+    };
+    Ok(changed(feed, &body.final_url, validators, &body.bytes))
 }
 
 async fn interpret(
@@ -181,7 +197,11 @@ async fn interpret(
     }
 
     let page = body.html_text();
-    for candidate in crate::sources::html::feed_links(&page, &body.final_url) {
+    let mut candidates = crate::sources::html::feed_links(&page, &body.final_url);
+    candidates.extend(super::podcast::feed_links(&page, &body.final_url));
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|url| seen.insert(url.clone()));
+    for candidate in candidates {
         if candidate == body.final_url {
             continue;
         }
@@ -211,6 +231,15 @@ async fn interpret(
                 source.slug
             ),
         }
+    }
+
+    if super::podcast::is_spotify_show(&body.final_url) {
+        let (meta, items) = super::podcast::spotify_items(&page, &body.final_url)?;
+        return Ok(Fetch::Changed {
+            validators,
+            meta,
+            items,
+        });
     }
 
     match crate::sources::html::extract(&page, &body.final_url) {
@@ -343,11 +372,95 @@ fn common_feed_urls(page: &Url) -> Vec<Url> {
 
 /// RSS, Atom or JSON Feed bytes; relative links resolve against the URL the body came from.
 pub fn parse(bytes: &[u8], base: &Url) -> Result<Feed> {
+    let normalized = normalize_podcast_durations(bytes);
     feed_rs::parser::Builder::new()
         .base_uri(Some(base.as_str()))
         .build()
-        .parse(bytes)
+        .parse(normalized.as_ref())
         .context("parsing feed")
+}
+
+fn normalize_podcast_durations(bytes: &[u8]) -> Cow<'_, [u8]> {
+    use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
+
+    if !bytes
+        .windows(b"duration".len())
+        .any(|part| part == b"duration")
+    {
+        return Cow::Borrowed(bytes);
+    }
+    let mut reader = NsReader::from_reader(bytes);
+    let mut replacements = Vec::new();
+    loop {
+        let Ok((namespace, event)) = reader.read_resolved_event() else {
+            return Cow::Borrowed(bytes);
+        };
+        match event {
+            Event::Start(element)
+                if element.local_name().as_ref() == b"duration"
+                    && matches!(namespace, ResolveResult::Bound(namespace) if namespace.as_ref() == b"http://www.itunes.com/dtds/podcast-1.0.dtd") =>
+            {
+                let start = reader.buffer_position() as usize;
+                let Some((end, text)) = podcast_duration_text(&mut reader) else {
+                    return Cow::Borrowed(bytes);
+                };
+                // feed-rs treats MM:SS as seconds and accepts numeric substrings in invalid values.
+                let value = crate::media_duration::parse(&text)
+                    .map(|seconds| seconds.to_string())
+                    .unwrap_or_default();
+                if &bytes[start..end] != value.as_bytes() {
+                    replacements.push((start..end, value));
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if replacements.is_empty() {
+        return Cow::Borrowed(bytes);
+    }
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut copied = 0;
+    for (range, value) in replacements {
+        normalized.extend_from_slice(&bytes[copied..range.start]);
+        normalized.extend_from_slice(value.as_bytes());
+        copied = range.end;
+    }
+    normalized.extend_from_slice(&bytes[copied..]);
+    Cow::Owned(normalized)
+}
+
+fn podcast_duration_text(
+    reader: &mut quick_xml::reader::NsReader<&[u8]>,
+) -> Option<(usize, String)> {
+    use quick_xml::events::Event;
+    let mut text = String::new();
+    let mut depth = 1;
+    let mut nested = false;
+    loop {
+        let position = reader.buffer_position() as usize;
+        match reader.read_event().ok()? {
+            Event::Text(value) if depth == 1 => text.push_str(&value.decode().ok()?),
+            Event::CData(value) if depth == 1 => text.push_str(&value.decode().ok()?),
+            Event::GeneralRef(value) if depth == 1 => {
+                let escaped = format!("&{};", value.decode().ok()?);
+                text.push_str(&quick_xml::escape::unescape(&escaped).ok()?);
+            }
+            Event::Start(_) => {
+                depth += 1;
+                nested = true;
+            }
+            Event::Empty(_) => nested = true,
+            Event::End(_) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((position, if nested { String::new() } else { text }));
+                }
+            }
+            Event::Eof => return None,
+            _ => {}
+        }
+    }
 }
 
 /// Pure mapping from a parsed feed to raw items; entries without a usable link are dropped.
@@ -367,9 +480,27 @@ pub fn convert(feed: &Feed, feed_url: &Url) -> (SourceMeta, Vec<RawItem>) {
 }
 
 fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<RawItem> {
+    let audio = entry
+        .media
+        .iter()
+        .flat_map(|media| media.content.iter())
+        .filter(|content| {
+            content
+                .content_type
+                .as_ref()
+                .is_some_and(|kind| kind.ty() == "audio")
+        })
+        .filter_map(|content| content.url.as_ref())
+        .find(|url| matches!(url.scheme(), "http" | "https"));
     let link = pick_link(&entry.links)
         .map(|link| link.href.clone())
-        .or_else(|| Url::parse(&entry.id).ok().map(|url| url.to_string()))?;
+        .or_else(|| {
+            Url::parse(&entry.id)
+                .ok()
+                .filter(|url| matches!(url.scheme(), "http" | "https"))
+                .map(|url| url.to_string())
+        })
+        .or_else(|| audio.map(Url::to_string))?;
     let link = feed_url
         .join(&link)
         .map(|url| url.to_string())
@@ -442,6 +573,48 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<RawItem> {
         });
 
     let mut extra = std::collections::BTreeMap::new();
+    if let Some(url) = audio {
+        extra.insert("audio_url".to_string(), url.to_string().into());
+    }
+    let duration = entry
+        .media
+        .iter()
+        .find_map(|media| {
+            media
+                .content
+                .iter()
+                .find(|content| {
+                    content
+                        .url
+                        .as_ref()
+                        .is_some_and(|url| Some(url) == audio || url.as_str() == link)
+                })
+                .and_then(|content| content.duration.or(media.duration))
+        })
+        .or_else(|| {
+            // A single media object may carry iTunes duration independently of its enclosure.
+            (entry.media.len() == 1)
+                .then(|| &entry.media[0])
+                .and_then(|media| {
+                    media.duration.or_else(|| {
+                        media
+                            .content
+                            .iter()
+                            .filter(|content| {
+                                content.content_type.as_ref().is_some_and(|kind| {
+                                    matches!(kind.ty().as_str(), "audio" | "video")
+                                })
+                            })
+                            .find_map(|content| content.duration)
+                    })
+                })
+        });
+    if let Some(seconds) = duration
+        .map(|duration| duration.as_secs())
+        .filter(|seconds| *seconds > 0)
+    {
+        extra.insert("duration_seconds".into(), seconds.into());
+    }
     if let Some(thumbnail) = entry
         .media
         .iter()
@@ -707,6 +880,153 @@ Second paragraph.</media:description></media:group>
             item.extra["thumbnail"],
             serde_yaml_ng::Value::from("https://example.com/a.jpg")
         );
+    }
+
+    #[test]
+    fn podcast_without_an_episode_page_keeps_its_audio_link() {
+        let xml = r#"<rss version="2.0"><channel><title>Podcast</title><link>https://example.com</link><description>Show</description><item><guid isPermaLink="false">episode-id</guid><title>Episode</title><description>Notes</description><enclosure url="https://example.com/episode.mp3" type="audio/mpeg" length="100"/></item></channel></rss>"#;
+        let (_, items) = parse(xml, "https://example.com/feed.xml");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].link, "https://example.com/episode.mp3");
+        assert_eq!(
+            items[0].extra["audio_url"].as_str(),
+            Some("https://example.com/episode.mp3")
+        );
+    }
+
+    #[test]
+    fn duration_normalization_respects_namespaces_and_preserves_article_markup() {
+        let xml = br#"<rss version="2.0" xmlns:pod="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:other="https://example.com/extensions"><channel><title>Podcast</title><item><guid>one</guid><title>Episode</title><link>https://example.com/episode</link><enclosure url="https://example.com/audio.mp3" type="audio/mpeg" length="987654"/><pod:duration>27&#58;51</pod:duration><other:duration>15:20</other:duration><description><![CDATA[<p>The example is <pod:duration>12:00</pod:duration>.</p>]]></description></item></channel></rss>"#;
+        let expected = String::from_utf8(xml.to_vec())
+            .unwrap()
+            .replace("27&#58;51", "1671");
+        assert_eq!(
+            normalize_podcast_durations(xml).as_ref(),
+            expected.as_bytes()
+        );
+        assert!(
+            matches!(
+                normalize_podcast_durations(expected.as_bytes()),
+                Cow::Borrowed(_)
+            ),
+            "canonical feed durations do not copy the response again"
+        );
+        let base = Url::parse("https://example.com/feed").unwrap();
+        let feed = super::parse(xml, &base).unwrap();
+        let raw = convert_entry(&feed.entries[0], &base).unwrap();
+        assert_eq!(raw.extra["duration_seconds"].as_u64(), Some(1671));
+        assert!(
+            raw.content_html
+                .unwrap()
+                .contains("<pod:duration>12:00</pod:duration>")
+        );
+    }
+
+    #[test]
+    fn media_duration_preserves_publisher_seconds_instead_of_enclosure_byte_lengths() {
+        let base = Url::parse("https://example.com/feed").unwrap();
+        for (element, expected) in [
+            ("<itunes:duration>1:00:01</itunes:duration>", Some(3601)),
+            ("<itunes:duration>61</itunes:duration>", Some(61)),
+            ("<itunes:duration>27:51</itunes:duration>", Some(1671)),
+            (
+                "<itunes:duration><![CDATA[18:26]]></itunes:duration>",
+                Some(1106),
+            ),
+            ("<itunes:duration>0</itunes:duration>", None),
+            ("<itunes:duration>unknown</itunes:duration>", None),
+            ("<itunes:duration>27 minutes</itunes:duration>", None),
+            ("<itunes:duration>2:99</itunes:duration>", None),
+            (
+                "<itunes:duration>184467440737095516150</itunes:duration>",
+                None,
+            ),
+            ("", None),
+        ] {
+            let xml = format!(
+                r#"<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Podcast</title><item><guid>one</guid><title>Episode</title><link>https://example.com/episode</link><enclosure url="https://example.com/audio.mp3" type="audio/mpeg" length="12345"/>{element}</item></channel></rss>"#
+            );
+            let feed = super::parse(xml.as_bytes(), &base).unwrap();
+            let raw = convert_entry(&feed.entries[0], &base).unwrap();
+            assert_eq!(
+                raw.extra
+                    .get("duration_seconds")
+                    .and_then(serde_yaml_ng::Value::as_u64),
+                expected,
+                "{element}"
+            );
+        }
+        let xml = br#"<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel><title>Videos</title><item><guid>movie</guid><title>Movie</title><link>https://example.com/movie.mp4</link><media:content url="https://example.com/movie.mp4" type="video/mp4" duration="125"/></item></channel></rss>"#;
+        let feed = super::parse(xml, &base).unwrap();
+        assert_eq!(
+            convert_entry(&feed.entries[0], &base).unwrap().extra["duration_seconds"].as_u64(),
+            Some(125)
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_podcast_feed_is_remembered_and_conditionally_fetched() {
+        let server = MockServer::start_async().await;
+        let endpoint = server.url("/opaque-feed-id");
+        let page = server.mock_async(|when, then| {
+            when.method(GET).path("/show");
+            then.status(200).body(format!(r#"<script type="application/json">{{"podcast":{{"rssFeedUrl":"{endpoint}"}}}}</script>"#));
+        }).await;
+        let rss = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/opaque-feed-id");
+                then.status(200).header("etag", "podcast-v1").body(RSS);
+            })
+            .await;
+        let configured = Url::parse(&server.url("/show")).unwrap();
+        let source = source(configured.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = crate::store::SourceState::default();
+        let result = fetch(
+            &configured,
+            &source,
+            &Context {
+                client: &client,
+                state: &state,
+                cache_dir: directory.path(),
+            },
+        )
+        .await
+        .unwrap();
+        let Fetch::Changed {
+            validators, items, ..
+        } = result
+        else {
+            panic!("expected podcast episodes");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(validators.resolved_url.as_deref(), Some(endpoint.as_str()));
+        validators.apply(&mut state);
+        state.identity = source.identity.clone();
+        rss.delete_async().await;
+        let cached = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/opaque-feed-id")
+                    .header("if-none-match", "podcast-v1");
+                then.status(304);
+            })
+            .await;
+        let result = fetch(
+            &configured,
+            &source,
+            &Context {
+                client: &client,
+                state: &state,
+                cache_dir: directory.path(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Fetch::Unchanged { .. }));
+        page.assert_calls_async(1).await;
+        cached.assert_calls_async(1).await;
     }
 
     #[test]

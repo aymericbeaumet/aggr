@@ -1,19 +1,9 @@
 {% extends "base.html" %}
-{# Served by the service worker for any page that is neither online nor cached. The newest
-   guaranteed-precached entries are rendered here so fallback works before JavaScript. #}
 {% block content %}
-<div class="listhead">
-  <h1>Offline</h1>
-  <div class="listtools"><span id="count" class="muted"></span></div>
-</div>
-<p class="empty">
-  You are offline and this page is not cached. Head back to the <a href="{{ '' | url_for }}">feed</a>,
-  or read one of the newest entries cached during installation:
-</p>
-{% if items %}<ol class="rows" id="list" role="list" data-shell="offline">
-{% for item in items %}
-  {% set rank = loop.index %}
-  {% include "_item.html" %}
-{% endfor %}
-</ol>{% else %}<p class="empty">Nothing is cached yet.</p>{% endif %}
+<div class="listhead"><h1>Offline</h1></div>
+<p>This page has not been saved. Return to the <a href="{{ '' | url_for }}">feed</a> or open a downloaded article below.</p>
+<p id="offline-download-status" role="status">Checking downloaded articles…</p>
+<ul id="offline-articles"></ul>
+<p id="offline-empty">No complete article downloads are available yet. Set how many recent articles to keep in <a href="{{ 'preferences/' | url_for }}">Preferences</a> while online.</p>
+<noscript><p>Enable JavaScript to see which articles are saved on this device.</p></noscript>
 {% endblock %}

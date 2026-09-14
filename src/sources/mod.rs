@@ -4,6 +4,8 @@
 pub mod aggr;
 pub mod feed;
 pub mod html;
+pub mod instagram;
+pub mod podcast;
 pub mod qwen;
 pub mod youtube;
 
@@ -52,7 +54,11 @@ pub enum Fetch {
 
 pub async fn fetch(source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
     let mut fetched = match &source.engine {
+        Engine::Feed { url } if instagram::is_profile_url(url) => {
+            instagram::fetch(url, source, ctx).await
+        }
         Engine::Feed { url } if qwen::is_blog_url(url) => qwen::fetch(url, source, ctx).await,
+        Engine::Feed { url } if podcast::is_show_url(url) => podcast::fetch(url, source, ctx).await,
         Engine::Feed { url } => feed::fetch(url, source, ctx).await,
         Engine::Aggr {
             url,

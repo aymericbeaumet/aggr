@@ -12,10 +12,28 @@ that portable core.
 ## Source definitions and collections
 
 `[[sources]].url` is the shared configuration boundary for local or remote websites, feeds,
-aggr TOML, OPML subscriptions, and newline-separated URL lists. Resource content determines the
-format: a feed contributes one source, while a collection expands into its entries. Strings and
-arrays of strings share line splitting, whitespace trimming, and empty-line removal. Per-table
-options group resources without an additional syntax inside strings.
+aggr TOML, OPML subscriptions, and newline-separated URL lists. Ordinary remote feed/page URLs
+perform no config-time requests; discovery belongs to the concurrent fetch pipeline. Local files,
+remote `.toml`/`.opml`/`.txt` paths, and recognized GitHub config paths expand as collections.
+An opaque collection URL requires `collection = true`; this flag applies only to the named resource,
+not its flattened sources. Collection bytes determine their format. Strings and
+arrays of strings share line splitting, trailing-comment removal, whitespace trimming, and
+empty-line removal. A comment starts at the exact delimiter ` #` (an ASCII space followed by a
+hash); `https://example.org/feed#section` preserves its fragment. This also applies to imported
+newline-separated URL lists. Per-table options such as category, labels, headers, and content
+mode are copied to every resulting source before shared resolution and deduplication.
+
+Repository URLs infer an aggr data import: `https://github.com/owner/reader`,
+`git@github.com:owner/reader.git`, and `ssh://git@github.com/owner/reader.git` identify the same
+GitHub source. The first configured transport is retained for cloning, including SSH credentials.
+Bare two-segment repository paths on GitLab, Bitbucket, and Codeberg are also recognized; other
+hosts can use an explicit `.git` URL or SSH URL. Repository options `branch`, `sources`, and `limit`
+apply to those URLs. Explicit `type` and `repo` fields are not supported.
+
+To import a repository's subscriptions instead of its retained articles, link its config file:
+`https://github.com/owner/reader/blob/main/aggr.toml` (or `/owner/reader/aggr.toml` to follow the
+default branch). Existing bare GitHub collection URLs must add that config path; bare repository
+URLs now import retained data and do not download the upstream root configuration.
 
 Expansion preserves declaration order and reduces every form to the same `Source` model for
 defaults, environment expansion, validation, deduplication, and discovery. Collection entries
@@ -30,10 +48,106 @@ Offline cleanup uses the same document parser to protect local dependencies thro
 collections, including environment-expanded paths, without requesting remote resources. New
 collection formats must preserve this dependency tracking as well as normal loading.
 
-Online loading reads remote inputs to classify them before fetching the resolved sources; this
-currently adds a detection request for ordinary feeds and websites. Pinned archive builds use
-offline loading. Dev starts from local configuration and cached data, resolves remote inputs in
+Pinned archive builds use offline configuration loading. Dev starts from local configuration
+and cached data, resolves declared remote collections in
 the background, and reuses the resolved sources when only templates or styles change.
+
+Instagram profile URLs are not reliable public feeds. The public page may expose a profile name
+and post count while withholding all post data. aggr imports only post entries actually exposed in
+the returned page; otherwise it reports a specific metadata-only, private-account, login, or
+verification error instead of attempting generic feed endpoints. Configured headers are honored,
+but aggr does not log in, complete challenges, or query third-party Instagram bridges. When a
+profile cannot be read publicly, use the creator's website or feed instead. Meta's authorized
+Instagram APIs are a separate integration and are not enabled by adding an ordinary profile URL.
+
+## Public threads
+
+Heavy article extraction joins public posts by the original author. Mastodon/ActivityPub follows
+same-origin ActivityStreams parents and replies. X/Twitter status URLs use public xcancel HTML;
+stored attribution and post links use `x.com`, and images use their original media URLs. X source
+credentials are never forwarded to xcancel. No login, browser cookies, or publisher scripts are used.
+
+X traversal follows author continuations and cursor pages, deduplicates status IDs, and orders posts
+chronologically while preserving each post's media sequence. It is bounded to 32 requests, 128 posts,
+and 30 seconds; an unavailable continuation or exhausted budget is logged as a warning and the
+retrieved posts are kept. Failure to retrieve the initial post leaves ordinary article extraction
+available. Existing entries receive new thread extraction on explicit refresh; saved content is not
+silently replaced.
+
+A thread reads as one uninterrupted article: posts are concatenated without separators, per-post
+links, or partial-thread notices, because the metadata original link already reaches the thread.
+Trailing parenthesized or bracketed counters such as `(1/3)` and standalone `2/3` paragraphs are
+removed per post before concatenation. Fractions inside prose, code, links, or nonterminal text stay
+intact. Builds apply the same presentation cleanup to archived social Markdown, including earlier
+captures that stored separators or generated links, across reader pages, search, feeds, and exports
+without rewriting stored Markdown or HTML. Media remains at its post position; a video keeps its
+poster image only; playback is not retained.
+
+## HTTP extraction and native builds
+
+HTTP requests use reqwest with rustls first. A response explicitly marked
+`cf-mitigated: challenge` permits one retry using a browser-compatible TLS and HTTP/2 profile.
+The selected profile survives that request's redirects and transient retries on the same origin.
+Successful choices are remembered in a bounded, in-memory origin cache for the run.
+The retry preserves aggr's user agent and configured request headers, certificate verification,
+redirect origin boundaries, host pacing, total timeout, and decompressed body limit. It shares the
+ordinary response and article cache; challenge pages are not successful article captures.
+
+This is an HTTP transport fallback implemented in Rust, with BoringSSL linked into the binary.
+It does not run Python, a browser, JavaScript challenges, or an external proxy service, and does
+not import browser cookies or obtain challenge cookies. Sites requiring interactive verification
+can still refuse the request. Failed article extraction retains the available RSS/feed content.
+
+Readability receives explicit image-and-caption figure structure as article content before its
+boilerplate filters run. This preserves charts whose IDs happen to contain words such as `replies`;
+the enclosing semantic article receives the same signal so tied figure scores cannot drop a
+neighboring figure. Ordinary comment containers and sidebars still follow the normal filtering rules. Extraction cache
+versions change with these rules while raw HTTP responses remain reusable. A figure already absent
+from both stored HTML and Markdown needs a fresh extraction; rendering cannot reconstruct it.
+
+Charts that a page draws in the browser (Vega-Lite specifications streamed in a Next.js payload,
+as on openai.com) leave an empty placeholder in the server HTML, and aggr never executes page
+scripts. When the specification carries its data inline, the placeholder receives that data as a
+table with the chart title and its caption, so the figures stay readable and searchable; the drawn
+chart itself is not reproduced. Rows and columns are bounded.
+
+An item that only kept feed content because the original page was unavailable (a Cloudflare
+challenge, an outage, or a rate limit at capture time) is retried on later runs: at most eight per
+source per run, once a day per page, giving up after seven attempts. A successful retry rewrites
+the body, retained HTML, and media while keeping the item's path, dates, labels, and authors.
+Explicit refresh still forces a new capture regardless of this schedule.
+
+Readability discards elements whose class or id mentions sharing. A wrapper that contains real
+media and no sharing links (Apple Newsroom's `image-sharesheet` figures, for example) is renamed
+before extraction so its picture survives; genuine share widgets with intent or social links are
+still removed.
+
+Shared boundary cleanup removes a compact leading `By Name Name MM.DD.YY` paragraph only when its
+date matches the item's publication date. A standalone editorial note at either document
+boundary such as `This article was updated on 08 September 2026.` is removed too, because the
+item metadata already shows publication and update times; the same words inside prose stay. It preserves headings, quotations, code, normal prose,
+later bylines, and existing front matter. Builds apply the same cleanup to older archived bodies
+without rewriting their stored Markdown or HTML.
+
+OpenReview papers can use verified public metadata and an identity-matched author preprint instead
+of the challenged web application; see [OpenReview ingestion](openreview.md). Canvas applications
+can retain their safe prose and automatically load the sandboxed live original inside the reader; see
+[reader behavior](themes.md#reader-behavior). Neither route executes publisher scripts during fetching.
+
+`wreq = 6.0.0-rc.31` and `wreq-util = 3.0.0-rc.14` are exact prerelease pins: both published
+packages use Apache-2.0 and declare Rust 1.85 compatibility, preserving aggr's Rust 1.96 minimum.
+The newer stable pair requires Rust 1.98; the older stable utility release has a different,
+GPL-3.0 license. Review the actual package licenses, compiler requirements, and platform builds
+before changing these pins.
+
+Building from source additionally needs CMake 3.22+, a C/C++ toolchain, Git, and native libclang
+for bindgen. Linux CI installs `cmake libclang-dev build-essential`; macOS uses Xcode tools and
+Homebrew `cmake llvm`, with `LIBCLANG_PATH="$(brew --prefix llvm)/lib"`. Windows uses the native
+Visual Studio environment, Ninja, and LLVM; `LIBCLANG_PATH` points to LLVM's `bin` directory.
+Windows x64 also needs NASM. Windows ARM64 uses clang-cl's integrated assembler instead of NASM.
+These are contributor and release build requirements; prebuilt binaries do not require them.
+CI and release workflows keep native Linux GNU, macOS, and Windows runners for both architectures.
+Windows ARM64 must pass those workflows; upstream's documented build matrix does not cover it.
 
 ## A local snapshot and its original
 
@@ -81,8 +195,8 @@ streams and advertises them from its HTML:
 | `feed.json` | `application/feed+json` | JSON Feed 1.1 |
 
 The same names live below `sources/<slug>/`, `categories/<slug>/`, and `tags/<slug>/`. The
-human-facing `/library/` hub groups links to those stable per-collection routes; there are no
-separate source, category, or tag index pages. Feed entries point their primary URL at the local
+human-facing `/sources/`, `/categories/`, and `/tags/` directories link to those stable
+per-collection routes; `/browse/` combines the directories. Feed entries point their primary URL at the local
 clean-reading page and carry the original URL through the format's provenance field.
 
 ## Discovery and URL lookup
@@ -98,7 +212,7 @@ emits:
 - `llms.txt`, a short inventory of the site's public resources.
 
 HTML advertises the descriptor and linkset. `aggr.json` names the instance and generator, identifies
-the aggr network, and enumerates feeds, the unified Library collection hub and its group anchors,
+the aggr network, and enumerates feeds, the collection directories and combined Browse directory,
 search, sitemap, PWA, and linkset endpoints.
 When GitHub repository identity is known, it also points to the pinned root config and data tree.
 The human `aggr.toml` navigation link opens GitHub's commit-pinned blob page, while machine
@@ -136,7 +250,7 @@ does not embed the full effective configuration: local collection files, remote 
 themes, environment expansion, and the binary version remain separate inputs. Pin or vendor remote
 collections when repeatable rebuilding matters.
 
-An instance can also consume another instance's retained data through a `type = "aggr"` source.
+An instance can also consume another instance's retained data through its repository URL.
 That copies readable item content and its ultimate original URL into a second repository. It is
 decentralized replication of selected current content, not synchronization of the source
 repository's complete Git history.
@@ -166,7 +280,10 @@ the live site is intended to remain a complete archive.
 
 aggr preserves a safe, readable snapshot: metadata, extracted or feed Markdown, and optionally the
 stripped HTML used to derive it. Optional image retention preserves safe raster masters and
-lossless derivatives, including a metadata lead image omitted from extracted prose. It does not preserve the complete HTTP exchange,
+lossless derivatives, including a metadata lead image omitted from extracted prose. SVG diagrams
+are retained as passive rasters with their source URL; their original executable markup and
+referenced resources are not archived. Standard SVG doctypes without internal subsets are ignored;
+entity definitions and internal DTD subsets remain rejected. It does not preserve the complete HTTP exchange,
 executable page, stylesheet, fonts, video streams, or arbitrary linked assets, and a failed
 extraction can leave only feed metadata. It is therefore not a pixel-perfect mirror or a WARC archive.
 
@@ -176,8 +293,10 @@ Webmention, WebSub publication, and Memento support should be claimed only when 
 complete their full contracts.
 
 Shared content cleanup runs during fetch and rendering, so retained archives benefit without
-rewriting stored companions. Boundary removal targets standalone metadata and comment controls;
-code, quotes, lists, references, and interior prose remain intact. Provider-specific description
+rewriting stored companions. Boundary removal targets standalone metadata, comment controls, and
+accessibility labels such as “opens in new window”. A leading standalone “Advertisement” label
+also removes its immediately following orphan bullet. Unrelated bullets, code, quotes, lists,
+references, and interior prose remain intact. Provider-specific description
 normalization stays scoped to that provider. Public YouTube captions are fetched with bounded
 requests when advertised; unavailable captions leave the description intact and do not count as a
 successfully cached transcript.
