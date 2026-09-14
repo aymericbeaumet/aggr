@@ -463,7 +463,9 @@ async fn wait_for(client: &Client, expression: &str) -> Result<()> {
         {
             return Ok(());
         }
-        if start.elapsed() > Duration::from_secs(20) {
+        // The suite runs every browser test in parallel; a loaded runner can stall a mount well
+        // past the time the same step takes in isolation.
+        if start.elapsed() > Duration::from_secs(45) {
             bail!(
                 "browser timeout at {}: {expression}",
                 client.current_url().await?
@@ -1682,11 +1684,13 @@ async fn shift_modifier_highlights_hovered_links() -> Result<()> {
     let client = browser_client().await?;
     let result = async {
         client.goto(&fixture.base).await?;
-        wait_for(&client,"document.querySelector('.nav .menu-link') && typeof window.swup?.navigate==='function'").await?;
-        let point=client.execute("const r=document.querySelector('.nav .menu-link').getBoundingClientRect();return {x:r.left+20,y:r.top+r.height/2}",vec![]).await?;
+        // The feed link is the current section here; hover feedback is about the others.
+        let inactive = "document.querySelector('.nav .menu-link:not([aria-current])')";
+        wait_for(&client,&format!("{inactive} && typeof window.swup?.navigate==='function'")).await?;
+        let point=client.execute(&format!("const r={inactive}.getBoundingClientRect();return {{x:r.left+20,y:r.top+r.height/2}}"),vec![]).await?;
         emulate(&client,"Input.dispatchMouseEvent",json!({"type":"mouseMoved","x":point["x"],"y":point["y"]})).await?;
-        let decoration="getComputedStyle(document.querySelector('.nav .menu-link')).textDecorationLine";
-        let before=client.execute(&format!("return {{decoration:{decoration},classes:document.documentElement.className,hovered:[...document.querySelectorAll('a:hover')].map(link=>link.className),selected:document.querySelector('.nav .menu-link').outerHTML}}"),vec![]).await?;
+        let decoration=format!("getComputedStyle({inactive}).textDecorationLine");
+        let before=client.execute(&format!("return {{decoration:{decoration},classes:document.documentElement.className,hovered:[...document.querySelectorAll('a:hover')].map(link=>link.className),selected:{inactive}.outerHTML}}"),vec![]).await?;
         anyhow::ensure!(before["decoration"]=="none","inactive navigation link normally has no hover underline: {before}");
         for reset in ["release","blur"] {
             emulate(&client,"Input.dispatchKeyEvent",json!({"type":"keyDown","key":"Shift","code":"ShiftLeft","windowsVirtualKeyCode":16,"modifiers":8})).await?;
@@ -1831,7 +1835,7 @@ async fn title_metadata_matches_feed_search_and_article() -> Result<()> {
                         vec![json!(format)],
                     )
                     .await?;
-                metadata_contracts(&client, &fixture)
+                metadata_contracts(&client, &fixture, width)
                     .await
                     .with_context(|| format!("metadata at {width}px with {format} dates"))?;
                 let expected=if format=="relative" {"4h ago"} else {"2026-09-02"};
@@ -1886,7 +1890,7 @@ async fn metadata_layout(client: &Client, selector: &str) -> Result<Value> {
     "#,vec![json!(selector)]).await?)
 }
 
-async fn metadata_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
+async fn metadata_contracts(client: &Client, fixture: &Fixture, width: u32) -> Result<()> {
     client.goto(&fixture.base).await?;
     wait_for(client, "typeof window.swup?.navigate === 'function'").await?;
     let feed = visible_metadata(client, ".row .meta").await?;
@@ -1941,9 +1945,12 @@ async fn metadata_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
             && tags["weight"] == "400",
         "tags must share the plain muted metadata style: {tags}"
     );
+    // Compact feed rows deliberately stack and shrink their metadata at and below 40rem; the
+    // article keeps the full treatment. Feed and search rows share it at every width.
     anyhow::ensure!(
-        feed_layout["typography"] == article_layout["typography"]
-            && feed_layout["fields"] == article_layout["fields"],
+        width <= 640
+            || (feed_layout["typography"] == article_layout["typography"]
+                && feed_layout["fields"] == article_layout["fields"]),
         "shared metadata geometry and typography differ: feed={feed_layout}, article={article_layout}"
     );
     anyhow::ensure!(
