@@ -1,0 +1,5 @@
+# Templates and static assets are embedded in the binary and served verbatim, so a Windows
+# checkout must not turn them into CRLF: a build's output would otherwise differ by platform.
+* text=auto eol=lf
+*.png binary
+*.ttf binary

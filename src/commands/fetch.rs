@@ -2755,7 +2755,9 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(
-                format!("{error:#}").contains("items/blog/healthy"),
+                format!("{error:#}")
+                    .replace('\\', "/")
+                    .contains("items/blog/healthy"),
                 "non-NotFound preview errors retain the article context: {error:#}"
             );
         }

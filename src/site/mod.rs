@@ -3871,8 +3871,10 @@ category = "Science"
         assert!(sw.contains("\"offline.html\""));
         assert!(sw.contains("\"browse/\""));
         assert!(sw.contains("\"sources/blog/\""));
+        let statements = sw.replace("\r\n", "\n");
         let catalog: serde_json::Value = serde_json::from_str(
-            sw.split("var OFFLINE_CATALOG = ")
+            statements
+                .split("var OFFLINE_CATALOG = ")
                 .nth(1)
                 .unwrap()
                 .split(";\n")
