@@ -30,7 +30,14 @@
   }
   function keydown(event: KeyboardEvent) {
     if (composing || event.isComposing || event.keyCode === 229) { event.stopPropagation(); return; }
-    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); helpDismissed = true; dismiss(); input?.blur(); }
+    if (event.key === 'Escape') {
+      // First Escape closes open suggestions; the next one leaves the field.
+      event.preventDefault(); event.stopPropagation(); helpDismissed = true;
+      const suggesting = $model.open && $model.suggestions.length > 0;
+      dismiss();
+      if (!suggesting) input?.blur();
+      return;
+    }
     if ((event.key === 'Enter' || (event.key === 'Tab' && !event.shiftKey)) && $model.open && $model.suggestions.length) {
       event.preventDefault(); event.stopPropagation();
       const choice = selectedCompletion($model.suggestions, selected);

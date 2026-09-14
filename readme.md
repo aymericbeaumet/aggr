@@ -184,7 +184,7 @@ without clearing reading history. Resetting also restores the site's offline-dow
 | Keys | Action |
 |---|---|
 | `Cmd+K` / `Ctrl+K` | Focus global search. |
-| `↑` / `↓`, then `Enter` in search | With suggestions open, choose and accept one; otherwise move the result cursor and open the selected result. `Escape` closes suggestions and removes focus. |
+| `↑` / `↓`, then `Enter` in search | With suggestions open, choose and accept one; otherwise move the result cursor and open the selected result. `Escape` closes suggestions, then removes focus. |
 | `j` / `k` in article lists | Select the next / previous item; the first press selects the first item. |
 | `gg` / `G` | Select the first / last visible feed item; scroll to the top / bottom on article pages. |
 | `o` / `Enter` in article lists | Open the selected item. |

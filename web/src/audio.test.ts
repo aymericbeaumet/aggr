@@ -126,7 +126,8 @@ describe("audio playback", () => {
     const audio=new TestAudio();let state!:PlaybackSnapshot;
     const player=createPlayback(audio,next=>{state=next;});
     player.volume(.4);expect(audio.volume).toBe(.4);
-    player.mute();expect(state.muted).toBe(true);
+    player.mute();expect(state.muted).toBe(true);expect(state.volume).toBe(0);
+    player.mute();expect(state.muted).toBe(false);expect(state.volume).toBe(.4);
     player.volume(.6);expect(state.muted).toBe(false);expect(state.volume).toBe(.6);
     player.volume(0);player.mute();expect(state.volume).toBe(.6);expect(state.muted).toBe(false);
     player.volume(2);expect(state.volume).toBe(1);

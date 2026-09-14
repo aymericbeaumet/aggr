@@ -105,6 +105,18 @@ neighboring figure. Ordinary comment containers and sidebars still follow the no
 versions change with these rules while raw HTTP responses remain reusable. A figure already absent
 from both stored HTML and Markdown needs a fresh extraction; rendering cannot reconstruct it.
 
+Charts that a page draws in the browser (Vega-Lite specifications streamed in a Next.js payload,
+as on openai.com) leave an empty placeholder in the server HTML, and aggr never executes page
+scripts. When the specification carries its data inline, the placeholder receives that data as a
+table with the chart title and its caption, so the figures stay readable and searchable; the drawn
+chart itself is not reproduced. Rows and columns are bounded.
+
+An item that only kept feed content because the original page was unavailable (a Cloudflare
+challenge, an outage, or a rate limit at capture time) is retried on later runs: at most eight per
+source per run, once a day per page, giving up after seven attempts. A successful retry rewrites
+the body, retained HTML, and media while keeping the item's path, dates, labels, and authors.
+Explicit refresh still forces a new capture regardless of this schedule.
+
 Readability discards elements whose class or id mentions sharing. A wrapper that contains real
 media and no sharing links (Apple Newsroom's `image-sharesheet` figures, for example) is renamed
 before extraction so its picture survives; genuine share widgets with intent or social links are

@@ -12,7 +12,7 @@ mod pagefind;
 mod parallel;
 mod related;
 pub mod render;
-mod video;
+pub(crate) mod video;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1436,15 +1436,16 @@ pub fn build(
             Vec::new()
         };
         let article_url = url::Url::parse(&item.front.link).ok();
-        ctx.body_html = Some(content::anchor_headings(
-            &prepared_markdown.reader_html_with_images(
-                article_images
-                    .get(&item.path)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-                &dimensions,
+        let local_images = article_images
+            .get(&item.path)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        ctx.body_html = Some(content::embed_body_videos(
+            &content::anchor_headings(
+                &prepared_markdown.reader_html_with_images(local_images, &dimensions),
+                article_url.as_ref(),
             ),
-            article_url.as_ref(),
+            local_images,
         ));
         let dir = out.join(&ctx.url);
         let representation = out.join(ctx.url.trim_end_matches('/'));
@@ -3295,6 +3296,53 @@ category = "Science"
             std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0.md")).unwrap();
         assert!(markdown.contains("Body emoji stays 🚀."));
         assert_eq!(store.items().unwrap()[0].front.title, item.front.title);
+    }
+
+    #[test]
+    fn body_video_links_play_inline_in_the_reader_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let mut item = store.items().unwrap().remove(0);
+        item.body = "Episode notes.\n\nhttps://youtu.be/abcDEF12345\n\nMore notes with https://youtu.be/inline1234 inline.\n".into();
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &item.front,
+                body: &item.body,
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let page =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
+        assert_eq!(page.matches("video-player-inline").count(), 1, "{page}");
+        assert!(
+            page.contains("data-video-embed=\"https://www.youtube-nocookie.com/embed/abcDEF12345?"),
+            "{page}"
+        );
+        assert!(
+            page.contains(
+                "href=\"https://youtu.be/inline1234\">https://youtu.be/inline1234</a> inline."
+            ),
+            "{page}"
+        );
+        assert!(!page.contains("<iframe"), "{page}");
+        for path in ["items/blog/2026-09-01-post-0.md", "feed.json", "atom.xml"] {
+            let output = std::fs::read_to_string(out.join(path)).unwrap();
+            assert!(
+                !output.contains("video-player"),
+                "facade leaked into {path}"
+            );
+            assert!(
+                output.contains("youtu.be/abcDEF12345"),
+                "link missing from {path}"
+            );
+        }
     }
 
     #[test]

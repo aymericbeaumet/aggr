@@ -473,6 +473,19 @@ async fn wait_for(client: &Client, expression: &str) -> Result<()> {
     }
 }
 
+/// Escape first closes open suggestions; a second press leaves the search field.
+async fn escape_search(client: &Client) -> Result<()> {
+    key(client, "Escape").await?;
+    if client
+        .execute("return document.activeElement?.id==='q'", vec![])
+        .await?
+        == true
+    {
+        key(client, "Escape").await?;
+    }
+    Ok(())
+}
+
 async fn key(client: &Client, key: &str) -> Result<()> {
     let key = match key {
         "Enter" => "\u{e007}",
@@ -1238,7 +1251,7 @@ async fn mobile_tabs_and_instant_cached_navigation() -> Result<()> {
               queueMicrotask(()=>{off();done({query:input.value,selection:[input.selectionStart,input.selectionEnd],focused:document.activeElement===input,visits,active:document.querySelectorAll('.mobile-tabs [aria-current]').length,hrefQuery:new URL(tab.href).searchParams.get('q')})});
             "#,vec![]).await?;
             anyhow::ensure!(search_reselected==json!({"query":"category:engineering","selection":[9,12],"focused":true,"visits":0,"active":1,"hrefQuery":"category:engineering"}),"Search reselect preserves the query, caret, and native link destination without navigating: {search_reselected}");
-            key(&client,"Escape").await?;
+            escape_search(&client).await?;
             wait_for(&client,"document.activeElement?.id!=='q' && document.querySelector('.mobile-tabs [aria-current]')?.hasAttribute('data-search-action')").await?;
             client.execute("const input=document.querySelector('#q');input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));input.blur()",vec![]).await?;
             wait_for(&client,"!new URL(location.href).searchParams.has('q') && document.querySelector('.mobile-tabs [aria-current]')?.hasAttribute('data-feed-action')").await?;
@@ -1648,8 +1661,8 @@ async fn search_focus_scrolls_only_when_obscured() -> Result<()> {
             emulate(&client,"Input.dispatchMouseEvent",json!({"type":"mousePressed","x":point["x"],"y":point["y"],"button":"left","clickCount":1})).await?;
             emulate(&client,"Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":point["x"],"y":point["y"],"button":"left","clickCount":1})).await?;
             wait_for(&client,"scrollY===0 && document.activeElement.id==='q'").await?;
-            key(&client,"Escape").await?;
-            anyhow::ensure!(client.execute("return document.activeElement.id!=='q' && !document.querySelector('.search-completions')",vec![]).await?==true,"Escape still blurs and dismisses search");
+            escape_search(&client).await?;
+            anyhow::ensure!(client.execute("return document.activeElement.id!=='q' && !document.querySelector('.search-completions')",vec![]).await?==true,"Escape closes suggestions, then blurs search");
         }
         Ok(())
     }.await;
@@ -2474,8 +2487,13 @@ async fn run_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
                 fixture.base
             ))
             .await?;
+        // Every provider, YouTube included, stays a facade until activation.
+        wait_for(
+            client,
+            "document.querySelector('[data-video-embed]')?.getAttribute('role') === 'button'",
+        )
+        .await?;
         if provider == "youtube" {
-            wait_for(client, "!!document.querySelector('.video-player iframe')").await?;
             let source_colors = client.execute(r#"
               const source=document.querySelector('.itemhead .domain:has(em)'), span=source.querySelector('.source-resolved');
               const probe=document.createElement('span');probe.style.color='var(--warm)';document.body.append(probe);
@@ -2485,32 +2503,26 @@ async fn run_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
             assert_eq!(source_colors["via"], source_colors["neutral"]);
             assert_ne!(source_colors["source"], source_colors["via"]);
             assert_eq!(client.execute("const date=document.querySelector('.published-date');date.dispatchEvent(new PointerEvent('pointerover',{bubbles:true}));return {duplicate:date.title.includes('Updated:'),separate:date.hasAttribute('data-date-updated')}", vec![]).await?, json!({"duplicate":false,"separate":false}), "identical published and updated dates should appear only once in the tooltip");
-            client.execute(r#"
-              const frame=document.querySelector('.video-player iframe');
-              window.videoContract={url:frame.src,allow:frame.allow,sandbox:frame.getAttribute('sandbox'),referrer:frame.referrerPolicy,title:frame.title};
-              frame.removeAttribute('src');
-            "#, vec![]).await?;
-        } else {
-            wait_for(
-                client,
-                "document.querySelector('[data-video-embed]')?.getAttribute('role') === 'button'",
-            )
-            .await?;
-            assert_eq!(client.execute("return {frames:document.querySelectorAll('iframe').length,providerRequests:performance.getEntriesByType('resource').filter(r=>/youtube|twitch|vimeo/.test(new URL(r.name).hostname)).length}",vec![]).await?,json!({"frames":0,"providerRequests":0}),"video providers must not receive requests before activation");
-            client.execute(r#"
-          const player=document.querySelector('.video-player'), append=player.appendChild;
-          player.appendChild=function(frame){
-            window.videoContract={url:frame.src,allow:frame.allow,sandbox:frame.getAttribute('sandbox'),referrer:frame.referrerPolicy,title:frame.title};
-            frame.removeAttribute('src');
-            return append.call(this,frame);
-          };
-        "#,vec![]).await?;
-            client
-                .find(Locator::Css("[data-video-embed]"))
-                .await?
-                .click()
-                .await?;
         }
+        wait_for(
+            client,
+            "document.querySelector('[data-video-embed]')?.getAttribute('role') === 'button'",
+        )
+        .await?;
+        assert_eq!(client.execute("return {frames:document.querySelectorAll('iframe').length,providerRequests:performance.getEntriesByType('resource').filter(r=>/youtube|twitch|vimeo/.test(new URL(r.name).hostname)).length}",vec![]).await?,json!({"frames":0,"providerRequests":0}),"video providers must not receive requests before activation");
+        client.execute(r#"
+      const player=document.querySelector('.video-player'), append=player.appendChild;
+      player.appendChild=function(frame){
+        window.videoContract={url:frame.src,allow:frame.allow,sandbox:frame.getAttribute('sandbox'),referrer:frame.referrerPolicy,title:frame.title};
+        frame.removeAttribute('src');
+        return append.call(this,frame);
+      };
+    "#,vec![]).await?;
+        client
+            .find(Locator::Css("[data-video-embed]"))
+            .await?
+            .click()
+            .await?;
         let video = client.execute(r#"
           const frame=document.querySelector('.video-player iframe'), url=new URL(window.videoContract.url);
           return {...window.videoContract,host:url.hostname,parent:url.searchParams.get('parent'),autoplay:url.searchParams.get('autoplay'),rel:url.searchParams.get('rel'),dnt:url.searchParams.get('dnt'),h:url.searchParams.get('h'),frames:document.querySelectorAll('iframe').length,width:frame.clientWidth,height:frame.clientHeight,overflow:document.documentElement.scrollWidth>innerWidth};
@@ -2537,10 +2549,7 @@ async fn run_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
                 "{video}"
             );
         } else {
-            assert_eq!(
-                video["autoplay"],
-                if provider == "youtube" { "0" } else { "1" }
-            );
+            assert_eq!(video["autoplay"], "1");
             assert_eq!(video["parent"], Value::Null);
         }
         if provider == "youtube" {
@@ -2726,7 +2735,7 @@ async fn run_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
     assert_eq!(layout["labels"], json!(["feed", "browse", "preferences"]));
     assert_eq!(
         layout["separators"],
-        json!([{ "text": "|", "hidden": "true" }])
+        json!([{ "text": "|", "hidden": "true" }, { "text": "|", "hidden": "true" }])
     );
     assert_eq!(layout["searchIcon"], false);
     assert_eq!(layout["flat"], true);

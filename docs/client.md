@@ -65,7 +65,8 @@ parity tests cover their shared data, optional fields, escaping, and separators.
 ## Ownership and navigation
 
 The shared header contains `feed | browse | preferences`, with `aggr.toml` on the right and
-regular-weight, full-opacity labels and an underline for the selected section. At widths up to
+regular-weight, full-opacity labels and an underline for the selected section. Article pages select
+no section: feed is current only on the feed itself. At widths up to
 40rem, only the brand and aggr.toml remain at the top. A persistent four-tab bar provides feed,
 search, browse, and preferences at the viewport bottom. Browse groups categories, sources, and tags;
 Search focuses the shared field and preserves its query. Mobile feed rows omit numbers and use the
@@ -155,8 +156,8 @@ Completion replaces only the token at the cursor. It suggests qualifier names, s
 values with contextual counts and date shortcuts. Articles appear exclusively in the result list;
 completing or submitting free text never opens an article suggestion. Value lists
 are scrollable without an arbitrary cutoff; completed values stop suggesting themselves. Keyboard
-and touch selection are supported; Escape closes suggestions and blurs the search field without
-clearing the query. Composition input does not launch partial searches. Enter and Tab accept the
+and touch selection are supported; Escape closes open suggestions, and a further Escape blurs the
+search field, never clearing the query. Composition input does not launch partial searches. Enter and Tab accept the
 highlighted stable option identity, even when labels coincide or asynchronous counts reorder values.
 Suggestions and counts honor every remaining clause after removing the edited token. While that
 context loads, unrelated archive-wide values remain hidden. Obsolete requests cannot replace a newer

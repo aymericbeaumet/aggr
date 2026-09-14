@@ -43,12 +43,14 @@
   <div use:nativeHost style="display: contents"></div>
   <div class="audio-controls" data-audio-controls>
     <div class="audio-transport">
-      <button class="audio-skip" type="button" data-audio-back aria-label="Back 15 seconds" title="Back 15 seconds" disabled={!$model.seekable} onclick={() => player.skip(-15)}>↶ 15</button>
+      <button class="audio-skip" type="button" data-audio-skip="-30" aria-label="Back 30 seconds" title="Back 30 seconds" disabled={!$model.seekable} onclick={() => player.skip(-30)}>↶ 30</button>
+      <button class="audio-skip" type="button" data-audio-skip="-15" data-audio-back aria-label="Back 15 seconds" title="Back 15 seconds" disabled={!$model.seekable} onclick={() => player.skip(-15)}>↶ 15</button>
       <button class="audio-toggle" type="button" data-audio-toggle aria-label={label} title={label} onclick={player.toggle}>
         <svg class="audio-play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z" /></svg>
         <svg class="audio-pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6zm8 0h4v14h-4z" /></svg>
       </button>
-      <button class="audio-skip" type="button" data-audio-forward aria-label="Forward 30 seconds" title="Forward 30 seconds" disabled={!$model.seekable} onclick={() => player.skip(30)}>30 ↷</button>
+      <button class="audio-skip" type="button" data-audio-skip="15" aria-label="Forward 15 seconds" title="Forward 15 seconds" disabled={!$model.seekable} onclick={() => player.skip(15)}>15 ↷</button>
+      <button class="audio-skip" type="button" data-audio-skip="30" data-audio-forward aria-label="Forward 30 seconds" title="Forward 30 seconds" disabled={!$model.seekable} onclick={() => player.skip(30)}>30 ↷</button>
     </div>
     <div class="audio-timeline">
       <input type="range" min="0" max="1000" value={progress} step="1" data-audio-seek aria-label="Playback position"

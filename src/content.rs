@@ -92,7 +92,8 @@ pub fn extract_article(page: &str, url: &Url) -> Result<ExtractedArticle> {
         max_elements_to_parse: 100_000,
         ..Default::default()
     };
-    let mut readability = Readability::new(page, Some(url.as_str()), Some(config))
+    let page = expand_embedded_charts(page);
+    let mut readability = Readability::new(page.as_ref(), Some(url.as_str()), Some(config))
         .context("parsing the original article page")?;
     preserve_share_named_media_wrappers(&readability);
     // Figure filenames such as `replies.png` can resemble comment widgets to Readability.
@@ -117,6 +118,187 @@ pub fn extract_article(page: &str, url: &Url) -> Result<ExtractedArticle> {
         html,
         image: article.image,
     })
+}
+
+const MAX_CHART_ROWS: usize = 400;
+const MAX_CHART_COLUMNS: usize = 12;
+
+/// Charts that a page draws with JavaScript (Vega-Lite specs shipped in a Next.js payload, as on
+/// openai.com) leave an empty placeholder in the server HTML. aggr never runs scripts, so the
+/// chart's own data is written into the placeholder as a table: the numbers stay readable and
+/// searchable even though the drawn chart cannot be reproduced.
+fn expand_embedded_charts(page: &str) -> std::borrow::Cow<'_, str> {
+    if !page.contains("vegaLiteSpec") || !page.contains("<div id=\"chart-") {
+        return std::borrow::Cow::Borrowed(page);
+    }
+    let payload = next_flight_payload(page);
+    let mut out = String::with_capacity(page.len() + 4096);
+    let mut position = 0;
+    while let Some(offset) = page[position..].find("<div id=\"chart-") {
+        let start = position + offset;
+        let Some(tag) = parse_tag(&page[start..]).and_then(|tag| tag.end) else {
+            out.push_str(&page[position..start + 1]);
+            position = start + 1;
+            continue;
+        };
+        let open = &page[start..start + tag];
+        let table = attribute_value(open, "id")
+            .and_then(|id| embedded_chart_spec(&payload, id.strip_prefix("chart-")?))
+            .and_then(|spec| chart_table(&spec));
+        out.push_str(&page[position..start + tag]);
+        if let Some(table) = table {
+            out.push_str(&table);
+        }
+        position = start + tag;
+    }
+    out.push_str(&page[position..]);
+    std::borrow::Cow::Owned(out)
+}
+
+/// Concatenate the React Flight chunks that Next.js streams through `self.__next_f.push`.
+fn next_flight_payload(page: &str) -> String {
+    let mut payload = String::new();
+    let mut position = 0;
+    while let Some(offset) = page[position..].find("self.__next_f.push([1,\"") {
+        let start = position + offset + "self.__next_f.push([1,\"".len();
+        let mut end = start;
+        let bytes = page.as_bytes();
+        while end < bytes.len() {
+            match bytes[end] {
+                b'\\' => end += 2,
+                b'"' => break,
+                _ => end += 1,
+            }
+        }
+        if end > bytes.len() {
+            break;
+        }
+        if let Ok(chunk) = serde_json::from_str::<String>(&format!("\"{}\"", &page[start..end])) {
+            payload.push_str(&chunk);
+        }
+        position = end + 1;
+    }
+    payload
+}
+
+fn embedded_chart_spec(payload: &str, id: &str) -> Option<serde_json::Value> {
+    let marker = format!("{{\"id\":{},\"data\":", serde_json::to_string(id).ok()?);
+    let start = payload.find(&marker)?;
+    let object = balanced_json_object(&payload[start..])?;
+    let value: serde_json::Value = serde_json::from_str(object).ok()?;
+    value.get("data")?.get("vegaLiteSpec").cloned()
+}
+
+fn balanced_json_object(text: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in text.bytes().enumerate() {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(&text[..=index]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn chart_table(spec: &serde_json::Value) -> Option<String> {
+    let rows = spec.get("data")?.get("values")?.as_array()?;
+    let rows = rows
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .take(MAX_CHART_ROWS)
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return None;
+    }
+    // Text columns first, then numbers, so each row reads as a label followed by its values.
+    let mut columns = rows
+        .iter()
+        .flat_map(|row| row.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    columns.sort_by_key(|column| {
+        rows.iter()
+            .all(|row| row.get(*column).is_none_or(serde_json::Value::is_number))
+    });
+    columns.truncate(MAX_CHART_COLUMNS);
+    let title = match spec.get("title") {
+        Some(serde_json::Value::String(text)) => Some(text.clone()),
+        Some(serde_json::Value::Object(title)) => {
+            let text = title.get("text").and_then(serde_json::Value::as_str);
+            let subtitle = title.get("subtitle").and_then(serde_json::Value::as_str);
+            match (text, subtitle) {
+                (Some(text), Some(subtitle)) => Some(format!("{text} — {subtitle}")),
+                (Some(text), None) => Some(text.to_string()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let mut html = String::from("<table class=\"chart-data\">");
+    html.push_str("<caption>");
+    html.push_str(&escape_html(&title.unwrap_or_else(|| "Chart".to_string())));
+    html.push_str(" (chart data)</caption><thead><tr>");
+    for column in &columns {
+        let label = column.replace('_', " ");
+        let mut label = label.chars();
+        let label = match label.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + label.as_str(),
+            None => String::new(),
+        };
+        html.push_str("<th>");
+        html.push_str(&escape_html(&label));
+        html.push_str("</th>");
+    }
+    html.push_str("</tr></thead><tbody>");
+    for row in rows {
+        html.push_str("<tr>");
+        for column in &columns {
+            html.push_str("<td>");
+            html.push_str(&escape_html(&chart_cell(row.get(*column))));
+            html.push_str("</td>");
+        }
+        html.push_str("</tr>");
+    }
+    html.push_str("</tbody></table>");
+    Some(html)
+}
+
+fn chart_cell(value: Option<&serde_json::Value>) -> String {
+    match value {
+        None | Some(serde_json::Value::Null) => String::new(),
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(serde_json::Value::Bool(flag)) => flag.to_string(),
+        Some(serde_json::Value::Number(number)) => match number.as_f64() {
+            Some(float) if float.fract() != 0.0 => {
+                let rounded = format!("{float:.4}");
+                rounded
+                    .trim_end_matches('0')
+                    .trim_end_matches('.')
+                    .to_string()
+            }
+            _ => number.to_string(),
+        },
+        Some(other) => other.to_string(),
+    }
 }
 
 /// Publishers such as Apple Newsroom wrap every article figure in a `…-sharesheet` container.
@@ -2033,6 +2215,97 @@ pub fn anchor_headings(html: &str, article_url: Option<&Url>) -> String {
     out
 }
 
+/// Turn a rendered paragraph that is only a link to a supported video into the same activation
+/// facade the item page uses, so provider videos play inline instead of leaving the reader. The
+/// poster is the linked picture when the paragraph had one, else the archived provider thumbnail;
+/// nothing is requested from the provider before activation. Reader only; portable outputs keep
+/// the link.
+pub fn embed_body_videos(html: &str, images: &[LocalImage]) -> String {
+    if !html.contains("<p><a ") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(offset) = html[position..].find("<p><a ") {
+        let start = position + offset;
+        let Some(end) = html[start..].find("</p>").map(|index| start + index + 4) else {
+            break;
+        };
+        out.push_str(&html[position..start]);
+        let paragraph = &html[start..end];
+        match video_facade(&paragraph[3..paragraph.len() - 4], images) {
+            Some(facade) => out.push_str(&facade),
+            None => out.push_str(paragraph),
+        }
+        position = end;
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+fn video_facade(inner: &str, images: &[LocalImage]) -> Option<String> {
+    let trimmed = inner.trim();
+    let tag = parse_tag(trimmed)?;
+    let (Some(open_end), "a", false) = (tag.end, tag.name.as_str(), tag.closing) else {
+        return None;
+    };
+    let content = trimmed[open_end..].strip_suffix("</a>")?.trim();
+    if content.contains("<a ") || content.contains("<a>") {
+        return None;
+    }
+    let href = decode_entities(attribute_value(&trimmed[..open_end], "href")?);
+    let href = href.trim();
+    let video = crate::site::video::VideoCtx::from_url(href)?;
+    let pictures = if content.contains("<picture") {
+        content.matches("<picture").count()
+    } else {
+        content.matches("<img").count()
+    };
+    let text = html_to_text(content);
+    let mut placeholder = String::new();
+    let poster = if pictures == 1 && text.trim().is_empty() {
+        content.to_string()
+    } else if pictures == 0 && !text.contains('<') {
+        let thumbnail = Url::parse(href)
+            .ok()
+            .and_then(|url| crate::sources::youtube::thumbnail(&url));
+        match thumbnail.and_then(|url| images.iter().find(|image| image.source == url)) {
+            Some(image) => {
+                placeholder = format!(
+                    " data-thumbhash=\"{}\" style=\"--image-placeholder: {}; --image-preview: url('{}')\"",
+                    escape_html(&image.placeholder.hash),
+                    escape_html(&image.color),
+                    image.placeholder.data_url
+                );
+                format!(
+                    "<img src=\"{}\" width=\"{}\" height=\"{}\" alt=\"\" loading=\"lazy\" decoding=\"async\">",
+                    escape_html(&image.original),
+                    image.width,
+                    image.height
+                )
+            }
+            None => format!(
+                "<span class=\"video-preview-label\">{}</span>",
+                escape_html(video.title)
+            ),
+        }
+    } else {
+        return None;
+    };
+    Some(format!(
+        "<div class=\"video-player video-player-inline\" data-video-provider=\"{provider}\"{placeholder}><a class=\"video-preview\" data-video-embed=\"{embed}\"{parent} href=\"{href}\" title=\"{href}\" target=\"_blank\" rel=\"noopener noreferrer\" aria-label=\"Play video on {title}\">{poster}<span class=\"video-preview-play\" aria-hidden=\"true\"><svg viewBox=\"0 0 24 24\"><path d=\"M8 5v14l11-7z\"/></svg></span></a></div>",
+        provider = video.provider,
+        embed = escape_html(&video.embed_url),
+        parent = if video.requires_parent {
+            " data-video-parent"
+        } else {
+            ""
+        },
+        href = escape_html(href),
+        title = escape_html(video.title),
+    ))
+}
+
 /// A heading whose entire content is one link to its own anchor or article page.
 fn unwrap_self_link<'a>(inner: &'a str, article_url: Option<&Url>) -> (&'a str, Option<String>) {
     let trimmed = inner.trim();
@@ -2729,6 +3002,63 @@ mod tests {
     }
 
     #[test]
+    fn script_drawn_charts_become_data_tables() {
+        let prose = "The question every finance leader asks is how to get more value from spending on models, and the answer starts with measuring work instead of seats. ".repeat(10);
+        let spec = r#"{"$schema":"https://vega.github.io/schema/vega-lite/v6.json","title":{"text":"DeepSWE v1.1","subtitle":"Coding"},"data":{"values":[{"model":"GPT-5.6 Sol","score":0.727,"x_value":3.4123456,"x_label":"$3.41","juice_index":2},{"model":"Claude Fable 5","score":0.699,"x_value":5,"x_label":"$5.00","juice_index":1}]},"layer":[{"mark":"line"}]}"#;
+        let flight = format!(
+            r#"["$","$Le7",null,{{"id":"abc123","data":{{"dotcomConfig":{{"theme":"blue"}},"vegaLiteSpec":{spec}}}}}]"#
+        );
+        let chunk = serde_json::to_string(&flight).unwrap();
+        let html = format!(
+            "<html><head><title>Scorecard</title></head><body><main><article><p>{prose}</p><figure><div><div id=\"chart-abc123\" style=\"height:400px\"></div></div><figcaption><p>DeepSWE v1.1: long-horizon tasks.</p></figcaption></figure><p>{prose}</p></article></main><script>self.__next_f.push([1,{chunk}])</script></body></html>"
+        );
+        let url = Url::parse("https://openai.com/index/a-scorecard-for-the-ai-age/").unwrap();
+        let article = extract_article(&html, &url).unwrap();
+        let markdown = to_markdown(&article.html, Some(&url));
+        let compact = markdown.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            compact.contains("| Model | X label | Juice index | Score | X value |"),
+            "{markdown}"
+        );
+        assert!(
+            compact.contains("| GPT-5.6 Sol | $3.41 | 2 | 0.727 | 3.4123 |"),
+            "{markdown}"
+        );
+        assert!(
+            compact.contains("| Claude Fable 5 | $5.00 | 1 | 0.699 | 5 |"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("DeepSWE v1.1 — Coding (chart data)"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("long-horizon tasks"), "{markdown}");
+        let untouched = html.replace("vegaLiteSpec", "otherSpec");
+        assert!(
+            !to_markdown(&extract_article(&untouched, &url).unwrap().html, Some(&url))
+                .contains("chart data")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires saved upstream HTML in AGGR_ARTICLE_HTML"]
+    fn saved_openai_scorecard_chart_becomes_a_table() {
+        let page = std::fs::read_to_string(std::env::var("AGGR_ARTICLE_HTML").unwrap()).unwrap();
+        let url = Url::parse("https://openai.com/index/a-scorecard-for-the-ai-age/").unwrap();
+        let article = extract_article(&page, &url).unwrap();
+        let markdown = to_markdown(&article.html, Some(&url));
+        assert!(
+            markdown.contains("DeepSWE v1.1 — Coding (chart data)"),
+            "{markdown}"
+        );
+        let compact = markdown.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            compact.matches("| Claude Fable 5 |").count() >= 3,
+            "{markdown}"
+        );
+    }
+
+    #[test]
     fn share_named_media_wrappers_survive_extraction_while_share_widgets_are_dropped() {
         let prose = "Apple today introduced a new watch with an all-new health sensing system that measures more signals than before. ".repeat(12);
         let html = format!(
@@ -2779,6 +3109,68 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn standalone_video_links_become_inline_facades() {
+        let placeholder =
+            crate::media::placeholder::from_image(&image::DynamicImage::new_rgb8(4, 4)).unwrap();
+        let thumbnail = LocalImage {
+            source: "https://i.ytimg.com/vi/xyz987_-ABC/hqdefault.jpg".into(),
+            original: "assets/images/poster.jpg".into(),
+            variants: vec![],
+            width: 480,
+            height: 360,
+            color: "#112233".into(),
+            placeholder,
+        };
+        let html = "<p><a target=\"_blank\" href=\"https://youtu.be/abcDEF12345?t=90\"><picture class=\"article-picture\"><img src=\"assets/images/thumb.png\" alt=\"\"></picture></a></p><p><a href=\"https://www.youtube.com/watch?v=xyz987_-ABC\">https://www.youtube.com/watch?v=xyz987_-ABC</a></p><p><a href=\"https://vimeo.com/76979871\">Watch the talk</a></p><p><a href=\"https://youtu.be/short12345\">Watch</a> and <a href=\"https://example.com\">more</a></p><p>See <a href=\"https://youtu.be/inline1234\">this</a>.</p><p><a href=\"https://example.com/video\">Not a provider</a></p>";
+        let embedded = embed_body_videos(html, std::slice::from_ref(&thumbnail));
+        assert_eq!(
+            embedded.matches("video-player-inline").count(),
+            3,
+            "{embedded}"
+        );
+        assert!(
+            embedded
+                .contains("data-video-embed=\"https://www.youtube-nocookie.com/embed/abcDEF12345?"),
+            "{embedded}"
+        );
+        assert!(embedded.contains("<a class=\"video-preview\" data-video-embed=\"https://www.youtube-nocookie.com/embed/abcDEF12345?autoplay=0&amp;rel=0&amp;playsinline=1&amp;iv_load_policy=3&amp;start=90\" href=\"https://youtu.be/abcDEF12345?t=90\""), "{embedded}");
+        assert!(embedded.contains("<picture class=\"article-picture\"><img src=\"assets/images/thumb.png\" alt=\"\"></picture><span class=\"video-preview-play\""), "{embedded}");
+        assert!(
+            embedded.contains("<img src=\"assets/images/poster.jpg\" width=\"480\" height=\"360\""),
+            "{embedded}"
+        );
+        assert!(
+            embedded.contains("--image-placeholder: #112233"),
+            "{embedded}"
+        );
+        assert!(
+            embedded.contains("data-video-provider=\"vimeo\""),
+            "{embedded}"
+        );
+        assert!(
+            embedded.contains("<span class=\"video-preview-label\">Vimeo</span>"),
+            "{embedded}"
+        );
+        assert!(
+            embedded.contains("<p><a href=\"https://youtu.be/short12345\">Watch</a> and"),
+            "{embedded}"
+        );
+        assert!(
+            embedded.contains("<p>See <a href=\"https://youtu.be/inline1234\">this</a>.</p>"),
+            "{embedded}"
+        );
+        assert!(
+            embedded.contains("<p><a href=\"https://example.com/video\">Not a provider</a></p>"),
+            "{embedded}"
+        );
+        assert!(
+            !embedded.contains("youtube.com/watch?v=xyz987_-ABC\">https://"),
+            "{embedded}"
+        );
+        assert_eq!(embed_body_videos("<p>plain</p>", &[]), "<p>plain</p>");
     }
 
     #[test]

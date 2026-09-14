@@ -144,7 +144,7 @@ window.AGGRPreferences = (function () {
   <nav class="nav" data-site-navigation aria-label="Site navigation">
     <a class="brand" data-route="" rel="home" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/favicon-32.png' | url_for }}" alt="" width="20" height="20"><span class="brand-title">{{ site.title | lower }}</span></a>
     <div class="nav-primary">
-      <a class="menu-link" data-route="" data-kinds="river item" data-feed-action href="{{ '' | url_for }}"{% if page.kind in ['river', 'item'] %} aria-current="page"{% endif %}>feed</a>
+      <a class="menu-link" data-route="" data-kinds="river" data-feed-action href="{{ '' | url_for }}"{% if page.kind == 'river' %} aria-current="page"{% endif %}>feed</a>
       <span class="nav-separator" aria-hidden="true">|</span>
       <a class="menu-link" data-route="browse/" data-kinds="browse categories category sources source tags tag" href="{{ 'browse/' | url_for }}"{% if page.kind in ['browse', 'categories', 'category', 'sources', 'source', 'tags', 'tag'] %} aria-current="page"{% endif %}>browse</a>
       <span class="nav-separator" aria-hidden="true">|</span>
@@ -157,7 +157,7 @@ window.AGGRPreferences = (function () {
 </header>
 <nav class="mobile-tabs" data-site-navigation aria-label="Main navigation" data-nosnippet>
   {% for route, label, kinds, icon in [
-    ['', 'feed', ['river', 'item'], 'M4 5h16M4 12h16M4 19h10'],
+    ['', 'feed', ['river'], 'M4 5h16M4 12h16M4 19h10'],
     ['?focus-search=1', 'search', [], 'M21 21l-4.34-4.34M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0'],
     ['browse/', 'browse', ['browse', 'categories', 'category', 'sources', 'source', 'tags', 'tag'], 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z'],
     ['preferences/', 'preferences', ['preferences'], 'M4 7h5m4 0h7M4 17h9m4 0h3M9 4v6M13 14v6']

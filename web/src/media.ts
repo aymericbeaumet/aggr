@@ -92,17 +92,23 @@ export function createMedia(options: MediaOptions) {
     }
   }
 
-  function enhanceVideo() {
-    const preview = document.querySelector<HTMLAnchorElement>("[data-video-embed]");
-    const player = preview?.closest<HTMLElement>(".video-player");
-    if (!preview || !player || player.dataset.videoMounted === "true" || player.dataset.videoBound === "true") return;
+  // Every provider player, including videos linked inside article bodies, is a facade that loads
+  // the provider only when the reader activates it, and then starts playback at once.
+  function enhanceVideo(root: ParentNode = document) {
+    for (const preview of root.querySelectorAll<HTMLAnchorElement>("[data-video-embed]")) enhanceVideoFacade(preview);
+  }
+
+  function enhanceVideoFacade(preview: HTMLAnchorElement) {
+    const player = preview.closest<HTMLElement>(".video-player");
+    if (!player || player.dataset.videoMounted === "true" || player.dataset.videoBound === "true") return;
     const provider = player.dataset.videoProvider;
     if (provider === "twitch" && location.protocol !== "https:"
       && !["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)) return;
     player.dataset.videoBound = "true";
+    const inline = player.classList.contains("video-player-inline");
 
     function mountPlayer(autoplay: boolean) {
-      if (!preview || !player || player.dataset.videoMounted === "true") return;
+      if (!player || player.dataset.videoMounted === "true") return;
       player.dataset.videoMounted = "true";
       const url = new URL(preview.dataset.videoEmbed || "");
       if (preview.hasAttribute("data-video-parent")) url.searchParams.set("parent", location.hostname);
@@ -126,7 +132,7 @@ export function createMedia(options: MediaOptions) {
         player.removeAttribute("aria-busy");
         preview.hidden = true;
       }, { once: true, signal: listeners.signal });
-      if (provider === "youtube" || provider === "vimeo") {
+      if (!inline && (provider === "youtube" || provider === "vimeo")) {
         const display = timingDisplay(player);
         const timing = createProviderTiming({
           provider, origin: url.origin,
@@ -161,7 +167,6 @@ export function createMedia(options: MediaOptions) {
       }
       if (autoplay) frame.focus({ preventScroll: true });
     }
-    if (provider === "youtube") { mountPlayer(false); return; }
     preview.setAttribute("role", "button");
     preview.addEventListener("keydown", (event) => {
       if (event.key === " ") { event.preventDefault(); preview.click(); }

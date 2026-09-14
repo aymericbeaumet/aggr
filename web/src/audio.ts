@@ -116,13 +116,18 @@ export function createPlayback(audio: AudioPort, update: (state: PlaybackSnapsho
     } catch {volumeAdjustable=false;}
     emit();
   }
+  // Mute lowers the visible volume to zero; unmute restores the level in use before muting.
   function mute() {
     if(disposed) return;
     try {
       if(audio.muted || audio.volume === 0) {
-        if(audio.volume === 0) volume(previousVolume);
         audio.muted=false;
-      } else audio.muted=true;
+        volume(previousVolume);
+      } else {
+        previousVolume=audio.volume;
+        audio.volume=0;
+        audio.muted=true;
+      }
     } catch { /* Some platforms delegate volume entirely to device controls. */ }
     emit();
   }

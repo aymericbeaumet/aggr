@@ -16,7 +16,7 @@ const ARTICLE_NAMESPACE: &str = "articles-v1";
 const RENDER_NAMESPACE: &str = "render-v1";
 const RENDER_KEY_FILE: &str = ".aggr-build-key";
 /// Bump when article extraction semantics change. Raw responses remain reusable across bumps.
-const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-5";
+const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-6";
 const MAX_ARTICLE_METADATA_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_ARTICLE_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXTRACTED_ARTICLE_BYTES: usize = 16 * 1024 * 1024;

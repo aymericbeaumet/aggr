@@ -752,13 +752,27 @@ pub fn markdown_candidates(markdown: &str, base: &Url) -> Vec<Candidate> {
         return Vec::new();
     }
     let arena = comrak::Arena::new();
-    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    // Bare video URLs autolink in the rendered reader, so recognize them here as well.
+    let mut options = comrak::Options::default();
+    options.extension.autolink = true;
+    let root = comrak::parse_document(&arena, markdown, &options);
     let mut candidates = Vec::new();
     for node in root.descendants() {
         let data = node.data.borrow();
         match &data.value {
             comrak::nodes::NodeValue::Image(link) => {
                 if let Some(url) = safe_image_url(&link.url, base) {
+                    candidates.push(Candidate { url, alt: None });
+                }
+            }
+            // A paragraph that is only a video link renders as an inline player; archive its
+            // poster so the facade never requests the provider before activation.
+            comrak::nodes::NodeValue::Paragraph => {
+                if let Some(url) = standalone_video_link(node)
+                    .and_then(|link| base.join(&link).ok())
+                    .and_then(|url| crate::sources::youtube::thumbnail(&url))
+                    .and_then(|thumbnail| Url::parse(&thumbnail).ok())
+                {
                     candidates.push(Candidate { url, alt: None });
                 }
             }
@@ -774,6 +788,23 @@ pub fn markdown_candidates(markdown: &str, base: &Url) -> Vec<Candidate> {
     let mut seen = BTreeSet::new();
     candidates.retain(|candidate| seen.insert(candidate.url.clone()));
     candidates
+}
+
+/// The URL of a paragraph consisting of one link (text or one image inside), else `None`.
+pub(crate) fn standalone_video_link<'a>(
+    paragraph: &'a comrak::nodes::AstNode<'a>,
+) -> Option<String> {
+    use comrak::nodes::NodeValue;
+    let mut link = None;
+    for child in paragraph.children() {
+        match &child.data.borrow().value {
+            NodeValue::Link(target) if link.is_none() => link = Some(target.url.clone()),
+            NodeValue::Text(text) if text.trim().is_empty() => {}
+            NodeValue::SoftBreak | NodeValue::LineBreak => {}
+            _ => return None,
+        }
+    }
+    link
 }
 
 fn is_data_url(value: &str) -> bool {
@@ -1783,6 +1814,24 @@ mod tests {
                 ["https://mitchellh.com/chart.svg"]
             );
         }
+    }
+
+    #[test]
+    fn standalone_video_links_archive_their_poster() {
+        let base = Url::parse("https://blog.example/post").unwrap();
+        let markdown = "Intro with https://youtu.be/inline1234 mentioned.\n\n[![](https://blog.example/thumb.png)](https://youtu.be/abcDEF12345)\n\nhttps://www.youtube.com/watch?v=xyz987_-ABC\n\n[Watch](https://youtu.be/short12345) and [more](https://example.com)\n";
+        let urls: Vec<_> = markdown_candidates(markdown, &base)
+            .into_iter()
+            .map(|candidate| candidate.url.to_string())
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "https://i.ytimg.com/vi/abcDEF12345/hqdefault.jpg",
+                "https://blog.example/thumb.png",
+                "https://i.ytimg.com/vi/xyz987_-ABC/hqdefault.jpg",
+            ]
+        );
     }
 
     #[test]

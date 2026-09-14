@@ -96,7 +96,9 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   apply shared boundary cleanup during both fetch and rendering so old archives benefit safely.
   Remove compact bylines only from a leading prose paragraph with a matching publication date.
 - Preserve explicitly captioned image figures before Readability classifies incidental IDs such as
-  `replies.png` as boilerplate, and rename share-named wrappers that hold media but no share links. Bump the extraction-cache version when extraction semantics change;
+  `replies.png` as boilerplate, and rename share-named wrappers that hold media but no share links.
+  Script-drawn charts with inline data become tables; feed-only captures are retried with a daily,
+  bounded backoff and upgraded in place when the original page becomes available. Bump the extraction-cache version when extraction semantics change;
   missing content already absent from stored HTML requires a fresh extraction.
   Publisher-feed reconciliation enriches media in place and records canonical dedupe aliases; keep article paths
   and hand-edited content, reject ambiguous matches, and leave repeats unchanged.
@@ -107,7 +109,7 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - Apply title presentation rules once in the build context and reuse them in every published
   representation, including feeds and Markdown; preserve stored originals and article bodies.
 - A lead image must not repeat a body picture (compare ThumbHashes, not only URLs) and must be at
-  least 800px wide. Reader headings are id anchors, never links; portable outputs keep links.
+  least 640px wide. Reader headings are id anchors, never links; portable outputs keep links.
 - Expand public social threads using only the original author's posts; preserve post/media order,
   strip terminal thread counters, and keep X links canonical even when xcancel supplies the data.
   Concatenate posts without separators, per-post links, or partial-thread notices: the metadata

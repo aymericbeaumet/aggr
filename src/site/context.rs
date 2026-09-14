@@ -286,7 +286,8 @@ impl ArticlePreviewCtx {
     }
 }
 
-const MIN_LEAD_WIDTH: u32 = 800;
+/// Social cards (600px and narrower) upscale badly as a hero; ordinary 640px+ leads are kept.
+const MIN_LEAD_WIDTH: u32 = 640;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceCtx {

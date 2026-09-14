@@ -299,7 +299,7 @@ List thumbnails and full article images serve different purposes. `item.article_
 a retained lead image only when that image, or an equivalent retained master, is absent from the
 rendered body. Equivalence uses the retained ThumbHashes, so an `og:image` served from another
 CDN URL, size, or format than the first body image is still recognized as the same picture and
-skipped. Leads narrower than 800px are skipped as well: social cards and small metadata images
+skipped. Leads narrower than 640px are skipped as well: social cards and small metadata images
 upscale badly as a hero. Small feed previews must not replace full article masters.
 
 Reader headings carry stable ids. A publisher heading that is one link to its own anchor or to
@@ -312,8 +312,11 @@ On screens of at least 2dppx, body pictures display at most two thirds of their 
 so a modest master is not stretched to double its pixels; large masters still fill the measure.
 Interactive and PDF viewers caption only the original link.
 
-YouTube item pages initialize a paused native player without autoplay. Twitch and Vimeo load after
-activation. Embed URLs come from validated provider identifiers; YouTube uses its privacy-enhanced
+Provider players are facades: nothing is requested from YouTube, Vimeo, or Twitch until the reader
+activates the poster, and activation starts playback in one click. A body paragraph that is only a
+link to a supported video (a bare URL, a text link, or a linked thumbnail) renders as the same facade
+so videos play inside aggr; its poster is the linked picture or the archived provider thumbnail.
+Portable outputs keep the plain link. Embed URLs come from validated provider identifiers; YouTube uses its privacy-enhanced
 domain, Vimeo uses DNT, and Twitch requires the current hostname as `parent`. These options do not
 guarantee that providers never set cookies or show recommendations. A creator's published poster
 can differ from the frame visible after playback begins.
@@ -340,8 +343,10 @@ viewport before activation so the provider minimum size cannot enlarge the artic
 Podcast audio enclosures and direct audio/video file URLs stay publisher-hosted, without autoplay
 or preload. Audio progressively enhances into a player with an uncropped cover in a full-height
 artwork area beside controls in golden-ratio columns (38.2% artwork, 61.8% controls), including on
-mobile. Controls stay compact within the right column and offer play/pause,
-seeking, 15-second rewind, 30-second skip, speed, and mute/volume. Native controls remain
+mobile. The artwork is inset on the player's own background rather than a separate panel. Controls
+stay compact within the right column and offer play/pause, seeking, symmetric 30- and 15-second
+skips either side of play, speed, and mute/volume; muting lowers the volume control to zero and
+unmuting restores the previous level. Native controls remain
 usable without JavaScript and appear automatically if enhanced playback fails; there is no separate
 browser-controls toggle. Navigation pauses audio and releases its resource, timers, and listeners.
 The initial card reserves the enhanced height, including wrapped touch controls.
