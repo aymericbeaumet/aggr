@@ -165,6 +165,11 @@ impl Store {
         self
     }
 
+    /// The validation receipt cache this store reuses, when one was attached.
+    pub fn image_cache(&self) -> Option<&crate::media::StoredAssetCache> {
+        self.image_cache.as_ref()
+    }
+
     /// Write the branch README, `.gitattributes` and `.gitignore` when missing. Each file is
     /// checked on its own, so a branch created by an older version gains the files it lacks.
     /// Returns whether anything was written.

@@ -42,9 +42,9 @@
   <div class="video-player" data-video-provider="{{ item.video.provider }}"{% if item.metadata.consumption.seconds %} data-duration-seconds="{{ item.metadata.consumption.seconds }}"{% endif %}{% if item.preview %} data-thumbhash="{{ item.preview.placeholder.hash }}" style="--image-placeholder: {{ item.preview.color }}; --image-preview: url('{{ item.preview.placeholder.data_url }}'); background-color: var(--image-placeholder)"{% endif %}>
     <a class="video-preview" data-video-embed="{{ item.video.embed_url }}"{% if item.video.requires_parent %} data-video-parent{% endif %} href="{{ item.link }}" title="{{ item.link }}" target="_blank" rel="noopener noreferrer" aria-label="Play {{ item.title }} on {{ item.video.title }}">
       {% if item.article_preview %}
-      <img src="{{ item.article_preview.url | url_for }}" srcset="{{ item.article_preview.srcset }}" sizes="(max-width: 48rem) 100vw, 48rem" width="{{ item.article_preview.width }}" height="{{ item.article_preview.height }}" alt="" decoding="async" fetchpriority="high">
+      <img src="{{ item.article_preview.url | url_for }}" srcset="{{ item.article_preview.srcset }}" sizes="(max-width: 48rem) 100vw, 48rem" width="{{ item.article_preview.width }}" height="{{ item.article_preview.height }}" alt="{{ item.article_preview.alt or '' }}" decoding="async" fetchpriority="high">
       {% elif item.preview %}
-      <img src="{{ item.preview.url | url_for }}" width="{{ item.preview.width }}" height="{{ item.preview.height }}" alt="" decoding="async" fetchpriority="high">
+      <img src="{{ item.preview.url | url_for }}" width="{{ item.preview.width }}" height="{{ item.preview.height }}" alt="{{ item.preview.alt or '' }}" decoding="async" fetchpriority="high">
       {% else %}
       <span class="video-preview-label">{{ item.video.title }}</span>
       {% endif %}
@@ -62,7 +62,7 @@
   <div class="media-timing" data-media-timing></div>
   {% else %}
   <div class="native-audio{% if item.preview %} has-artwork{% endif %}" data-audio-player data-audio-component{% if item.preview %} data-thumbhash="{{ item.preview.placeholder.hash }}" style="--image-preview: url('{{ item.preview.placeholder.data_url }}')"{% endif %}>
-    {% if item.preview %}<div class="audio-cover"><img class="audio-artwork" src="{{ item.preview.url | url_for }}" alt="" loading="lazy" decoding="async"></div>{% endif %}
+    {% if item.preview %}<div class="audio-cover"><img class="audio-artwork" src="{{ item.preview.url | url_for }}" alt="{{ item.preview.alt or '' }}" loading="lazy" decoding="async"></div>{% endif %}
     <div class="audio-panel">
       <div class="audio-heading">
         <div><strong>Listen</strong><p class="audio-status" data-audio-status role="status" aria-live="polite">Ready when you are</p></div>
@@ -84,7 +84,7 @@
   </figure>
   {% elif item.article_preview %}
   <figure class="article-lead media-frame" data-thumbhash="{{ item.article_preview.placeholder.hash }}" style="--media-ratio: {{ item.article_preview.width }} / {{ item.article_preview.height }}; --image-placeholder: {{ item.article_preview.color }}; --image-preview: url('{{ item.article_preview.placeholder.data_url }}')">
-    <img src="{{ item.article_preview.url | url_for }}" srcset="{{ item.article_preview.srcset }}" sizes="(max-width: 48rem) 100vw, 48rem" width="{{ item.article_preview.width }}" height="{{ item.article_preview.height }}" alt="" decoding="async" fetchpriority="high">
+    <img src="{{ item.article_preview.url | url_for }}" srcset="{{ item.article_preview.srcset }}" sizes="(max-width: 48rem) 100vw, 48rem" width="{{ item.article_preview.width }}" height="{{ item.article_preview.height }}" alt="{{ item.article_preview.alt or '' }}" decoding="async" fetchpriority="high">
   </figure>
   {% endif %}
   <div class="body e-content">{{ item.body_html | safe }}</div>

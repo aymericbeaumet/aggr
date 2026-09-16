@@ -297,24 +297,179 @@ fn date_filter(value: Value, format: Option<String>) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
+
+    /// Templates the generator renders directly: the pages `site/mod.rs` writes plus the service
+    /// worker and manifest. Every other file under `templates/` must be reached from one of these
+    /// through `extends`/`include`, or nothing renders it.
+    const RENDERED_TEMPLATES: &[&str] = &[
+        "index.html",
+        "item.html",
+        "browse.html",
+        "preferences.html",
+        "404.html",
+        "offline.html",
+        "manifest.webmanifest",
+        "sw.js",
+    ];
+
+    /// Classes the stylesheet styles that no template, client source or Rust string spells out
+    /// as a whole, because the name is assembled from data at build or run time.
+    const GENERATED_CLASSES: &[(&str, &str)] = &[
+        (
+            "swup-enabled",
+            "the vendored themes/default/static/swup.js adds it to <html> when it takes over navigation",
+        ),
+        (
+            "syntax-comment",
+            "syntect ClassStyle::SpacedPrefixed { prefix: \"syntax-\" } in content_highlight.rs",
+        ),
+        ("syntax-constant", "syntect scope class, see syntax-comment"),
+        ("syntax-entity", "syntect scope class, see syntax-comment"),
+        ("syntax-keyword", "syntect scope class, see syntax-comment"),
+        ("syntax-name", "syntect scope class, see syntax-comment"),
+        ("syntax-storage", "syntect scope class, see syntax-comment"),
+        ("syntax-string", "syntect scope class, see syntax-comment"),
+    ];
+
+    fn repository_path(relative: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+    }
+
+    /// Every UTF-8 file under `root` as (path relative to `root`, contents).
+    fn read_tree(root: &Path) -> Vec<(String, String)> {
+        walkdir::WalkDir::new(root)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .filter_map(|entry| {
+                let text = std::fs::read_to_string(entry.path()).ok()?;
+                let name = entry
+                    .path()
+                    .strip_prefix(root)
+                    .ok()?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                Some((name, text))
+            })
+            .collect()
+    }
+
+    /// Class names in the selector preludes of `css`. At-rule preludes and declaration blocks
+    /// are not selectors, and quoted attribute values are not classes.
+    fn declared_classes(css: &str) -> BTreeSet<String> {
+        let comments = regex::Regex::new(r"(?s)/\*.*?\*/").unwrap();
+        let strings = regex::Regex::new(r#""[^"]*"|'[^']*'"#).unwrap();
+        let class = regex::Regex::new(r"\.([a-z][a-z0-9_-]*)").unwrap();
+        let mut classes = BTreeSet::new();
+        let mut prelude = String::new();
+        for ch in comments.replace_all(css, "").chars() {
+            match ch {
+                '{' => {
+                    if !prelude.trim_start().starts_with('@') {
+                        let selector = strings.replace_all(&prelude, "\"\"");
+                        classes.extend(
+                            class
+                                .captures_iter(&selector)
+                                .map(|capture| capture[1].to_string()),
+                        );
+                    }
+                    prelude.clear();
+                }
+                '}' => prelude.clear(),
+                ch => prelude.push(ch),
+            }
+        }
+        classes
+    }
+
+    /// `name` occurs in `text` as a whole class token, not as part of a longer one.
+    fn mentions_class(text: &str, name: &str) -> bool {
+        let boundary = |ch: Option<char>| {
+            !ch.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        };
+        text.match_indices(name).any(|(index, _)| {
+            boundary(text[..index].chars().next_back())
+                && boundary(text[index + name.len()..].chars().next())
+        })
+    }
 
     #[test]
     fn embedded_theme_has_the_required_templates() {
-        for name in [
-            "base.html",
-            "index.html",
-            "item.html",
-            "browse.html",
-            "preferences.html",
-            "404.html",
-            "offline.html",
-            "manifest.webmanifest",
-            "sw.js",
-        ] {
+        for name in RENDERED_TEMPLATES.iter().chain(&["base.html"]) {
             assert!(
                 DefaultTheme::get(&format!("templates/{name}")).is_some(),
                 "missing embedded template {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_theme_template_is_rendered_or_included() {
+        let root = repository_path("themes/default/templates");
+        let templates = read_tree(&root);
+        assert!(templates.len() >= RENDERED_TEMPLATES.len());
+        let reference =
+            regex::Regex::new(r#"\{%-?\s*(?:extends|include|import|from)\s+"([^"]+)""#).unwrap();
+        let referenced = templates
+            .iter()
+            .flat_map(|(_, text)| {
+                reference
+                    .captures_iter(text)
+                    .map(|capture| capture[1].to_string())
+            })
+            .collect::<BTreeSet<_>>();
+        let unreachable = templates
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .filter(|name| !RENDERED_TEMPLATES.contains(name) && !referenced.contains(*name))
+            .collect::<Vec<_>>();
+        assert!(
+            unreachable.is_empty(),
+            "templates nothing renders or includes: {unreachable:?}"
+        );
+        for name in &referenced {
+            assert!(
+                root.join(name).is_file(),
+                "included template {name} is missing"
+            );
+        }
+    }
+
+    #[test]
+    fn every_class_the_stylesheet_declares_is_rendered_somewhere() {
+        let css =
+            std::fs::read_to_string(repository_path("themes/default/static/style.css")).unwrap();
+        let declared = declared_classes(&css);
+        assert!(declared.contains("row") && declared.contains("table-scroll"));
+        assert!(!declared.contains("5rem") && !declared.contains("body p"));
+        // This file's own assertions must not vouch for a class.
+        let corpus = ["themes/default/templates", "web/src", "src"]
+            .iter()
+            .flat_map(|dir| read_tree(&repository_path(dir)))
+            .filter(|(name, _)| name != "site/render.rs")
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>();
+        let unused = declared
+            .iter()
+            .filter(|name| {
+                !GENERATED_CLASSES
+                    .iter()
+                    .any(|(generated, _)| generated == name)
+            })
+            .filter(|name| !corpus.iter().any(|text| mentions_class(text, name)))
+            .collect::<Vec<_>>();
+        assert!(
+            unused.is_empty(),
+            "style.css declares classes nothing renders: {unused:?}"
+        );
+        for (generated, _) in GENERATED_CLASSES {
+            assert!(
+                declared.contains(*generated),
+                "{generated} is allowlisted but no longer styled"
             );
         }
     }
@@ -426,7 +581,7 @@ mod tests {
         assert!(css.contains("env(safe-area-inset-bottom)"));
         assert!(css.contains("@media (pointer: coarse)"));
         assert!(css.contains("font-size: 16px"));
-        assert!(css.contains(".directory-scroll:focus-visible"));
+        assert!(css.contains(".table-scroll:focus-visible"));
         assert!(css.contains("@media (prefers-contrast: more)"));
         assert!(!css.contains("min-height: 24px"));
     }
@@ -575,6 +730,93 @@ mod tests {
         assert!(!item.contains("Archived snapshot"));
         assert!(!item.contains("article-more-label"));
         assert!(!item.contains("class=\"permalinks\""));
+    }
+
+    #[test]
+    fn article_lead_and_posters_render_the_localised_alt_text() {
+        // Only the media blocks are under test; the rest of the page tolerates a sparse context.
+        let mut renderer = Renderer::new(Layers::default(), "").unwrap();
+        renderer
+            .env
+            .set_undefined_behavior(minijinja::UndefinedBehavior::Chainable);
+        let placeholder =
+            crate::media::placeholder::from_image(&image::DynamicImage::new_rgb8(4, 4)).unwrap();
+        let lead =
+            crate::site::context::ArticlePreviewCtx::from_image(&crate::content::LocalImage {
+                source: "https://publisher.test/lead.jpg".into(),
+                original: "assets/images/lead.jpg".into(),
+                alt: Some("Apple Watch <on> a \"wrist\"".into()),
+                variants: vec![],
+                width: 1280,
+                height: 720,
+                color: "#123456".into(),
+                placeholder: placeholder.clone(),
+            });
+        let preview = crate::site::context::PreviewCtx {
+            url: "assets/images/cover.jpg".into(),
+            width: 600,
+            height: 600,
+            alt: Some("Show cover".into()),
+            color: None,
+            placeholder,
+        };
+        let item = |media: Value| {
+            minijinja::context! {
+                title => "Introducing",
+                url => "items/blog/introducing/",
+                path => "items/blog/introducing.md",
+                link => "https://publisher.test/introducing",
+                content => "full",
+                body_html => "<p>Body</p>",
+                labels => Vec::<String>::new(),
+                authors => Vec::<String>::new(),
+                article_preview => Value::from_serialize(&lead),
+                preview => Value::from_serialize(&preview),
+                ..media
+            }
+        };
+        let page = |media: Value| {
+            renderer
+                .render(
+                    "item.html",
+                    minijinja::context! {
+                        item => item(media),
+                        site => minijinja::context! { title => "aggr" },
+                        page => minijinja::context! { kind => "item" },
+                    },
+                )
+                .unwrap()
+        };
+
+        let article = page(minijinja::context! {});
+        assert!(
+            article.contains("class=\"article-lead media-frame\""),
+            "{article}"
+        );
+        assert!(
+            article
+                .contains("alt=\"Apple Watch &lt;on&gt; a &quot;wrist&quot;\" decoding=\"async\""),
+            "{article}"
+        );
+
+        let video = page(minijinja::context! {
+            video => minijinja::context! { provider => "youtube", title => "YouTube", embed_url => "https://www.youtube-nocookie.com/embed/x", requires_parent => false },
+        });
+        assert!(
+            video.contains("class=\"video-preview\"")
+                && video.contains("alt=\"Apple Watch &lt;on&gt; a &quot;wrist&quot;\""),
+            "{video}"
+        );
+
+        let audio = page(minijinja::context! {
+            native_media => minijinja::context! { kind => "audio", url => "https://publisher.test/episode.mp3" },
+        });
+        assert!(
+            audio.contains(
+                "<img class=\"audio-artwork\" src=\"assets/images/cover.jpg\" alt=\"Show cover\""
+            ),
+            "{audio}"
+        );
     }
 
     #[test]

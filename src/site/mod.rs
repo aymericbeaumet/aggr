@@ -1,6 +1,7 @@
 //! Static site generation: the data tree + config + git facts in, a directory of files out.
 //! The planning half (`plan`) is pure; `build` does the IO.
 
+mod assets;
 pub mod context;
 mod display;
 mod document;
@@ -14,7 +15,7 @@ mod related;
 pub mod render;
 pub(crate) mod video;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
@@ -28,7 +29,7 @@ use crate::model::Item;
 use crate::store::{Status, Store};
 use context::{
     ArticleLinkCtx, ArticlePreviewCtx, BuildCtx, CategoryCtx, GitHubLinks, ItemCtx, ItemOptions,
-    PageCtx, PaginatorCtx, PreviewCtx, SiteCtx, SiteIdentityCtx, SourceCtx, SourceErrorCtx,
+    PageCtx, PaginatorCtx, SiteCtx, SiteIdentityCtx, SourceCtx, SourceErrorCtx,
 };
 use render::{Layers, Renderer};
 
@@ -192,168 +193,6 @@ pub fn paginate(prefix: &str, total: usize, per_page: usize) -> Vec<Pager> {
             }
         })
         .collect()
-}
-
-/// Everything the service worker fetches at install, as site paths under `base`: shells, list
-/// indexes, the assets needed to render them, the Pagefind bundle, and newest offline items.
-pub fn precache_paths(
-    base: &str,
-    lists: impl IntoIterator<Item = String>,
-    assets: &[String],
-    item_urls: impl IntoIterator<Item = String>,
-    offline_items: usize,
-) -> Vec<String> {
-    const SHELLS: [&str; 11] = [
-        "",
-        "aggr.json",
-        "updates.json",
-        "browse/",
-        "categories/",
-        "sources/",
-        "tags/",
-        "preferences/",
-        "404.html",
-        "offline.html",
-        "manifest.webmanifest",
-    ];
-    let mut seen = BTreeSet::new();
-    SHELLS
-        .iter()
-        .map(|path| path.to_string())
-        .chain(lists)
-        .chain(
-            assets
-                .iter()
-                .filter(|name| {
-                    name.ends_with(".css")
-                        || name.ends_with(".js")
-                        || name.starts_with("favicon-")
-                        || name.starts_with("icon-")
-                        || name.starts_with("apple-touch-icon-")
-                })
-                .map(|name| format!("assets/{name}")),
-        )
-        .chain(item_urls.into_iter().take(offline_items))
-        .map(|path| format!("{base}{path}"))
-        .filter(|path| seen.insert(path.clone()))
-        .collect()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct PrecacheEntry {
-    url: String,
-    revision: String,
-    required: bool,
-}
-
-/// Attach an exact content revision to every install-time resource. A new worker can copy
-/// byte-identical responses from the previous precache instead of downloading the whole offline
-/// archive after every feed commit.
-fn precache_entries(root: &Path, urls: Vec<String>) -> Result<Vec<PrecacheEntry>> {
-    urls.into_iter()
-        .map(|url| {
-            let relative = url.trim_start_matches('/');
-            if relative.split('/').any(|part| part == "..") {
-                bail!("invalid precache path {url:?}");
-            }
-            let file = if relative.is_empty() {
-                root.join("index.html")
-            } else if relative.ends_with('/') {
-                root.join(relative).join("index.html")
-            } else {
-                root.join(relative)
-            };
-            let bytes = std::fs::read(&file)
-                .with_context(|| format!("reading precache resource {}", file.display()))?;
-            let required = relative.is_empty()
-                || relative == "offline.html"
-                || (relative.starts_with("items/") && relative.ends_with('/'))
-                || (relative.starts_with("assets/")
-                    && (relative.ends_with(".css") || relative.ends_with(".js")));
-            Ok(PrecacheEntry {
-                url,
-                revision: crate::model::sha1_hex(&bytes),
-                required,
-            })
-        })
-        .collect()
-}
-
-fn publish_article_images(
-    out: &Path,
-    assets: Vec<crate::media::Asset>,
-    written: &mut BTreeSet<String>,
-) -> Result<Vec<content::LocalImage>> {
-    let mut published = Vec::with_capacity(assets.len());
-    for asset in assets {
-        let mut publish = |extension: &str, hash: &str, bytes: &[u8]| -> Result<String> {
-            let path = format!("assets/images/{hash}.{extension}");
-            publish_asset(out, written, &path, bytes)?;
-            Ok(path)
-        };
-        let original = publish(
-            asset.master_extension,
-            &asset.master_hash,
-            &asset.master_bytes,
-        )?;
-        let mut variants = asset
-            .renditions
-            .iter()
-            .map(|rendition| {
-                Ok(content::LocalImageVariant {
-                    url: publish(rendition.extension, &rendition.hash, &rendition.bytes)?,
-                    width: rendition.width,
-                    height: rendition.height,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if asset.master_extension == "webp"
-            && !variants.is_empty()
-            && variants.last().map(|variant| variant.width) != Some(asset.width)
-        {
-            variants.push(content::LocalImageVariant {
-                url: original.clone(),
-                width: asset.width,
-                height: asset.height,
-            });
-        }
-        published.push(content::LocalImage {
-            source: asset.source_url,
-            original,
-            variants,
-            width: asset.width,
-            height: asset.height,
-            color: asset.dominant_color,
-            placeholder: asset.placeholder,
-        });
-    }
-    Ok(published)
-}
-
-fn preview_placeholder(
-    bytes: &[u8],
-    cache: &mut BTreeMap<String, crate::media::placeholder::Placeholder>,
-) -> Result<crate::media::placeholder::Placeholder> {
-    let hash = crate::model::sha1_hex(bytes);
-    if let Some(placeholder) = cache.get(&hash) {
-        return Ok(placeholder.clone());
-    }
-    let placeholder = crate::media::placeholder::from_bytes(bytes)?;
-    cache.insert(hash, placeholder.clone());
-    Ok(placeholder)
-}
-
-fn publish_asset(
-    out: &Path,
-    written: &mut BTreeSet<String>,
-    path: &str,
-    bytes: &[u8],
-) -> Result<()> {
-    if !written.contains(path) {
-        write(&out.join(path), bytes)?;
-        written.insert(path.to_string());
-    }
-    Ok(())
 }
 
 /// Names the precache from durable build inputs. A no-op rebuild therefore reuses its cache,
@@ -761,53 +600,6 @@ fn structured_data(
     }))
 }
 
-#[derive(Serialize)]
-struct OfflineArticle {
-    url: String,
-    title: String,
-    resources: Vec<PrecacheEntry>,
-}
-
-fn offline_catalog(
-    out: &Path,
-    items: &[ItemCtx],
-    images: &BTreeMap<String, Vec<content::LocalImage>>,
-) -> Result<Vec<OfflineArticle>> {
-    let mut revisions = BTreeMap::<String, PrecacheEntry>::new();
-    items
-        .iter()
-        .take(1000)
-        .map(|item| {
-            let mut paths = BTreeSet::from([item.url.clone()]);
-            if let Some(preview) = &item.preview {
-                paths.insert(preview.url.clone());
-            }
-            for image in images.get(&item.path).into_iter().flatten() {
-                paths.insert(image.original.clone());
-                paths.extend(image.variants.iter().map(|variant| variant.url.clone()));
-            }
-            let resources = paths
-                .into_iter()
-                .map(|path| {
-                    if let Some(entry) = revisions.get(&path) {
-                        return Ok(entry.clone());
-                    }
-                    let entry = precache_entries(out, vec![path.clone()])?
-                        .pop()
-                        .context("offline resource revision")?;
-                    revisions.insert(path, entry.clone());
-                    Ok(entry)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Ok(OfflineArticle {
-                url: item.url.clone(),
-                title: item.title.clone(),
-                resources,
-            })
-        })
-        .collect()
-}
-
 /// What `sw.js` sees: the cache name and the revisioned install-time fetch list.
 #[derive(Serialize)]
 struct SwCtx<'a> {
@@ -816,8 +608,8 @@ struct SwCtx<'a> {
     version: String,
     app_version: &'a str,
     content_version: &'a str,
-    precache: Vec<PrecacheEntry>,
-    offline_catalog: Vec<OfflineArticle>,
+    precache: Vec<assets::PrecacheEntry>,
+    offline_catalog: Vec<assets::OfflineArticle>,
     offline_count: usize,
     search_manifest: serde_json::Value,
 }
@@ -980,118 +772,63 @@ pub fn build(
         .collect();
     let mut archive_items = Vec::with_capacity(all_items.len());
     let mut article_images = BTreeMap::<String, Vec<content::LocalImage>>::new();
-    let mut media_previews = BTreeMap::new();
-    let mut image_placeholders = BTreeMap::new();
-    let mut written_assets = BTreeSet::new();
-    for (item, prepared) in all_items.iter().zip(&prepared_bodies) {
-        let (source_name, category) = source_by_slug
-            .get(item.front.source.as_str())
-            .map(|s| (s.name.as_str(), s.category.as_deref()))
-            .unwrap_or((item.front.source.as_str(), None));
-        let excerpt = item
-            .front
-            .summary
-            .clone()
-            .filter(|_| prepared.resources().is_empty())
-            .map(|s| content::excerpt(&s, EXCERPT_CHARS))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| prepared.excerpt(EXCERPT_CHARS));
-        let mut ctx = ItemCtx::from_item(
-            item,
-            ItemOptions {
-                reading_metrics: prepared.reading_metrics(),
-                source_name,
-                category,
-                links: links.as_ref(),
-                excerpt,
-                discussions: &config.networks,
-                resolutions: &info.discussions,
-                now: info.now,
-            },
-        );
-        if let Some(source) = source_by_slug.get(item.front.source.as_str()) {
-            ctx.set_source(source);
-        }
-        ctx.resources = prepared.resources().to_vec();
-        if let Some(preview) = &item.front.preview
-            && let Some(bytes) = store.read_preview(item)?
-        {
-            let extension = Path::new(&preview.file)
-                .extension()
-                .and_then(|value| value.to_str())
-                .context("validated preview has a file extension")?;
-            let path = format!(
-                "assets/previews/{}.{}",
-                crate::model::sha1_hex(&bytes),
-                extension
-            );
-            publish_asset(out, &mut written_assets, &path, &bytes)?;
-            ctx.preview = Some(PreviewCtx {
-                url: path,
-                width: preview.width,
-                height: preview.height,
-                alt: preview.alt.clone(),
-                color: preview.color.clone(),
-                placeholder: preview_placeholder(&bytes, &mut image_placeholders)?,
-            });
-        }
-        let assets = store.read_image_assets(item)?;
-        let previews_enabled = sources
+    let mut written_assets = assets::Published::new();
+    let media_memo = assets::MediaMemo::new(store.image_cache().cloned());
+    let derive_preview = |item: &Item| {
+        sources
             .iter()
             .find(|source| source.slug == item.front.source)
-            .map_or(config.fetch.previews, |source| source.previews);
-        if ctx.preview.is_none() && previews_enabled {
-            for asset in assets
-                .iter()
-                .filter(|asset| !crate::media::is_status_badge(&asset.source_url))
-                .take(12)
-            {
-                let retained = asset
-                    .renditions
-                    .iter()
-                    .filter(|image| image.width >= 256 && image.height >= 32)
-                    .map(|image| image.bytes.as_slice())
-                    .chain(std::iter::once(asset.master_bytes.as_slice()));
-                for bytes in retained.filter(|bytes| bytes.len() <= 5 * 1024 * 1024) {
-                    let key = crate::model::sha1_hex(bytes);
-                    let preview = media_previews.get(&key).cloned().unwrap_or_else(|| {
-                        let preview = crate::preview::thumbnail(bytes, None).ok();
-                        if media_previews.len() < 64 {
-                            media_previews.insert(key, preview.clone());
-                        }
-                        preview
-                    });
-                    if let Some(preview) = preview {
-                        let path = format!(
-                            "assets/previews/{}.{}",
-                            crate::model::sha1_hex(&preview.bytes),
-                            preview.extension
-                        );
-                        publish_asset(out, &mut written_assets, &path, &preview.bytes)?;
-                        ctx.preview = Some(PreviewCtx {
-                            url: path,
-                            width: preview.width,
-                            height: preview.height,
-                            alt: asset.alt.clone(),
-                            color: Some(preview.color),
-                            placeholder: preview_placeholder(
-                                &preview.bytes,
-                                &mut image_placeholders,
-                            )?,
-                        });
-                        break;
-                    }
-                }
-                if ctx.preview.is_some() {
-                    break;
-                }
+            .map_or(config.fetch.previews, |source| source.previews)
+    };
+    // Reading, validating and decoding archived media dominates this phase, so it runs on worker
+    // threads one window at a time, which bounds the assets held in memory. Publishing stays on
+    // this thread in item order: the dedupe map, memo state and archive order never depend on
+    // timing, so every worker count produces the same bytes.
+    let media_window = parallel::window();
+    for (items, prepared) in all_items
+        .chunks(media_window)
+        .zip(prepared_bodies.chunks(media_window))
+    {
+        let media = parallel::map(items, |item| {
+            assets::ItemMedia::gather(store, item, derive_preview(item), &media_memo)
+        })?;
+        for ((item, prepared), media) in items.iter().zip(prepared).zip(media) {
+            let (source_name, category) = source_by_slug
+                .get(item.front.source.as_str())
+                .map(|s| (s.name.as_str(), s.category.as_deref()))
+                .unwrap_or((item.front.source.as_str(), None));
+            let excerpt = item
+                .front
+                .summary
+                .clone()
+                .filter(|_| prepared.resources().is_empty())
+                .map(|s| content::excerpt(&s, EXCERPT_CHARS))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| prepared.excerpt(EXCERPT_CHARS));
+            let mut ctx = ItemCtx::from_item(
+                item,
+                ItemOptions {
+                    reading_metrics: prepared.reading_metrics(),
+                    source_name,
+                    category,
+                    links: links.as_ref(),
+                    excerpt,
+                    discussions: &config.networks,
+                    resolutions: &info.discussions,
+                    now: info.now,
+                },
+            );
+            if let Some(source) = source_by_slug.get(item.front.source.as_str()) {
+                ctx.set_source(source);
             }
+            ctx.resources = prepared.resources().to_vec();
+            let (preview, local_images) = media.publish(out, &mut written_assets)?;
+            ctx.preview = preview;
+            if !local_images.is_empty() {
+                article_images.insert(item.path.clone(), local_images);
+            }
+            archive_items.push(ctx);
         }
-        let local_images = publish_article_images(out, assets, &mut written_assets)?;
-        if !local_images.is_empty() {
-            article_images.insert(item.path.clone(), local_images);
-        }
-        archive_items.push(ctx);
     }
     phase("media and item metadata");
 
@@ -1635,15 +1372,20 @@ pub fn build(
             .chain(tags.iter().map(|tag| tag.page.clone()))
             .take(config.site.preferences.offline_items.clamp(32, 256));
         let lists = ["browse/".to_string()].into_iter().chain(scoped_lists);
-        let paths = precache_paths("", lists, &assets, std::iter::empty(), 0);
+        let paths = assets::precache_paths("", lists, &assets, std::iter::empty(), 0);
         let mut sw_ctx = SwCtx {
             site: &site,
             build: &build_ctx,
             version: cache_version(&build_ctx),
             app_version: &build_ctx.app_version,
             content_version: &build_ctx.content_version,
-            precache: precache_entries(out, paths)?,
-            offline_catalog: offline_catalog(out, &archive_items, &article_images)?,
+            precache: assets::precache_entries(out, paths, &written_assets)?,
+            offline_catalog: assets::offline_catalog(
+                out,
+                &archive_items,
+                &article_images,
+                &written_assets,
+            )?,
             offline_count: config.site.preferences.offline_items.min(1000),
             search_manifest: serde_json::json!({"version": search_manifest.version, "base": search_manifest.base}),
         };
@@ -2070,34 +1812,6 @@ mod tests {
     use chrono::TimeZone;
 
     #[test]
-    fn shared_immutable_assets_are_written_once_per_build() {
-        let root = tempfile::tempdir().unwrap();
-        let mut written = BTreeSet::new();
-        let path = "assets/images/known.png";
-        publish_asset(root.path(), &mut written, path, b"exact source bytes").unwrap();
-        let timestamp = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
-        std::fs::File::options()
-            .write(true)
-            .open(root.path().join(path))
-            .unwrap()
-            .set_modified(timestamp)
-            .unwrap();
-        publish_asset(root.path(), &mut written, path, b"exact source bytes").unwrap();
-        assert_eq!(
-            std::fs::metadata(root.path().join(path))
-                .unwrap()
-                .modified()
-                .unwrap(),
-            timestamp
-        );
-        assert_eq!(
-            std::fs::read(root.path().join(path)).unwrap(),
-            b"exact source bytes"
-        );
-        assert_eq!(written.len(), 1);
-    }
-
-    #[test]
     fn prepared_context_preserves_custom_theme_archive_access_without_reserializing() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct Counted<'a>(&'a AtomicUsize);
@@ -2203,47 +1917,6 @@ mod tests {
         println!(
             "1000 pages × 1000 archive entries: repeated={repeated:?}, prepared={:?}",
             started.elapsed()
-        );
-    }
-
-    #[test]
-    fn publishing_reconstructed_article_images_does_not_decode_again() {
-        let pixels = image::RgbaImage::from_fn(400, 240, |x, y| {
-            image::Rgba([
-                ((x * 37 + y * 11) % 256) as u8,
-                ((x * 13 + y * 41) % 256) as u8,
-                ((x * 29 + y * 23) % 256) as u8,
-                255,
-            ])
-        });
-        let mut encoded = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba8(pixels)
-            .write_to(&mut encoded, image::ImageFormat::Png)
-            .unwrap();
-        let asset = crate::media::prepare_asset(
-            &crate::media::Candidate {
-                url: url::Url::parse("https://publisher.example/diagram.png").unwrap(),
-                alt: Some("Diagram".into()),
-            },
-            encoded.into_inner(),
-            &crate::media::MediaLimits::default(),
-        )
-        .unwrap();
-        assert!(!asset.renditions.is_empty());
-        let out = tempfile::tempdir().unwrap();
-
-        crate::media::reset_stored_decode_count();
-        let published =
-            publish_article_images(out.path(), vec![asset], &mut BTreeSet::new()).unwrap();
-
-        assert_eq!(crate::media::stored_decode_count(), 0);
-        assert_eq!(published.len(), 1);
-        assert!(out.path().join(&published[0].original).is_file());
-        assert!(
-            published[0]
-                .variants
-                .iter()
-                .all(|variant| out.path().join(&variant.url).is_file())
         );
     }
 
@@ -2529,62 +2202,6 @@ mod tests {
     }
 
     #[test]
-    fn precache_lists_shells_lists_assets_and_the_newest_items() {
-        let paths = precache_paths(
-            "/repo/",
-            ["sources/a/".to_string(), "sources/a/".to_string()],
-            &["style.css".to_string()],
-            ["items/a/1/".to_string(), "items/a/2/".to_string()],
-            1,
-        );
-        assert_eq!(paths[0], "/repo/");
-        assert!(paths.contains(&"/repo/aggr.json".to_string()));
-        assert!(paths.contains(&"/repo/offline.html".to_string()));
-        assert!(paths.contains(&"/repo/browse/".to_string()));
-        assert!(paths.contains(&"/repo/preferences/".to_string()));
-        assert!(!paths.contains(&"/repo/settings/".to_string()));
-        assert!(paths.contains(&"/repo/sources/a/".to_string()));
-        assert!(paths.contains(&"/repo/assets/style.css".to_string()));
-        assert!(paths.contains(&"/repo/items/a/1/".to_string()));
-        assert!(!paths.contains(&"/repo/items/a/2/".to_string()));
-        assert_eq!(
-            paths
-                .iter()
-                .filter(|path| *path == "/repo/sources/a/")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn precache_entries_revision_every_resource_and_require_the_app_shell() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("assets")).unwrap();
-        std::fs::create_dir_all(dir.path().join("items/a/1")).unwrap();
-        std::fs::write(dir.path().join("index.html"), "home").unwrap();
-        std::fs::write(dir.path().join("offline.html"), "offline").unwrap();
-        std::fs::write(dir.path().join("assets/style-a.css"), "css").unwrap();
-        std::fs::write(dir.path().join("items/a/1/index.html"), "item").unwrap();
-
-        let entries = precache_entries(
-            dir.path(),
-            vec![
-                "".into(),
-                "offline.html".into(),
-                "assets/style-a.css".into(),
-                "items/a/1/".into(),
-            ],
-        )
-        .unwrap();
-        assert!(entries[0].required);
-        assert!(entries[1].required);
-        assert!(entries[2].required);
-        assert!(entries[3].required);
-        assert_eq!(entries[0].revision, crate::model::sha1_hex(b"home"));
-        assert_eq!(entries[3].revision, crate::model::sha1_hex(b"item"));
-    }
-
-    #[test]
     fn cache_version_changes_with_content_but_not_rebuild_time() {
         let build = BuildCtx {
             time: day(2),
@@ -2780,6 +2397,137 @@ mod tests {
                 (relative, digest)
             })
             .collect()
+    }
+
+    /// `url` → `revision` for every resource in the worker's offline catalog.
+    fn offline_catalog_revisions(worker: &str) -> BTreeMap<String, String> {
+        let statements = worker.replace("\r\n", "\n");
+        let catalog: serde_json::Value = serde_json::from_str(
+            statements
+                .split("var OFFLINE_CATALOG = ")
+                .nth(1)
+                .unwrap()
+                .split(";\n")
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|article| article["resources"].as_array().unwrap())
+            .map(|entry| {
+                (
+                    entry["url"].as_str().unwrap().to_string(),
+                    entry["revision"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// The media phase gathers on worker threads and publishes in item order. Whatever the
+    /// worker count, the dedupe map, both memos and therefore every output byte must agree. The
+    /// fixture repeats one image across items and gives another item a stored preview, so shared
+    /// paths, derived thumbnails and placeholders all take part; ten items make the first window
+    /// large enough for `parallel::map` to spread across threads.
+    #[test]
+    fn worker_count_never_changes_the_output_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 10, "pwa = true\n");
+        let diagram = |name: &str, color: [u8; 4]| {
+            let pixels = image::RgbaImage::from_pixel(640, 320, image::Rgba(color));
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(pixels)
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .unwrap();
+            crate::media::prepare_asset(
+                &crate::media::Candidate {
+                    url: url::Url::parse(&format!("https://blog.example/{name}.png")).unwrap(),
+                    alt: Some(name.into()),
+                },
+                encoded.into_inner(),
+                &crate::media::MediaLimits::default(),
+            )
+            .unwrap()
+        };
+        let shared = diagram("shared", [21, 82, 109, 255]);
+        let distinct = diagram("distinct", [200, 40, 40, 255]);
+        let mut items = store.items().unwrap();
+        items.sort_by(|a, b| a.path.cmp(&b.path));
+        for (index, item) in items.iter_mut().enumerate() {
+            let (directory, stem) = item.path.rsplit_once('/').unwrap();
+            let images = match index % 3 {
+                0 => vec![shared.clone()],
+                1 => vec![distinct.clone(), shared.clone()],
+                _ => Vec::new(),
+            };
+            item.body = images
+                .iter()
+                .map(|asset| format!("![Diagram]({})\n\n", asset.source_url))
+                .chain(std::iter::once("Hello".to_string()))
+                .collect();
+            item.front.images = images.iter().map(|asset| asset.metadata(stem)).collect();
+            let preview = (index == 2)
+                .then(|| crate::preview::thumbnail(&distinct.master_bytes, None).unwrap());
+            item.front.preview = preview.as_ref().map(|thumbnail| thumbnail.metadata(stem));
+            store
+                .write_item(crate::store::NewItem {
+                    dir: directory,
+                    stem,
+                    front: &item.front,
+                    body: &item.body,
+                    html: None,
+                    preview: preview.as_ref().map(|thumbnail| thumbnail.bytes.as_slice()),
+                    images: &images,
+                })
+                .unwrap();
+        }
+        let pagefind_cache = dir.path().join("pagefind-cache");
+        let tree = |name: &str, workers: usize| {
+            let out = dir.path().join(name);
+            let mut build_info = info(out.clone());
+            build_info.release = true;
+            build_info.pagefind_cache = Some(pagefind_cache.clone());
+            let started = std::time::Instant::now();
+            parallel::with_workers(workers, || {
+                build(&config, &sources, &store, dir.path(), &build_info)
+            })
+            .unwrap();
+            println!(
+                "{name} build with {workers} worker(s): {:?}",
+                started.elapsed()
+            );
+            output_digests(&out)
+        };
+        let serial = tree("serial", 1);
+        let threaded = tree("threaded", 4);
+        assert_eq!(
+            serial.keys().collect::<Vec<_>>(),
+            threaded.keys().collect::<Vec<_>>()
+        );
+        for (path, digest) in &serial {
+            assert_eq!(
+                &threaded[path],
+                digest,
+                "{} differs between a serial and a parallel build",
+                path.display()
+            );
+        }
+        let published = |prefix: &str| {
+            serial
+                .keys()
+                .filter(|path| path.starts_with(prefix))
+                .count()
+        };
+        assert!(
+            published("assets/images") >= 2,
+            "shared and distinct images"
+        );
+        assert!(
+            published("assets/previews") >= 2,
+            "stored and derived previews"
+        );
     }
 
     /// A store with `count` items of one source, newest last, and a matching config.
@@ -3725,9 +3473,18 @@ category = "Science"
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         let path = format!("assets/previews/{hash}.jpg");
         assert_eq!(std::fs::read(out.join(&path)).unwrap(), bytes);
-        assert!(!precache_entries(&out, vec![path.clone()]).unwrap()[0].required);
+        assert!(
+            !assets::precache_entries(&out, vec![path.clone()], &BTreeMap::new()).unwrap()[0]
+                .required
+        );
         let worker = std::fs::read_to_string(out.join("sw.js")).unwrap();
         assert!(worker.contains(&path));
+        // The catalog takes the revision from the publish map; it must still be the file's hash.
+        assert_eq!(offline_catalog_revisions(&worker)[&path], hash);
+        assert_eq!(
+            hash,
+            crate::model::sha1_hex(std::fs::read(out.join(&path)).unwrap())
+        );
         let page =
             std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
         assert!(page.contains(&format!("https://u.github.io/repo/{path}")));
@@ -3887,6 +3644,19 @@ category = "Science"
             assert!(
                 worker.contains(&format!("assets/images/{}.webp", rendition.hash)),
                 "{worker}"
+            );
+        }
+        let revisions = offline_catalog_revisions(&worker);
+        for path in std::iter::once(master.clone()).chain(
+            asset
+                .renditions
+                .iter()
+                .map(|rendition| format!("assets/images/{}.webp", rendition.hash)),
+        ) {
+            assert_eq!(
+                revisions[&path],
+                crate::model::sha1_hex(std::fs::read(out.join(&path)).unwrap()),
+                "{path} is revisioned by its own content hash"
             );
         }
     }
@@ -4843,7 +4613,7 @@ same_as = ["https://social.example/@ada"]
         ctx.body_html = Some("<p>Body</p>".into());
         let placeholder =
             crate::media::placeholder::from_image(&image::DynamicImage::new_rgb8(4, 4)).unwrap();
-        ctx.preview = Some(PreviewCtx {
+        ctx.preview = Some(context::PreviewCtx {
             url: "assets/previews/small.jpg".into(),
             width: 320,
             height: 180,
@@ -4855,6 +4625,7 @@ same_as = ["https://social.example/@ada"]
             url: "assets/images/lead.jpg".into(),
             width: 1200,
             height: 630,
+            alt: None,
             srcset: "assets/images/lead.jpg 1200w".into(),
             color: "#285a8c".into(),
             placeholder,

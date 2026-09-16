@@ -2750,11 +2750,23 @@ pub struct LocalImageVariant {
 pub struct LocalImage {
     pub source: String,
     pub original: String,
+    /// The publisher's `<img alt>` where the image was found, already normalised by the media
+    /// pipeline; `None` for social cards and images that had none.
+    pub alt: Option<String>,
     pub variants: Vec<LocalImageVariant>,
     pub width: u32,
     pub height: u32,
     pub color: String,
     pub placeholder: crate::media::placeholder::Placeholder,
+}
+
+/// The alternative text a localised image carries into the reader: publisher whitespace runs
+/// collapsed, nothing when it was empty, and capped so a pasted paragraph does not become a
+/// screen-reader monologue.
+pub fn image_alt(alt: &str) -> Option<String> {
+    const MAX_CHARS: usize = 300;
+    let collapsed = alt.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!collapsed.is_empty()).then(|| collapsed.chars().take(MAX_CHARS).collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2855,11 +2867,12 @@ impl PreparedMarkdown {
         images: &[LocalImage],
         dimensions: &[ImageDimensions],
     ) -> String {
-        if self.resource_range.is_none() {
+        let html = if self.resource_range.is_none() {
             self.with_images(images, dimensions)
         } else {
             enhance_rendered_images(self.reader_html(), images, dimensions)
-        }
+        };
+        wrap_scrollable_tables(&html)
     }
 
     pub fn reading_metrics(&self) -> (usize, usize) {
@@ -2933,7 +2946,14 @@ pub fn anchor_headings(html: &str, article_url: Option<&Url>) -> String {
             counter += 1;
         }
         out.push_str(&html[position..start]);
-        out.push_str(&set_attribute(open, "id", &unique));
+        let open = set_attribute(open, "id", &unique);
+        // The page already has its title as the only `<h1>`; a publisher heading at that level
+        // reads as a second document title, so assistive technology hears it as a section.
+        if tag.name == "h1" {
+            out.push_str(&set_attribute(&open, "aria-level", "2"));
+        } else {
+            out.push_str(&open);
+        }
         out.push_str(inner);
         out.push_str(&closing);
         position = start + open_end + inner_len + closing.len();
@@ -3309,17 +3329,51 @@ fn enhance_rendered_images(
         position = start + end;
     }
     out.push_str(&html[position..]);
-    wrap_scrollable_tables(&group_captioned_figures(&out))
+    group_captioned_figures(&out)
 }
 
-/// A table is laid out as one box so its columns line up; the scrolling and the margin bleed
-/// belong to a wrapper around it, not to the table itself.
+/// The reader's scroll container around a table: a labelled region that keyboard users can focus
+/// and pan, wrapping a table that keeps its own layout box so header and body columns line up.
+const TABLE_SCROLL_OPEN: &str =
+    "<div class=\"table-scroll\" role=\"region\" tabindex=\"0\" aria-label=\"Table\">";
+
+/// Wrap every top-level table in [`TABLE_SCROLL_OPEN`]; a table nested inside another table
+/// scrolls with its parent and is left alone. Reader only: portable representations and stored
+/// bodies keep the bare table.
 fn wrap_scrollable_tables(html: &str) -> String {
-    if !html.contains("<table>") {
+    if !html.contains("<table") {
         return html.to_string();
     }
-    html.replace("<table>", "<div class=\"table-scroll\"><table>")
-        .replace("</table>", "</table></div>")
+    let mut out = String::with_capacity(html.len() + 2 * TABLE_SCROLL_OPEN.len());
+    let mut depth = 0usize;
+    let mut position = 0;
+    while let Some(offset) = html[position..].find("<") {
+        let start = position + offset;
+        out.push_str(&html[position..start]);
+        let table = parse_tag(&html[start..]).filter(|tag| tag.name == "table");
+        let Some(tag) = table else {
+            out.push('<');
+            position = start + 1;
+            continue;
+        };
+        let end = tag.end.unwrap_or(html.len() - start);
+        if tag.closing {
+            depth = depth.saturating_sub(1);
+            out.push_str(&html[start..start + end]);
+            if depth == 0 {
+                out.push_str("</div>");
+            }
+        } else {
+            if depth == 0 {
+                out.push_str(TABLE_SCROLL_OPEN);
+            }
+            depth += 1;
+            out.push_str(&html[start..start + end]);
+        }
+        position = start + end;
+    }
+    out.push_str(&html[position..]);
+    out
 }
 
 /// An image followed by a hard break and a short line is the figure/caption pair that Markdown
@@ -3873,6 +3927,7 @@ mod tests {
         let thumbnail = LocalImage {
             source: "https://i.ytimg.com/vi/xyz987_-ABC/hqdefault.jpg".into(),
             original: "assets/images/poster.jpg".into(),
+            alt: None,
             variants: vec![],
             width: 480,
             height: 360,
@@ -3940,6 +3995,19 @@ mod tests {
         assert_eq!(
             anchor_headings("<p>no headings</p><hr>", None),
             "<p>no headings</p><hr>"
+        );
+    }
+
+    #[test]
+    fn a_body_h1_reads_as_a_section_heading_without_changing_its_tag() {
+        // Feed-supplied bodies sometimes repeat the article title as their own `<h1>`; the page
+        // title is the document's only first-level heading.
+        assert_eq!(
+            anchor_headings(
+                "<h1>Title again</h1><h2>Next</h2><h1 id=\"x\">Kept</h1><h3>Deep</h3>",
+                None
+            ),
+            "<h1 id=\"title-again\" aria-level=\"2\">Title again</h1><h2 id=\"next\">Next</h2><h1 id=\"x\" aria-level=\"2\">Kept</h1><h3 id=\"deep\">Deep</h3>"
         );
     }
 
@@ -4431,6 +4499,7 @@ mod tests {
         let image = LocalImage {
             source: "https://publisher.example/diagram.png".into(),
             original: "assets/images/original.png".into(),
+            alt: None,
             variants: vec![
                 LocalImageVariant {
                     url: "assets/images/small.webp".into(),
@@ -5355,17 +5424,67 @@ List:       openbsd-tech
     }
 
     #[test]
-    fn tables_render_inside_their_own_scroll_container() {
-        // The table needs one layout box, or its header and body columns stop lining up.
-        let html = render_markdown(
-            "| Register | Action |\n| --- | --- |\n| `triangleCMD` | Start rendering. |\n",
-        );
+    fn reader_tables_become_focusable_scroll_regions_and_portable_outputs_keep_bare_tables() {
+        // The table needs one layout box, or its header and body columns stop lining up; the
+        // region around it is what a keyboard user focuses and pans.
+        let markdown = "Intro.\n\n| Register | Action |\n| --- | --- |\n| `triangleCMD` | Start rendering. |\n\nBetween.\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+        let prepared = PreparedMarkdown::new(markdown);
+        let reader = prepared.reader_html_with_images(&[], &[]);
+        assert_eq!(reader.matches(TABLE_SCROLL_OPEN).count(), 2, "{reader}");
+        assert_eq!(reader.matches("</table></div>").count(), 2, "{reader}");
+        assert_eq!(reader.matches("<table>").count(), 2, "{reader}");
         assert!(
-            html.contains("<div class=\"table-scroll\"><table>"),
-            "{html}"
+            reader.contains(&format!("{TABLE_SCROLL_OPEN}<table>")),
+            "{reader}"
         );
-        assert!(html.contains("</table></div>"), "{html}");
-        assert_eq!(html.matches("<table>").count(), 1, "{html}");
+        // Stored bodies, feeds and the text/plain, reStructuredText and JSON representations
+        // all derive from the portable rendering, which stays a bare table.
+        for portable in [
+            prepared.portable_html().to_string(),
+            render_markdown(markdown),
+        ] {
+            assert!(!portable.contains("table-scroll"), "{portable}");
+            assert!(!portable.contains("role=\"region\""), "{portable}");
+            assert_eq!(portable.matches("<table>").count(), 2, "{portable}");
+        }
+        assert_eq!(
+            prepared.plain_text(),
+            html_to_text(prepared.portable_html())
+        );
+        assert!(!prepared.plain_text().contains("Table"));
+        assert_eq!(
+            to_markdown(&reader, None),
+            to_markdown(prepared.portable_html(), None)
+        );
+    }
+
+    #[test]
+    fn nested_tables_scroll_with_their_parent() {
+        let html = "<p>a</p><table><tbody><tr><td><table><tr><td>inner</td></tr></table></td></tr></tbody></table><p>b</p><table class=\"x\"><tr><td>2</td></tr></table><tablet>";
+        assert_eq!(
+            wrap_scrollable_tables(html),
+            format!(
+                "<p>a</p>{TABLE_SCROLL_OPEN}<table><tbody><tr><td><table><tr><td>inner</td></tr></table></td></tr></tbody></table></div><p>b</p>{TABLE_SCROLL_OPEN}<table class=\"x\"><tr><td>2</td></tr></table></div><tablet>"
+            )
+        );
+        assert_eq!(wrap_scrollable_tables("<p>no table</p>"), "<p>no table</p>");
+        assert_eq!(
+            wrap_scrollable_tables("<table><tr><td>open"),
+            format!("{TABLE_SCROLL_OPEN}<table><tr><td>open")
+        );
+    }
+
+    #[test]
+    fn image_alt_collapses_whitespace_drops_empty_text_and_caps_length() {
+        assert_eq!(
+            image_alt("  A   diagram\n of the\tpipeline "),
+            Some("A diagram of the pipeline".into())
+        );
+        assert_eq!(image_alt("   "), None);
+        assert_eq!(image_alt(""), None);
+        let long = "é".repeat(400);
+        assert_eq!(image_alt(&long).map(|alt| alt.chars().count()), Some(300));
+        assert_eq!(image_alt("Chart"), Some("Chart".into()));
     }
 
     #[test]

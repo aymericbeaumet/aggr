@@ -221,6 +221,8 @@ pub struct ArticlePreviewCtx {
     pub url: String,
     pub width: u32,
     pub height: u32,
+    /// Alternative text for the hero or poster, from the publisher's own `<img alt>`.
+    pub alt: Option<String>,
     pub srcset: String,
     pub color: String,
     pub placeholder: crate::media::placeholder::Placeholder,
@@ -280,6 +282,7 @@ impl ArticlePreviewCtx {
             url,
             width: image.width,
             height: image.height,
+            alt: image.alt.as_deref().and_then(crate::content::image_alt),
             srcset: candidates
                 .iter()
                 .map(|(width, url)| format!("{url} {width}w"))
@@ -735,6 +738,7 @@ mod tests {
         let image = crate::content::LocalImage {
             source: "https://publisher.test/lead.jpg".into(),
             original: "assets/images/master.jpg".into(),
+            alt: None,
             variants: vec![],
             width: 1200,
             height: 800,
@@ -837,6 +841,7 @@ mod tests {
         let image = crate::content::LocalImage {
             source: "https://i.ytimg.com/vi/video/maxresdefault.jpg".into(),
             original: "assets/images/master.jpg".into(),
+            alt: Some("  Video   poster ".into()),
             variants: [48, 320, 640, 960, 1280]
                 .into_iter()
                 .map(|width| crate::content::LocalImageVariant {
@@ -856,6 +861,7 @@ mod tests {
         let poster = super::ArticlePreviewCtx::from_image(&image);
         assert_eq!(poster.url, "assets/images/640.webp");
         assert_eq!((poster.width, poster.height), (1280, 720));
+        assert_eq!(poster.alt.as_deref(), Some("Video poster"));
         assert_eq!(
             poster.srcset,
             "assets/images/320.webp 320w, assets/images/640.webp 640w, assets/images/960.webp 960w, assets/images/master.jpg 1280w"
@@ -868,6 +874,38 @@ mod tests {
         });
         assert_eq!(fallback.url, "assets/images/master.jpg");
         assert_eq!(fallback.srcset, "assets/images/master.jpg 480w");
+    }
+
+    #[test]
+    fn article_preview_alt_comes_from_the_localised_image_or_stays_absent() {
+        let image = crate::content::LocalImage {
+            source: "https://publisher.test/lead.jpg".into(),
+            original: "assets/images/master.jpg".into(),
+            alt: Some("Apple Watch  on\na wrist".into()),
+            variants: vec![],
+            width: 1200,
+            height: 800,
+            color: "#123456".into(),
+            placeholder: crate::media::placeholder::from_image(&image::DynamicImage::new_rgb8(
+                4, 4,
+            ))
+            .unwrap(),
+        };
+        let base = url::Url::parse("https://publisher.test/article").unwrap();
+        let lead = super::ArticlePreviewCtx::lead_image(
+            "<p>Article</p>",
+            &base,
+            std::slice::from_ref(&image),
+        )
+        .unwrap();
+        assert_eq!(lead.alt.as_deref(), Some("Apple Watch on a wrist"));
+        for alt in [None, Some("   ".to_string())] {
+            let card = crate::content::LocalImage {
+                alt,
+                ..image.clone()
+            };
+            assert_eq!(super::ArticlePreviewCtx::from_image(&card).alt, None);
+        }
     }
 
     use super::*;

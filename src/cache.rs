@@ -235,6 +235,7 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("store", "store/mod.rs"),
         source!("frontmatter", "store/frontmatter.rs"),
         source!("site", "site/mod.rs"),
+        source!("assets", "site/assets.rs"),
         source!("context", "site/context.rs"),
         source!("display", "site/display.rs"),
         source!("document", "site/document.rs"),

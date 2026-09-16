@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use image::{
@@ -19,6 +19,7 @@ use image::{
     ImageDecoder as _, ImageFormat, ImageReader,
 };
 use scraper::{Html, Selector};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Semaphore;
@@ -101,6 +102,10 @@ pub struct MediaLimits {
     pub download_concurrency: usize,
     pub decode_concurrency: usize,
     pub decode_timeout: Duration,
+    /// Wall-clock budget for one article's image candidates. Candidates are still fetched one
+    /// at a time; once the budget is spent the remaining candidates are skipped and the images
+    /// already retained are kept, so one slow CDN cannot occupy its source for many minutes.
+    pub article_timeout: Duration,
     pub rendition_widths: Vec<u32>,
 }
 
@@ -116,6 +121,7 @@ impl Default for MediaLimits {
             download_concurrency: 8,
             decode_concurrency: 1,
             decode_timeout: Duration::from_secs(15),
+            article_timeout: Duration::from_secs(120),
             rendition_widths: vec![320, 640, 960, 1280, 1600],
         }
     }
@@ -368,20 +374,31 @@ impl Asset {
 const MAX_ASSET_RECEIPT_BYTES: usize = 8 * 1024;
 const ASSET_RECEIPT_SLOTS: usize = 16_384;
 const ASSET_RECEIPT_WAYS: usize = 4;
+/// Sidecar directory for placeholder receipts inside the validated-images namespace. Additive:
+/// asset receipts keep their slot files at the namespace root, so existing caches stay valid.
+const PLACEHOLDER_RECEIPTS_DIR: &str = "placeholders-v1";
 
 /// Local validation receipts contain no master pixels. Fixed slots bound disk usage without
 /// scanning a large cache; collisions only cause a fresh validation, never incorrect reuse.
+#[derive(Clone)]
 pub(crate) struct StoredAssetCache {
     root: PathBuf,
     slots: usize,
 }
 
+/// One set-associative directory of `{slot:04x}.json` receipts, each checksummed and bound to
+/// the key that produced it.
+struct ReceiptSlots {
+    root: PathBuf,
+    capacity: usize,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AssetReceipt {
+struct Receipt<T> {
     key: String,
     checksum: String,
-    value: ValidatedAsset,
+    value: T,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -400,6 +417,28 @@ struct CachedRendition {
     hash: String,
 }
 
+/// A ThumbHash derived from content-addressed bytes; the inline preview is re-derived from it.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CachedPlaceholder {
+    thumbhash: String,
+}
+
+/// Receipt key for a placeholder derived from the bytes identified by `content_hash`, bound to
+/// the media implementation so a changed placeholder algorithm never reuses stale hashes.
+fn placeholder_receipt_key(content_hash: &str) -> Result<String> {
+    ensure!(
+        (1..=128).contains(&content_hash.len())
+            && content_hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid placeholder content hash"
+    );
+    let mut hash = Sha256::new();
+    hash.update(implementation_fingerprint());
+    hash.update(b"placeholder\n");
+    hash.update(content_hash.as_bytes());
+    Ok(hex::encode(hash.finalize()))
+}
+
 impl StoredAssetCache {
     pub(crate) fn new(root: impl AsRef<Path>) -> Self {
         Self {
@@ -416,7 +455,7 @@ impl StoredAssetCache {
     ) -> Result<Asset> {
         let key = stored_asset_key(metadata, &master, &variants);
         if let Ok(key) = &key
-            && let Ok(value) = self.read(key)
+            && let Ok(value) = self.asset_receipts().read::<ValidatedAsset>(key)
             && let Ok(placeholder) = placeholder::from_hash(&value.thumbhash)
             && let Ok((extension, hash, mut renditions)) = value.parts(metadata, &master, &variants)
         {
@@ -449,70 +488,48 @@ impl StoredAssetCache {
         Ok(asset)
     }
 
-    fn slots(&self, key: &str) -> Result<Vec<PathBuf>> {
-        let prefix = key.get(..4).context("invalid image cache key")?;
-        let capacity = self.slots.max(1);
-        let bucket =
-            usize::from(u16::from_str_radix(prefix, 16)?) % capacity.div_ceil(ASSET_RECEIPT_WAYS);
-        let first = bucket * ASSET_RECEIPT_WAYS;
-        Ok((first..(first + ASSET_RECEIPT_WAYS).min(capacity))
-            .map(|slot| self.root.join(format!("{slot:04x}.json")))
-            .collect())
-    }
-
-    fn read(&self, key: &str) -> Result<ValidatedAsset> {
-        self.slots(key)?
-            .into_iter()
-            .find_map(|path| Self::read_slot(&path, key).ok())
-            .context("image validation receipt missing")
-    }
-
-    fn read_slot(path: &Path, key: &str) -> Result<ValidatedAsset> {
-        let receipt = Self::receipt(path)?;
-        ensure!(receipt.key == key, "image cache slot changed");
-        Ok(receipt.value)
-    }
-
-    fn receipt(path: &Path) -> Result<AssetReceipt> {
-        let metadata = std::fs::symlink_metadata(path)?;
-        ensure!(
-            metadata.is_file() && metadata.len() <= MAX_ASSET_RECEIPT_BYTES as u64,
-            "invalid image cache receipt"
-        );
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take((MAX_ASSET_RECEIPT_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)?;
-        ensure!(
-            bytes.len() <= MAX_ASSET_RECEIPT_BYTES,
-            "image cache receipt too large"
-        );
-        let receipt: AssetReceipt = serde_json::from_slice(&bytes)?;
-        ensure!(
-            receipt.checksum == hex::encode(Sha256::digest(serde_json::to_vec(&receipt.value)?)),
-            "image cache receipt checksum changed"
-        );
-        Ok(receipt)
-    }
-
-    fn replacement(&self, key: &str) -> Result<PathBuf> {
-        let mut oldest = None;
-        for path in self.slots(key)? {
-            match Self::receipt(&path) {
-                Ok(receipt) if receipt.key != key => {}
-                _ => return Ok(path),
-            }
-            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                return Ok(path);
-            };
-            let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
-            if oldest.as_ref().is_none_or(|(_, time)| modified < *time) {
-                oldest = Some((path, modified));
-            }
+    fn asset_receipts(&self) -> ReceiptSlots {
+        ReceiptSlots {
+            root: self.root.clone(),
+            capacity: self.slots,
         }
-        oldest
-            .map(|(path, _)| path)
-            .context("image cache has no slots")
+    }
+
+    fn placeholder_receipts(&self) -> ReceiptSlots {
+        ReceiptSlots {
+            root: self.root.join(PLACEHOLDER_RECEIPTS_DIR),
+            capacity: self.slots,
+        }
+    }
+
+    /// A placeholder previously derived from the bytes identified by `content_hash` (their
+    /// `model::sha1_hex`), or `None` when it must be computed again. The inline preview is
+    /// re-derived from the stored ThumbHash, so a corrupt receipt only costs a fresh decode.
+    pub(crate) fn cached_placeholder(
+        &self,
+        content_hash: &str,
+    ) -> Option<placeholder::Placeholder> {
+        let key = placeholder_receipt_key(content_hash).ok()?;
+        let value = self
+            .placeholder_receipts()
+            .read::<CachedPlaceholder>(&key)
+            .ok()?;
+        placeholder::from_hash(&value.thumbhash).ok()
+    }
+
+    /// Remember a placeholder derived from the bytes identified by `content_hash`. The cache is
+    /// disposable, so a failed write is ignored and never affects the build.
+    pub(crate) fn remember_placeholder(
+        &self,
+        content_hash: &str,
+        placeholder: &placeholder::Placeholder,
+    ) {
+        if let Ok(key) = placeholder_receipt_key(content_hash) {
+            let value = CachedPlaceholder {
+                thumbhash: placeholder.hash.clone(),
+            };
+            let _ = self.placeholder_receipts().write(&key, &value);
+        }
     }
 
     fn write(
@@ -543,9 +560,83 @@ impl StoredAssetCache {
             variants,
             thumbhash: asset.placeholder.hash.clone(),
         };
-        let checksum = hex::encode(Sha256::digest(serde_json::to_vec(&value)?));
-        let bytes = serde_json::to_vec(&AssetReceipt {
-            key: key.into(),
+        self.asset_receipts().write(key, &value)
+    }
+}
+
+impl ReceiptSlots {
+    fn paths(&self, key: &str) -> Result<Vec<PathBuf>> {
+        let prefix = key.get(..4).context("invalid image cache key")?;
+        let capacity = self.capacity.max(1);
+        let bucket =
+            usize::from(u16::from_str_radix(prefix, 16)?) % capacity.div_ceil(ASSET_RECEIPT_WAYS);
+        let first = bucket * ASSET_RECEIPT_WAYS;
+        Ok((first..(first + ASSET_RECEIPT_WAYS).min(capacity))
+            .map(|slot| self.root.join(format!("{slot:04x}.json")))
+            .collect())
+    }
+
+    fn read<T: Serialize + DeserializeOwned>(&self, key: &str) -> Result<T> {
+        self.paths(key)?
+            .into_iter()
+            .find_map(|path| Self::read_slot::<T>(&path, key).ok())
+            .context("image validation receipt missing")
+    }
+
+    fn read_slot<T: Serialize + DeserializeOwned>(path: &Path, key: &str) -> Result<T> {
+        let receipt = Self::receipt::<T>(path)?;
+        ensure!(receipt.key == key, "image cache slot changed");
+        Ok(receipt.value)
+    }
+
+    fn receipt<T: Serialize + DeserializeOwned>(path: &Path) -> Result<Receipt<T>> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        ensure!(
+            metadata.is_file() && metadata.len() <= MAX_ASSET_RECEIPT_BYTES as u64,
+            "invalid image cache receipt"
+        );
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take((MAX_ASSET_RECEIPT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() <= MAX_ASSET_RECEIPT_BYTES,
+            "image cache receipt too large"
+        );
+        let receipt: Receipt<T> = serde_json::from_slice(&bytes)?;
+        ensure!(
+            receipt.checksum == hex::encode(Sha256::digest(serde_json::to_vec(&receipt.value)?)),
+            "image cache receipt checksum changed"
+        );
+        Ok(receipt)
+    }
+
+    /// The slot to overwrite for `key`: its own slot, an unreadable one, or the least recently
+    /// written one in its set. The same receipt type must be used to judge readability.
+    fn replacement<T: Serialize + DeserializeOwned>(&self, key: &str) -> Result<PathBuf> {
+        let mut oldest = None;
+        for path in self.paths(key)? {
+            match Self::receipt::<T>(&path) {
+                Ok(receipt) if receipt.key != key => {}
+                _ => return Ok(path),
+            }
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                return Ok(path);
+            };
+            let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+            if oldest.as_ref().is_none_or(|(_, time)| modified < *time) {
+                oldest = Some((path, modified));
+            }
+        }
+        oldest
+            .map(|(path, _)| path)
+            .context("image cache has no slots")
+    }
+
+    fn write<T: Serialize + DeserializeOwned>(&self, key: &str, value: &T) -> Result<()> {
+        let checksum = hex::encode(Sha256::digest(serde_json::to_vec(value)?));
+        let bytes = serde_json::to_vec(&Receipt {
+            key: key.to_string(),
             checksum,
             value,
         })?;
@@ -556,7 +647,7 @@ impl StoredAssetCache {
         std::fs::create_dir_all(&self.root)?;
         let mut temporary = tempfile::NamedTempFile::new_in(&self.root)?;
         temporary.write_all(&bytes)?;
-        temporary.persist(self.replacement(key)?)?;
+        temporary.persist(self.replacement::<T>(key)?)?;
         Ok(())
     }
 }
@@ -951,6 +1042,10 @@ impl Fetcher {
             limits.decode_concurrency > 0,
             "media decode concurrency must be positive"
         );
+        ensure!(
+            limits.article_timeout >= Duration::from_secs(fetch.timeout_secs),
+            "media article timeout must be at least the request timeout"
+        );
         let client = http::Client::new(&FetchConfig {
             timeout_secs: fetch.timeout_secs,
             max_body_bytes: limits.max_file_bytes,
@@ -1105,6 +1200,7 @@ impl Fetcher {
         let mut retained = 0_usize;
         let mut seen = BTreeSet::new();
         let mut resolved = BTreeMap::<Url, usize>::new();
+        let started = Instant::now();
         for candidate in candidates.iter().take(self.limits.max_candidates) {
             if !seen.insert(&candidate.url) {
                 continue;
@@ -1120,6 +1216,20 @@ impl Fetcher {
                 continue;
             }
             if assets.len() >= max_assets || downloaded >= max_bytes {
+                break;
+            }
+            // Checked between candidates only: an in-flight request keeps its own timeout and
+            // its outcome, so a slow but successful image is never marked as failed.
+            if started.elapsed() >= self.limits.article_timeout {
+                log::debug!(
+                    "{}: image budget of {:?} spent after {:?}: keeping {} images, skipping the \
+                     remaining candidates from {}",
+                    source.slug,
+                    self.limits.article_timeout,
+                    started.elapsed(),
+                    assets.len(),
+                    candidate.url
+                );
                 break;
             }
             if let Some(index) = resolved.get(&request_url) {
@@ -2326,12 +2436,13 @@ mod tests {
 
         let key = stored_asset_key(&metadata, &prepared.master_bytes, &inputs()).unwrap();
         let path = cache
-            .slots(&key)
+            .asset_receipts()
+            .paths(&key)
             .unwrap()
             .into_iter()
             .find(|path| path.is_file())
             .unwrap();
-        let mut receipt = StoredAssetCache::receipt(&path).unwrap();
+        let mut receipt = ReceiptSlots::receipt::<ValidatedAsset>(&path).unwrap();
         receipt.value.master_hash = "0".repeat(40);
         receipt.checksum = hex::encode(Sha256::digest(serde_json::to_vec(&receipt.value).unwrap()));
         std::fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
@@ -2463,7 +2574,7 @@ mod tests {
         reset_stored_decode_count();
         assert_eq!(restore(), cold);
         assert!(stored_decode_count() > 0);
-        let mut invalid: AssetReceipt =
+        let mut invalid: Receipt<ValidatedAsset> =
             serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
         invalid.value.variants = vec![CachedRendition {
             index: usize::MAX,
@@ -2482,7 +2593,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode([0; 5]),
             "A".repeat(100),
         ] {
-            let mut invalid = StoredAssetCache::receipt(&receipt).unwrap();
+            let mut invalid = ReceiptSlots::receipt::<ValidatedAsset>(&receipt).unwrap();
             invalid.value.thumbhash = bad_hash;
             invalid.checksum =
                 hex::encode(Sha256::digest(serde_json::to_vec(&invalid.value).unwrap()));
@@ -3305,5 +3416,150 @@ mod tests {
 
         assert_eq!((one.len(), two.len()), (1, 1));
         assert!(started.elapsed() >= Duration::from_millis(180));
+    }
+
+    #[test]
+    fn article_timeout_must_cover_one_request() {
+        let fetch = FetchConfig {
+            timeout_secs: 20,
+            ..FetchConfig::default()
+        };
+        let limits = |article_timeout| MediaLimits {
+            article_timeout,
+            ..MediaLimits::default()
+        };
+        assert!(Fetcher::new(&fetch, limits(Duration::from_secs(19))).is_err());
+        assert!(Fetcher::new(&fetch, limits(Duration::from_secs(20))).is_ok());
+        assert!(Fetcher::new(&fetch, MediaLimits::default()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn article_timeout_stops_after_a_hanging_candidate_and_keeps_earlier_images() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start_async().await;
+        let first = server
+            .mock_async(|when, then| {
+                when.path("/first.png");
+                then.status(200).body(png(&DynamicImage::new_rgba8(80, 48)));
+            })
+            .await;
+        let hanging = server
+            .mock_async(|when, then| {
+                when.path("/hanging.png");
+                then.status(200)
+                    .delay(Duration::from_secs(3))
+                    .body(png(&DynamicImage::new_rgba8(64, 32)));
+            })
+            .await;
+        let later = server
+            .mock_async(|when, then| {
+                when.path("/later.png");
+                then.status(200).body(png(&DynamicImage::new_rgba8(48, 24)));
+            })
+            .await;
+        let last = server
+            .mock_async(|when, then| {
+                when.path("/last.png");
+                then.status(200).body(png(&DynamicImage::new_rgba8(40, 20)));
+            })
+            .await;
+        let config = crate::config::Config::parse(&format!(
+            "[[sources]]\nurl = {:?}\n",
+            server.url("/feed")
+        ))
+        .unwrap();
+        let source = config.sources().unwrap().remove(0);
+        let fetcher = Fetcher::new(
+            &FetchConfig {
+                timeout_secs: 1,
+                retries: 0,
+                ..FetchConfig::default()
+            },
+            MediaLimits {
+                article_timeout: Duration::from_secs(1),
+                ..MediaLimits::default()
+            },
+        )
+        .unwrap();
+        let candidates = ["first.png", "hanging.png", "later.png", "last.png"]
+            .map(|path| candidate(&server.url(format!("/{path}"))));
+
+        let started = std::time::Instant::now();
+        let assets = fetcher.fetch(&candidates, &source).await;
+
+        assert_eq!(
+            assets
+                .iter()
+                .map(|asset| asset.source_url.as_str())
+                .collect::<Vec<_>>(),
+            [server.url("/first.png")]
+        );
+        assert_eq!((assets[0].width, assets[0].height), (80, 48));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        first.assert_calls(1);
+        hanging.assert_calls(1);
+        later.assert_calls(0);
+        last.assert_calls(0);
+    }
+
+    #[test]
+    fn placeholder_receipts_persist_across_instances_and_reject_invalid_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = StoredAssetCache::new(directory.path());
+        let bytes = png(&DynamicImage::ImageRgb8(ImageBuffer::from_fn(
+            96,
+            64,
+            |x, y| image::Rgb([(x * 2) as u8, (y * 3) as u8, ((x + y) % 251) as u8]),
+        )));
+        let hash = crate::model::sha1_hex(&bytes);
+        assert!(cache.cached_placeholder(&hash).is_none());
+
+        let placeholder = placeholder::from_bytes(&bytes).unwrap();
+        cache.remember_placeholder(&hash, &placeholder);
+        assert_eq!(
+            StoredAssetCache::new(directory.path()).cached_placeholder(&hash),
+            Some(placeholder.clone())
+        );
+        assert!(cache.cached_placeholder(&"0".repeat(40)).is_none());
+
+        // The sidecar leaves the asset receipt slots at the namespace root untouched.
+        let entries = std::fs::read_dir(&cache.root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, [cache.root.join(PLACEHOLDER_RECEIPTS_DIR)]);
+        let receipt = std::fs::read_dir(cache.root.join(PLACEHOLDER_RECEIPTS_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+
+        // Content hashes that are not hex digests are never stored or looked up.
+        for invalid in ["", "not a digest", &"f".repeat(129)] {
+            cache.remember_placeholder(invalid, &placeholder);
+            assert!(cache.cached_placeholder(invalid).is_none(), "{invalid:?}");
+        }
+        assert_eq!(
+            std::fs::read_dir(cache.root.join(PLACEHOLDER_RECEIPTS_DIR))
+                .unwrap()
+                .count(),
+            1
+        );
+
+        // A checksummed receipt whose ThumbHash no longer decodes is ignored, not trusted.
+        let mut tampered: Receipt<CachedPlaceholder> =
+            serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+        tampered.value.thumbhash = "AAAA".into();
+        tampered.checksum =
+            hex::encode(Sha256::digest(serde_json::to_vec(&tampered.value).unwrap()));
+        std::fs::write(&receipt, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        assert!(cache.cached_placeholder(&hash).is_none());
+        std::fs::write(&receipt, b"not a receipt").unwrap();
+        assert!(cache.cached_placeholder(&hash).is_none());
+
+        // Remembering again repairs the slot.
+        cache.remember_placeholder(&hash, &placeholder);
+        assert_eq!(cache.cached_placeholder(&hash), Some(placeholder));
     }
 }
