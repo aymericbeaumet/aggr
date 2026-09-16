@@ -38,18 +38,7 @@ pub fn instance_descriptor(
     build: &BuildCtx,
     updated: DateTime<Utc>,
 ) -> Result<String> {
-    let endpoint = |path: &str| {
-        site.base_url.as_ref().map_or_else(
-            || {
-                if path.is_empty() {
-                    "./".to_string()
-                } else {
-                    path.to_string()
-                }
-            },
-            |_| site_url(site, path),
-        )
-    };
+    let endpoint = |path: &str| site.endpoint(path);
     let config_url = site
         .config_url
         .clone()
@@ -126,18 +115,7 @@ pub fn instance_descriptor(
 }
 
 pub fn llms_txt(site: &SiteCtx) -> String {
-    let endpoint = |path: &str| {
-        site.base_url.as_ref().map_or_else(
-            || {
-                if path.is_empty() {
-                    "./".to_string()
-                } else {
-                    path.to_string()
-                }
-            },
-            |_| site_url(site, path),
-        )
-    };
+    let endpoint = |path: &str| site.endpoint(path);
     let config_url = site
         .config_url
         .clone()
@@ -366,6 +344,14 @@ pub fn atom_feed(site: &SiteCtx, build: &BuildCtx, items: &[ItemCtx]) -> String 
     atom_collection(site, build, &site.title, "", items)
 }
 
+/// Language of one entry when it differs from the feed-level `xml:lang` or `language`, compared
+/// case-insensitively as BCP 47 requires. `None` keeps a single-language feed byte-identical.
+fn entry_language<'a>(item: &'a ItemCtx, site: &SiteCtx) -> Option<&'a str> {
+    item.language
+        .as_deref()
+        .filter(|language| !language.eq_ignore_ascii_case(&site.language))
+}
+
 /// Serialize an Atom 1.0 collection.
 ///
 /// A path-derived URN is the stable entry identity and the generated aggr page is its alternate
@@ -415,7 +401,12 @@ pub fn atom_collection(
     for item in items {
         let local = site_url(site, &item.url);
         let item_updated = item.updated.unwrap_or(item.date);
-        out.push_str("  <entry>\n");
+        match entry_language(item, site) {
+            Some(language) => {
+                out.push_str(&format!("  <entry xml:lang=\"{}\">\n", escape(language)));
+            }
+            None => out.push_str("  <entry>\n"),
+        }
         element(&mut out, 4, "id", &item_uid(item));
         out.push_str(&format!(
             "    <title type=\"text\">{}</title>\n",
@@ -576,6 +567,9 @@ pub fn json_collection(
                 entry.insert("external_url".into(), Value::String(item.link.clone()));
             }
             entry.insert("title".into(), Value::String(item.title.clone()));
+            if let Some(language) = entry_language(item, site) {
+                entry.insert("language".into(), Value::String(language.to_string()));
+            }
             if let Some(preview) = &item.preview
                 && site.base_url.is_some()
             {
@@ -952,9 +946,9 @@ fn collection_path(path: &str) -> String {
     }
 }
 
+/// Feed and discovery links: absolute on a published site, `base_path`-relative on a portable one.
 fn site_url(site: &SiteCtx, path: &str) -> String {
-    let root = site.base_url.as_deref().unwrap_or(&site.base_path);
-    join_url(root, path)
+    site.absolute(path).unwrap_or_else(|| site.url(path))
 }
 
 fn feed_id(site: &SiteCtx, path: &str) -> String {
@@ -971,21 +965,6 @@ fn feed_id(site: &SiteCtx, path: &str) -> String {
 
 fn item_uid(item: &ItemCtx) -> String {
     format!("urn:aggr:item:{}", crate::model::sha1_hex(&item.path))
-}
-
-fn join_url(root: &str, path: &str) -> String {
-    let path = path.trim_start_matches('/');
-    if let Ok(mut root) = url::Url::parse(root) {
-        if !root.path().ends_with('/') {
-            let normalized = format!("{}/", root.path());
-            root.set_path(&normalized);
-        }
-        if let Ok(joined) = root.join(path) {
-            return joined.to_string();
-        }
-    }
-    let root = format!("{}/", root.trim_end_matches('/'));
-    format!("{root}{path}")
 }
 
 fn collection_updated(items: &[ItemCtx], fallback: DateTime<Utc>) -> DateTime<Utc> {
@@ -1235,6 +1214,7 @@ mod tests {
             feed_display: "upstream.example".into(),
             is_aggregated: false,
             is_youtube: false,
+            language: None,
             category: Some("Engineering".into()),
             date: at(8),
             age_band: "day",
@@ -1767,6 +1747,7 @@ mod tests {
             url: None,
             feed_url: None,
             site_url: None,
+            language: None,
             category: None,
             engine: engine.into(),
             count: 1,
@@ -2240,6 +2221,37 @@ mod tests {
         let mut portable = site();
         portable.base_url = None;
         assert!(llms_txt(&portable).contains("- [OPML subscriptions](sources.opml)\n"));
+    }
+
+    #[test]
+    fn entries_declare_a_language_only_when_it_differs_from_the_feed() {
+        let site = site();
+        let mut french = item();
+        french.language = Some("fr".into());
+        let mut same = podcast();
+        same.language = Some("en-gb".into());
+        let unknown = item();
+        assert_eq!(entry_language(&french, &site), Some("fr"));
+        assert_eq!(entry_language(&same, &site), None, "case-insensitive");
+        assert_eq!(entry_language(&unknown, &site), None);
+
+        let items = [french, same, unknown];
+        let atom = atom_collection(&site, &build(), "All", "", &items);
+        well_formed(&atom);
+        assert_eq!(atom.matches("<entry xml:lang=\"fr\">").count(), 1, "{atom}");
+        assert_eq!(atom.matches("<entry>").count(), 2, "{atom}");
+        // `xml:lang` is inherited by every child of the entry (RFC 4287 §2); feed-rs only reads it
+        // from `<content>`, so the entry attribute is checked on the serialized document above.
+        let parsed = feed_rs::parser::parse(atom.as_bytes()).unwrap();
+        assert_eq!(parsed.language.as_deref(), Some("en-GB"));
+        assert_eq!(parsed.entries.len(), 3);
+
+        let json: serde_json::Value =
+            serde_json::from_str(&json_collection(&site, "All", "", &items).unwrap()).unwrap();
+        assert_eq!(json["language"], "en-GB");
+        assert_eq!(json["items"][0]["language"], "fr");
+        assert!(json["items"][1].get("language").is_none());
+        assert!(json["items"][2].get("language").is_none());
     }
 
     #[test]

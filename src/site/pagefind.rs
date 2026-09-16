@@ -405,6 +405,7 @@ mod tests {
             feed_display: "secret.example".into(),
             is_aggregated: false,
             is_youtube: false,
+            language: None,
             category: Some("engineering".into()),
             date: Utc.with_ymd_and_hms(2026, 9, 3, 10, 0, 0).unwrap(),
             age_band: "h1",
@@ -501,8 +502,7 @@ mod tests {
     #[test]
     fn static_and_search_media_metadata_share_duration_and_unknown_state() {
         let renderer =
-            crate::site::render::Renderer::new(crate::site::render::Layers::default(), "/aggr/")
-                .unwrap();
+            crate::site::render::Renderer::new(crate::site::render::Layers::default()).unwrap();
         for (kind, action) in [
             (super::super::item_type::ItemType::Podcast, "listen"),
             (super::super::item_type::ItemType::Audio, "listen"),
@@ -574,8 +574,7 @@ mod tests {
         assert!(!document.content.contains("comments?a="));
 
         let renderer =
-            crate::site::render::Renderer::new(crate::site::render::Layers::default(), "/aggr/")
-                .unwrap();
+            crate::site::render::Renderer::new(crate::site::render::Layers::default()).unwrap();
         let rendered = renderer
             .render("_metadata.html", minijinja::context! { item => item })
             .unwrap();

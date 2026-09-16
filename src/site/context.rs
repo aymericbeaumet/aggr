@@ -45,6 +45,51 @@ pub struct SiteCtx {
     pub params: toml::Table,
 }
 
+impl SiteCtx {
+    /// Site-local reference under `base_path`: `/repo/atom.xml`. Portable across mirrors of
+    /// the same output tree, so redirects and fallbacks that must not encode an origin use it.
+    pub fn url(&self, path: &str) -> String {
+        join(&self.base_path, path)
+    }
+
+    /// Absolute URL under `base_url`, or `None` for a portable build that has no public root.
+    /// Canonical links, sitemaps and structured data only exist in the `Some` case.
+    pub fn absolute(&self, path: &str) -> Option<String> {
+        self.base_url.as_deref().map(|root| join(root, path))
+    }
+
+    /// Endpoint of a machine-readable descriptor: absolute when the site has a public root,
+    /// otherwise relative to the descriptor itself (`./` for the site root) so the document keeps
+    /// working when the output tree is served from anywhere.
+    pub fn endpoint(&self, path: &str) -> String {
+        self.absolute(path).unwrap_or_else(|| {
+            if path.is_empty() {
+                "./".to_string()
+            } else {
+                path.to_string()
+            }
+        })
+    }
+}
+
+/// Append `path` to `root`, whether `root` is an absolute URL or a site path. A URL root resolves
+/// through the URL parser so `.` segments and reserved characters come out normalized; a path root
+/// is joined textually. Exactly one `/` separates the two either way.
+fn join(root: &str, path: &str) -> String {
+    let path = path.trim_start_matches('/');
+    if let Ok(mut root) = url::Url::parse(root) {
+        if !root.path().ends_with('/') {
+            let normalized = format!("{}/", root.path());
+            root.set_path(&normalized);
+        }
+        if let Ok(joined) = root.join(path) {
+            return joined.to_string();
+        }
+    }
+    let root = format!("{}/", root.trim_end_matches('/'));
+    format!("{root}{path}")
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SiteIdentityCtx {
     #[serde(rename = "type")]
@@ -85,14 +130,14 @@ pub struct BuildCtx {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PageCtx {
-    /// `river`, `source`, `category`, `tag`, `browse`, `item`, `search`, `preferences`, `404`,
-    /// or `offline`.
+    /// `river`, `source`, `category`, `tag`, `browse`, `sources`, `categories`, `tags`, `item`,
+    /// `preferences`, `404`, `offline`, or `manifest`.
     pub kind: String,
     pub title: String,
     pub document_title: String,
     pub description: String,
-    /// Whether crawlers should index this page. Search, preferences, offline and error shells
-    /// remain useful to people and link discovery, but are not useful search results.
+    /// Whether crawlers should index this page. Preferences, offline and error shells remain
+    /// useful to people and link discovery, but are not useful search results.
     pub indexable: bool,
     /// Site path of this page, e.g. `sources/rust-blog/`.
     pub path: String,
@@ -152,6 +197,10 @@ pub struct ItemCtx {
     pub feed_display: String,
     pub is_aggregated: bool,
     pub is_youtube: bool,
+    /// Publisher-declared BCP 47 tag inherited from the source. Templates and feeds mark it up
+    /// only when it differs from `site.language`, so single-language instances are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     pub category: Option<String>,
     pub date: DateTime<Utc>,
     /// Stable build-time age bucket used for the 1h, 3h and 24h visual boundaries.
@@ -305,6 +354,8 @@ pub struct SourceCtx {
     /// Feed endpoint resolved by the fetch pipeline, when a public one is known.
     pub feed_url: Option<String>,
     pub site_url: Option<String>,
+    /// Canonical BCP 47 tag the publisher declares for the whole source, when known.
+    pub language: Option<String>,
     pub category: Option<String>,
     pub engine: String,
     pub count: usize,
@@ -570,6 +621,7 @@ impl ItemCtx {
         self.source_url = identity.url;
         self.feed_display = identity.feed_display;
         self.is_aggregated = identity.is_aggregated;
+        self.language = source.language.clone();
         self.metadata = super::display::Metadata::from(&*self);
     }
 
@@ -592,6 +644,7 @@ impl ItemCtx {
             is_aggregated: false,
             is_youtube: url::Url::parse(&item.front.link)
                 .is_ok_and(|url| crate::sources::youtube::is_video_url(&url)),
+            language: None,
             category: options.category.and_then(normalize_category),
             date: item.created_at(),
             age_band: age_band(options.now, item.created_at()),
@@ -912,6 +965,118 @@ mod tests {
     use chrono::TimeZone;
 
     #[test]
+    fn site_links_follow_the_three_url_contracts() {
+        let site = |base_url: Option<&str>| SiteCtx {
+            title: "Reader".into(),
+            description: String::new(),
+            identity: None,
+            language: "en".into(),
+            og_locale: "en".into(),
+            base_path: crate::site::base_path(base_url),
+            base_url: base_url.map(str::to_string),
+            repository: None,
+            data_branch: "aggr".into(),
+            network_url: "",
+            instance_type_url: "",
+            pwa: false,
+            preferences: serde_json::json!({}),
+            config_page_url: None,
+            config_url: None,
+            has_categories: false,
+            discussions: Vec::new(),
+            entry_shortcuts: Vec::new(),
+            params: toml::Table::new(),
+        };
+        // (base_url, path) -> (url, absolute, endpoint)
+        let cases = [
+            (None, "", "/", None, "./"),
+            (None, "atom.xml", "/atom.xml", None, "atom.xml"),
+            (None, "items/a/b/", "/items/a/b/", None, "items/a/b/"),
+            (None, "/leading", "/leading", None, "/leading"),
+            (
+                Some("https://x.test/"),
+                "",
+                "/",
+                Some("https://x.test/"),
+                "https://x.test/",
+            ),
+            (
+                Some("https://x.test/"),
+                "atom.xml",
+                "/atom.xml",
+                Some("https://x.test/atom.xml"),
+                "https://x.test/atom.xml",
+            ),
+            (
+                Some("https://x.test/"),
+                "items/a/b/",
+                "/items/a/b/",
+                Some("https://x.test/items/a/b/"),
+                "https://x.test/items/a/b/",
+            ),
+            (
+                Some("https://x.test/"),
+                "/leading",
+                "/leading",
+                Some("https://x.test/leading"),
+                "https://x.test/leading",
+            ),
+            (
+                Some("https://x.test/repo/"),
+                "",
+                "/repo/",
+                Some("https://x.test/repo/"),
+                "https://x.test/repo/",
+            ),
+            (
+                Some("https://x.test/repo/"),
+                "atom.xml",
+                "/repo/atom.xml",
+                Some("https://x.test/repo/atom.xml"),
+                "https://x.test/repo/atom.xml",
+            ),
+            (
+                Some("https://x.test/repo/"),
+                "items/a/b/",
+                "/repo/items/a/b/",
+                Some("https://x.test/repo/items/a/b/"),
+                "https://x.test/repo/items/a/b/",
+            ),
+            (
+                Some("https://x.test/repo/"),
+                "/leading",
+                "/repo/leading",
+                Some("https://x.test/repo/leading"),
+                "https://x.test/repo/leading",
+            ),
+        ];
+        for (base_url, path, url, absolute, endpoint) in cases {
+            let site = site(base_url);
+            assert_eq!(site.url(path), url, "url {base_url:?} + {path:?}");
+            assert_eq!(
+                site.absolute(path).as_deref(),
+                absolute,
+                "absolute {base_url:?} + {path:?}"
+            );
+            assert_eq!(
+                site.endpoint(path),
+                endpoint,
+                "endpoint {base_url:?} + {path:?}"
+            );
+        }
+        // A root without its trailing slash still joins with exactly one separator.
+        assert_eq!(
+            join("https://x.test/repo", "atom.xml"),
+            "https://x.test/repo/atom.xml"
+        );
+        assert_eq!(join("/repo", "atom.xml"), "/repo/atom.xml");
+        assert_eq!(
+            join("https://x.test/repo/", "?q="),
+            "https://x.test/repo/?q="
+        );
+    }
+
+    #[test]
     fn discussion_shortcuts_are_uppercase_distinct_and_reserve_original() {
         let network = |name: &str| crate::config::NetworkConfig {
             name: name.into(),
@@ -1139,12 +1304,14 @@ mod tests {
         assert_eq!(context.source_name, "Example");
         assert_eq!(context.source_title, "Example");
         assert_eq!(context.feed_display, "Example");
+        assert_eq!(context.language, None, "unknown until the source says");
         context.set_source(&SourceCtx {
             slug: "example".into(),
             name: "☀ Daily News 🗞️".into(),
             url: Some("https://news.example/feed.xml".into()),
             feed_url: None,
             site_url: Some("https://news.example/".into()),
+            language: Some("fr-FR".into()),
             category: None,
             engine: "web".into(),
             count: 1,
@@ -1154,6 +1321,7 @@ mod tests {
         });
         assert_eq!(context.source_name, "Daily News");
         assert_eq!(context.source_title, "example.com · via Daily News");
+        assert_eq!(context.language.as_deref(), Some("fr-FR"));
         let related = ArticleLinkCtx::from(&context);
         assert_eq!(related.title, context.title);
         assert_eq!(related.metadata.source_title, context.source_title);

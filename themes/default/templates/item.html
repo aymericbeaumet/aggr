@@ -16,7 +16,7 @@
 {% for author in item.authors %}<meta name="author" content="{{ author }}">{% endfor %}
 {% endblock %}
 {% block content %}
-<article class="item h-entry" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}"{% if item.previous_article %} data-previous-url="{{ item.previous_article.url | url_for }}"{% endif %}{% if item.next_article %} data-next-url="{{ item.next_article.url | url_for }}"{% endif %}>
+<article class="item h-entry"{% if item.language and item.language | lower != site.language | lower %} lang="{{ item.language }}"{% endif %} data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}"{% if item.previous_article %} data-previous-url="{{ item.previous_article.url | url_for }}"{% endif %}{% if item.next_article %} data-next-url="{{ item.next_article.url | url_for }}"{% endif %}>
   <a class="u-uid u-url" href="{{ item.url | url_for }}" hidden></a>
   {% for author in item.authors %}<data class="p-author h-card" value="{{ author }}" hidden></data>{% endfor %}
   <header class="itemhead">
@@ -88,11 +88,7 @@
   </figure>
   {% endif %}
   <div class="body e-content">{{ item.body_html | safe }}</div>
-  {% set discover = namespace(articles=[]) %}
-  {% for article in item.recommended_articles %}
-  {% if (not item.previous_article or article.url != item.previous_article.url) and (not item.next_article or article.url != item.next_article.url) %}{% set discover.articles = discover.articles + [article] %}{% endif %}
-  {% endfor %}
-  {% if item.next_article or discover.articles %}
+  {% if item.next_article or item.recommended_articles %}
   <footer class="article-footer">
     {% if item.next_article %}
     <section class="article-more-section" aria-labelledby="coming-next-title">
@@ -102,11 +98,11 @@
       </nav>
     </section>
     {% endif %}
-    {% if discover.articles %}
+    {% if item.recommended_articles %}
     <section class="article-more-section" aria-labelledby="discover-more-title">
       <h2 class="article-more-heading" id="discover-more-title">Discover more</h2>
       <nav class="article-more" aria-labelledby="discover-more-title">
-        {% for article in discover.articles %}
+        {% for article in item.recommended_articles %}
         {% with item = article, coming_next = false %}{% include "_related_item.html" %}{% endwith %}
         {% endfor %}
       </nav>

@@ -476,8 +476,8 @@ fn media_url(raw: &str, base: &Url) -> Option<Url> {
 fn render_image(html: &mut String, url: &Url, alt: &str) {
     html.push_str(&format!(
         "<figure><img src=\"{}\" alt=\"{}\"></figure>",
-        super::escape_html(url.as_str()),
-        super::escape_html(alt)
+        content::escape_html(url.as_str()),
+        content::escape_html(alt)
     ));
 }
 
@@ -485,7 +485,7 @@ fn render_text(element: ElementRef<'_>, base: &Url) -> String {
     let mut html = String::new();
     for node in element.children() {
         match node.value() {
-            Node::Text(text) => html.push_str(&super::escape_html(text).replace('\n', "<br>")),
+            Node::Text(text) => html.push_str(&content::escape_html(text).replace('\n', "<br>")),
             Node::Element(_) => {
                 let Some(child) = ElementRef::wrap(node) else {
                     continue;
@@ -518,7 +518,7 @@ fn render_text(element: ElementRef<'_>, base: &Url) -> String {
                             }
                             html.push_str(&format!(
                                 "<a href=\"{}\">{}</a>",
-                                super::escape_html(url.as_str()),
+                                content::escape_html(url.as_str()),
                                 render_text(child, base)
                             ));
                         } else {

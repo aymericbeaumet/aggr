@@ -21,7 +21,7 @@ use url::{Origin, Url};
 
 use crate::cache::ArticleCache;
 use crate::config::Source;
-use crate::content::{self, ExtractedArticle};
+use crate::content::{self, ExtractedArticle, escape_html};
 use crate::http;
 
 const ACTIVITY_ACCEPT: &str = "application/activity+json, application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"";
@@ -1060,15 +1060,6 @@ fn points_to_other_accounts(url: &Url) -> bool {
         }
         matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
     })
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 #[cfg(test)]

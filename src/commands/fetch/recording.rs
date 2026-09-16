@@ -14,6 +14,14 @@ use crate::site::item_type::ItemType;
 
 const RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Whether an item plays a recording: a podcast episode, an audio file, or a video page.
+pub(super) fn is_recording(link: &str, audio: Option<&str>) -> bool {
+    matches!(
+        ItemType::from_urls(link, audio),
+        ItemType::Podcast | ItemType::Audio | ItemType::Video
+    )
+}
+
 pub(super) async fn infer(
     raw: &RawItem,
     source: &Source,
@@ -46,10 +54,7 @@ async fn infer_at(
         .get("audio_url")
         .and_then(|value| value.as_str())
         .and_then(safe_url);
-    if !matches!(
-        ItemType::from_urls(&raw.link, audio.as_ref().map(Url::as_str)),
-        ItemType::Podcast | ItemType::Audio | ItemType::Video
-    ) {
+    if !is_recording(&raw.link, audio.as_ref().map(Url::as_str)) {
         return Ok(None);
     }
     let Some(url) = safe_url(&raw.link) else {
@@ -240,6 +245,25 @@ mod tests {
         format!(
             r#"<script type="application/ld+json">{{"@type":"AudioObject","contentUrl":"{audio}","duration":"PT27M51S"}}</script>"#
         )
+    }
+
+    #[test]
+    fn recordings_are_video_pages_audio_files_and_podcast_episodes() {
+        assert!(is_recording(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            None
+        ));
+        assert!(is_recording("https://cdn.example/episode.mp3", None));
+        assert!(is_recording(
+            "https://publisher.example/episode",
+            Some("https://cdn.example/episode.mp3")
+        ));
+        assert!(!is_recording("https://publisher.example/article", None));
+        assert!(!is_recording(
+            "https://publisher.example/article",
+            Some("not a url")
+        ));
+        assert!(!is_recording("https://publisher.example/paper.pdf", None));
     }
 
     #[tokio::test]

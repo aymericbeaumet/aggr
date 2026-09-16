@@ -116,6 +116,7 @@ fn changed_fetch(url: &Url, via: String, checked_out_tip: String, items: Vec<Raw
         meta: SourceMeta {
             title: (!title.is_empty()).then_some(title),
             site_url: Some(via),
+            language: None,
         },
         items,
     }

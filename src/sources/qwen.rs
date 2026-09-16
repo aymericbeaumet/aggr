@@ -60,6 +60,7 @@ pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetc
         meta: SourceMeta {
             title: Some("Qwen".into()),
             site_url: Some("https://qwen.ai/".into()),
+            language: None,
         },
         items,
     })

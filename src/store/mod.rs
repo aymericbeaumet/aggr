@@ -48,6 +48,10 @@ pub struct SourceState {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub site_url: Option<String>,
+    /// Canonical BCP 47 tag the publisher declares for the whole source; items inherit it at
+    /// build time, so archives that predate the field pick it up on their next build.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1803,6 +1807,30 @@ mod tests {
         let obsolete: SourceState =
             toml::from_str("url='https://obsolete.example/feed'\n").unwrap();
         assert!(obsolete.identity.is_empty());
+    }
+
+    #[test]
+    fn state_language_is_additive() {
+        let before: SourceState =
+            toml::from_str("identity='h'\ntitle='T'\nsite_url='https://t.example/'\n").unwrap();
+        assert_eq!(
+            before.language, None,
+            "state written before the field parses"
+        );
+        let state = SourceState {
+            identity: "h".into(),
+            language: Some("fr-FR".into()),
+            ..Default::default()
+        };
+        let text = toml::to_string(&state).unwrap();
+        assert!(text.contains("language = \"fr-FR\"\n"), "{text}");
+        assert_eq!(toml::from_str::<SourceState>(&text).unwrap(), state);
+        assert!(
+            !toml::to_string(&SourceState::default())
+                .unwrap()
+                .contains("language"),
+            "an unknown language is not serialised"
+        );
     }
 
     #[test]

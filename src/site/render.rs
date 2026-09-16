@@ -122,7 +122,7 @@ struct Asset {
 }
 
 impl Renderer {
-    pub fn new(layers: Layers, _base_path: &str) -> Result<Self> {
+    pub fn new(layers: Layers) -> Result<Self> {
         let mut env = Environment::new();
         env.set_trim_blocks(true);
         env.set_lstrip_blocks(true);
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn embedded_theme_unifies_article_navigation_and_recommendations() {
-        let renderer = Renderer::new(Layers::default(), "").unwrap();
+        let renderer = Renderer::new(Layers::default()).unwrap();
         renderer.env.get_template("item.html").unwrap();
 
         let css_file = DefaultTheme::get("static/style.css").unwrap();
@@ -735,7 +735,7 @@ mod tests {
     #[test]
     fn article_lead_and_posters_render_the_localised_alt_text() {
         // Only the media blocks are under test; the rest of the page tolerates a sparse context.
-        let mut renderer = Renderer::new(Layers::default(), "").unwrap();
+        let mut renderer = Renderer::new(Layers::default()).unwrap();
         renderer
             .env
             .set_undefined_behavior(minijinja::UndefinedBehavior::Chainable);
@@ -821,7 +821,7 @@ mod tests {
 
     #[test]
     fn embedded_theme_groups_collection_directories_under_browse() {
-        let renderer = Renderer::new(Layers::default(), "").unwrap();
+        let renderer = Renderer::new(Layers::default()).unwrap();
         renderer.env.get_template("browse.html").unwrap();
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
@@ -890,7 +890,7 @@ mod tests {
         let layers = Layers {
             dirs: vec![dir.path().to_path_buf()],
         };
-        let renderer = Renderer::new(layers.clone(), "/").unwrap();
+        let renderer = Renderer::new(layers.clone()).unwrap();
         let out = renderer
             .render(
                 "index.html",
@@ -920,7 +920,7 @@ mod tests {
 
     #[test]
     fn filters_work() {
-        let renderer = Renderer::new(Layers::default(), "/repo/").unwrap();
+        let renderer = Renderer::new(Layers::default()).unwrap();
         let out = renderer
             .render_str_for_test(
                 "{{ 'sources/' | url_for }} {{ 'https://www.a.b/c' | domain }} \
@@ -932,7 +932,7 @@ mod tests {
 
     #[test]
     fn html_escaping_keeps_slashes_and_blocks_scripts() {
-        let mut renderer = Renderer::new(Layers::default(), "/").unwrap();
+        let mut renderer = Renderer::new(Layers::default()).unwrap();
         renderer
             .env
             .add_template(

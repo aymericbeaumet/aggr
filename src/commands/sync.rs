@@ -18,6 +18,9 @@ pub const LAST_GOOD: &str = "refs/aggr/last-good";
 /// `--clean` is handled by the dispatcher before the project is loaded.
 pub async fn run(project: &Project, args: &SyncArgs) -> Result<Option<ResolutionSet>> {
     let worktree = project.worktree()?;
+    if !args.fetch.dry_run {
+        sweep_cache(project);
+    }
     let first = worktree.head_sha()?.is_none();
     let report = fetch::run(project, worktree, &args.fetch).await?;
 
@@ -101,6 +104,20 @@ fn finish(report: &Report) -> Result<()> {
         bail!("every source failed");
     }
     Ok(())
+}
+
+/// Drop cache files nothing reads any more before the run adds new ones. Housekeeping only: it is
+/// throttled to one pass a day inside the cache, a failure is reported, and the sync proceeds on
+/// the cache as it is.
+fn sweep_cache(project: &Project) {
+    let swept = project.build_cache_dir().and_then(|cache| {
+        crate::cache::sweep(&cache, Some(crate::media::image_failure_generation()))
+    });
+    match swept {
+        Ok(report) if report.throttled => {}
+        Ok(report) => log::debug!("cache sweep: {report}"),
+        Err(err) => log::warn!("cache sweep skipped: {err:#}"),
+    }
 }
 
 /// Subject says what changed, body lists sources, trailers make runs greppable.

@@ -348,10 +348,7 @@ fn safe_url(value: &str, base: Option<&Url>) -> Option<Url> {
 }
 
 fn clean_alt(value: Option<&str>) -> Option<String> {
-    value
-        .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|value| !value.is_empty())
-        .map(|value| value.chars().take(300).collect())
+    value.and_then(crate::model::image_alt)
 }
 
 /// Ordered, deduplicated and safe candidates, capped before any network requests begin.

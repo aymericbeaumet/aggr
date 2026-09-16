@@ -541,6 +541,7 @@ pub fn deezer_items(page: &str, url: &Url) -> Result<(SourceMeta, Vec<RawItem>)>
             .and_then(Value::as_str)
             .map(crate::content::html_to_text),
         site_url: Some(format!("https://www.deezer.com/show/{id}")),
+        language: None,
     };
     // The label publishes the show; the catalog may credit a different host, so it is only a hint.
     let publisher = show
@@ -676,6 +677,7 @@ pub fn spotify_items(page: &str, url: &Url) -> Result<(SourceMeta, Vec<RawItem>)
     let meta = SourceMeta {
         title: show.get("name").and_then(Value::as_str).map(str::to_string),
         site_url: Some(format!("https://open.spotify.com/show/{id}")),
+        language: None,
     };
     let episodes = show
         .pointer("/pages/items")

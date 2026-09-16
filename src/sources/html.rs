@@ -117,6 +117,11 @@ pub fn extract(page: &str, page_url: &Url) -> Result<(SourceMeta, Vec<RawItem>)>
     let meta = SourceMeta {
         title: select_text(&document, "title"),
         site_url: Some(page_url.origin().ascii_serialization() + "/"),
+        language: document
+            .root_element()
+            .value()
+            .attr("lang")
+            .and_then(super::normalize_language),
     };
     let mut items = json_ld_items(&document, page_url);
     items.extend(card_items(&document, page_url)?);
@@ -523,6 +528,24 @@ mod tests {
         );
         assert_eq!(items[1].title, "Second article");
         assert_eq!(items[2].title, "Third article");
+    }
+
+    #[test]
+    fn source_language_comes_from_the_html_lang_attribute() {
+        let base = Url::parse("https://example.com/news/").unwrap();
+        let (meta, _) = extract(PAGE, &base).unwrap();
+        assert_eq!(meta.language, None, "no declaration stays unknown");
+        for (declared, expected) in [
+            ("FR-fr", Some("fr-FR")),
+            ("en", Some("en")),
+            ("", None),
+            ("en_US", None),
+        ] {
+            let page = PAGE.replacen("<html>", &format!("<html lang=\"{declared}\">"), 1);
+            let (meta, items) = extract(&page, &base).unwrap();
+            assert_eq!(meta.language.as_deref(), expected, "{declared:?}");
+            assert_eq!(items.len(), 3);
+        }
     }
 
     #[test]

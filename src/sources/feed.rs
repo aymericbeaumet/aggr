@@ -588,6 +588,9 @@ pub fn convert(feed: &Feed, feed_url: &Url) -> (SourceMeta, Vec<RawItem>) {
         site_url: pick_link(&feed.links)
             .map(|link| link.href.clone())
             .filter(|href| href != feed_url.as_str()),
+        // RSS `<language>`, the Atom `xml:lang` of `<feed>`, or JSON Feed `language`; entries
+        // may carry their own `xml:lang`, which a per-item value could use later.
+        language: feed.language.as_deref().and_then(super::normalize_language),
     };
     let items = feed
         .entries
@@ -959,6 +962,38 @@ Second paragraph.</media:description></media:group>
             items[0].summary.as_deref(),
             Some("A < B & C\n\nSecond paragraph.")
         );
+    }
+
+    #[test]
+    fn source_language_comes_from_the_feed_and_is_canonicalised() {
+        let rss = |language: &str| {
+            format!(
+                r#"<rss version="2.0"><channel><title>T</title><link>https://example.com/</link>
+                <language>{language}</language>
+                <item><title>A</title><link>https://example.com/a</link></item></channel></rss>"#
+            )
+        };
+        let (meta, _) = parse(&rss("fr"), "https://example.com/feed.xml");
+        assert_eq!(meta.language.as_deref(), Some("fr"));
+        // feed-rs lowercases RSS languages; the region casing is restored.
+        let (meta, _) = parse(&rss("EN-gb"), "https://example.com/feed.xml");
+        assert_eq!(meta.language.as_deref(), Some("en-GB"));
+        let (meta, _) = parse(&rss("English (US)"), "https://example.com/feed.xml");
+        assert_eq!(meta.language, None);
+
+        let atom = r#"<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="zh-hant-tw">
+            <title>T</title><entry xml:lang="en"><id>a</id><title>A</title>
+            <link href="https://example.com/a"/></entry></feed>"#;
+        let (meta, _) = parse(atom, "https://example.com/feed.xml");
+        assert_eq!(meta.language.as_deref(), Some("zh-Hant-TW"));
+
+        let json = r#"{"version":"https://jsonfeed.org/version/1.1","title":"T","language":"de-DE",
+            "items":[{"id":"a","url":"https://example.com/a","title":"A"}]}"#;
+        let (meta, _) = parse(json, "https://example.com/feed.json");
+        assert_eq!(meta.language.as_deref(), Some("de-DE"));
+
+        let (meta, _) = parse(RSS, "https://example.com/feed.xml");
+        assert_eq!(meta.language, None, "no declaration stays unknown");
     }
 
     #[test]
