@@ -1,10 +1,15 @@
 //! Shared browser harness: the generated fixture site and its HTTP server, WebDriver session
 //! helpers, self-diagnosing waits and session teardown.
 
+// The shared integration-test helpers (git and environment isolation). Declared here rather than
+// in the target root so that both the `browser` and `browser_performance` targets, which include
+// this file, get the same policy.
+#[path = "../support/mod.rs"]
+mod support;
+
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -12,11 +17,13 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use assert_cmd::prelude::*;
 use fantoccini::{Client, ClientBuilder};
 use futures_util::FutureExt as _;
 use serde_json::{Value, json};
 use sha1::{Digest as _, Sha1};
+
+use support::aggr_command;
+pub(crate) use support::git;
 
 pub(crate) struct Fixture {
     pub(crate) directory: tempfile::TempDir,
@@ -41,25 +48,6 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Relaxed);
     }
-}
-
-pub(crate) fn git(root: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(root)
-        .args([
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .output()?;
-    if !output.status.success() {
-        bail!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-    }
-    Ok(())
 }
 
 impl Fixture {
@@ -120,13 +108,7 @@ impl Fixture {
 
     pub(crate) fn build(&self) -> Result<()> {
         let root = self.directory.path();
-        let output = Command::cargo_bin("aggr")?
-            .current_dir(root)
-            .env_remove("AGGR_CONFIG")
-            .env_remove("AGGR_BASE_URL")
-            .env_remove("GITHUB_REPOSITORY")
-            .env_remove("GITHUB_TOKEN")
-            .env_remove("GH_TOKEN")
+        let output = aggr_command(root)
             .args([
                 "build",
                 "--data-ref",
@@ -249,13 +231,7 @@ impl Fixture {
         git(root, &["commit", "-qm", "fixture articles"])?;
         git(root, &["switch", "main"])?;
         let out = root.join("_site");
-        let output = Command::cargo_bin("aggr")?
-            .current_dir(root)
-            .env_remove("AGGR_CONFIG")
-            .env_remove("AGGR_BASE_URL")
-            .env_remove("GITHUB_REPOSITORY")
-            .env_remove("GITHUB_TOKEN")
-            .env_remove("GH_TOKEN")
+        let output = aggr_command(root)
             .args([
                 "build",
                 "--data-ref",

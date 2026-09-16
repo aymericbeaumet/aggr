@@ -1,6 +1,8 @@
 //! End-to-end: a bare origin, a clone holding `aggr.toml`, feeds served by httpmock, and the
 //! real binary. Nothing here touches the network or the user's git configuration.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
@@ -15,6 +17,8 @@ use httpmock::prelude::*;
 use predicates::prelude::*;
 use sha1::Digest as _;
 use tempfile::TempDir;
+
+use support::{aggr_command, bare_origin_with_clone, git};
 
 const FEED: &str = r#"<?xml version="1.0"?>
 <rss version="2.0"><channel><title>Demo blog</title><link>https://demo.example/</link>
@@ -42,21 +46,7 @@ struct TestRepo {
 impl TestRepo {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let origin = tmp.path().join("origin.git");
-        git(
-            tmp.path(),
-            &["init", "-q", "--bare", "-b", "main", "origin.git"],
-        );
-        let clone = tmp.path().join("clone");
-        git(
-            tmp.path(),
-            &[
-                "clone",
-                "-q",
-                origin.to_str().unwrap(),
-                clone.to_str().unwrap(),
-            ],
-        );
+        let (origin, clone) = bare_origin_with_clone(tmp.path()).unwrap();
         Self {
             _tmp: tmp,
             origin,
@@ -72,29 +62,13 @@ impl TestRepo {
 
     fn write_raw_config(&self, config: &str) {
         std::fs::write(self.clone.join("aggr.toml"), config).unwrap();
-        git(&self.clone, &["add", "-A"]);
-        git(&self.clone, &["commit", "-q", "-m", "config"]);
-        git(&self.clone, &["push", "-q", "-u", "origin", "main"]);
+        git(&self.clone, &["add", "-A"]).unwrap();
+        git(&self.clone, &["commit", "-q", "-m", "config"]).unwrap();
+        git(&self.clone, &["push", "-q", "-u", "origin", "main"]).unwrap();
     }
 
     fn aggr(&self) -> Command {
-        let mut cmd = Command::cargo_bin("aggr").unwrap();
-        cmd.current_dir(&self.clone);
-        for (key, value) in git_env() {
-            cmd.env(key, value);
-        }
-        for key in [
-            "GITHUB_ACTIONS",
-            "GITHUB_REPOSITORY",
-            "GITHUB_TOKEN",
-            "GH_TOKEN",
-            "AGGR_BASE_URL",
-            "AGGR_CONFIG",
-            "AGGR_CACHE_DIR",
-        ] {
-            cmd.env_remove(key);
-        }
-        cmd
+        aggr_command(&self.clone)
     }
 
     fn origin_rev(&self, rev: &str) -> Option<String> {
@@ -211,31 +185,6 @@ fn wait_for_cached_site(root: &Path, timeout: Duration) {
         thread::sleep(Duration::from_millis(25));
     }
     panic!("aggr dev did not populate its persistent cache");
-}
-
-fn git_env() -> Vec<(&'static str, String)> {
-    vec![
-        ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
-        ("GIT_CONFIG_NOSYSTEM", "1".into()),
-        ("GIT_AUTHOR_NAME", "t".into()),
-        ("GIT_AUTHOR_EMAIL", "t@t".into()),
-        ("GIT_COMMITTER_NAME", "t".into()),
-        ("GIT_COMMITTER_EMAIL", "t@t".into()),
-    ]
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let mut cmd = Command::new("git");
-    cmd.args(args).current_dir(dir);
-    for (key, value) in git_env() {
-        cmd.env(key, value);
-    }
-    let out = cmd.output().unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 fn preview_image() -> Vec<u8> {
@@ -961,7 +910,8 @@ fn build_publishes_data_despite_an_unrelated_recovery_pointer() {
     git(
         &repo.origin,
         &["update-ref", "refs/aggr/last-good", "refs/heads/main"],
-    );
+    )
+    .unwrap();
     let old = repo.origin_rev("refs/aggr/last-good");
     repo.aggr()
         .args(["build", "--out", "_site"])
@@ -1173,8 +1123,8 @@ fn sync_bootstraps_appends_and_leaves_no_trace_when_nothing_changed() {
         .join("items/demo/2026/09/2026-09-02-third.md");
     std::fs::remove_file(&doomed).unwrap();
     std::fs::remove_file(doomed.with_extension("html")).unwrap();
-    git(&repo.data_dir(), &["commit", "-qam", "delete third"]);
-    git(&repo.data_dir(), &["push", "-q", "origin", "aggr"]);
+    git(&repo.data_dir(), &["commit", "-qam", "delete third"]).unwrap();
+    git(&repo.data_dir(), &["push", "-q", "origin", "aggr"]).unwrap();
     let deleted_tip = repo.origin_rev("refs/heads/aggr").unwrap();
     // A different body (so the hash guard does not short-circuit) listing the same entries.
     third.delete();
@@ -1338,8 +1288,8 @@ fn feed_only_captures_are_upgraded_in_place_and_keep_hand_edits() {
         .split_once("\n---\n")
         .unwrap();
     std::fs::write(&file, format!("---\n{front}\nhidden: true\n---\n{body}")).unwrap();
-    git(&repo.data_dir(), &["commit", "-qam", "hide deep dive"]);
-    git(&repo.data_dir(), &["push", "-q", "origin", "aggr"]);
+    git(&repo.data_dir(), &["commit", "-qam", "hide deep dive"]).unwrap();
+    git(&repo.data_dir(), &["push", "-q", "origin", "aggr"]).unwrap();
     let hidden_tip = repo.origin_rev("refs/heads/aggr").unwrap();
 
     // The original page comes back: the body is upgraded in place and the hand edit survives.
@@ -1428,9 +1378,9 @@ fn source_errors_are_recorded_on_transition_only_and_all_failed_is_fatal() {
         server.url("/broken.xml")
     );
     std::fs::write(repo.clone.join("aggr.toml"), config).unwrap();
-    git(&repo.clone, &["add", "-A"]);
-    git(&repo.clone, &["commit", "-qm", "config"]);
-    git(&repo.clone, &["push", "-q", "-u", "origin", "main"]);
+    git(&repo.clone, &["add", "-A"]).unwrap();
+    git(&repo.clone, &["commit", "-qm", "config"]).unwrap();
+    git(&repo.clone, &["push", "-q", "-u", "origin", "main"]).unwrap();
 
     repo.aggr()
         .arg("sync")
