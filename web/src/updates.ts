@@ -18,6 +18,25 @@ export function connectionPresentation(state: UpdateSnapshot) {
   const refresh = state.phase !== 'current';
   return { visible: refresh, message: '', retry: false, refresh, disabled: state.phase === 'reloading' };
 }
+export type ConnectionView = ReturnType<typeof connectionPresentation>;
+
+// The text the connection status presents. The component itself is no live region because toggling
+// `hidden` on one is not reliably spoken; changes go through the shared announcer instead.
+export function connectionAnnouncement(view: ConnectionView): string {
+  if (!view.visible) return '';
+  return view.refresh ? 'Refresh to update' : view.message;
+}
+
+// The first view only seeds the announcer, as a live region would not speak a page's initial status;
+// each later change to a non-empty text is announced once, an unchanged status never repeated.
+export function createConnectionAnnouncer(announce: (text: string) => void) {
+  let last: string | undefined;
+  return (view: ConnectionView) => {
+    const text = connectionAnnouncement(view);
+    if (last !== undefined && text && text !== last) announce(text);
+    last = text;
+  };
+}
 
 export function createUpdates(initial: AppContext, online: boolean) {
   let state: UpdateSnapshot = { phase: 'current', appVersion: initial.appVersion,

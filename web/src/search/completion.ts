@@ -79,6 +79,12 @@ export function selectedCompletion(items: Completion[], selected: string): Compl
   return items.find(item => item.id === selected) || items[0];
 }
 
+// A highlight the user moved to survives the store emissions that follow (debounced searches, status refreshes);
+// otherwise the first item leads, as it does when the list opens.
+export function nextSelectedCompletion(items: Completion[], current: string, moved: boolean): Completion | undefined {
+  return moved ? selectedCompletion(items, current) : items[0];
+}
+
 export type CompletionMenu = 'idle' | 'open' | 'dismissed';
 export function completionMenu(state: CompletionMenu, event: 'focus' | 'input' | 'dismiss' | 'blur'): CompletionMenu {
   if (event === 'input') return 'open';

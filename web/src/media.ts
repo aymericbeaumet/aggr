@@ -1,5 +1,6 @@
 import { createAudio } from "./audio";
 import { enhanceInteractive } from "./interactive";
+import { originalLabel } from "./labels";
 import { createNativeTiming, createProviderTiming, finiteDuration, formatPlaybackEnd, playbackTiming, updateConsumption, type PlaybackTimingState } from "./media-timing";
 
 export interface MediaOptions {
@@ -106,6 +107,8 @@ export function createMedia(options: MediaOptions) {
       && !["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)) return;
     player.dataset.videoBound = "true";
     const inline = player.classList.contains("video-player-inline");
+    // Read before externalLinks() can append ", opens in a new tab" to the preview label.
+    const frameTitle = originalLabel(preview);
 
     function mountPlayer(autoplay: boolean) {
       if (!player || player.dataset.videoMounted === "true") return;
@@ -119,7 +122,7 @@ export function createMedia(options: MediaOptions) {
       }
       const frame = document.createElement("iframe");
       frame.src = url.href;
-      frame.title = preview.getAttribute("aria-label") || "";
+      frame.title = frameTitle;
       frame.loading = autoplay ? "eager" : "lazy";
       frame.allow = "autoplay; encrypted-media; fullscreen; picture-in-picture";
       frame.allowFullscreen = true;

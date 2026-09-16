@@ -2,7 +2,8 @@
   import { Command } from 'bits-ui';
   import type { Readable } from 'svelte/store';
   import type { ViewState } from './state';
-  import { selectedCompletion, type Completion } from './completion';
+  import { untrack } from 'svelte';
+  import { nextSelectedCompletion, selectedCompletion, type Completion } from './completion';
 
   let { model, change, caret, choose, submit, move, open, clear, focusInput, revealInput, dismiss, blur }: {
     model: Readable<ViewState>;
@@ -15,10 +16,20 @@
   let composing = $state(false);
   let value = $state('');
   let selected = $state('');
+  // Set once the user drives the highlight (arrows or pointer) so store emissions do not snap it back to the first item.
+  let moved = $state(false);
+  let seenQuery = '';
   let hovering = $state(false), helpDismissed = $state(false);
   const helpVisible = $derived(hovering && !helpDismissed);
   $effect(() => { value = $model.query; });
-  $effect(() => { selected = selectedCompletion($model.suggestions, selected)?.id || ''; });
+  $effect(() => {
+    const { open, query, suggestions } = $model;
+    untrack(() => {
+      if (query !== seenQuery || !open || !suggestions.length) moved = false;
+      seenQuery = query;
+      selected = nextSelectedCompletion(suggestions, selected, moved)?.id || '';
+    });
+  });
 
   function inputChanged(event: Event) {
     const target = event.currentTarget as HTMLInputElement;
@@ -47,6 +58,7 @@
     // Without suggestions the arrows walk the results and Enter opens the selected one.
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       if (move(event.key === 'ArrowDown' ? 1 : -1)) { event.preventDefault(); event.stopPropagation(); }
+      else if ($model.open && $model.suggestions.length) moved = true;
       return;
     }
     if (event.key === 'Enter' && (!$model.open || !$model.suggestions.length)) {
@@ -67,16 +79,16 @@
         onfocus={focusInput} onblur={() => { window.setTimeout(() => { if (!input?.closest('.search-command')?.contains(document.activeElement)) blur(); }, 100); }}
         oncompositionstart={() => { composing = true; }}
         oncompositionend={(event) => { composing = false; inputChanged(event); }}>
-        {#snippet child({ props })}<input {...props} bind:value aria-expanded={$model.open && $model.suggestions.length > 0} />{/snippet}
+        {#snippet child({ props })}<input {...props} bind:value aria-expanded={$model.open && $model.suggestions.length > 0} aria-controls={$model.open && $model.suggestions.length > 0 ? 'search-completions' : undefined} />{/snippet}
       </Command.Input>
       {#if $model.query}<button type="button" class="search-clear" aria-label="Clear search" onclick={() => { clear(); input?.focus({ preventScroll: true }); }}>×</button>{/if}
     </div>
   </form>
   {#if $model.open && $model.suggestions.length}
-    <Command.List class="search-completions" aria-label="Search suggestions">
+    <Command.List id="search-completions" class="search-completions" aria-label="Search suggestions">
       <Command.Viewport>
         {#each $model.suggestions as suggestion (suggestion.id)}
-          <Command.Item value={suggestion.id} onSelect={() => choose(suggestion)} class="search-completion" data-completion-id={suggestion.id}>
+          <Command.Item value={suggestion.id} onSelect={() => choose(suggestion)} onpointermove={() => { moved = true; }} class="search-completion" data-completion-id={suggestion.id}>
             <span class="completion-label">{suggestion.label}</span>
             {#if suggestion.detail || suggestion.count !== undefined}<small>{suggestion.detail}{suggestion.count !== undefined ? ` · ${suggestion.count}` : ''}</small>{/if}
           </Command.Item>

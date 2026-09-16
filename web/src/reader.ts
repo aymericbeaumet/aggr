@@ -16,6 +16,8 @@ import { mountShortcutHelp } from "./shortcuts";
 import { createNavigation, enqueuePrefetch, mountMobileNavigation } from "./navigation";
 import { createSelection, selectedLink } from "./selection";
 import { mountSelectionSharing } from "./share-selection";
+import { announce } from "./announce";
+import { originalLabel } from "./labels";
 (function () {
   "use strict";
   // Cache the server-rendered page before enhancement adds binding flags or transient UI.
@@ -168,7 +170,7 @@ import { mountSelectionSharing } from "./share-selection";
           if (installed) link.removeAttribute("target");
           else link.target = "_blank";
           link.relList.add("noopener", "noreferrer");
-          let label = link.dataset.aggrExternalLabel || link.getAttribute("aria-label") || link.textContent.trim();
+          let label = originalLabel(link) || link.textContent.trim();
           const behavior = installed ? "external site" : "opens in a new tab";
           if (label) {
             link.dataset.aggrExternalLabel = label;
@@ -294,8 +296,7 @@ import { mountSelectionSharing } from "./share-selection";
       highlighted.push(entry);
     });
     if (highlighted.length) {
-      let announcer = $("#aggr-announcer");
-      if (announcer) announcer.textContent = highlighted.length + (highlighted.length === 1 ? " new item" : " new items");
+      announce(highlighted.length + (highlighted.length === 1 ? " new item" : " new items"));
       // Flush the starting color before removing it, so the five-second fade starts now.
       const first = $(".row.is-new");
       if (first) first.getBoundingClientRect();
@@ -333,10 +334,7 @@ import { mountSelectionSharing } from "./share-selection";
   }
 
   function announceNavigation() {
-    let announcer = $("#aggr-announcer");
-    if (!announcer) return;
-    announcer.textContent = "";
-    requestAnimationFrame(function () { announcer.textContent = "Navigated to " + document.title; });
+    announce("Navigated to " + document.title);
   }
 
   function singleKeyShortcuts() {

@@ -34,7 +34,10 @@ export function mountSearch(options: SearchOptions): SearchHandle {
     isOffline: !navigator.onLine, hasOfflineStatus: false, savedURLs: new Set(), cachedPreviews: new Set()
   };
   const model = writable(state);
-  const update = (changes: Partial<ViewState>) => { state = { ...state, ...changes }; model.set(state); };
+  const update = (changes: Partial<ViewState>) => {
+    if (destroyed) return;
+    state = { ...state, ...changes }; model.set(state);
+  };
   const engine = options.session;
   engine.setOnline(navigator.onLine);
   let manifest: SearchCatalog | undefined;

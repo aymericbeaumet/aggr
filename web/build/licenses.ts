@@ -2,6 +2,13 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { dirname, join, parse } from 'node:path';
 import type { Plugin } from 'vite';
 
+const licenseName = /^licen[cs]e(?:[.\-].*)?$/i;
+// Code-unit order keeps client.LICENSE identical whatever order a filesystem lists a package's files in.
+export function pickLicense(names: readonly string[]): string | undefined {
+  const candidates = names.filter(name => licenseName.test(name)).sort();
+  return candidates.find(name => name === 'LICENSE') ?? candidates[0];
+}
+
 export function licenses(): Plugin {
   return {
     name: 'dependency-licenses',
@@ -18,7 +25,7 @@ export function licenses(): Plugin {
               const pkg = JSON.parse(readFileSync(file, 'utf8'));
               const key = `${pkg.name}@${pkg.version}`;
               if (!packages.has(key)) {
-                const license = readdirSync(directory).find(name => /^licen[cs]e(?:\..*)?$/i.test(name));
+                const license = pickLicense(readdirSync(directory));
                 if (!license) throw new Error(`Missing license for bundled dependency ${key}`);
                 packages.set(key, `${key}\n${readFileSync(join(directory, license), 'utf8').trim()}`);
               }

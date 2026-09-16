@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { complete, acceptCompletion, completionMenu, isCompletingFacet, selectedCompletion, stableCompletions } from './completion';
+import { complete, acceptCompletion, completionMenu, isCompletingFacet, nextSelectedCompletion, selectedCompletion, stableCompletions } from './completion';
 import type { SearchCatalog } from './types';
 
 const facets = { source: [{ value: 'rust-blog', label: 'The Rust Blog', count: 23 }], category: [{ value: 'web-development', label: 'Web Development', count: 9 }], tag: [], 'published-day': [] } satisfies SearchCatalog['facets'];
@@ -142,6 +142,16 @@ describe('completion menu interaction', () => {
     expect(selectedCompletion([...items].reverse(),'source:two')?.insert).toBe('source:two');
     expect(selectedCompletion([items[0]],'source:two')?.insert).toBe('source:one');
     expect(selectedCompletion([],'source:two')).toBeUndefined();
+  });
+  it('keeps an arrowed-to suggestion across re-emissions and otherwise leads with the first item', () => {
+    const items = complete('sort:', 5, facets);
+    expect(items.map(item => item.id)).toEqual(['sort:relevance', 'sort:newest', 'sort:oldest']);
+    expect(nextSelectedCompletion(items, 'sort:oldest', true)?.id).toBe('sort:oldest');
+    expect(nextSelectedCompletion(complete('sort:', 5, facets), 'sort:oldest', true)?.id).toBe('sort:oldest');
+    expect(nextSelectedCompletion(items, 'sort:oldest', false)?.id).toBe('sort:relevance');
+    expect(nextSelectedCompletion(items, '', false)?.id).toBe('sort:relevance');
+    expect(nextSelectedCompletion(items.slice(0, 2), 'sort:oldest', true)?.id).toBe('sort:relevance');
+    expect(nextSelectedCompletion([], 'sort:oldest', true)).toBeUndefined();
   });
   it('keeps accepted and dismissed suggestions closed through focus and asynchronous refreshes', () => {
     let state = completionMenu('idle', 'focus');

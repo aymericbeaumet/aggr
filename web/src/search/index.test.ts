@@ -26,6 +26,7 @@ interface Controls {
   choose(completion: Completion): void;
   focusInput(): void;
   revealInput(): void;
+  dismiss(): void; blur(): void; caret(cursor: number): void;
 }
 let handle: SearchHandle | undefined;
 function fakeSession(): SearchSession { return {load:mocks.load,search:mocks.search,facetCounts:mocks.facetCounts,prepare:mocks.prepare,setOnline:vi.fn(),markStale:vi.fn(),dispose:vi.fn()}; }
@@ -352,4 +353,15 @@ it('preserves scroll during focus restoration and ignores focus requests after d
   handle!.focus(); controls.revealInput();
   expect(window.scrollTo).not.toHaveBeenCalled();
   expect(input.focus).toHaveBeenCalledOnce();
+});
+
+it('stops publishing model updates once disposed', async () => {
+  const { controls } = setup();
+  const emissions = vi.fn();
+  const unsubscribe = controls.model.subscribe(emissions);
+  await handle!.destroy();
+  emissions.mockClear();
+  controls.dismiss(); controls.blur(); controls.caret(3);
+  expect(emissions).not.toHaveBeenCalled();
+  unsubscribe();
 });
