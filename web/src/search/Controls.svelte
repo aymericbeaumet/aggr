@@ -3,7 +3,7 @@
   import type { Readable } from 'svelte/store';
   import type { ViewState } from './state';
   import { untrack } from 'svelte';
-  import { nextSelectedCompletion, selectedCompletion, type Completion } from './completion';
+  import { completionHighlight, selectedCompletion, type Completion } from './completion';
 
   let { model, change, caret, choose, submit, move, open, clear, focusInput, revealInput, dismiss, blur }: {
     model: Readable<ViewState>;
@@ -21,13 +21,20 @@
   let seenQuery = '';
   let hovering = $state(false), helpDismissed = $state(false);
   const helpVisible = $derived(hovering && !helpDismissed);
+  // Only a new suggestions array may re-render the menu, and each item's value must stay a stable derived id:
+  // bits-ui re-registers an item whenever its `value` prop is dirtied and then re-selects the first entry after
+  // the tick, which is what snapped an arrowed-to highlight back on every unrelated store emission.
+  const suggestions = $derived($model.suggestions);
   $effect(() => { value = $model.query; });
   $effect(() => {
     const { open, query, suggestions } = $model;
     untrack(() => {
       if (query !== seenQuery || !open || !suggestions.length) moved = false;
       seenQuery = query;
-      selected = nextSelectedCompletion(suggestions, selected, moved)?.id || '';
+      // `selected` is the live Command.Root binding (bits-ui writes it synchronously on every arrow or pointer move).
+      // A moved highlight that is still listed is never echoed back, so an emission cannot restore a previous item.
+      const highlight = completionHighlight(suggestions, selected, moved);
+      if (highlight !== undefined && highlight !== selected) selected = highlight;
     });
   });
 
@@ -87,8 +94,9 @@
   {#if $model.open && $model.suggestions.length}
     <Command.List id="search-completions" class="search-completions" aria-label="Search suggestions">
       <Command.Viewport>
-        {#each $model.suggestions as suggestion (suggestion.id)}
-          <Command.Item value={suggestion.id} onSelect={() => choose(suggestion)} onpointermove={() => { moved = true; }} class="search-completion" data-completion-id={suggestion.id}>
+        {#each suggestions as suggestion (suggestion.id)}
+          {@const id = suggestion.id}
+          <Command.Item value={id} onSelect={() => choose(suggestion)} onpointermove={() => { moved = true; }} class="search-completion" data-completion-id={id}>
             <span class="completion-label">{suggestion.label}</span>
             {#if suggestion.detail || suggestion.count !== undefined}<small>{suggestion.detail}{suggestion.count !== undefined ? ` · ${suggestion.count}` : ''}</small>{/if}
           </Command.Item>

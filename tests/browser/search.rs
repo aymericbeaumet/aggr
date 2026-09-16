@@ -531,9 +531,6 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         "document.querySelectorAll('.search-completion').length===3",
     )
     .await?;
-    // Let the bare operator's debounced search emit before driving the highlight: this contract
-    // is about arrows advancing a settled list, not about racing the 180 ms search emission.
-    tokio::time::sleep(Duration::from_millis(300)).await;
     // Selection moves asynchronously, so each arrow waits for a different highlighted label
     // instead of sampling whatever the previous render left behind.
     let selected_label = "document.querySelector('.search-completion[data-selected] .completion-label')?.textContent";

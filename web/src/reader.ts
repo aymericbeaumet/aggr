@@ -1,5 +1,5 @@
-import { createSearchSession, mountSearch, type SearchHandle } from "./search";
-import type { PreferenceValues, ArticleHeader, BuildManifest, NavigationRequest, NavigationOptions, SwupAdapter, ReaderWindow, ReaderNavigator } from "./contracts";
+import { createSearchSession, inertSearchHandle, mountSearch, type SearchHandle } from "./search";
+import type { PreferenceValues, BuildManifest, NavigationRequest, NavigationOptions, SwupAdapter, ReaderWindow, ReaderNavigator } from "./contracts";
 const readerWindow = window as unknown as ReaderWindow;
 const readerNavigator = navigator as ReaderNavigator;
 import { createOfflineClient } from "./offline-client";
@@ -8,16 +8,24 @@ import { createDates } from "./dates";
 import { createMedia } from "./media";
 import { installShiftHover } from "./modifiers";
 import { createPreferencesService, mountPreferences } from "./preferences";
-import { createScope } from "./lifecycle";
+import { createScope, safely } from "./lifecycle";
 import { createBuildWatcher } from "./build-watcher";
 import { createUpdates } from "./updates";
 import { mountConnectionStatus } from "./status";
-import { mountShortcutHelp } from "./shortcuts";
-import { createNavigation, enqueuePrefetch, mountMobileNavigation } from "./navigation";
+import { inertShortcutHelp, mountShortcutHelp } from "./shortcuts";
+import { createNavigation, enqueuePrefetch, mountMobileNavigation, prefetchKey } from "./navigation";
 import { createSelection, selectedLink } from "./selection";
 import { mountSelectionSharing } from "./share-selection";
 import { announce } from "./announce";
 import { originalLabel } from "./labels";
+import { $, $$, el, setStyle } from "./reader/dom";
+import { syncPageHead } from "./reader/page-head";
+import { enhanceMarginNotes } from "./reader/margin-notes";
+import { createArticleHeader } from "./reader/article-header";
+import { ageBand, entryStateKey, mergeNewEntries, remainingEntries, resolveEntries, scopedEntries } from "./reader/entries";
+import { FEED_PAGE_PARAMETER, feedPageUrl, paginationLayout, type PagerLink } from "./reader/pagination";
+import { pullLabel, wireTouchPullRefresh, type PullPhase } from "./reader/pull-refresh";
+import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget, gotoRoute, lineHeight, scrollDistance, scrollShortcut } from "./reader/shortcuts";
 (function () {
   "use strict";
   // Cache the server-rendered page before enhancement adds binding flags or transient UI.
@@ -25,7 +33,7 @@ import { originalLabel } from "./labels";
     url: location.pathname + location.search,
     html: "<!doctype html>" + document.documentElement.outerHTML
   } : null;
-  installShiftHover(document, window);
+  safely("shift-hover", () => installShiftHover(document, window));
   function resolveRoot(relative?: string) { return new URL(relative || "./", window.location.href).href; }
   const script = document.querySelector("script[src$='assets/app.js']");
   let BASE = resolveRoot((readerWindow.AGGR && readerWindow.AGGR.base) || (script && (script.getAttribute("src") || "").slice(0, -"assets/app.js".length)) || "./");
@@ -54,31 +62,9 @@ import { originalLabel } from "./labels";
   const preferences = readerWindow.AGGRPreferences;
 
 
-  const PULL_THRESHOLD = 84;
-  const PULL_MAX = 72;
-  const PULL_HOLD = 48;
-  let pullRefreshState = "idle";
-  let pullStartX = 0;
-  let pullStartY = 0;
-  let pullResetTimer: ReturnType<typeof setTimeout> | undefined;
-  let articleHeaderObserver: ResizeObserver | undefined;
-  let articleHeaderFrame: number | null = null;
-  let articleHeader: ArticleHeader | null = null;
-  let articleHeaderNeedsMeasure = true;
   const marginNoteViewport = window.matchMedia("(min-width: 72.0625rem)");
+  const articleHeader = createArticleHeader({ document, window, kind: () => KIND });
 
-  function $<T extends Element = HTMLElement>(selector: string, root: ParentNode | null = document): T | null { return (root || document).querySelector<T>(selector); }
-  function $$<T extends Element = HTMLElement>(selector: string, root: ParentNode | null = document): T[] { return Array.from((root || document).querySelectorAll<T>(selector)); }
-  function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, string | number | boolean | null> = {}, children: Array<Node | null | false> = []): HTMLElementTagNameMap[K] {
-    const node = document.createElement(tag);
-    Object.keys(attrs || {}).forEach(function (key) {
-      if (key === "text") node.textContent = String(attrs[key] ?? "");
-      else if (key === "html") node.innerHTML = String(attrs[key] ?? "");
-      else node.setAttribute(key, String(attrs[key]));
-    });
-    (children || []).forEach(function (child) { if (child) node.appendChild(child); });
-    return node;
-  }
   const dates = createDates({format: function () { return preferences.values["date-format"]; }, afterFormat: applyAgeBands});
   appScope.add(() => dates.dispose());
   function formatTimes(root: ParentNode = document) {
@@ -90,61 +76,6 @@ import { originalLabel } from "./labels";
   const enhanceArticleMedia = media.enhanceArticle;
   const enhanceVideoPlayer = media.enhanceVideo;
 
-  function enhanceMarginNotes(root: ParentNode) {
-    if (!marginNoteViewport.matches) return;
-    $$(".body", root).forEach(function (body) {
-      if (body.dataset.marginNotesEnhanced === "true") return;
-      let count = 0;
-      $$(".footnote-ref a[data-footnote-ref]", body).forEach(function (reference) {
-        const href = reference.getAttribute("href") || "";
-        if (href.charAt(0) !== "#") return;
-        let id = href.slice(1);
-        try { id = decodeURIComponent(id); } catch (error) { /* keep the literal fragment */ }
-        let definition = document.getElementById(id);
-        if (!definition || !body.contains(definition)) return;
-
-        const number = reference.textContent.trim();
-        const marginId = (reference.id || id + "-reference-" + (count + 1)) + "-note";
-        const note = el("aside", {
-          "class": "margin-note footnote-margin-note",
-          "role": "note",
-          "aria-label": "Note " + number,
-          "id": marginId
-        });
-        Array.prototype.slice.call(definition.childNodes).forEach(function (child) {
-          note.appendChild(child.cloneNode(true));
-        });
-        $$(".footnote-backref", note).forEach(function (backref) { backref.remove(); });
-        $$('[id]', note).forEach(function (node) { node.removeAttribute("id"); });
-        const marker = el("span", { "class": "margin-note-number", "text": number + ". " });
-        const firstParagraph = $("p", note);
-        if (firstParagraph) firstParagraph.insertBefore(marker, firstParagraph.firstChild);
-        else note.insertBefore(marker, note.firstChild);
-
-        reference.removeAttribute("target");
-        reference.removeAttribute("rel");
-        reference.setAttribute("aria-describedby", note.id);
-        reference.parentElement?.insertAdjacentElement("afterend", note);
-        reference.addEventListener("click", function (event) {
-          if (!marginNoteViewport.matches) return;
-          event.preventDefault();
-          note.setAttribute("tabindex", "-1");
-          note.focus({ preventScroll: true });
-        });
-        count += 1;
-      });
-      if (count) body.classList.add("has-margin-notes");
-      body.dataset.marginNotesEnhanced = "true";
-    });
-  }
-
-  function ageBand(iso: string) {
-    const age = Math.max(0, Date.now() - Date.parse(iso));
-    if (age < 60 * 60 * 1000) return "fresh";
-    if (age < 3 * 60 * 60 * 1000) return "h1";
-    if (age < 24 * 60 * 60 * 1000) return "h3";
-    return "h24";
-  }
   function applyAgeBands(root: ParentNode) {
     $$(".rows:not(.search-results)", root).forEach(function (list) {
       $$(".row", list).forEach(function (row) {
@@ -181,9 +112,6 @@ import { originalLabel } from "./labels";
     });
   }
 
-  function entryStateKey(name: string) {
-    return "aggr:" + name + ":" + encodeURIComponent(new URL(BASE).pathname);
-  }
   function readSessionList(key: string): string[] | null {
     try {
       const value = sessionStorage.getItem(key);
@@ -201,9 +129,6 @@ import { originalLabel } from "./labels";
   function writeSessionValue(key: string, value: string) {
     try { sessionStorage.setItem(key, value); } catch (error) { /* private mode */ }
   }
-  function uniqueEntries(entries: string[]) {
-    return Array.from(new Set(entries));
-  }
   function currentRecentEntries() {
     let entries = readerWindow.AGGR && Array.isArray(readerWindow.AGGR.entries) ? readerWindow.AGGR.entries : [];
     const home = new URL(location.href).pathname === new URL(BASE).pathname;
@@ -212,21 +137,13 @@ import { originalLabel } from "./labels";
         return row.dataset.url || "";
       }));
     }
-    return uniqueEntries(entries.map(function (entry) {
-      try { return new URL(entry, BASE).href; } catch (error) { return null; }
-    }).filter((entry): entry is string => entry !== null));
+    return resolveEntries(entries, BASE);
   }
   function detectNewEntries() {
-    const seenKey = entryStateKey("last-seen-entry");
-    const pendingKey = entryStateKey("new-entries");
+    const seenKey = entryStateKey("last-seen-entry", BASE);
+    const pendingKey = entryStateKey("new-entries", BASE);
     let current = currentRecentEntries();
-    const previousHead = readSessionValue(seenKey);
-    let pending = readSessionList(pendingKey) || [];
-    if (previousHead && current.length) {
-      const boundary = current.indexOf(previousHead);
-      const additions = current.slice(0, boundary === -1 ? current.length : boundary);
-      pending = uniqueEntries(pending.concat(additions));
-    }
+    const pending = mergeNewEntries(readSessionValue(seenKey), current, readSessionList(pendingKey) || []);
     if (current.length) writeSessionValue(seenKey, current[0]);
     writeSessionList(pendingKey, pending);
     pendingNewEntries = pending;
@@ -271,10 +188,10 @@ import { originalLabel } from "./labels";
   }
   function acknowledgeNewEntries(entries: string[]) {
     const acknowledged = new Set(entries || []);
-    pendingNewEntries = pendingNewEntries.filter(function (entry) { return !acknowledged.has(entry); });
-    if (pendingNewEntries.length) writeSessionList(entryStateKey("new-entries"), pendingNewEntries);
+    pendingNewEntries = remainingEntries(pendingNewEntries, acknowledged);
+    if (pendingNewEntries.length) writeSessionList(entryStateKey("new-entries", BASE), pendingNewEntries);
     else {
-      try { sessionStorage.removeItem(entryStateKey("new-entries")); } catch (error) { /* private mode */ }
+      try { sessionStorage.removeItem(entryStateKey("new-entries", BASE)); } catch (error) { /* private mode */ }
     }
     $$(".row.is-new").forEach(function (row) {
       let entry;
@@ -304,35 +221,6 @@ import { originalLabel } from "./labels";
     }
   }
 
-  const PAGE_HEAD_SELECTOR = [
-    'meta[name="description"]',
-    'meta[name="robots"]',
-    'meta[name="author"]',
-    'meta[name^="aggr:"]',
-    'meta[property^="og:"]',
-    'meta[name^="twitter:"]',
-    'meta[property^="article:"]',
-    'link[rel="canonical"]',
-    'link[rel="first"]',
-    'link[rel="last"]',
-    'link[rel="prev"]',
-    'link[rel="next"]',
-    'link[rel="alternate"]',
-    'link[rel="search"]',
-    'link[rel="service-meta"]',
-    'link[rel="type"]',
-    'link[rel="via"]',
-    'link[rel="original"]',
-    'script[type="application/ld+json"]'
-  ].join(',');
-  function syncPageHead(incoming?: Document | null) {
-    if (!incoming || !incoming.head) return;
-    $$(PAGE_HEAD_SELECTOR, document.head).forEach(function (node) { node.remove(); });
-    $$(PAGE_HEAD_SELECTOR, incoming.head).forEach(function (node) {
-      document.head.appendChild(document.importNode(node, true));
-    });
-  }
-
   function announceNavigation() {
     announce("Navigated to " + document.title);
   }
@@ -359,26 +247,11 @@ import { originalLabel } from "./labels";
   appScope.add(() => updates.dispose());
   function applyPreferences(state: PreferenceValues, persist: boolean) { preferenceService.apply(state, persist); }
 
-  const FEED_PAGE_PARAMETER = "feed-page";
-  function positiveInteger(value: unknown, fallback: number) {
-    const parsed = Number.parseInt(String(value), 10);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-  }
-  function feedPageUrl(target: string, slice: number) {
-    let current = new URL(location.href);
-    let url = new URL(target, document.baseURI);
-    current.searchParams.forEach(function (value, key) {
-      if (key !== FEED_PAGE_PARAMETER && !url.searchParams.has(key)) url.searchParams.set(key, value);
-    });
-    if (slice > 1) url.searchParams.set(FEED_PAGE_PARAMETER, String(slice));
-    else url.searchParams.delete(FEED_PAGE_PARAMETER);
-    return url.href;
-  }
-  function updatePagerLink(pager: HTMLElement, selector: string, target: string, slice: number, visible: boolean) {
-    const link = $<HTMLAnchorElement>(selector, pager);
-    if (!link) return;
-    link.hidden = !visible;
-    if (visible) link.href = feedPageUrl(target, slice);
+  function updatePagerLink(pager: HTMLElement, selector: string, link: PagerLink) {
+    const anchor = $<HTMLAnchorElement>(selector, pager);
+    if (!anchor) return;
+    anchor.hidden = !link.visible;
+    if (link.visible) anchor.href = feedPageUrl(link.target, link.slice, location.href, document.baseURI);
   }
   function applyFeedPagination() {
     if (KIND !== "river" || (searchController && searchController.isActive())) return;
@@ -387,51 +260,26 @@ import { originalLabel } from "./labels";
     if (!list || !pager) return;
 
     const rows = $$(".row", list);
-    const staticSize = positiveInteger(pager.dataset.staticPageSize, rows.length || 1);
-    const staticPage = positiveInteger(pager.dataset.staticPage, 1);
-    const staticPages = positiveInteger(pager.dataset.staticPages, 1);
-    const totalItems = Math.max(rows.length, positiveInteger(pager.dataset.totalItems, rows.length));
-    const preferredSize = positiveInteger(preferences.values["feed-page-size"], 50);
-    const pageSize = Math.min(preferredSize, staticSize);
-    const slicesPerFullPage = Math.ceil(staticSize / pageSize);
-    const slicesOnPage = Math.max(1, Math.ceil(rows.length / pageSize));
-    const requestedSlice = positiveInteger(new URL(location.href).searchParams.get(FEED_PAGE_PARAMETER), 1);
-    const slice = Math.min(requestedSlice, slicesOnPage);
-    const start = (slice - 1) * pageSize;
-    const end = Math.min(start + pageSize, rows.length);
-
+    const layout = paginationLayout(rows.length, pager.dataset, preferences.values["feed-page-size"], new URL(location.href).searchParams.get(FEED_PAGE_PARAMETER), location.href);
     rows.forEach(function (row, index) {
-      const hidden = index < start || index >= end;
+      const hidden = index < layout.start || index >= layout.end;
       if (row.hidden !== hidden) row.hidden = hidden;
       if (hidden && row.classList.contains("is-selected")) row.classList.remove("is-selected");
     });
-    list.dataset.feedPage = String(slice);
-    list.dataset.feedPageSize = String(pageSize);
+    list.dataset.feedPage = String(layout.slice);
+    list.dataset.feedPageSize = String(layout.pageSize);
 
-    const finalStaticCount = Math.max(0, totalItems - ((staticPages - 1) * staticSize));
-    const finalSlices = Math.max(1, Math.ceil(finalStaticCount / pageSize));
-    const totalPages = Math.max(1, ((staticPages - 1) * slicesPerFullPage) + finalSlices);
-    const currentPage = ((staticPage - 1) * slicesPerFullPage) + slice;
-    const hasPrevious = currentPage > 1;
-    const hasNext = currentPage < totalPages;
-    const previousTarget = slice > 1 ? location.href : pager.dataset.staticPrevious;
-    const previousSlice = slice > 1 ? slice - 1 : slicesPerFullPage;
-    const nextTarget = slice < slicesOnPage ? location.href : pager.dataset.staticNext;
-    const nextSlice = slice < slicesOnPage ? slice + 1 : 1;
-    const finalTarget = pager.dataset.staticLast || location.href;
-
-    pager.hidden = totalPages <= 1;
-    pager.dataset.page = String(currentPage);
-    pager.dataset.pages = String(totalPages);
+    pager.hidden = layout.totalPages <= 1;
+    pager.dataset.page = String(layout.currentPage);
+    pager.dataset.pages = String(layout.totalPages);
     const status = $("[data-page-status]", pager);
-    if (status) status.textContent = "page " + currentPage + " / " + totalPages;
-    updatePagerLink(pager, "[data-page-first]", pager.dataset.staticFirst || location.href, 1, hasPrevious);
-    updatePagerLink(pager, "[data-page-previous]", previousTarget || location.href, previousSlice, hasPrevious);
-    updatePagerLink(pager, "[data-page-next]", nextTarget || location.href, nextSlice, hasNext);
-    updatePagerLink(pager, "[data-page-last]", finalTarget, finalSlices, hasNext);
+    if (status) status.textContent = "page " + layout.currentPage + " / " + layout.totalPages;
+    updatePagerLink(pager, "[data-page-first]", layout.first);
+    updatePagerLink(pager, "[data-page-previous]", layout.previous);
+    updatePagerLink(pager, "[data-page-next]", layout.next);
+    updatePagerLink(pager, "[data-page-last]", layout.last);
 
-    const normalized = feedPageUrl(location.href, pageSize < staticSize ? slice : 1);
-    navigation.replaceLocation(normalized);
+    navigation.replaceLocation(feedPageUrl(location.href, layout.normalizedSlice, location.href, document.baseURI));
     restoreListCursor(false);
   }
   function listRows() {
@@ -515,7 +363,8 @@ import { originalLabel } from "./labels";
     const root = $("[data-search-root]");
     const resultsRoot = $("[data-search-results]");
     if (!root || !resultsRoot) return;
-    searchController = mountSearch({
+    // A failed mount leaves the static form in place and an inert handle behind so the rest of the page boots.
+    searchController = safely("search", () => mountSearch({
       root: root,
       staticFeed: $("[data-static-feed]"),
       resultsRoot: resultsRoot,
@@ -542,7 +391,7 @@ import { originalLabel } from "./labels";
         restoreListFocus = false;
         if (!searchController?.isActive()) void refreshCurrentFeed();
       }
-    });
+    })) ?? inertSearchHandle();
     const mounted = searchController;
     pageScope.add(() => {
       if (searchController === mounted) searchController = null;
@@ -602,14 +451,8 @@ import { originalLabel } from "./labels";
   }
   function prefetchPage(target?: string, urgent?: boolean) {
     if (!swup || !target || !canPrefetch()) return;
-    let url;
-    try { url = new URL(target, document.baseURI); } catch (error) { return; }
-    const scope = new URL(BASE);
-    if (url.origin !== scope.origin || url.pathname.indexOf(scope.pathname) !== 0 || url.pathname.slice(-1) !== "/") return;
-    url.hash = "";
-    url.searchParams.delete("focus-search");
-    const key = url.pathname + url.search;
-    if (key === location.pathname + location.search || swup.cache.has(key)) return;
+    const key = prefetchKey(target, document.baseURI, BASE, location);
+    if (!key || swup.cache.has(key)) return;
     if (prefetchPending.has(key) && !prefetchQueue.includes(key)) return;
     const next = enqueuePrefetch(prefetchQueue, key, !!urgent);
     prefetchQueue.filter(url => !next.includes(url)).forEach(url => prefetchPending.delete(url));
@@ -707,16 +550,16 @@ import { originalLabel } from "./labels";
     event.stopImmediatePropagation();
     navigate(url.href);
   }, true);
-  const shortcutDialog = mountShortcutHelp(document, readerWindow.AGGR?.discussions);
+  const shortcutDialog = safely("shortcut-help", () => mountShortcutHelp(document, readerWindow.AGGR?.discussions)) ?? inertShortcutHelp();
   appScope.add(() => shortcutDialog.dispose());
-  appScope.add(mountConnectionStatus(document, updates, {
+  safely("connection-status", () => appScope.add(mountConnectionStatus(document, updates, {
     retry: () => location.reload(),
     refresh: () => {
       if (!updates.beginReload()) return;
       rememberReloadPosition();
       location.reload();
     }
-  }));
+  })));
   function shortcutHelp() { shortcutDialog.toggle(); }
   function beginGoto() {
     waitingForGoto = true;
@@ -727,119 +570,24 @@ import { originalLabel } from "./labels";
     if (!waitingForGoto) return false;
     waitingForGoto = false;
     clearTimeout(gotoTimer);
-    if (key === "g") {
-      goToBoundary('first');
-      return true;
-    }
-    const routes: Record<string, string> = { f: "", i: "", l: "browse/", p: "preferences/" };
-    if (Object.prototype.hasOwnProperty.call(routes, key)) {
-      navigate(new URL(routes[key], BASE).href);
-      return true;
-    }
-    if (/^[1-9]$/.test(key)) {
-      let entries = (readerWindow.AGGR && readerWindow.AGGR.entries) || [];
-      let entry = entries[Number(key) - 1];
-      if (entry) {
-        navigate(new URL(entry, BASE).href);
-        return true;
-      }
-    }
-    return false;
+    const target = gotoRoute(key, (readerWindow.AGGR && readerWindow.AGGR.entries) || [], BASE);
+    if (!target) return false;
+    if (target.type === "first") goToBoundary('first');
+    else navigate(target.url);
+    return true;
   }
   function isEditing(target: EventTarget | null) {
     return target instanceof Element && !!target.closest('input, textarea, select, button, summary, [role="button"], [role="textbox"], [role="combobox"], [contenteditable]:not([contenteditable="false"])');
   }
-  function setStyle(node: HTMLElement, property: string, value: string | number) {
-    if (node.style.getPropertyValue(property) !== String(value)) node.style.setProperty(property, String(value));
-  }
-  function updateArticleHeader() {
-    articleHeaderFrame = null;
-    const state = articleHeader;
-    if (!state) return;
-    const y = window.scrollY;
-    const folded = y >= 160;
-    // Read geometry before changing the folding styles, so scrolling never forces
-    // a synchronous layout after an earlier write in this frame.
-    let measurements;
-    if (articleHeaderNeedsMeasure) {
-      const style = getComputedStyle(state.header);
-      const top = state.topBar ? Math.max(0, state.topBar.getBoundingClientRect().bottom) : 0;
-      measurements = {
-        tags: state.labels ? state.labels.getBoundingClientRect().height : null,
-        // offsetHeight rounds to whole pixels; the title's transform must not affect this height.
-        titleHeight: state.title ? parseFloat(getComputedStyle(state.title).height) : null,
-        offset: (style.position === "sticky" ? state.header.getBoundingClientRect().height + (parseFloat(style.top) || 0) : top)
-          + (state.fade ? state.fade.getBoundingClientRect().height : 16),
-        range: document.documentElement.scrollHeight - window.innerHeight
-      };
-      state.scrollRange = measurements.range;
-      articleHeaderNeedsMeasure = false;
-    }
-    const progress = Math.max(0, Math.min(1, y / 160));
-    setStyle(state.header, "--header-progress", progress);
-    if (state.tags && state.folded !== folded) {
-      state.tags.inert = folded;
-      state.tags.style.visibility = folded ? "hidden" : "visible";
-    }
-    state.folded = folded;
-    if (measurements) {
-      if (measurements.tags !== null) setStyle(state.header, "--item-tags-height", measurements.tags + "px");
-      if (measurements.titleHeight !== null) setStyle(state.header, "--header-title-height", measurements.titleHeight + "px");
-      setStyle(document.documentElement, "--article-header-offset", measurements.offset + "px");
-    }
-    const readingProgress = state.scrollRange > 0 ? Math.max(0, Math.min(1, y / state.scrollRange)) : 0;
-    if (state.progress) setStyle(state.progress, "transform", `scaleX(${readingProgress})`);
-  }
-  function scheduleArticleHeader() {
-    if (articleHeader && !articleHeaderFrame) articleHeaderFrame = requestAnimationFrame(updateArticleHeader);
-  }
-  function measureArticleHeader() {
-    articleHeaderNeedsMeasure = true;
-    scheduleArticleHeader();
-  }
-  function wireArticleHeader() {
-    if (articleHeaderObserver) articleHeaderObserver.disconnect();
-    document.documentElement.style.removeProperty("--article-header-offset");
-    let header = KIND === "item" && $(".itemhead");
-    articleHeader = header ? {
-      header: header, title: $(".itemhead-title", header), tags: $(".item-tags", header), labels: $(".item-tags-inner", header),
-      progress: $(".itemhead-progress", header), fade: $(".itemhead-fade", header), topBar: $(".top"), scrollRange: 0
-    } : null;
-    articleHeaderNeedsMeasure = true;
-    scheduleArticleHeader();
-    if (!header) return;
-    if (window.ResizeObserver) {
-      articleHeaderObserver = new ResizeObserver(measureArticleHeader);
-      articleHeaderObserver.observe(header);
-      const main = $("main");
-      if (main) articleHeaderObserver.observe(main);
-      if (articleHeader?.labels) articleHeaderObserver.observe(articleHeader.labels);
-      if (articleHeader?.title) articleHeaderObserver.observe(articleHeader.title);
-    }
-  }
-  window.addEventListener("scroll", scheduleArticleHeader, { passive: true });
-  window.addEventListener("resize", measureArticleHeader, { passive: true });
-  function articleNavigationDirection(key: string) {
-    const normalized = key.length === 1 ? key.toLowerCase() : key;
-    if (normalized === "k") return "previous";
-    if (normalized === "j") return "next";
-    return null;
-  }
   function pageScroll(event: KeyboardEvent) {
-    if (event.altKey || event.metaKey || isEditing(event.target)) return false;
-    if (event.ctrlKey && event.shiftKey) return false;
-    if (!event.ctrlKey && !singleKeyShortcuts()) return false;
-    const key = event.key.toLowerCase();
-    let lineScroll = event.ctrlKey && (key === "e" || key === "y");
-    if (!lineScroll && key !== "d" && key !== "u") return false;
+    const scroll = scrollShortcut(event, isEditing(event.target), singleKeyShortcuts());
+    if (!scroll) return false;
     const content = $(".body") || $("main") || document.body;
     const style = getComputedStyle(content);
-    const line = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.6;
     let header = $(".itemhead") || $(".top");
     const top = header ? Math.max(0, header.getBoundingClientRect().bottom) : 0;
-    const available = Math.max(line, window.innerHeight - top);
-    let distance = lineScroll ? line : Math.min(line * preferences.values["scroll-amount"], available * 0.5);
-    window.scrollBy({ top: key === "d" || key === "e" ? distance : -distance, behavior: "instant" });
+    const distance = scrollDistance(scroll, lineHeight(style.lineHeight, style.fontSize), window.innerHeight - top, preferences.values["scroll-amount"]);
+    window.scrollBy({ top: distance, behavior: "instant" });
     return true;
   }
   function openArticleExternal(url: string) {
@@ -851,26 +599,19 @@ import { originalLabel } from "./labels";
     window.scrollTo({ top: edge === 'first' ? 0 : document.documentElement.scrollHeight, behavior: 'instant' });
   }
   function articleExternalShortcut(key: string) {
-    if (key.length !== 1 || key !== key.toUpperCase()) return false;
+    if (!externalShortcutKey(key)) return false;
     const article = KIND === "item" ? $("article.item") : listRows().find(row => row.classList.contains("is-selected"));
     if (!article) return false;
-    if (key === "O") {
-      let original = $<HTMLAnchorElement>(".u-bookmark-of", article);
-      if (!original) return false;
-      openArticleExternal(original.href);
-      return true;
-    }
-    const networks = (readerWindow.AGGR && readerWindow.AGGR.discussions) || [];
-    let network = networks.find(function (candidate) { return candidate.shortcut === key; });
-    if (!network) return false;
-    const found = $$<HTMLAnchorElement>(".discussion[data-discussion]", article).find(function (link) {
-      return link.dataset.discussion === network.name;
-    });
-    const originalUrl = article.dataset.link || "";
     const title = $(".p-name", article);
-    let target = found ? found.href : network.url
-      .split("{url}").join(encodeURIComponent(originalUrl))
-      .split("{title}").join(encodeURIComponent(title ? title.textContent : ""));
+    const target = externalShortcutTarget(key, {
+      original: $<HTMLAnchorElement>(".u-bookmark-of", article)?.href ?? null,
+      link: article.dataset.link || "",
+      title: title ? title.textContent || "" : "",
+      discussions: $$<HTMLAnchorElement>(".discussion[data-discussion]", article).map(function (link) {
+        return { name: link.dataset.discussion || "", href: link.href };
+      })
+    }, (readerWindow.AGGR && readerWindow.AGGR.discussions) || []);
+    if (!target) return false;
     openArticleExternal(target);
     return true;
   }
@@ -944,7 +685,7 @@ import { originalLabel } from "./labels";
       || readerNavigator.standalone === true;
   }
 
-  function reloadPositionKey() { return entryStateKey("reload-position"); }
+  function reloadPositionKey() { return entryStateKey("reload-position", BASE); }
   function rememberReloadPosition() {
     try {
       let active = document.activeElement;
@@ -986,12 +727,10 @@ import { originalLabel } from "./labels";
   const showConnectionStatus = updates.notice;
   function updateConnectionStatus() { searchSession.setOnline(navigator.onLine); updates.setOnline(navigator.onLine); }
 
-  function setPullRefreshState(next: string, distance: number) {
+  function renderPullRefresh(next: PullPhase, distance: number, changed: boolean) {
     let root = document.documentElement;
     const indicator = $("#pull-refresh");
     let label = $("#pull-refresh-label");
-    let changed = pullRefreshState !== next;
-    pullRefreshState = next;
     if (next === "idle") {
       delete root.dataset.pullState;
       root.style.removeProperty("--pull-distance");
@@ -1002,66 +741,24 @@ import { originalLabel } from "./labels";
     root.style.setProperty("--pull-distance", Math.max(0, distance || 0) + "px");
     if (indicator) indicator.setAttribute("aria-hidden", "false");
     if (!changed || !label) return;
-    if (next === "armed") label.textContent = "Release to refresh";
-    else if (next === "refreshing") label.textContent = "Refreshing…";
-    else label.textContent = "Pull to refresh";
+    label.textContent = pullLabel(next);
   }
 
-  function settlePullRefresh() {
-    if (pullRefreshState === "idle" || pullRefreshState === "refreshing") return;
-    clearTimeout(pullResetTimer);
-    setPullRefreshState("settling", 0);
-    pullResetTimer = setTimeout(function () {
-      setPullRefreshState("idle", 0);
-    }, 190);
-  }
-
-  function wireTouchPullRefresh() {
+  function wirePullRefresh() {
     let root = document.documentElement;
     if (root.dataset.pullRefreshBound === "true") return;
     if (!PWA || !isInstalled() || !(navigator.maxTouchPoints > 0 || "ontouchstart" in window)) return;
     root.dataset.pullRefreshBound = "true";
-
-    document.addEventListener("touchstart", function (event) {
-      if (pullRefreshState === "refreshing" || event.touches.length !== 1) return;
-      if (!isInstalled() || window.scrollY > 0 || $("dialog[open]") || isEditing(event.target)) return;
-      clearTimeout(pullResetTimer);
-      pullStartX = event.touches[0].clientX;
-      pullStartY = event.touches[0].clientY;
-      setPullRefreshState("tracking", 0);
-    }, { passive: true });
-
-    document.addEventListener("touchmove", function (event) {
-      if (["tracking", "pulling", "armed"].indexOf(pullRefreshState) === -1) return;
-      if (event.touches.length !== 1 || window.scrollY > 0) {
-        settlePullRefresh();
-        return;
-      }
-      const deltaX = Math.abs(event.touches[0].clientX - pullStartX);
-      const deltaY = event.touches[0].clientY - pullStartY;
-      if (deltaY <= 0 || deltaX > deltaY) {
-        settlePullRefresh();
-        return;
-      }
-      if (deltaY < 6) return;
-      if (event.cancelable) event.preventDefault();
-      let distance = Math.min(PULL_MAX, Math.round(deltaY * 0.55));
-      if (deltaY >= PULL_THRESHOLD) setPullRefreshState("armed", distance);
-      else setPullRefreshState("pulling", distance);
-    }, { passive: false });
-
-    document.addEventListener("touchend", function () {
-      if (pullRefreshState === "armed") {
-        clearTimeout(pullResetTimer);
-        setPullRefreshState("refreshing", PULL_HOLD);
+    wireTouchPullRefresh({
+      document, window,
+      canStart: target => isInstalled() && !(window.scrollY > 0) && !$("dialog[open]") && !isEditing(target),
+      render: renderPullRefresh,
+      refresh() {
         showConnectionStatus("Refreshing for new items…", false, false);
         rememberReloadPosition();
         location.reload();
-      } else {
-        settlePullRefresh();
       }
-    }, { passive: true });
-    document.addEventListener("touchcancel", settlePullRefresh, { passive: true });
+    });
   }
 
   function clearNavigationCache() {
@@ -1125,7 +822,7 @@ import { originalLabel } from "./labels";
       if (replacedScope !== pageScope || current !== $("#swup") || location.href !== url || epoch !== pageEpoch || version !== updates.snapshot().contentVersion) return;
       current.replaceChildren.apply(current, Array.from(next.childNodes).map(function (node) { return document.importNode(node, true); }));
       document.title = incoming.title;
-      syncPageHead(incoming);
+      syncPageHead(document.head, incoming);
       pageEpoch += 1;
       feedRefreshPending = false;
       bootPage();
@@ -1163,10 +860,7 @@ import { originalLabel } from "./labels";
       resetSearchIndex();
       feedRefreshPending = true;
       if (Array.isArray(build.entries)) {
-        readerWindow.AGGR.entries = build.entries.filter(function (entry) {
-          if (typeof entry !== "string") return false;
-          try { return new URL(entry, BASE).href.startsWith(BASE); } catch (error) { return false; }
-        });
+        readerWindow.AGGR.entries = scopedEntries(build.entries, BASE);
         detectNewEntries();
       }
       showNewEntries($("#swup") || document);
@@ -1228,16 +922,12 @@ import { originalLabel } from "./labels";
   function bootPage() {
     pageScope = createScope();
     pageScope.add(() => media.dispose());
-    pageScope.add(() => {
-      articleHeaderObserver?.disconnect();
-      if (articleHeaderFrame !== null) cancelAnimationFrame(articleHeaderFrame);
-      articleHeaderObserver = undefined;
-      articleHeaderFrame = null;
-      articleHeader = null;
-    });
-    navigation.acceptPage();
-    let page = $("#aggr-page");
-    if (page) {
+    pageScope.add(() => articleHeader.dispose());
+    // Every step is guarded: one failing enhancement is recorded and the rest of the page still boots.
+    safely("boot:navigation", () => navigation.acceptPage());
+    safely("boot:page-context", () => {
+      let page = $("#aggr-page");
+      if (!page) return;
       BASE = resolveRoot(page.dataset.root);
       KIND = page.dataset.kind || "";
       if ($("#aggr-base")?.getAttribute("href") !== BASE) $("#aggr-base")?.setAttribute("href", BASE);
@@ -1248,29 +938,30 @@ import { originalLabel } from "./labels";
         if (link.getAttribute("href") !== href) link.setAttribute("href", href);
       });
       updateMenuSelection();
-    }
-    wireMenuNavigation();
-
-    wireTouchPullRefresh();
-    preferenceService.importLocation(KIND);
-    const preferencePanel = mountPreferences($("#swup") || document, preferenceService, { onShortcuts: shortcutHelp });
-    pageScope.add(() => preferencePanel.dispose());
-    applyPreferences(preferences.values, false);
-    enhanceMarginNotes($("#swup") || document);
-    enhancePreviewMedia($("#swup") || document);
-    enhanceVideoPlayer();
-    enhanceArticleMedia($("#swup") || document);
-    mountSelectionSharing($("#swup") || document, pageScope.signal);
-    wireArticleHeader();
-    externalLinks(pageEpoch ? $("#swup") || document : document);
-    fillSearch();
-    if (!searchController?.isActive()) restoreListCursor(restoreListFocus && !swup);
-    showNewEntries($("#swup") || document);
+    });
+    safely("boot:menu-navigation", () => wireMenuNavigation());
+    safely("boot:pull-refresh", () => wirePullRefresh());
+    safely("boot:preference-location", () => preferenceService.importLocation(KIND));
+    safely("boot:preferences", () => {
+      const preferencePanel = mountPreferences($("#swup") || document, preferenceService, { onShortcuts: shortcutHelp });
+      pageScope.add(() => preferencePanel.dispose());
+    });
+    safely("boot:apply-preferences", () => applyPreferences(preferences.values, false));
+    safely("boot:margin-notes", () => enhanceMarginNotes($("#swup") || document, marginNoteViewport, document));
+    safely("boot:preview-media", () => enhancePreviewMedia($("#swup") || document));
+    safely("boot:video-player", () => enhanceVideoPlayer());
+    safely("boot:article-media", () => enhanceArticleMedia($("#swup") || document));
+    safely("boot:selection-sharing", () => mountSelectionSharing($("#swup") || document, pageScope.signal));
+    safely("boot:article-header", () => articleHeader.wire());
+    safely("boot:external-links", () => externalLinks(pageEpoch ? $("#swup") || document : document));
+    safely("boot:search", () => fillSearch());
+    safely("boot:list-cursor", () => { if (!searchController?.isActive()) restoreListCursor(restoreListFocus && !swup); });
+    safely("boot:new-entries", () => showNewEntries($("#swup") || document));
   }
 
   window.addEventListener("appinstalled", function () {
     externalLinks(document);
-    wireTouchPullRefresh();
+    wirePullRefresh();
   });
   window.addEventListener("offline", updateConnectionStatus);
   window.addEventListener("online", updateConnectionStatus);
@@ -1279,16 +970,16 @@ import { originalLabel } from "./labels";
     const navigationEntry = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
     restoreListFocus = !!(navigationEntry && navigationEntry.type === "back_forward");
   }
-  detectNewEntries();
-  bootPage();
-  restoreReloadPosition();
+  safely("new-entries", () => detectNewEntries());
+  safely("boot", () => bootPage());
+  safely("reload-position", () => restoreReloadPosition());
   window.addEventListener("pagehide", event => {
     if (event.persisted) return;
     void pageScope.dispose().catch(() => {});
     void appScope.dispose().catch(() => {});
   });
   const mobileBar = $(".mobile-tabs");
-  if (mobileBar) appScope.add(mountMobileNavigation(mobileBar, window));
+  if (mobileBar) safely("mobile-navigation", () => appScope.add(mountMobileNavigation(mobileBar, window)));
   const topBar = $(".top");
   if (topBar && window.ResizeObserver) {
     const syncTopNavOffset = function () {
@@ -1303,8 +994,9 @@ import { originalLabel } from "./labels";
       showNewEntries($("#swup") || document);
     }
   });
-  if (readerWindow.Swup) {
-    readerWindow.swup = swup = new readerWindow.Swup({ containers: ["#swup"], cache: true, animationSelector: false, native: false, animateHistoryBrowsing: false });
+  const Swup = readerWindow.Swup;
+  if (Swup) safely("swup", () => {
+    readerWindow.swup = swup = new Swup({ containers: ["#swup"], cache: true, animationSelector: false, native: false, animateHistoryBrowsing: false });
     
     const fetchPage = swup.fetchPage.bind(swup);
     swup.hooks.before("fetch:request", function (visit, request) {
@@ -1379,7 +1071,7 @@ import { originalLabel } from "./labels";
     swup.hooks.on("visit:end", warmPage);
     swup.hooks.before("content:replace", async function (visit) {
       await pageScope.dispose();
-      syncPageHead(visit && visit.to && visit.to.document);
+      syncPageHead(document.head, visit && visit.to && visit.to.document);
     });
     swup.hooks.on("page:view", function () {
       bootPage();
@@ -1400,8 +1092,8 @@ import { originalLabel } from "./labels";
         target.focus({ preventScroll: true });
       }
     });
-  }
-  warmPage();
+  });
+  safely("warm-page", () => warmPage());
 
   if (darkPreference) {
     const syncAutoTheme = function () {
@@ -1414,13 +1106,13 @@ import { originalLabel } from "./labels";
   }
   const syncMarginNotes = function () {
     if (!marginNoteViewport.matches) return;
-    enhanceMarginNotes($("#swup") || document);
+    enhanceMarginNotes($("#swup") || document, marginNoteViewport, document);
     externalLinks($(".body") || document);
   };
   if (marginNoteViewport.addEventListener) marginNoteViewport.addEventListener("change", syncMarginNotes);
   else if (marginNoteViewport.addListener) marginNoteViewport.addListener(syncMarginNotes);
-  offlineClient.start();
-  buildWatcher.start();
+  safely("offline-client", () => offlineClient.start());
+  safely("build-watcher", () => buildWatcher.start());
   setInterval(function () {
     if (document.visibilityState === "visible") formatTimes($("#swup") || document);
   }, 60 * 1000);

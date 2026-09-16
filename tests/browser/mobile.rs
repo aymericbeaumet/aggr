@@ -73,19 +73,6 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
         "document.documentElement.classList.contains('swup-enabled')",
     )
     .await?;
-    let preference_checks = client
-        .execute_async(
-            include_str!("../fixtures/preferences_checks.js"),
-            vec![json!(std::fs::read_to_string(
-                fixture.out.join("index.html")
-            )?)],
-        )
-        .await?;
-    assert!(
-        preference_checks.get("error").is_none(),
-        "{preference_checks}"
-    );
-    assert_eq!(preference_checks["checks"], 10);
     let feed_page_size = client
         .execute(
             r#"

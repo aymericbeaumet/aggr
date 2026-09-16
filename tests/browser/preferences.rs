@@ -5,8 +5,8 @@ use fantoccini::{Client, Locator};
 use serde_json::json;
 
 use crate::harness::{
-    Fixture, browser_client, catch_panics, finish, key, phone_session, report_failure, screenshot,
-    wait_booted_with, wait_for,
+    Fixture, browser_client, catch_panics, emulate, finish, key, phone_session, report_failure,
+    screenshot, wait_booted, wait_booted_with, wait_for,
 };
 use crate::mobile::mobile_feed_layout;
 
@@ -23,6 +23,50 @@ async fn preference_controls_transfer_and_import() -> Result<()> {
 
 async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
     phone_session(client).await?;
+    // The bootstrap's validation rules are covered by web/src/preferences/bootstrap.test.ts; the
+    // browser confirms the inline script runs before paint: the stored theme is on <html> while the
+    // head is still parsing and the app has not loaded, and an invalid stored value has already
+    // fallen back to its default.
+    client.goto(&fixture.base).await?;
+    wait_booted(client).await?;
+    client
+        .execute(
+            "localStorage.setItem('aggr:theme','dark');localStorage.setItem('aggr:density','invalid');",
+            vec![],
+        )
+        .await?;
+    emulate(
+        client,
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({"source": r#"
+          new MutationObserver((records, observer) => {
+            if (!records.some(record => record.attributeName === 'data-theme')) return;
+            observer.disconnect();
+            window.__aggrBootstrap = {
+              theme: document.documentElement.dataset.theme,
+              density: document.documentElement.dataset.density,
+              headParsing: document.body === null && document.readyState === 'loading',
+              appLoaded: typeof window.swup !== 'undefined'
+            };
+          }).observe(document, {attributes: true, subtree: true});
+        "#}),
+    )
+    .await?;
+    client.goto(&fixture.base).await?;
+    wait_booted(client).await?;
+    assert_eq!(
+        client
+            .execute("return window.__aggrBootstrap || null", vec![])
+            .await?,
+        json!({"theme":"dark","density":"compact","headParsing":true,"appLoaded":false}),
+        "the inline preferences script must apply stored values before paint and fall back for invalid ones"
+    );
+    client
+        .execute(
+            "localStorage.removeItem('aggr:theme');localStorage.removeItem('aggr:density');",
+            vec![],
+        )
+        .await?;
     client.goto(&fixture.base).await?;
     wait_booted_with(
         client,

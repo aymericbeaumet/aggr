@@ -19,7 +19,7 @@
       {@const original = safeURL(display.original || entry.url, $model.base)}
       {@const preview = display.preview}
       <li class="row h-entry" class:is-selected={page === $model.selectedURL || (!$model.selectedURL && index === 0)} data-url={page} data-link={original}>
-        <a class="u-uid" href={page} hidden aria-label={entry.meta.title}></a>
+        <a class="u-uid u-url" href={page} hidden aria-label={entry.meta.title}></a>
         <div class="cell"><div class="row-content"><div class="row-copy">
           <div class="row-heading"><span class="rank" aria-hidden="true">{($model.page.page - 1) * $model.page.size + index + 1}.</span><a class="title p-name u-url" data-row-open href={page}>{entry.meta.title || 'Untitled'}</a></div>
           <div class="search-excerpt">{#each resultExcerptParts(entry) as part}{#if part.highlight}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</div>

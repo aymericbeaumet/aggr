@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { createScope } from './lifecycle';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createScope, safely } from './lifecycle';
 
 describe('page ownership', () => {
   it('cancels work immediately and waits for every component before replacement', async () => {
@@ -27,5 +27,32 @@ describe('page ownership', () => {
     await expect(first).rejects.toThrow('failed unmount');
     expect(cleaned).toBe(1);
     expect(() => scope.add(() => {})).toThrow('disposed');
+  });
+});
+
+describe('guarded start-up steps', () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  it('records a failing step on the page and continues with the next one', () => {
+    const page: { __aggrErrors?: unknown[] } = {};
+    vi.stubGlobal('window', page);
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const order: string[] = [];
+    expect(safely('search', () => { order.push('search'); throw new Error('mount failed'); })).toBeUndefined();
+    expect(safely('media', () => { order.push('media'); return 42; })).toBe(42);
+    expect(order).toEqual(['search', 'media']);
+    expect(page.__aggrErrors).toHaveLength(1);
+    const [recorded] = page.__aggrErrors as { step: string; error: string }[];
+    expect(recorded.step).toBe('search');
+    expect(recorded.error).toContain('mount failed');
+    expect(reported).toHaveBeenCalledWith('[aggr] search failed', expect.any(Error));
+  });
+
+  it('appends to an existing error list and describes non-Error throws', () => {
+    const page = { __aggrErrors: ['earlier'] as unknown[] };
+    vi.stubGlobal('window', page);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    safely('boot', () => { throw 'plain failure'; });
+    expect(page.__aggrErrors).toEqual(['earlier', { step: 'boot', error: 'plain failure' }]);
   });
 });

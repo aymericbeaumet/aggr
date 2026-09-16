@@ -58,15 +58,43 @@ async fn service_worker_contracts(client: &Client, fixture: &Fixture) -> Result<
         cursor
     );
 
+    // The worker's caching rules are covered by web/src/sw.test.ts; the browser confirms the real
+    // registration: it succeeds, its worker takes control, and a precached shell is served offline.
     wait_for(client, "!!navigator.serviceWorker.controller").await?;
-    let checks = client
+    let registration = client
         .execute_async(
-            include_str!("../fixtures/service_worker_checks.js"),
-            vec![json!(std::fs::read_to_string(fixture.out.join("sw.js"))?)],
+            r#"
+      const done = arguments[arguments.length-1];
+      navigator.serviceWorker.getRegistration().then(registration => done({
+        scope: registration?.scope || null,
+        active: registration?.active?.scriptURL || null,
+        controller: navigator.serviceWorker.controller?.scriptURL || null
+      }), error => done({error: error.message}));
+    "#,
+            vec![],
         )
         .await?;
-    assert!(checks.get("error").is_none(), "{checks}");
-    assert_eq!(checks["checks"], 55);
+    assert_eq!(registration["scope"], json!(fixture.base), "{registration}");
+    assert_eq!(
+        registration["active"],
+        json!(format!("{}sw.js", fixture.base)),
+        "{registration}"
+    );
+    assert_eq!(
+        registration["controller"], registration["active"],
+        "the registered worker must be the one controlling the page"
+    );
+    set_offline(client, true).await?;
+    client
+        .goto(&format!("{}offline.html", fixture.base))
+        .await?;
+    wait_for(
+        client,
+        "!navigator.onLine && !!document.querySelector('#offline-articles')",
+    )
+    .await?;
+    set_offline(client, false).await?;
+    wait_for(client, "navigator.onLine").await?;
     let identities = client
         .execute_async(
             r#"

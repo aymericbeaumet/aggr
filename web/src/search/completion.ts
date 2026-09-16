@@ -79,10 +79,15 @@ export function selectedCompletion(items: Completion[], selected: string): Compl
   return items.find(item => item.id === selected) || items[0];
 }
 
-// A highlight the user moved to survives the store emissions that follow (debounced searches, status refreshes);
-// otherwise the first item leads, as it does when the list opens.
-export function nextSelectedCompletion(items: Completion[], current: string, moved: boolean): Completion | undefined {
-  return moved ? selectedCompletion(items, current) : items[0];
+// Decides what the highlight binding should be written with after a store emission (debounced searches,
+// status refreshes, delayed counts). `undefined` means "leave the binding alone": a highlight the user moved
+// to and that is still listed is owned by the menu, and rewriting it from component state can only race the
+// live value. Unmoved lists lead with the first item, a vanished highlight falls back to it, and an empty
+// list clears the binding.
+export function completionHighlight(items: Completion[], current: string, moved: boolean): string | undefined {
+  if (!items.length) return '';
+  if (moved && items.some(item => item.id === current)) return undefined;
+  return items[0].id;
 }
 
 export type CompletionMenu = 'idle' | 'open' | 'dismissed';
