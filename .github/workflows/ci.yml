@@ -7,6 +7,13 @@ on:
   workflow_dispatch:
   workflow_call:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -23,6 +30,15 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci --prefix web
       - run: npm --prefix web run verify
+      - name: Enforce the reader bundle budget
+        run: |
+          budget=72000
+          size="$(gzip -c themes/default/static/app.js | wc -c | tr -d '[:space:]')"
+          echo "themes/default/static/app.js: $size bytes gzipped (budget $budget)"
+          if [ "$size" -gt "$budget" ]; then
+            echo "::error file=themes/default/static/app.js::app.js is $size bytes gzipped, over the $budget byte budget; trim the reader or raise the budget deliberately in ci.yml"
+            exit 1
+          fi
       - name: Check embedded reader assets match their source
         run: git diff --exit-code -- themes/default/static/app.js themes/default/static/client.css themes/default/static/client.LICENSE
 
@@ -44,58 +60,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Install native TLS build dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake libclang-dev build-essential
-      - name: Install native TLS build dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install cmake llvm
-          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
-      - name: Configure native Windows compiler environment
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
-      - name: Configure native TLS build dependencies (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
-          if (!(Test-Path (Join-Path $llvmBin 'libclang.dll'))) {
-            throw "The runner's native LLVM installation is missing libclang.dll"
-          }
-          "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
-          $llvmBin >> $env:GITHUB_PATH
-          'CMAKE_GENERATOR=Ninja' >> $env:GITHUB_ENV
-          if ('${{ runner.arch }}' -eq 'ARM64') {
-            'CC=clang-cl' >> $env:GITHUB_ENV
-            'CXX=clang-cl' >> $env:GITHUB_ENV
-            'ASM=clang-cl' >> $env:GITHUB_ENV
-          } else {
-            choco install nasm --yes --no-progress
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            (Join-Path $env:ProgramFiles 'NASM') >> $env:GITHUB_PATH
-          }
-          cmake --version
-          ninja --version
+      - uses: ./.github/actions/native-deps
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - run: cargo fmt --check
+          # The linux-amd64 leg produces the cache the browser job restores; the other legs keep
+          # their automatic per-job key.
+          shared-key: ${{ matrix.name == 'linux-amd64' && 'linux-x64' || '' }}
+          # release.yml re-runs this workflow on the tag ref; caches saved there can never be
+          # restored by main or pull requests and only eat the repository's cache quota.
+          save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - run: cargo fmt --all -- --check
         if: matrix.name == 'linux-amd64'
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
-      - name: Check shipped default config
-        if: matrix.name == 'linux-amd64'
-        run: cargo run --locked -- check --config config.default.toml
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
 
   browser:
     name: browser (chrome)
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 12
     permissions:
       contents: read
     env:
@@ -103,13 +86,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install native TLS build dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake libclang-dev build-essential
+      - uses: ./.github/actions/native-deps
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
+          # Restore what test (linux-amd64) built for the same lockfile instead of keeping a
+          # second copy of it.
+          shared-key: linux-x64
+          save-if: false
       - name: Install matching Chrome and ChromeDriver
         shell: bash
         run: |
@@ -135,6 +118,10 @@ jobs:
           echo "$browser_dir/chromedriver-linux64" >> "$GITHUB_PATH"
       - name: Test reader and offline browser contracts
         shell: bash
+        env:
+          # Two sessions share a 4-vCPU runner; a cold Chrome start under that load needs more
+          # than the harness default.
+          AGGR_BROWSER_TIMEOUT_SECS: "90"
         run: |
           set -euo pipefail
           mkdir -p target/browser-artifacts
@@ -151,7 +138,7 @@ jobs:
             sleep 0.25
           done
           curl --fail --silent --show-error "$AGGR_WEBDRIVER_URL/status" | jq -e '.value.ready == true'
-          cargo test --locked --test browser -- --ignored --nocapture
+          cargo test --locked --test browser -- --ignored --nocapture --test-threads=2
       - name: Upload browser failure screenshots and logs
         if: failure()
         uses: actions/upload-artifact@v7
@@ -168,16 +155,14 @@ jobs:
       - uses: actions/checkout@v4
       - id: msrv
         run: echo "version=$(perl -ne 'print $1 if /^rust-version = "(.*)"/' Cargo.toml)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
-      - name: Install native TLS build dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake libclang-dev build-essential
+      - uses: ./.github/actions/native-deps
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - run: cargo build --locked
 
   # The version is committed in two places; keep them equal before anything gets tagged.

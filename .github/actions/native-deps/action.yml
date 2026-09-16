@@ -1,0 +1,49 @@
+name: native-deps
+description: >-
+  Installs what the BoringSSL build behind wreq needs beyond a Rust toolchain: cmake, libclang
+  and an assembler. On macOS only cmake is ensured; clang-sys locates Xcode's libclang on its
+  own, so neither Homebrew llvm nor LIBCLANG_PATH is needed there.
+
+runs:
+  using: composite
+  steps:
+    - name: Install native TLS build dependencies (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends cmake libclang-dev build-essential
+
+    - name: Ensure cmake is present (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: command -v cmake >/dev/null || brew install cmake
+
+    - name: Configure native Windows compiler environment
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+
+    - name: Configure native TLS build dependencies (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
+        if (!(Test-Path (Join-Path $llvmBin 'libclang.dll'))) {
+          throw "The runner's native LLVM installation is missing libclang.dll"
+        }
+        "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
+        $llvmBin >> $env:GITHUB_PATH
+        'CMAKE_GENERATOR=Ninja' >> $env:GITHUB_ENV
+        if ('${{ runner.arch }}' -eq 'ARM64') {
+          'CC=clang-cl' >> $env:GITHUB_ENV
+          'CXX=clang-cl' >> $env:GITHUB_ENV
+          'ASM=clang-cl' >> $env:GITHUB_ENV
+        } else {
+          choco install nasm --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          (Join-Path $env:ProgramFiles 'NASM') >> $env:GITHUB_PATH
+        }
+        cmake --version
+        ninja --version
