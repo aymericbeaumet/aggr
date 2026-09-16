@@ -12,8 +12,8 @@ use sha1::{Digest as _, Sha1};
 use sha2::{Digest as _, Sha256};
 
 use super::context::ItemCtx;
+use crate::cache::Namespace;
 
-const CACHE_NAMESPACE: &str = "pagefind-v1";
 const CACHE_KEY: &str = ".aggr-pagefind-key";
 
 #[derive(Debug, Clone, Serialize)]
@@ -332,7 +332,7 @@ fn fingerprint(documents: &[SearchDocument], language: &str) -> Result<String> {
 }
 
 fn restore(cache_root: &Path, fingerprint: &str, out: &Path) -> Result<bool> {
-    let cached = cache_root.join(CACHE_NAMESPACE);
+    let cached = Namespace::Pagefind.dir(cache_root);
     if std::fs::read_to_string(cached.join(CACHE_KEY))
         .ok()
         .is_none_or(|key| key != fingerprint)
@@ -356,12 +356,12 @@ fn store(cache_root: &Path, fingerprint: &str, out: &Path) -> Result<()> {
         .prefix("pagefind-")
         .tempdir_in(cache_root)
         .context("creating Pagefind cache staging directory")?;
-    let staged = scratch.path().join(CACHE_NAMESPACE);
+    let staged = Namespace::Pagefind.dir(scratch.path());
     crate::cache::copy_tree(&out.join("pagefind"), &staged.join("site"))?;
     crate::cache::write(&staged.join(CACHE_KEY), fingerprint.as_bytes())?;
 
-    let current = cache_root.join(CACHE_NAMESPACE);
-    let previous = cache_root.join(format!(".{CACHE_NAMESPACE}.previous"));
+    let current = Namespace::Pagefind.dir(cache_root);
+    let previous = cache_root.join(format!(".{}.previous", Namespace::Pagefind.dir_name()));
     if previous.exists() {
         std::fs::remove_dir_all(&previous)
             .with_context(|| format!("clearing {}", previous.display()))?;
@@ -701,7 +701,7 @@ mod tests {
         let document = document(&item(), "Only this prose is searchable.");
 
         build_cached(&first, std::slice::from_ref(&document), "en", Some(&cache)).unwrap();
-        std::fs::write(cache.join(CACHE_NAMESPACE).join("site/proof"), "cached").unwrap();
+        std::fs::write(Namespace::Pagefind.dir(&cache).join("site/proof"), "cached").unwrap();
         let manifest = build_cached(&second, &[document], "en", Some(&cache)).unwrap();
 
         assert!(second.join(&manifest.base).join("pagefind.js").is_file());

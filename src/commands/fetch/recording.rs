@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, bail};
 use url::Url;
 
-use crate::cache::ArticleCache;
+use crate::cache::{ArticleCache, Namespace};
 use crate::config::Source;
 use crate::http::{self, Request, Response};
 use crate::model::RawItem;
@@ -77,7 +77,7 @@ async fn infer_at(
     if failures.blocked(&url) {
         return Ok(None);
     }
-    let probe = Probe(cache_dir.join("recording-duration-v1").join(format!(
+    let probe = Probe(Namespace::RecordingDuration.dir(cache_dir).join(format!(
         "{}.probe",
         crate::model::sha1_hex(format!("{}\0{:?}\0{:?}", url, headers, audio))
     )));
@@ -420,7 +420,7 @@ mod tests {
             .unwrap(),
             None
         );
-        assert!(!directory.path().join("recording-duration-v1").exists());
+        assert!(!Namespace::RecordingDuration.dir(directory.path()).exists());
         failed.delete_async().await;
         let ready = server
             .mock_async(|when, then| {

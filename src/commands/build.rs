@@ -61,6 +61,7 @@ async fn run_prevalidated(project: &Project, args: &BuildArgs) -> Result<Summary
     let fingerprint = crate::cache::render_fingerprint(crate::cache::RenderFingerprint {
         config: &project.config,
         project_root: &project.root,
+        repo_root: project.repo.root(),
         config_sha: config_sha.as_deref(),
         data_sha: data_sha.as_deref(),
         base_url: base_url.as_deref(),

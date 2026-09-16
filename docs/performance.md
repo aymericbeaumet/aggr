@@ -38,8 +38,9 @@ binary article links skip HTML extraction to avoid downloading the same original
 Build-time preview fallback reuses retained image renditions and memoizes up to 64 decoding
 results. Dimensions from retained publisher HTML are inspected only for articles with image
 markup; text-only articles avoid the additional read and sanitization. Render fingerprints
-include the display, preferences, document, and native-media implementations to invalidate stale
-snapshots when those components change.
+include every module that can change rendered bytes (a unit test classifies each source file as
+fingerprinted or render-independent) and name loaded config files by their repository-relative
+path, so the same checkout at another location shares a fingerprint.
 
 Stored-image validation receipts live under the existing build/dev cache in `validated-images-v2`.
 They reuse verified rendition choices, derived colors, and ThumbHashes across builds
@@ -77,6 +78,29 @@ Pagefind output is reused by its input fingerprint. Upstream Pagefind can order 
 differently on a cold rebuild, producing different bytes for an equivalent index. Preserving the
 cache keeps no-op index and worker versions stable; a cold rebuild may change the content index
 version, but never the application-release fingerprint.
+
+## Caches on GitHub Actions
+
+`src/cache.rs` is the registry of every `.aggr/cache/build-v1` namespace; `Namespace::ci_cached`
+decides which ones the reusable workflow carries between runners, and a unit test holds the
+workflow's `actions/cache` paths to that list. Only derived state about bytes the site already
+publishes qualifies, because it invalidates itself: `validated-images-v2` (content-keyed receipts),
+`pagefind-v1` (index keyed by its input fingerprint), `feed-parsing` (parser-version receipts that
+gate conditional GET), and the timestamped backoff markers in `discussions-v1`, `image-failures-v1`,
+`capture-retries-v1` and `recording-duration-v1`. Each run saves under its own key and the next run
+restores the newest entry; the save runs only after a successful build.
+
+`articles-v1` holds raw original-page responses. It is private to the machine that fetched it and is
+never uploaded. `render-v1` is not cached on Actions either: the fingerprint folds each item's age
+band (1 h, 3 h, 24 h) into the generation, so any item under a day old changes it, and a full site
+of a 1,100-item instance is about 2.4 GB per entry. Uploading one per run exhausted the 10 GB
+repository cache quota for entries that almost never hit.
+
+A warm run on Actions therefore still renders every page, but skips cold image validation and
+Pagefind indexing, fetches feeds conditionally, and honours the image, capture and duration
+backoffs. Expect rendering to dominate the build; the cold image validation that took about seven
+minutes on a 1,120-item instance disappears once the receipt cache restores. The first run after a
+cache eviction is cold again.
 
 These changes remove repeated work and allow independent work to overlap. They do not change
 storage retention or guarantee a fixed speedup; source latency, image dimensions, CPU availability,

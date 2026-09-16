@@ -403,7 +403,7 @@ struct CachedRendition {
 impl StoredAssetCache {
     pub(crate) fn new(root: impl AsRef<Path>) -> Self {
         Self {
-            root: root.as_ref().join("validated-images-v2"),
+            root: crate::cache::Namespace::ValidatedImages.dir(root.as_ref()),
             slots: ASSET_RECEIPT_SLOTS,
         }
     }
@@ -969,7 +969,11 @@ impl Fetcher {
     pub fn with_cache(mut self, directory: &Path) -> Self {
         static GENERATION: OnceLock<String> = OnceLock::new();
         let generation = GENERATION.get_or_init(|| hex::encode(implementation_fingerprint()));
-        self.failure_cache = Some(directory.join("image-failures-v1").join(generation));
+        self.failure_cache = Some(
+            crate::cache::Namespace::ImageFailures
+                .dir(directory)
+                .join(generation),
+        );
         self
     }
 

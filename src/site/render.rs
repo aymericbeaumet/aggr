@@ -360,6 +360,61 @@ mod tests {
     }
 
     #[test]
+    fn reusable_workflow_caches_exactly_the_derived_state_namespaces() {
+        let workflow: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(include_str!("../../.github/workflows/aggr.yml")).unwrap();
+        let steps = workflow["jobs"]["aggr"]["steps"].as_sequence().unwrap();
+        let mut expected = crate::cache::ci_cached_paths();
+        expected.sort();
+
+        let mut restore = None;
+        let mut save = None;
+        let mut build = None;
+        for (index, step) in steps.iter().enumerate() {
+            let uses = step["uses"].as_str().unwrap_or_default();
+            assert!(
+                !uses.starts_with("actions/cache@"),
+                "use explicit restore/save steps so a failed build saves nothing"
+            );
+            if step["run"]
+                .as_str()
+                .is_some_and(|run| run.starts_with("aggr build"))
+            {
+                build = Some(index);
+            }
+            let Some(path) = step["with"]["path"].as_str() else {
+                continue;
+            };
+            for private in ["render-v1", "articles-v1"] {
+                assert!(
+                    !path.contains(private),
+                    "{uses} must not persist {private}: {path}"
+                );
+            }
+            if !uses.starts_with("actions/cache/restore@")
+                && !uses.starts_with("actions/cache/save@")
+            {
+                continue;
+            }
+            let mut paths = path
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            paths.sort();
+            assert_eq!(paths, expected, "{uses} disagrees with cache::Namespace");
+            if uses.starts_with("actions/cache/restore@") {
+                assert!(restore.replace(index).is_none(), "one restore step");
+            } else {
+                assert!(save.replace(index).is_none(), "one save step");
+            }
+        }
+        let (restore, build, save) = (restore.unwrap(), build.unwrap(), save.unwrap());
+        assert!(restore < build && build < save, "restore, build, then save");
+    }
+
+    #[test]
     fn embedded_theme_is_safe_and_readable_on_installed_phones() {
         let file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(file.data.as_ref()).unwrap();

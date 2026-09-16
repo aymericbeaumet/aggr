@@ -13,11 +13,11 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use url::Url;
 
+use crate::cache::Namespace;
 use crate::config::{NetworkConfig, NetworkProvider};
 use crate::http;
 use crate::model::{Item, normalize_link, sha1_hex};
 
-const CACHE_NAMESPACE: &str = "discussions-v1";
 const MAX_LOOKUPS: usize = 100;
 const CONCURRENCY: usize = 8;
 const FOUND_TTL: Duration = Duration::hours(24);
@@ -72,7 +72,7 @@ struct Job {
 
 /// Reuse previous matches while dev refreshes its sources, without waiting for providers.
 pub fn cached(configs: &[NetworkConfig], items: &[Item], cache_root: &Path) -> ResolutionSet {
-    let root = cache_root.join(CACHE_NAMESPACE);
+    let root = Namespace::Discussions.dir(cache_root);
     let providers: BTreeSet<_> = configs
         .iter()
         .filter_map(|config| config.provider)
@@ -104,7 +104,7 @@ pub async fn resolve(
     if providers.is_empty() {
         return Ok(ResolutionSet::default());
     }
-    let cache_root = cache_root.join(CACHE_NAMESPACE);
+    let cache_root = Namespace::Discussions.dir(cache_root);
     std::fs::create_dir_all(&cache_root)
         .with_context(|| format!("creating {}", cache_root.display()))?;
 
@@ -443,7 +443,7 @@ mod tests {
         };
         write_cache(
             &cache_path(
-                &dir.path().join(CACHE_NAMESPACE),
+                &Namespace::Discussions.dir(dir.path()),
                 NetworkProvider::HackerNews,
                 link,
             ),

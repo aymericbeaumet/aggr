@@ -12,9 +12,87 @@ use url::Url;
 
 const BUILD_NAMESPACE: &str = "build-v1";
 const DEV_NAMESPACE: &str = "dev-v1";
-const ARTICLE_NAMESPACE: &str = "articles-v1";
-const RENDER_NAMESPACE: &str = "render-v1";
 const RENDER_KEY_FILE: &str = ".aggr-build-key";
+
+/// Every directory aggr creates under a build or dev cache root. The reusable workflow persists
+/// the derived-state subset between runners, so a namespace's name is an on-disk contract: rename
+/// one only together with a format change, never for tidiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Namespace {
+    /// Raw original-page responses and their extractions. Private to the machine that fetched
+    /// them: never uploaded to a shared cache.
+    Articles,
+    /// The last rendered site, keyed by [`render_fingerprint`].
+    Render,
+    /// Discussion lookups with timestamped backoff.
+    Discussions,
+    /// The Pagefind index keyed by its input fingerprint.
+    Pagefind,
+    /// Validation receipts for retained images, keyed by every input byte.
+    ValidatedImages,
+    /// Backoff markers for image downloads that failed, per media implementation generation.
+    ImageFailures,
+    /// Backoff markers for feed-only captures awaiting their original page.
+    CaptureRetries,
+    /// Backoff markers for recording-duration probes.
+    RecordingDuration,
+    /// Feed parser receipts that gate conditional GET after a parser change.
+    FeedParsing,
+}
+
+impl Namespace {
+    /// Test-only: unit tests pin the reusable workflow's cache list to this registry.
+    #[cfg(test)]
+    pub const ALL: [Namespace; 9] = [
+        Namespace::Articles,
+        Namespace::Render,
+        Namespace::Discussions,
+        Namespace::Pagefind,
+        Namespace::ValidatedImages,
+        Namespace::ImageFailures,
+        Namespace::CaptureRetries,
+        Namespace::RecordingDuration,
+        Namespace::FeedParsing,
+    ];
+
+    pub fn dir_name(&self) -> &'static str {
+        match self {
+            Namespace::Articles => "articles-v1",
+            Namespace::Render => "render-v1",
+            Namespace::Discussions => "discussions-v1",
+            Namespace::Pagefind => "pagefind-v1",
+            Namespace::ValidatedImages => "validated-images-v2",
+            Namespace::ImageFailures => "image-failures-v1",
+            Namespace::CaptureRetries => "capture-retries-v1",
+            Namespace::RecordingDuration => "recording-duration-v1",
+            Namespace::FeedParsing => "feed-parsing",
+        }
+    }
+
+    pub fn dir(&self, root: &Path) -> PathBuf {
+        root.join(self.dir_name())
+    }
+
+    /// Whether the reusable workflow may persist this namespace between runners. Derived state
+    /// about already-published bytes is safe and self-invalidating; raw upstream responses are
+    /// private, and the rendered site is too large and too short-lived to be worth uploading.
+    #[cfg(test)]
+    pub fn ci_cached(&self) -> bool {
+        !matches!(self, Namespace::Articles | Namespace::Render)
+    }
+}
+
+/// Repository-relative directories the reusable workflow restores and saves, in registry order.
+/// Test-only: `.github/workflows/aggr.yml` is checked against this list.
+#[cfg(test)]
+pub fn ci_cached_paths() -> Vec<String> {
+    Namespace::ALL
+        .iter()
+        .filter(|namespace| namespace.ci_cached())
+        .map(|namespace| format!(".aggr/cache/{BUILD_NAMESPACE}/{}", namespace.dir_name()))
+        .collect()
+}
+
 /// Bump when article extraction semantics change. Raw responses remain reusable across bumps.
 const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-8";
 const MAX_ARTICLE_METADATA_BYTES: usize = 64 * 1024;
@@ -43,6 +121,9 @@ pub fn dev(config_path: &Path) -> Result<PathBuf> {
 pub struct RenderFingerprint<'a> {
     pub config: &'a crate::config::Config,
     pub project_root: &'a Path,
+    /// Loaded config files are named relative to this root so a checkout elsewhere (another
+    /// clone, a CI runner) shares the fingerprint of the same bytes.
+    pub repo_root: &'a Path,
     pub config_sha: Option<&'a str>,
     pub data_sha: Option<&'a str>,
     pub base_url: Option<&'a str>,
@@ -55,6 +136,7 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     let RenderFingerprint {
         config,
         project_root,
+        repo_root,
         config_sha,
         data_sha,
         base_url,
@@ -63,11 +145,11 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
         generation,
     } = input;
     let mut hash = Sha1::new();
-    hash_field(&mut hash, b"schema", b"render-v2");
+    hash_field(&mut hash, b"schema", b"render-v3");
     hash_field(&mut hash, b"version", env!("CARGO_PKG_VERSION").as_bytes());
     // Development builds often keep the package version while renderer code changes. Hash the
     // implementation itself so a prior binary can never make a new binary restore stale HTML.
-    for (name, source) in render_implementation_sources() {
+    for (name, _, source) in render_implementation_sources() {
         hash_field(&mut hash, name.as_bytes(), source.as_bytes());
     }
     hash_field(
@@ -98,7 +180,12 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     let mut config_files = config.loaded_files.clone();
     config_files.sort();
     for path in config_files {
-        hash_file(&mut hash, b"config", &path)?;
+        hash_file(
+            &mut hash,
+            b"config",
+            &path,
+            &portable_name(&path, repo_root),
+        )?;
     }
     let mut remote_configs = config.loaded_remote.clone();
     remote_configs.sort();
@@ -115,38 +202,85 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
-fn render_implementation_sources() -> [(&'static str, &'static str); 28] {
-    [
-        ("config", include_str!("config.rs")),
-        ("preferences", include_str!("config/preferences.rs")),
-        ("repository-url", include_str!("config/repository_url.rs")),
-        ("source-entries", include_str!("config/source_entries.rs")),
-        ("source-formats", include_str!("config/import_formats.rs")),
-        ("source-graph", include_str!("config/import_graph.rs")),
-        ("defaults", include_str!("../config.default.toml")),
-        ("content", include_str!("content.rs")),
-        ("content-highlight", include_str!("content_highlight.rs")),
-        ("media", include_str!("media.rs")),
-        ("model", include_str!("model.rs")),
-        ("youtube", include_str!("sources/youtube.rs")),
-        ("preview", include_str!("preview.rs")),
-        ("pdf-preview", include_str!("preview/pdf.rs")),
-        ("store", include_str!("store/mod.rs")),
-        ("frontmatter", include_str!("store/frontmatter.rs")),
-        ("site", include_str!("site/mod.rs")),
-        ("context", include_str!("site/context.rs")),
-        ("display", include_str!("site/display.rs")),
-        ("document", include_str!("site/document.rs")),
-        ("interactive", include_str!("site/interactive.rs")),
-        ("native-media", include_str!("site/native_media.rs")),
-        ("item-type", include_str!("site/item_type.rs")),
-        ("outputs", include_str!("site/outputs.rs")),
-        ("pagefind", include_str!("site/pagefind.rs")),
-        ("related", include_str!("site/related.rs")),
-        ("render", include_str!("site/render.rs")),
-        ("threads", include_str!("threads.rs")),
+/// `(hash label, path relative to `src/`, contents)` for every module whose code can change
+/// rendered bytes. A unit test walks `src/` and fails on any file that is neither listed here nor
+/// in [`RENDER_INDEPENDENT_SOURCES`], so a new module must be classified before it ships.
+fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'static str)] {
+    macro_rules! source {
+        ($name:literal, $path:literal) => {
+            ($name, $path, include_str!($path))
+        };
+    }
+    &[
+        source!("config", "config.rs"),
+        source!("language", "config/language.rs"),
+        source!("preferences", "config/preferences.rs"),
+        source!("repository-url", "config/repository_url.rs"),
+        source!("source-entries", "config/source_entries.rs"),
+        source!("source-formats", "config/import_formats.rs"),
+        source!("source-graph", "config/import_graph.rs"),
+        source!("defaults", "../config.default.toml"),
+        source!("content", "content.rs"),
+        source!("content-highlight", "content_highlight.rs"),
+        source!("discussions", "discussions.rs"),
+        source!("media", "media.rs"),
+        source!("media-placeholder", "media/placeholder.rs"),
+        source!("media-srcset", "media/srcset.rs"),
+        source!("media-vector", "media/vector.rs"),
+        source!("media-duration", "media_duration.rs"),
+        source!("model", "model.rs"),
+        source!("youtube", "sources/youtube.rs"),
+        source!("preview", "preview.rs"),
+        source!("pdf-preview", "preview/pdf.rs"),
+        source!("store", "store/mod.rs"),
+        source!("frontmatter", "store/frontmatter.rs"),
+        source!("site", "site/mod.rs"),
+        source!("context", "site/context.rs"),
+        source!("display", "site/display.rs"),
+        source!("document", "site/document.rs"),
+        source!("interactive", "site/interactive.rs"),
+        source!("native-media", "site/native_media.rs"),
+        source!("item-type", "site/item_type.rs"),
+        source!("outputs", "site/outputs.rs"),
+        source!("pagefind", "site/pagefind.rs"),
+        source!("parallel", "site/parallel.rs"),
+        source!("related", "site/related.rs"),
+        source!("render", "site/render.rs"),
+        source!("video", "site/video.rs"),
+        source!("threads", "threads.rs"),
     ]
 }
+
+/// Source files (relative to `src/`, a trailing `/` matching a whole directory) that cannot change
+/// rendered bytes, with the reason each one is safe to leave out of the fingerprint. Anything
+/// they influence reaches the renderer through inputs that are fingerprinted on their own: the
+/// data commit, the loaded config files, the base URL, the release flag and the generation.
+#[cfg(test)]
+const RENDER_INDEPENDENT_SOURCES: &[&str] = &[
+    // Process entry, argument parsing and command orchestration. Every rendering decision they
+    // make (output URL, release mode, pinned data ref) is an explicit fingerprint field.
+    "main.rs",
+    "cli.rs",
+    "commands/",
+    // This module: the fingerprint, the raw-response cache and the cache layout. Changing how a
+    // key is computed is deliberately versioned through the `schema` field instead.
+    "cache.rs",
+    // Git plumbing decides which commit is rendered; the commit itself is the `data-sha` field.
+    "git.rs",
+    // HTTP fetches bytes into the data branch and the private article cache; what was fetched
+    // is covered by `data-sha`, and the build never renders a live response.
+    "http.rs",
+    "http/transport.rs",
+    // Source engines produce raw items that sync persists before any build reads them. Only
+    // `sources/youtube.rs` is consulted at render time (video ids, posters, short links) and it
+    // is listed above; its `duration.rs` submodule serves ingestion-only duration and caption
+    // probes.
+    "sources/",
+    // X thread expansion runs during capture; the expanded body is stored in the data branch.
+    "threads/x.rs",
+    // Retention plans remove files from the checkout in sync; the build sees the resulting tree.
+    "store/retention.rs",
+];
 
 #[derive(Serialize, Deserialize)]
 struct RenderManifest {
@@ -163,7 +297,7 @@ pub fn restore_render(
     fingerprint: &str,
     out: &Path,
 ) -> Result<Option<crate::site::Summary>> {
-    let root = cache_root.join(RENDER_NAMESPACE);
+    let root = Namespace::Render.dir(cache_root);
     let manifest_path = root.join("manifest.toml");
     let manifest = match std::fs::read_to_string(&manifest_path)
         .ok()
@@ -204,7 +338,7 @@ pub fn store_render(
     summary: crate::site::Summary,
 ) -> Result<()> {
     write(&rendered.join(RENDER_KEY_FILE), fingerprint.as_bytes())?;
-    let root = cache_root.join(RENDER_NAMESPACE);
+    let root = Namespace::Render.dir(cache_root);
     std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
     let current = root.join("site");
     let previous = root.join("previous");
@@ -257,11 +391,25 @@ fn hash_field(hash: &mut Sha1, name: &[u8], value: &[u8]) {
     hash.update(value);
 }
 
-fn hash_file(hash: &mut Sha1, kind: &[u8], path: &Path) -> Result<()> {
+fn hash_file(hash: &mut Sha1, kind: &[u8], path: &Path, name: &str) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    hash_field(hash, kind, path.to_string_lossy().as_bytes());
+    hash_field(hash, kind, name.as_bytes());
     hash_field(hash, b"bytes", &bytes);
     Ok(())
+}
+
+/// The name a loaded file contributes to the fingerprint: its path under the repository with
+/// `/` separators on every platform, or just its file name when it lives outside the repository.
+fn portable_name(path: &Path, repo_root: &Path) -> String {
+    let relative = match path.strip_prefix(repo_root) {
+        Ok(relative) => relative,
+        Err(_) => path.file_name().map(Path::new).unwrap_or(path),
+    };
+    relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn hash_tree(hash: &mut Sha1, kind: &str, root: &Path) -> Result<()> {
@@ -364,7 +512,7 @@ struct ArticleMeta {
 impl ArticleCache {
     pub fn new(cache_root: &Path) -> Self {
         Self {
-            root: cache_root.join(ARTICLE_NAMESPACE),
+            root: Namespace::Articles.dir(cache_root),
         }
     }
 
@@ -793,8 +941,8 @@ mod tests {
         };
         store_render(&cache_root, "manifest-generation", &rendered, summary).unwrap();
         std::fs::write(
-            cache_root
-                .join(RENDER_NAMESPACE)
+            Namespace::Render
+                .dir(&cache_root)
                 .join("site")
                 .join(RENDER_KEY_FILE),
             "site-generation",
@@ -817,20 +965,27 @@ mod tests {
         );
     }
 
+    /// A minimal project: `aggr.toml` importing `sources.toml`, plus one project template.
+    fn write_fixture(root: &Path) -> Vec<PathBuf> {
+        std::fs::write(root.join("aggr.toml"), "[site]\ntitle = \"one\"\n").unwrap();
+        std::fs::write(root.join("sources.toml"), "[[sources]]\nurl = \"x\"\n").unwrap();
+        std::fs::create_dir_all(root.join("templates")).unwrap();
+        std::fs::write(root.join("templates/index.html"), "one").unwrap();
+        vec![root.join("aggr.toml"), root.join("sources.toml")]
+    }
+
     #[test]
     fn render_fingerprint_tracks_loaded_config_and_theme_files() {
         let root = tempdir().unwrap();
         let config_path = root.path().join("aggr.toml");
-        std::fs::write(&config_path, "[site]\ntitle = \"one\"\n").unwrap();
-        std::fs::create_dir_all(root.path().join("templates")).unwrap();
-        std::fs::write(root.path().join("templates/index.html"), "one").unwrap();
         let mut config = crate::config::Config::parse("[site]\ntitle = \"one\"\n").unwrap();
-        config.loaded_files = vec![config_path.clone()];
+        config.loaded_files = write_fixture(root.path());
         macro_rules! fingerprint {
             ($discussions:expr) => {
                 render_fingerprint(RenderFingerprint {
                     config: &config,
                     project_root: root.path(),
+                    repo_root: root.path(),
                     config_sha: Some("config"),
                     data_sha: Some("data"),
                     base_url: None,
@@ -862,12 +1017,189 @@ mod tests {
     }
 
     #[test]
+    fn render_fingerprint_is_the_same_for_the_same_checkout_at_another_path() {
+        fn fingerprint(root: &Path, loaded_files: Vec<PathBuf>) -> String {
+            let mut config = crate::config::Config::parse("[site]\ntitle = \"one\"\n").unwrap();
+            config.loaded_files = loaded_files;
+            render_fingerprint(RenderFingerprint {
+                config: &config,
+                project_root: root,
+                repo_root: root,
+                config_sha: Some("config"),
+                data_sha: Some("data"),
+                base_url: None,
+                release: false,
+                discussions: None,
+                generation: "generation",
+            })
+            .unwrap()
+        }
+
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+        assert_ne!(first.path(), second.path());
+        let original = fingerprint(first.path(), write_fixture(first.path()));
+        let copied = fingerprint(second.path(), write_fixture(second.path()));
+        assert_eq!(original, copied);
+
+        // Same bytes under a different imported file name is a different config graph.
+        std::fs::rename(
+            second.path().join("sources.toml"),
+            second.path().join("feeds.toml"),
+        )
+        .unwrap();
+        let renamed = fingerprint(
+            second.path(),
+            vec![
+                second.path().join("aggr.toml"),
+                second.path().join("feeds.toml"),
+            ],
+        );
+        assert_ne!(copied, renamed);
+    }
+
+    #[test]
+    fn portable_names_are_repository_relative_with_forward_slashes() {
+        let repo = Path::new("/srv/checkout");
+        assert_eq!(
+            portable_name(&repo.join("config").join("feeds.toml"), repo),
+            "config/feeds.toml"
+        );
+        assert_eq!(portable_name(&repo.join("aggr.toml"), repo), "aggr.toml");
+        assert_eq!(
+            portable_name(Path::new("/elsewhere/shared/aggr.toml"), repo),
+            "aggr.toml"
+        );
+    }
+
+    #[test]
     fn render_fingerprint_tracks_config_implementation_and_embedded_defaults() {
         let names = render_implementation_sources()
-            .map(|(name, _)| name)
-            .into_iter()
+            .iter()
+            .map(|(name, _, _)| *name)
             .collect::<Vec<_>>();
         assert!(names.contains(&"config"));
         assert!(names.contains(&"defaults"));
+        let unique = names.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "duplicate hash labels: {names:?}"
+        );
+    }
+
+    #[test]
+    fn every_source_file_is_classified_for_the_render_fingerprint() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let tracked = render_implementation_sources()
+            .iter()
+            .map(|(_, path, _)| *path)
+            .collect::<std::collections::BTreeSet<_>>();
+        for tracked in &tracked {
+            assert!(
+                src.join(tracked).is_file(),
+                "fingerprinted source {tracked} does not exist"
+            );
+        }
+        for allowed in RENDER_INDEPENDENT_SOURCES {
+            assert!(
+                !tracked.contains(allowed),
+                "{allowed} is both fingerprinted and declared render-independent"
+            );
+            let path = src.join(allowed);
+            assert!(
+                if allowed.ends_with('/') {
+                    path.is_dir()
+                } else {
+                    path.is_file()
+                },
+                "render-independent entry {allowed} does not exist"
+            );
+        }
+
+        let mut unclassified = Vec::new();
+        for entry in walkdir::WalkDir::new(&src) {
+            let entry = entry.unwrap();
+            if !entry.file_type().is_file()
+                || entry.path().extension().is_none_or(|ext| ext != "rs")
+            {
+                continue;
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(&src)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let allowed = RENDER_INDEPENDENT_SOURCES.iter().any(|allowed| {
+                if allowed.ends_with('/') {
+                    relative.starts_with(allowed)
+                } else {
+                    relative == *allowed
+                }
+            });
+            if !tracked.contains(relative.as_str()) && !allowed {
+                unclassified.push(relative);
+            }
+        }
+        assert!(
+            unclassified.is_empty(),
+            "classify these files in render_implementation_sources() or \
+             RENDER_INDEPENDENT_SOURCES: {unclassified:?}"
+        );
+    }
+
+    #[test]
+    fn cache_namespaces_keep_their_historical_directory_names() {
+        let names = Namespace::ALL
+            .iter()
+            .map(Namespace::dir_name)
+            .collect::<Vec<_>>();
+        let unique = names.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), names.len(), "duplicate namespaces: {names:?}");
+        // Renaming a namespace orphans every cache written by earlier releases.
+        assert_eq!(Namespace::Articles.dir_name(), "articles-v1");
+        assert_eq!(Namespace::Render.dir_name(), "render-v1");
+        assert_eq!(Namespace::Discussions.dir_name(), "discussions-v1");
+        assert_eq!(Namespace::Pagefind.dir_name(), "pagefind-v1");
+        assert_eq!(Namespace::ValidatedImages.dir_name(), "validated-images-v2");
+        assert_eq!(Namespace::ImageFailures.dir_name(), "image-failures-v1");
+        assert_eq!(Namespace::CaptureRetries.dir_name(), "capture-retries-v1");
+        assert_eq!(
+            Namespace::RecordingDuration.dir_name(),
+            "recording-duration-v1"
+        );
+        assert_eq!(Namespace::FeedParsing.dir_name(), "feed-parsing");
+        assert_eq!(
+            Namespace::Pagefind.dir(Path::new("/repo/.aggr/cache/build-v1")),
+            Path::new("/repo/.aggr/cache/build-v1/pagefind-v1")
+        );
+    }
+
+    #[test]
+    fn ci_caches_derived_state_but_never_private_responses_or_the_rendered_site() {
+        let excluded = Namespace::ALL
+            .iter()
+            .filter(|namespace| !namespace.ci_cached())
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(excluded, [Namespace::Articles, Namespace::Render]);
+        let paths = ci_cached_paths();
+        assert_eq!(paths.len(), Namespace::ALL.len() - excluded.len());
+        for path in &paths {
+            assert!(
+                path.starts_with(".aggr/cache/build-v1/"),
+                "{path} is not under the build cache"
+            );
+            assert!(
+                Path::new("/repo")
+                    .join(path)
+                    .starts_with(build(Path::new("/repo"))),
+                "{path} does not resolve under build()"
+            );
+        }
+        assert!(paths.contains(&".aggr/cache/build-v1/validated-images-v2".to_string()));
+        assert!(!paths.iter().any(|path| path.contains("render-v1")));
+        assert!(!paths.iter().any(|path| path.contains("articles-v1")));
     }
 }

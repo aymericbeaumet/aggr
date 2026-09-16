@@ -1721,7 +1721,7 @@ struct CaptureRetries {
 impl CaptureRetries {
     fn new(cache_dir: &Path) -> Self {
         Self {
-            root: cache_dir.join("capture-retries-v1"),
+            root: crate::cache::Namespace::CaptureRetries.dir(cache_dir),
         }
     }
 

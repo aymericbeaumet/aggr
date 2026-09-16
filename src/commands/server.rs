@@ -480,6 +480,7 @@ fn render_refresh(
     let fingerprint = crate::cache::render_fingerprint(crate::cache::RenderFingerprint {
         config: &project.config,
         project_root: &project.root,
+        repo_root: project.repo.root(),
         config_sha: config_sha.as_deref(),
         data_sha: None,
         base_url: base_url.as_deref(),
@@ -1241,7 +1242,9 @@ mod tests {
                 .contains("Retained article")
         );
         assert!(
-            !state.cache.join("discussions-v1").exists(),
+            !crate::cache::Namespace::Discussions
+                .dir(&state.cache)
+                .exists(),
             "local rendering must not initiate discussion resolution"
         );
         assert!(
