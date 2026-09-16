@@ -10,9 +10,11 @@ pub use x::canonical_url as canonical_x_url;
 pub use x::expand as expand_x;
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::sync::LazyLock;
 
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use scraper::{Html, Selector};
 use serde_json::Value;
 use url::{Origin, Url};
@@ -439,12 +441,7 @@ impl<'a> Remote<'a> {
         }
         self.requests += 1;
 
-        let mut headers = http::source_headers(self.source, url)
-            .iter()
-            .filter(|(name, _)| !name.eq_ignore_ascii_case("accept"))
-            .cloned()
-            .collect::<Vec<_>>();
-        headers.push(("Accept".into(), ACTIVITY_ACCEPT.into()));
+        let headers = http::with_accept(http::source_headers(self.source, url), ACTIVITY_ACCEPT);
         let cached = self.cache.load(url, &headers)?;
         let response = self
             .client
@@ -656,6 +653,14 @@ fn render(posts: &[Post], order: &[usize]) -> ExtractedArticle {
     ExtractedArticle { html, image }
 }
 
+/// A terminal post counter in archived Markdown, where comrak escapes the square brackets.
+static MARKDOWN_COUNTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?:^|\s)(\(([0-9]{1,4})/([0-9]{1,4})\)|\\?\[([0-9]{1,4})/([0-9]{1,4})\\?\]|([0-9]{1,4})/([0-9]{1,4}))\s*$",
+    )
+    .expect("valid markdown thread counter pattern")
+});
+
 /// Present an archived social thread as uninterrupted prose: remove terminal post counters,
 /// post separators, and generated per-post links or partial-thread notices from earlier
 /// captures. The metadata original link already reaches the thread. Stored sources stay intact.
@@ -666,11 +671,6 @@ pub fn clean_archived_thread(markdown: &str, link: &str) -> String {
     if canonical_x_url(&url).is_none() && !conservative_status_url(&url) {
         return markdown.to_string();
     }
-    let Ok(counter) = regex::Regex::new(
-        r"(?:^|\s)(\(([0-9]{1,4})/([0-9]{1,4})\)|\\?\[([0-9]{1,4})/([0-9]{1,4})\\?\]|([0-9]{1,4})/([0-9]{1,4}))\s*$",
-    ) else {
-        return markdown.to_string();
-    };
     use comrak::nodes::NodeValue;
     let arena = comrak::Arena::new();
     let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
@@ -696,7 +696,7 @@ pub fn clean_archived_thread(markdown: &str, link: &str) -> String {
                 .last_child()
                 .is_some_and(|node| matches!(node.data.borrow().value, NodeValue::Text(_)))
             && let Some(range) = source_range(paragraph)
-            && let Some(captures) = counter.captures(&markdown[range.clone()])
+            && let Some(captures) = MARKDOWN_COUNTER.captures(&markdown[range.clone()])
             && let Some(marker) = captures.get(1)
         {
             let raw = &markdown[range.clone()];
@@ -788,6 +788,19 @@ fn thread_footer_link<'a>(node: &'a comrak::nodes::AstNode<'a>, labels: &[&str])
             .is_some()
 }
 
+/// A terminal post counter in a captured post's HTML text node.
+static HTML_COUNTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?:^|\s)(\(([0-9]{1,4})/([0-9]{1,4})\)|\[([0-9]{1,4})/([0-9]{1,4})\]|^([0-9]{1,4})/([0-9]{1,4}))\s*$",
+    )
+    .expect("valid HTML thread counter pattern")
+});
+/// Only whitespace, closing tags and line breaks may follow a counter for it to be terminal.
+static TRAILING_MARKUP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:\s|</[a-z][a-z0-9]*\s*>|<br\s*/?>)*$")
+        .expect("valid trailing markup pattern")
+});
+
 fn strip_thread_counter(html: &str) -> String {
     let document = Html::parse_fragment(html);
     let Some(last) = document.tree.nodes().rfind(
@@ -805,12 +818,7 @@ fn strip_thread_counter(html: &str) -> String {
     let scraper::node::Node::Text(text) = last.value() else {
         return html.to_string();
     };
-    let Ok(counter) = regex::Regex::new(
-        r"(?:^|\s)(\(([0-9]{1,4})/([0-9]{1,4})\)|\[([0-9]{1,4})/([0-9]{1,4})\]|^([0-9]{1,4})/([0-9]{1,4}))\s*$",
-    ) else {
-        return html.to_string();
-    };
-    let Some(captures) = counter.captures(text) else {
+    let Some(captures) = HTML_COUNTER.captures(text) else {
         return html.to_string();
     };
     let Some(marker) = captures.get(1) else {
@@ -851,10 +859,7 @@ fn strip_thread_counter(html: &str) -> String {
         return html.to_string();
     };
     let end = start + marker.len();
-    let Ok(closing) = regex::Regex::new(r"(?i)^(?:\s|</[a-z][a-z0-9]*\s*>|<br\s*/?>)*$") else {
-        return html.to_string();
-    };
-    if !closing.is_match(&html[end..]) {
+    if !TRAILING_MARKUP.is_match(&html[end..]) {
         return html.to_string();
     }
     format!("{}{}", html[..start].trim_end(), &html[end..])
