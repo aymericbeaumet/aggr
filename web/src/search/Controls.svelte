@@ -112,20 +112,3 @@
 {#if $model.error}<p class="search-error" role="alert">{$model.error}</p>{/if}
 {#if $model.offline}<p class="search-offline" role="status">{$model.offline}</p>{/if}
 
-<style>
-  .search-control { position: relative; }
-  :global(.search-command) { position: relative; width: 100%; min-width: 0; }
-  form { margin: 0; width: 100%; }
-  .search-input-line { position: relative; width: 100%; }
-  :global(.search-input-line #q) { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; padding: .55rem 2.75rem .55rem .7rem; border: 1px solid var(--faint); border-radius: .35rem; color: var(--fg); background: var(--search-bg, var(--code)); font: inherit; }
-  .search-clear { position: absolute; inset-block: 0; right: 0; display: grid; place-items: center; width: 44px; min-height: 44px; padding: 0; border: 0; border-radius: .35rem; color: var(--muted); background: transparent; font-size: 1.5rem; line-height: 1; }
-  :global(.search-completions) { position: absolute; z-index: 20; top: 100%; inset-inline: 0; max-height: min(24rem, 55vh); overflow-y: auto; border: 1px solid var(--faint); border-radius: .4rem; background: var(--bg); box-shadow: 0 6px 20px #0002; padding: .3rem; }
-  :global(.search-completion) { display: flex; justify-content: space-between; align-items: center; gap: .75rem; min-height: 44px; padding: .4rem .65rem; border-radius: .25rem; cursor: pointer; }
-  :global(.search-completion[data-selected]) { background: var(--code); }
-  .completion-label { min-width: 0; overflow-wrap: anywhere; }
-  small { flex: none; color: var(--muted); }
-  .search-query-help { position: absolute; z-index: 21; bottom: calc(100% + .4rem); inset-inline-start: 0; box-sizing: border-box; max-width: min(38rem, 100%); padding: .5rem .65rem; border: 1px solid var(--faint); border-radius: .35rem; color: var(--muted); background: var(--bg); box-shadow: 0 3px 12px #0002; font-size: .75rem; line-height: 1.5; }
-  .search-query-help[hidden] { display: none; }
-  .search-error, .search-offline { font-size: .85rem; margin: .4rem 0; }
-  .search-error { color: var(--warm); }
-</style>

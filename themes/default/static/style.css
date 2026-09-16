@@ -964,7 +964,8 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
 .nav-separator { opacity: .5; font-weight: 400; }
 .feed-toolbar { min-width: 0; margin: 0.6rem 0 1rem; }
 .feed-search { display: flex; align-items: center; margin: 0; width: 100%; min-width: 0; }
-.feed-search input[type="search"] { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; color: var(--fg); background: var(--search-bg, var(--code)); border: 1px solid var(--faint); border-radius: .35rem; padding: .55rem 2.75rem .55rem .7rem; font: inherit; }
+/* One selector list for the server-rendered field and the mounted one, so their geometry cannot drift. */
+.feed-search input[type="search"], .search-input-line #q { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; color: var(--fg); background: var(--search-bg, var(--code)); border: 1px solid var(--faint); border-radius: .35rem; padding: .55rem 2.75rem .55rem .7rem; font: inherit; }
 .feed-search input::placeholder, .search-input-line input::placeholder { color: var(--muted); opacity: 1; }
 .feed-search #q:focus-visible, .search-input-line #q:focus-visible { box-shadow: none; border-color: var(--warm); }
 @media (prefers-contrast: more) {
@@ -973,6 +974,22 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
 @media (forced-colors: active) {
   .feed-search input[type="search"], .search-input-line #q { border-color: ButtonBorder; }
 }
+/* Mounted search controls (web/src/search/Controls.svelte). Rules that were scoped to the component stay under
+   .search-control; the status paragraphs render next to it, so they keep their own class. */
+.search-control { position: relative; }
+.search-command { position: relative; width: 100%; min-width: 0; }
+.search-control form { margin: 0; width: 100%; }
+.search-control .search-input-line { position: relative; width: 100%; }
+.search-control .search-clear { position: absolute; inset-block: 0; right: 0; display: grid; place-items: center; width: 44px; min-height: 44px; padding: 0; border: 0; border-radius: .35rem; color: var(--muted); background: transparent; font-size: 1.5rem; line-height: 1; }
+.search-completions { position: absolute; z-index: 20; top: 100%; inset-inline: 0; max-height: min(24rem, 55vh); overflow-y: auto; border: 1px solid var(--faint); border-radius: .4rem; background: var(--bg); box-shadow: 0 6px 20px #0002; padding: .3rem; }
+.search-completion { display: flex; justify-content: space-between; align-items: center; gap: .75rem; min-height: 44px; padding: .4rem .65rem; border-radius: .25rem; cursor: pointer; }
+.search-completion[data-selected] { background: var(--code); }
+.search-control .completion-label { min-width: 0; overflow-wrap: anywhere; }
+.search-control small { flex: none; color: var(--muted); }
+.search-control .search-query-help { position: absolute; z-index: 21; bottom: calc(100% + .4rem); inset-inline-start: 0; box-sizing: border-box; max-width: min(38rem, 100%); padding: .5rem .65rem; border: 1px solid var(--faint); border-radius: .35rem; color: var(--muted); background: var(--bg); box-shadow: 0 3px 12px #0002; font-size: .75rem; line-height: 1.5; }
+.search-control .search-query-help[hidden] { display: none; }
+.search-error, .search-offline { font-size: .85rem; margin: .4rem 0; }
+.search-error { color: var(--warm); }
 .meta .source-resolved { color: var(--warm); }
 @media (max-width: 40rem) {
   .nav { column-gap: 0.2rem; }
