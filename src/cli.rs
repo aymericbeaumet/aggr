@@ -77,6 +77,10 @@ pub struct FetchArgs {
     /// Rewrite items that already exist (hand edits are lost).
     #[arg(long)]
     pub refresh: bool,
+    /// Re-derive stored article bodies from the HTML retained beside them, so cleanup added since
+    /// an item was captured reaches it (hand edits are lost).
+    #[arg(long)]
+    pub reprocess: bool,
 }
 
 #[derive(Debug, Args, Default, Clone)]

@@ -131,7 +131,22 @@ export function createMedia(options: MediaOptions) {
         player.classList.add("is-loaded");
         player.removeAttribute("aria-busy");
         preview.hidden = true;
+        // An `autoplay` parameter alone leaves YouTube and Vimeo showing their own play button
+        // when the browser's autoplay heuristics decline, costing the reader a second click.
+        // The activating click is still the gesture that authorized this, so ask the player too.
+        if (autoplay) requestPlayback();
       }, { once: true, signal: listeners.signal });
+
+      function requestPlayback() {
+        const target = frame.contentWindow;
+        if (!target) return;
+        if (provider === "youtube") {
+          target.postMessage(JSON.stringify({ event: "listening", id: "aggr-play", channel: "widget" }), url.origin);
+          target.postMessage(JSON.stringify({ event: "command", func: "playVideo", args: [], id: "aggr-play", channel: "widget" }), url.origin);
+        } else if (provider === "vimeo") {
+          target.postMessage({ method: "play" }, url.origin);
+        }
+      }
       if (!inline && (provider === "youtube" || provider === "vimeo")) {
         const display = timingDisplay(player);
         const timing = createProviderTiming({

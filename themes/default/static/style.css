@@ -162,7 +162,36 @@ html[data-pull-state="settling"] .main {
 }
 @keyframes pull-refresh-spin { to { transform: rotate(360deg); } }
 [hidden] { display: none !important; }
-::selection { background: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--fg); }
+::selection { background: color-mix(in srgb, var(--warm) 32%, transparent); color: var(--fg); }
+
+/* Selecting article text offers one action: a link that reselects the same words for whoever
+   opens it. It follows the selection and never covers it. */
+.selection-share {
+  position: absolute;
+  z-index: 3;
+  display: flex;
+  padding: 0.2rem;
+  border-radius: 0.5rem;
+  background: var(--nav-bg);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
+}
+.selection-share[hidden] { display: none; }
+.selection-share-action {
+  min-height: 2rem;
+  padding: 0 0.85rem;
+  border: 0;
+  border-radius: 0.35rem;
+  background: none;
+  color: var(--nav-fg);
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 2rem;
+  cursor: pointer;
+}
+.selection-share-action:is(:hover, :focus-visible) { background: rgb(255 255 255 / 0.14); }
+@media (prefers-reduced-motion: no-preference) {
+  .selection-share { transition: opacity 0.12s ease; }
+}
 a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 a, button, input, select { -webkit-tap-highlight-color: color-mix(in srgb, var(--accent) 22%, transparent); }
@@ -177,7 +206,7 @@ code { background: var(--code); padding: 0 0.25em; border-radius: 3px; }
 pre { background: var(--code); padding: 0.75rem; overflow: auto; border-radius: 4px; }
 pre code { background: none; padding: 0; }
 .body .code-snippet { display: block; }
-.body .code-snippet::before { content: attr(data-language); display: block; margin-bottom: .65rem; color: var(--muted); font-family: var(--font); font-size: .7rem; font-weight: 400; line-height: 1.3; }
+.body .code-snippet[data-language]::before { content: attr(data-language); display: block; margin-bottom: .65rem; color: var(--muted); font-family: var(--font); font-size: .7rem; font-weight: 400; line-height: 1.3; }
 .body pre code .syntax-comment { color: var(--muted); font-style: italic; }
 .body pre code .syntax-keyword, .body pre code .syntax-storage { color: var(--warm); }
 .body pre code .syntax-string { color: var(--accent-strong); }
@@ -595,10 +624,35 @@ body[data-kind="item"] .main {
 .body :is(h1, h2, h3, h4, h5, h6)[id]::before { content: "#"; position: absolute; right: 100%; top: 0; margin-right: 0.3em; color: var(--muted); font-weight: 400; opacity: 0; pointer-events: none; }
 .body :is(h1, h2, h3, h4, h5, h6)[id]:hover::before { opacity: 1; }
 .body :is(h1, h2, h3, h4, h5, h6)[id]:target::before { opacity: 1; color: var(--accent-strong); }
+.body .article-figure { margin: 1.5em 0; }
+.body .article-figure > .article-picture { margin-block: 0; }
+.body figcaption { margin-top: 0.6em; color: var(--muted); font-size: 0.85em; line-height: 1.5; text-align: center; text-wrap: pretty; }
 .body blockquote { margin: 1.5em 0; padding-inline-start: 1em; border-inline-start: 3px solid var(--faint); color: var(--fg); }
 .body pre { margin-block: 1.5em; max-width: 100%; font-size: 0.875em; line-height: 1.6; tab-size: 4; text-align: left; overflow-wrap: normal; }
-.body table { max-width: 100%; margin-block: 1.5em; border-collapse: collapse; display: block; overflow: auto; font-size: 0.9em; line-height: 1.5; }
+/* A wide table squashed into the reading measure is unreadable, so it borrows the page margins
+   and scrolls only once it outgrows those too. The table itself stays a single layout box so its
+   header and body columns line up. */
+.body .table-scroll {
+  --table-bleed: max(0px, (100cqi - 100%) / 2);
+  box-sizing: border-box;
+  width: calc(100% + 2 * var(--table-bleed));
+  margin-block: 1.5em;
+  margin-inline: calc(-1 * var(--table-bleed));
+  overflow-x: auto;
+}
+.body table {
+  width: 100%;
+  max-width: none;
+  margin-block: 1.5em;
+  border-collapse: collapse;
+  font-size: 0.9em;
+  line-height: 1.5;
+}
+.body .table-scroll > table { margin-block: 0; }
+.body :is(td, th) { min-width: 6.5rem; }
 .body th { text-align: start; background: var(--code); }
+/* A header aggr supplied because the source table had none carries no information. */
+.body thead:not(:has(th:not(:empty))) { display: none; }
 .body > hr:first-child { display: none; }
 .body > hr:first-child + * { margin-top: 0; }
 .body hr { margin-block: 2em; border: 0; border-top: 1px solid var(--faint); }
@@ -944,11 +998,12 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
 @media (max-width: 40rem) {
   .nav { column-gap: 0.2rem; }
   .nav-primary, .nav-actions { column-gap: 0.1rem; }
-  :root { --bottom-nav-offset: calc(57px + var(--mobile-safe-area)); }
+  :root { --bottom-nav-offset: calc(50px + var(--mobile-safe-area)); }
   .nav { flex-wrap: nowrap; }
   .nav .brand { flex: 1; overflow: hidden; }
   .nav .nav-primary, .footer { display: none; }
   .nav-actions { flex: none; }
+  /* Platform tab bars are a compact row above the home indicator, not a tall panel. */
   .mobile-tabs {
     position: fixed; inset: auto 0 0; z-index: 5;
     display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -956,17 +1011,29 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
     border-top: 1px solid var(--faint); background: var(--bg); color: var(--muted);
     contain: layout paint;
   }
+  @supports (backdrop-filter: blur(20px)) {
+    .mobile-tabs {
+      background: color-mix(in srgb, var(--bg) 78%, transparent);
+      backdrop-filter: saturate(180%) blur(20px);
+    }
+  }
   .mobile-tabs a {
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
-    height: 56px; min-width: 0; padding: 4px 0; color: inherit;
-    font-size: 11px; font-weight: 400; line-height: 1.2; text-decoration: none;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+    height: 49px; min-width: 0; padding: 3px 0; color: inherit;
+    font-size: 10px; font-weight: 500; line-height: 1.2; text-decoration: none;
+    letter-spacing: 0.01em;
     touch-action: manipulation; -webkit-user-select: none; user-select: none;
   }
   .mobile-tabs a:active { opacity: 1; background: color-mix(in srgb, var(--warm) 12%, var(--bg)); }
+  /* Colour alone marks the current tab, the way a platform tab bar does. */
   .mobile-tabs a[aria-current] { color: var(--warm); }
-  .mobile-tabs a[aria-current] span { text-decoration: underline; text-underline-offset: 3px; }
   .mobile-tabs a:focus-visible { outline: 2px solid var(--warm); outline-offset: -3px; }
   .mobile-tabs[data-keyboard-open] { visibility: hidden; pointer-events: none; }
+  /* Touch reading: links read as links by colour, without the desktop underline, and taps do not
+     flash the platform's default highlight rectangle. */
+  .body a, .body a:hover { text-decoration: none; }
+  .body a:focus-visible { text-decoration: underline; text-decoration-thickness: 0.12em; }
+  :is(a, button, summary, [role="button"]) { -webkit-tap-highlight-color: transparent; }
   .feed-search input[type="search"] { font-size: 1rem; }
   .row .rank { display: none; }
   .row-heading { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }

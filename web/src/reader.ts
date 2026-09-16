@@ -15,6 +15,7 @@ import { mountConnectionStatus } from "./status";
 import { mountShortcutHelp } from "./shortcuts";
 import { createNavigation, enqueuePrefetch, mountMobileNavigation } from "./navigation";
 import { createSelection, selectedLink } from "./selection";
+import { mountSelectionSharing } from "./share-selection";
 (function () {
   "use strict";
   // Cache the server-rendered page before enhancement adds binding flags or transient UI.
@@ -1261,6 +1262,7 @@ import { createSelection, selectedLink } from "./selection";
     enhancePreviewMedia($("#swup") || document);
     enhanceVideoPlayer();
     enhanceArticleMedia($("#swup") || document);
+    mountSelectionSharing($("#swup") || document, pageScope.signal);
     wireArticleHeader();
     externalLinks(pageEpoch ? $("#swup") || document : document);
     fillSearch();

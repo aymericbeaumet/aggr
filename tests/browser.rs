@@ -5170,7 +5170,7 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
     search_query(client, "\"cobalt marmalade\"", 1).await?;
     wait_for(
         client,
-        "document.querySelector('.search-results [data-saved-offline=false]')",
+        "document.querySelector('.search-results [data-row-open]') && !document.querySelector('.search-results .search-saved-status')",
     )
     .await?;
     anyhow::ensure!(
@@ -5534,7 +5534,7 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
     )
     .await?;
     search_query(client, "\"cobalt marmalade\"", 1).await?;
-    anyhow::ensure!(client.execute("return document.querySelector('.search-results [data-saved-offline=false]')!==null",vec![]).await?==true,"falling back to the older complete index does not mark uncached articles saved");
+    anyhow::ensure!(client.execute("return document.querySelector('.search-results [data-row-open]')!==null && document.querySelector('.search-results .search-saved-status')===null",vec![]).await?==true,"falling back to the older complete index does not mark uncached articles saved");
     client
         .goto(&format!("{}preferences/", fixture.base))
         .await?;

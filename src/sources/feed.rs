@@ -43,7 +43,7 @@ pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetc
             return Err(primary).context("fetching the configured URL and common feed endpoints");
         }
     };
-    interpret(response, source, ctx, previous).await
+    interpret(response, source, ctx, previous, remembered.is_none()).await
 }
 
 async fn fetch_local(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
@@ -133,7 +133,7 @@ async fn fetch_fresh(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fe
             return Err(primary).context("fetching the configured URL and common feed endpoints");
         }
     };
-    interpret(response, source, ctx, Validators::default()).await
+    interpret(response, source, ctx, Validators::default(), true).await
 }
 
 pub(super) async fn request(
@@ -172,6 +172,7 @@ async fn interpret(
     source: &Source,
     ctx: &Context<'_>,
     previous: Validators,
+    first_discovery: bool,
 ) -> Result<Fetch> {
     let body = match response {
         Response::NotModified => {
@@ -241,6 +242,21 @@ async fn interpret(
             items,
         });
     }
+    if super::podcast::is_deezer_show(&body.final_url) {
+        let (meta, items) = super::podcast::deezer_items(&page, &body.final_url)?;
+        return Ok(Fetch::Changed {
+            validators,
+            meta,
+            items,
+        });
+    }
+
+    // A real feed beats heuristic card extraction, so probe the conventional endpoints before
+    // reading the listing. Only the first resolution pays for it: afterwards the source remembers
+    // whichever endpoint answered.
+    if first_discovery && let Some(discovered) = discover_at(&body.final_url, source, ctx).await {
+        return Ok(discovered);
+    }
 
     match crate::sources::html::extract(&page, &body.final_url) {
         Ok((meta, items)) => Ok(Fetch::Changed {
@@ -306,8 +322,26 @@ fn supplement_json_images(bytes: &[u8], base: &Url, items: &mut [RawItem]) {
     }
 }
 
+/// Conventional feed endpoints under the configured section only: a site-wide feed found at the
+/// root would quietly replace the section the user asked for.
+async fn discover_at(url: &Url, source: &Source, ctx: &Context<'_>) -> Option<Fetch> {
+    // A listing that reads fine is only worth replacing by a feed that actually carries entries:
+    // sites routinely keep an empty stock feed beside the posts they really publish.
+    probe_feeds(section_feed_urls(url), url, source, ctx, true).await
+}
+
 async fn discover_common(url: &Url, source: &Source, ctx: &Context<'_>) -> Option<Fetch> {
-    for candidate in common_feed_urls(url) {
+    probe_feeds(common_feed_urls(url), url, source, ctx, false).await
+}
+
+async fn probe_feeds(
+    candidates: Vec<Url>,
+    url: &Url,
+    source: &Source,
+    ctx: &Context<'_>,
+    require_entries: bool,
+) -> Option<Fetch> {
+    for candidate in candidates {
         if candidate == *url {
             continue;
         }
@@ -329,6 +363,10 @@ async fn discover_common(url: &Url, source: &Source, ctx: &Context<'_>) -> Optio
                 continue;
             }
         };
+        if require_entries && feed.entries.is_empty() {
+            log::debug!("{}: common feed {candidate} is empty", source.slug);
+            continue;
+        }
         return Some(changed(
             feed,
             &body.final_url,
@@ -344,7 +382,8 @@ async fn discover_common(url: &Url, source: &Source, ctx: &Context<'_>) -> Optio
     None
 }
 
-fn common_feed_urls(page: &Url) -> Vec<Url> {
+fn section_feed_urls(page: &Url) -> Vec<Url> {
+    let base = as_directory(page);
     let mut urls = Vec::new();
     for name in [
         "rss.xml",
@@ -355,16 +394,40 @@ fn common_feed_urls(page: &Url) -> Vec<Url> {
         "feed",
         "rss",
     ] {
-        if let Ok(url) = page.join(name) {
+        if let Ok(url) = base.join(name) {
             urls.push(url);
         }
     }
+    dedupe(urls)
+}
+
+fn common_feed_urls(page: &Url) -> Vec<Url> {
+    let mut urls = section_feed_urls(page);
     if let Ok(mut root) = page.join("/") {
         for name in ["feed.xml", "rss.xml", "atom.xml", "feed.atom", "index.xml"] {
             root.set_path(&format!("/{name}"));
             urls.push(root.clone());
         }
     }
+    dedupe(urls)
+}
+
+/// A listing URL names a section, so `…/blog` and `…/blog/` must resolve the same candidates.
+/// A final segment carrying an extension is a document and keeps its parent as the base.
+fn as_directory(page: &Url) -> Url {
+    let last = page
+        .path_segments()
+        .and_then(Iterator::last)
+        .unwrap_or_default();
+    if last.is_empty() || last.contains('.') {
+        return page.clone();
+    }
+    let mut directory = page.clone();
+    directory.set_path(&format!("{}/", page.path()));
+    directory
+}
+
+fn dedupe(mut urls: Vec<Url>) -> Vec<Url> {
     let mut seen = std::collections::HashSet::new();
     urls.retain(|url| seen.insert(url.as_str().to_owned()));
     urls
@@ -1274,6 +1337,44 @@ Second paragraph.</media:description></media:group>
     }
 
     #[test]
+    fn conventional_feed_endpoints_treat_a_listing_path_as_a_section() {
+        let expected = [
+            "https://example.com/blog/rss.xml",
+            "https://example.com/blog/feed.xml",
+            "https://example.com/blog/atom.xml",
+            "https://example.com/blog/feed.atom",
+            "https://example.com/blog/index.xml",
+            "https://example.com/blog/feed",
+            "https://example.com/blog/rss",
+        ];
+        for page in ["https://example.com/blog", "https://example.com/blog/"] {
+            let urls = section_feed_urls(&Url::parse(page).unwrap());
+            assert_eq!(
+                urls.iter().map(Url::as_str).collect::<Vec<_>>(),
+                expected,
+                "{page}"
+            );
+        }
+        // A section probe never reaches the root: a site-wide feed is not what the user asked for.
+        assert!(
+            section_feed_urls(&Url::parse("https://example.com/blog").unwrap())
+                .iter()
+                .all(|url| url.path().starts_with("/blog/"))
+        );
+        assert!(
+            common_feed_urls(&Url::parse("https://example.com/blog").unwrap())
+                .iter()
+                .any(|url| url.path() == "/feed.xml")
+        );
+        // A document keeps its directory as the base instead of growing a segment.
+        assert!(
+            section_feed_urls(&Url::parse("https://example.com/blog/index.html").unwrap())
+                .iter()
+                .all(|url| url.path().starts_with("/blog/") && !url.path().contains("index.html"))
+        );
+    }
+
+    #[test]
     fn json_feed_images_survive_feed_rs_conversion() {
         let url = Url::parse("https://example.com/feed.json").unwrap();
         let bytes = br#"{"version":"https://jsonfeed.org/version/1.1","title":"Example","items":[{"id":"post","url":"https://example.com/post","content_text":"Body","image":"/image.jpg","banner_image":"/banner.webp"}]}"#;
@@ -1422,6 +1523,56 @@ Second paragraph.</media:description></media:group>
         assert_eq!(
             validators.resolved_url.as_deref(),
             Some(configured.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_section_url_prefers_its_conventional_feed_over_article_cards() {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/news");
+                then.status(200).body(
+                    "<title>News</title><article><h2><a href=\"/news/one\">One story</a></h2><time datetime=\"2026-09-02\"></time></article>",
+                );
+            })
+            .await;
+        // The first conventional candidate exists but publishes nothing, so probing continues.
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/news/rss.xml");
+                then.status(200)
+                    .body("<rss version=\"2.0\"><channel><title>Empty</title></channel></rss>");
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/news/feed.xml");
+                then.status(200).body(
+                    "<rss version=\"2.0\"><channel><title>News</title><item><title>One story</title><link>https://example.com/news/one</link></item></channel></rss>",
+                );
+            })
+            .await;
+        let configured = Url::parse(&server.url("/news")).unwrap();
+        let source = source(configured.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let state = crate::store::SourceState::default();
+        let cache = tempfile::tempdir().unwrap();
+        let ctx = Context {
+            client: &client,
+            state: &state,
+            cache_dir: cache.path(),
+        };
+        let Fetch::Changed {
+            items, validators, ..
+        } = fetch(&configured, &source, &ctx).await.unwrap()
+        else {
+            panic!("expected the discovered feed");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            validators.resolved_url.as_deref(),
+            Some(server.url("/news/feed.xml").as_str())
         );
     }
 }

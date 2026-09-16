@@ -82,6 +82,7 @@ struct Options {
     existing_paths: Arc<OnceCell<ExistingPaths>>,
     dry_run: bool,
     refresh: bool,
+    reprocess: bool,
     html: bool,
     html_max_bytes: usize,
     article_concurrency: usize,
@@ -124,6 +125,7 @@ pub async fn run_with_cache(
         existing_paths: Arc::new(OnceCell::new_with(Some(existing_paths))),
         dry_run: args.dry_run,
         refresh: args.refresh,
+        reprocess: args.reprocess,
         html: project.config.store.html,
         html_max_bytes: project.config.store.html_max_bytes,
         article_concurrency: project.config.fetch.article_concurrency,
@@ -1021,7 +1023,8 @@ async fn fetch_one_inner(
     let duration_repairs = repair_recordings(source, &context, transaction.as_deref_mut()).await?;
     let repaired = duration_repairs
         + repair_feed_captures(source, &context, transaction.as_deref_mut()).await?
-        + repair_archived_images(source, store, options, transaction.as_deref_mut()).await?;
+        + repair_archived_images(source, store, options, transaction.as_deref_mut()).await?
+        + reprocess_stored_bodies(source, store, options, transaction.as_deref_mut())?;
     report.added += repaired;
     report.unchanged &= repaired == 0;
     visible_change |= repaired > 0;
@@ -1055,6 +1058,76 @@ fn merge_image_metadata(
             metadata.push(next);
         }
     }
+}
+
+/// Re-derive stored bodies from the HTML retained beside them. Content cleanup added after an item
+/// was captured cannot reach it any other way: its source eventually stops listing it, and a build
+/// never overrides a stored body. Explicit, like `--refresh`, because it discards hand edits, and
+/// bounded to items whose retained HTML is complete so a body can never come back shorter.
+fn reprocess_stored_bodies(
+    source: &Source,
+    store: &Store,
+    options: &Options,
+    mut transaction: Option<&mut SourceTransaction>,
+) -> Result<usize> {
+    if !options.reprocess || options.dry_run {
+        return Ok(0);
+    }
+    let Some(index) = options
+        .existing_paths
+        .get()
+        .and_then(|index| index.items.get(&source.slug))
+    else {
+        return Ok(0);
+    };
+    let mut rewritten = 0;
+    for path in index.values().collect::<BTreeSet<_>>() {
+        let existing = store.read_item(path)?;
+        if existing.front.source != source.slug || existing.front.html_truncated {
+            continue;
+        }
+        let Some(html) = store.read_html(&existing)? else {
+            continue;
+        };
+        let base = url::Url::parse(&existing.front.link).ok();
+        let body = content::strip_article_metadata(
+            &content::to_markdown(&html, base.as_ref()),
+            existing.front.published,
+            &source.slug,
+        );
+        if body == existing.body || body.trim().is_empty() {
+            continue;
+        }
+        let mut planned = Planned {
+            dir: String::new(),
+            stem: String::new(),
+            front: existing.front,
+            body,
+            html: None,
+        };
+        use_existing_path(&mut planned, path)?;
+        if let Some(transaction) = transaction.as_deref_mut() {
+            transaction.track_item(&planned, &RawItem::default())?;
+        }
+        store.write_item(NewItem {
+            dir: &planned.dir,
+            stem: &planned.stem,
+            front: &planned.front,
+            body: &planned.body,
+            html: None,
+            preview: None,
+            images: &[],
+        })?;
+        log::debug!("{}: re-derived the stored body for {path}", source.slug);
+        rewritten += 1;
+    }
+    if rewritten > 0 {
+        log::info!(
+            "{}: re-derived {rewritten} stored article body(ies)",
+            source.slug
+        );
+    }
+    Ok(rewritten)
 }
 
 async fn repair_archived_images(
@@ -2454,6 +2527,7 @@ mod tests {
             existing_paths: Arc::default(),
             dry_run: false,
             refresh: false,
+            reprocess: false,
             html: true,
             html_max_bytes: 1000,
             article_concurrency: 4,
@@ -2897,6 +2971,115 @@ mod tests {
         assert_eq!(missing.calls_async().await, 14);
         assert_eq!(inaccessible.calls_async().await, 1);
         assert_eq!(feed.calls_async().await, 2);
+    }
+
+    #[test]
+    fn reprocess_re_derives_stored_bodies_from_retained_html() {
+        // An item captured before a cleanup rule existed: blog.google's audio player survived into
+        // the stored body, and the source has long since stopped listing the article.
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path());
+        let html = "<div data-component=\"uni-audio-player-tts\"><p><audio title=\"Listen\"><source src=\"https://cdn.example/a.mp3\" type=\"audio/mpeg\"><p>Your browser does not support the audio element.</p></audio></p><div><p>Listen to article</p><p>[[duration]] minutes</p></div></div><p>Today, we are launching the app.</p>";
+        let stale = "Your browser does not support the audio element.\n\nListen to article\n\n\\[\\[duration\\]\\] minutes\n\nToday, we are launching the app.\n";
+        let front = FrontMatter {
+            source: "blog".into(),
+            title: "Launch".into(),
+            link: "https://blog.example/launch".into(),
+            content: ContentKind::Extracted,
+            html: Some("launch.html".into()),
+            ..Default::default()
+        };
+        store
+            .write_item(NewItem {
+                dir: "items/blog",
+                stem: "launch",
+                front: &front,
+                body: stale,
+                html: Some(html),
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+
+        let configured = source();
+        let (_, archive) = index_archive(store.items().unwrap());
+        let idle = Options {
+            existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+            ..options()
+        };
+        // Without the flag nothing is touched, however stale the body is.
+        assert_eq!(
+            reprocess_stored_bodies(&configured, &store, &idle, None).unwrap(),
+            0
+        );
+        assert_eq!(store.read_item("items/blog/launch").unwrap().body, stale);
+
+        let (_, archive) = index_archive(store.items().unwrap());
+        let reprocessing = Options {
+            existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+            reprocess: true,
+            ..options()
+        };
+        assert_eq!(
+            reprocess_stored_bodies(&configured, &store, &reprocessing, None).unwrap(),
+            1
+        );
+        let repaired = store.read_item("items/blog/launch").unwrap();
+        assert_eq!(repaired.body, "Today, we are launching the app.\n");
+        // The retained HTML and the front matter are left exactly as they were.
+        assert_eq!(store.read_html(&repaired).unwrap().as_deref(), Some(html));
+        assert_eq!(repaired.front.title, front.title);
+        assert_eq!(repaired.front.html.as_deref(), Some("launch.html"));
+
+        // A second run has nothing left to do.
+        let (_, archive) = index_archive(store.items().unwrap());
+        let again = Options {
+            existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+            reprocess: true,
+            ..options()
+        };
+        assert_eq!(
+            reprocess_stored_bodies(&configured, &store, &again, None).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn reprocess_never_shortens_an_item_whose_retained_html_was_truncated() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path());
+        let body = "The complete article body, longer than what was retained.\n";
+        let front = FrontMatter {
+            source: "blog".into(),
+            title: "Long".into(),
+            link: "https://blog.example/long".into(),
+            content: ContentKind::Extracted,
+            html: Some("long.html".into()),
+            html_truncated: true,
+            ..Default::default()
+        };
+        store
+            .write_item(NewItem {
+                dir: "items/blog",
+                stem: "long",
+                front: &front,
+                body,
+                html: Some("<p>The complete article"),
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let (_, archive) = index_archive(store.items().unwrap());
+        let reprocessing = Options {
+            existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+            reprocess: true,
+            ..options()
+        };
+        assert_eq!(
+            reprocess_stored_bodies(&source(), &store, &reprocessing, None).unwrap(),
+            0
+        );
+        assert_eq!(store.read_item("items/blog/long").unwrap().body, body);
     }
 
     #[test]

@@ -134,8 +134,15 @@ The default theme uses plain links, a responsive header with visible navigation,
 column of approximately 65 characters. Its warm light/dark palettes, focus styling, and code
 colors are defined in `static/style.css`. Code is highlighted during Rust rendering with `syntax-`
 span classes and a small `.code-snippet[data-language]` label. Publisher language hints take
-precedence over conservative detection; ambiguous or unsupported snippets remain plain text.
-Labels are CSS-generated so copied code stays unchanged. No client-side highlighter is loaded.
+precedence over conservative detection; a snippet whose language stays ambiguous carries no
+`data-language` attribute at all, so the label disappears rather than reading “Text”. Labels are
+CSS-generated so copied code stays unchanged. No client-side highlighter is loaded.
+
+A figure and its caption render as `figure.article-figure` wrapping the picture and a `figcaption`.
+Tables are wrapped in `div.table-scroll`, which borrows the page margins and scrolls; the table
+itself stays one layout box so its header and body columns line up, and a header row aggr supplied
+for a source table that had none is hidden. Selecting article text mounts a
+`.selection-share` toolbar; see [the reader](reading.md#sharing-a-passage).
 
 When extending the default script, keep these relationships intact:
 
@@ -189,7 +196,7 @@ scrolls instantly to the top, accounting for the sticky header and mobile viewpo
 `O` opens the original and configured uppercase discussion shortcuts target the selected feed
 result or current article. The separate
 directories do not have local filters.
-The [README keyboard map](../readme.md#read-comfortably) describes the controls.
+The [reader keyboard map](reading.md#keyboard) describes the controls.
 
 Keep keyboard focus visible with an underline or contrasting surface. The default script marks
 programmatic main focus with `data-navigation-focus`, suppressing only the large container

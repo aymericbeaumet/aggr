@@ -167,6 +167,12 @@ image decoding (including PNG filtering), regular-expression matching, and SHA-1
 unoptimized development build. Warm asset validation still reads and SHA-256 hashes retained bytes; receipts reuse the previously
 verified SHA-1 asset identities without a second byte pass.
 
+The profile emits line tables instead of full DWARF. Backtraces and profiles keep file and line
+information, while the debug information that dominated linking is gone: a one-line edit to
+`src/main.rs` rebuilds in about 6 s instead of about 19 s on an M-series laptop, which is what
+`cargo run -- dev` pays on every restart. Use `RUSTFLAGS="-g"` for a session that needs full
+variable inspection under a debugger.
+
 Keep the local `target/` directory between edits. Cargo enables incremental compilation for the
 application by default; changing compiler flags, profiles, or target directories can discard that
 benefit. `make timings` writes Cargo's HTML timing report under `target/cargo-timings/`. Compare a

@@ -101,6 +101,12 @@ pub fn extract_article(page: &str, url: &Url) -> Result<ExtractedArticle> {
     readability.doc.select(
         "figure:has(img):has(figcaption), div.figure:has(img):has(figcaption, .photoCaption, .caption)",
     ).add_class("readability-content");
+    // A caption that repeats its image's alt text is marked `aria-hidden` by some generators, and
+    // Readability drops hidden nodes. On the page it is visible text, so keep it.
+    readability
+        .doc
+        .select("figcaption[aria-hidden]")
+        .remove_attr("aria-hidden");
     // Keep the semantic article above equally scored figure siblings. Otherwise a score tie
     // can select a figure and discard unscored neighboring figures.
     readability
@@ -189,7 +195,7 @@ fn embedded_chart_spec(payload: &str, id: &str) -> Option<serde_json::Value> {
     value.get("data")?.get("vegaLiteSpec").cloned()
 }
 
-fn balanced_json_object(text: &str) -> Option<&str> {
+pub(crate) fn balanced_json_object(text: &str) -> Option<&str> {
     let mut depth = 0usize;
     let mut in_string = false;
     let mut escaped = false;
@@ -794,7 +800,23 @@ fn best_srcset_candidate(srcset: &str) -> Option<String> {
 fn safe_image_candidate(value: &str) -> Option<String> {
     let value = decode_entities(value);
     let value = value.trim();
-    (!value.is_empty() && !is_active_url(value)).then(|| value.to_string())
+    if value.is_empty() || is_active_url(value) {
+        return None;
+    }
+    Some(responsive_json_candidate(value).unwrap_or_else(|| value.to_string()))
+}
+
+/// Some templates leak their unrendered responsive source map into the attribute, leaving a URL
+/// with a JSON object glued to it. The widest declared rendition is the one a reader wants.
+fn responsive_json_candidate(value: &str) -> Option<String> {
+    let object = balanced_json_object(&value[value.find('{')?..])?;
+    let sources: std::collections::BTreeMap<String, String> = serde_json::from_str(object).ok()?;
+    ["desktop", "tablet", "mobile"]
+        .into_iter()
+        .find_map(|key| sources.get(key))
+        .or_else(|| sources.values().next())
+        .map(String::from)
+        .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
 }
 
 fn set_attribute(tag: &str, name: &str, value: &str) -> String {
@@ -830,7 +852,10 @@ pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
     let description = normalize_youtube_description(html, base);
     let normalized_images = normalize_image_sources(&description);
     let passive = strip_active_content(&normalized_images);
-    let normalized = normalize_extracted_controls(&normalize_code_blocks(&passive));
+    let document = normalize_document_footnotes(&normalize_code_blocks(&normalize_code_tables(
+        &normalize_figure_captions(&strip_audio_players(&passive)),
+    )));
+    let normalized = normalize_extracted_controls(&document.html, document.footnotes);
     let clean = sanitize(&restore_inline_layout_boundaries(&normalized.html), base);
     let converter = htmd::HtmlToMarkdown::builder()
         .options(htmd::options::Options {
@@ -1047,6 +1072,213 @@ fn escape_html(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+/// Highlighters routinely lay a listing out as a table with a line-number gutter. Read as a table
+/// each line becomes its own row, so the snippet arrives as alternating numbers and fragments;
+/// rebuilt as a code block it keeps its indentation, its language and its copyability.
+fn normalize_code_tables(html: &str) -> String {
+    if !html.contains("<table") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        let listing = parse_tag(&html[start..])
+            .filter(|tag| !tag.closing && tag.name == "table")
+            .and_then(|_| element_bounds(html, start, "table"))
+            .and_then(|(.., end)| {
+                let table = &html[start..end];
+                Some((code_table(table).or_else(|| headed_table(table))?, end))
+            });
+        match listing {
+            Some((code, end)) => {
+                out.push_str(&code);
+                position = end;
+            }
+            None => {
+                out.push('<');
+                position = start + 1;
+            }
+        }
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// The `<pre><code>` replacement for a table that is really a numbered listing, or `None` when the
+/// table carries data a reader needs to keep as a table.
+fn code_table(table: &str) -> Option<String> {
+    let fragment = Html::parse_fragment(table);
+    if fragment
+        .select(&Selector::parse("th").ok()?)
+        .next()
+        .is_some()
+    {
+        return None;
+    }
+    let cells = Selector::parse("td").ok()?;
+    let rows: Vec<Vec<_>> = fragment
+        .select(&Selector::parse("tr").ok()?)
+        .map(|row| row.select(&cells).collect())
+        .collect();
+    if rows.is_empty() || rows.iter().any(|row| row.len() != 2) {
+        return None;
+    }
+    // A single row keeps the gutter and the listing whole in two cells; otherwise every line is
+    // its own row. Either way the numbers must run consecutively, which data never does by chance.
+    if rows.len() == 1 {
+        let numbers = element_text(&rows[0][0]);
+        let mut numbers = numbers.split_whitespace().map(str::parse::<i64>);
+        let first = numbers.next()?.ok()?;
+        let mut expected = first;
+        for number in numbers {
+            expected += 1;
+            if number.ok()? != expected {
+                return None;
+            }
+        }
+        if expected == first
+            || rows[0][1]
+                .select(&Selector::parse("pre").ok()?)
+                .next()
+                .is_none()
+        {
+            return None;
+        }
+        return Some(rows[0][1].inner_html());
+    }
+    let mut expected = None;
+    let mut lines = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let number: i64 = element_text(&row[0]).trim().parse().ok()?;
+        if expected
+            .replace(number + 1)
+            .is_some_and(|next| next != number)
+        {
+            return None;
+        }
+        lines.push(element_text(&row[1]));
+    }
+    Some(format!(
+        "<pre><code>{}</code></pre>",
+        escape_html(&lines.join("\n"))
+    ))
+}
+
+/// Markdown tables need a header row, so a table that has none degrades into a run of loose
+/// paragraphs. Give it an empty one and the rows stay a table.
+fn headed_table(table: &str) -> Option<String> {
+    let fragment = Html::parse_fragment(table);
+    if fragment
+        .select(&Selector::parse("th").ok()?)
+        .next()
+        .is_some()
+    {
+        return None;
+    }
+    let columns = fragment
+        .select(&Selector::parse("tr").ok()?)
+        .map(|row| row.select(&Selector::parse("td").unwrap()).count())
+        .max()
+        .filter(|columns| *columns > 0)?;
+    let header = "<th></th>".repeat(columns);
+    let (inner, closing, _) = element_bounds(table, 0, "table")?;
+    Some(format!(
+        "{}<thead><tr>{header}</tr></thead>{}{}",
+        &table[..inner],
+        &table[inner..closing],
+        &table[closing..]
+    ))
+}
+
+/// Text content with explicit line breaks preserved, as a code listing needs.
+fn element_text(element: &scraper::ElementRef<'_>) -> String {
+    let mut text = String::new();
+    for node in element.descendants() {
+        match node.value() {
+            scraper::Node::Text(value) => text.push_str(value),
+            scraper::Node::Element(element) if element.name() == "br" => text.push('\n'),
+            _ => {}
+        }
+    }
+    text
+}
+
+/// Keep a figure's caption attached to its media. Markdown has no figure, so the caption becomes a
+/// hard line break after the image — portable Markdown reads correctly, and the reader's renderer
+/// puts the pair back together as a real `<figure>`.
+fn normalize_figure_captions(html: &str) -> String {
+    if !html.contains("<figcaption") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|at| position + at) {
+        out.push_str(&html[position..start]);
+        let caption = parse_tag(&html[start..])
+            .filter(|tag| !tag.closing && tag.name == "figcaption")
+            .and_then(|_| element_bounds(html, start, "figcaption"));
+        match caption {
+            Some((inner, closing, end))
+                if !html_to_text(&html[inner..closing]).trim().is_empty() =>
+            {
+                out.push_str("<br>");
+                out.push_str(&html[inner..closing]);
+                position = end;
+            }
+            _ => {
+                out.push('<');
+                position = start + 1;
+            }
+        }
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// Mailing-list archives wrap a whole message in one `<pre>`, navigation bar included. A first or
+/// last line made only of bracketed labels, at least one of them a link, is that bar and not code.
+fn strip_listing_navigation(inner: &str) -> &str {
+    let mut body = inner;
+    loop {
+        let trimmed = body.trim_matches(['\n', '\r']);
+        let head = trimmed.split_once('\n').map_or(trimmed, |(head, _)| head);
+        let tail = trimmed.rsplit_once('\n').map_or(trimmed, |(_, tail)| tail);
+        let next = if is_bracketed_navigation(head) {
+            trimmed.split_once('\n').map_or("", |(_, rest)| rest)
+        } else if trimmed.contains('\n') && is_bracketed_navigation(tail) {
+            trimmed.rsplit_once('\n').map_or("", |(rest, _)| rest)
+        } else {
+            return trimmed;
+        };
+        if next.len() == body.len() {
+            return trimmed;
+        }
+        body = next;
+    }
+}
+
+fn is_bracketed_navigation(line: &str) -> bool {
+    if !line.contains("<a ") {
+        return false;
+    }
+    let text = html_to_text(line);
+    let mut rest = text.trim();
+    if rest.is_empty() {
+        return false;
+    }
+    while let Some(after) = rest.strip_prefix('[') {
+        let Some((label, tail)) = after.split_once(']') else {
+            return false;
+        };
+        if label.len() > 40 {
+            return false;
+        }
+        rest = tail.trim_start();
+    }
+    rest.is_empty()
+}
+
 /// Flatten highlighting wrappers before htmd can trim the line endings inside their spans.
 fn normalize_code_blocks(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
@@ -1056,9 +1288,10 @@ fn normalize_code_blocks(html: &str) -> String {
         if let Some(tag) = parse_tag(&html[start..])
             && !tag.closing
             && tag.name == "pre"
-            && let Some((_, _, end)) = element_bounds(html, start, "pre")
+            && let Some((inner, closing, end)) = element_bounds(html, start, "pre")
         {
-            let fragment = Html::parse_fragment(&html[start..end]);
+            let body = strip_listing_navigation(&html[inner..closing]);
+            let fragment = Html::parse_fragment(&format!("<pre>{body}</pre>"));
             let language = Selector::parse("code,pre")
                 .ok()
                 .and_then(|selector| fragment.select(&selector).find_map(code_language));
@@ -1135,12 +1368,256 @@ struct NormalizedHtml {
     footnotes: Vec<String>,
 }
 
+/// Standard document footnotes: numbered references pointing at an endnotes list in the same page.
+/// Without this the reference degrades to a bare number linking off-site and the notes pile up as a
+/// loose trailing list, so both halves are rebuilt as real Markdown footnotes.
+fn normalize_document_footnotes(html: &str) -> NormalizedHtml {
+    let Some(notes_range) = endnotes_bounds(html) else {
+        return NormalizedHtml {
+            html: html.to_string(),
+            footnotes: Vec::new(),
+        };
+    };
+    let (notes_start, notes_end) = (notes_range.start, notes_range.end);
+    let notes = endnote_items(&html[notes_range.inner]);
+    if notes.is_empty() {
+        return NormalizedHtml {
+            html: html.to_string(),
+            footnotes: Vec::new(),
+        };
+    }
+
+    let document = format!("{}{}", &html[..notes_start], &html[notes_end..]);
+    let mut out = String::with_capacity(document.len());
+    let mut used = vec![false; notes.len()];
+    let mut position = 0;
+    while let Some(tag_start) = document[position..].find('<').map(|at| position + at) {
+        out.push_str(&document[position..tag_start]);
+        let Some(tag) = parse_tag(&document[tag_start..]) else {
+            out.push('<');
+            position = tag_start + 1;
+            continue;
+        };
+        let Some(tag_len) = tag.end else {
+            out.push_str(&document[tag_start..]);
+            position = document.len();
+            break;
+        };
+        // A reference is an anchor into the endnotes list, usually wrapped in its own superscript.
+        let reference = (!tag.closing && matches!(tag.name.as_str(), "a" | "sup"))
+            .then(|| footnote_reference(&document, tag_start, &tag.name, &notes))
+            .flatten();
+        match reference {
+            Some((index, end)) => {
+                used[index] = true;
+                out.push(FOOTNOTE_REF_START);
+                out.push_str(&(index + 1).to_string());
+                out.push(FOOTNOTE_REF_END);
+                position = end;
+            }
+            None => {
+                out.push_str(&document[tag_start..tag_start + tag_len]);
+                position = tag_start + tag_len;
+            }
+        }
+    }
+    out.push_str(&document[position..]);
+
+    // An endnote nothing refers to would silently disappear; keep the original document instead.
+    if used.iter().any(|used| !used) {
+        return NormalizedHtml {
+            html: html.to_string(),
+            footnotes: Vec::new(),
+        };
+    }
+    NormalizedHtml {
+        html: out,
+        footnotes: notes.into_iter().map(|(_, note)| note).collect(),
+    }
+}
+
+struct ElementRange {
+    start: usize,
+    inner: std::ops::Range<usize>,
+    end: usize,
+}
+
+/// Longest wrapper text still considered player chrome rather than article prose.
+const PLAYER_CHROME_CHARS: usize = 400;
+
+/// Reader bodies are Markdown, so an `<audio>` element has no player: all that survives is its
+/// "your browser does not support" fallback and the labels around it. Drop the element, and its
+/// wrapper too when the wrapper holds nothing but that chrome.
+fn strip_audio_players(html: &str) -> String {
+    if !html.contains("<audio") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(tag_start) = html[position..].find('<').map(|at| position + at) {
+        out.push_str(&html[position..tag_start]);
+        let Some(tag) = parse_tag(&html[tag_start..]) else {
+            out.push('<');
+            position = tag_start + 1;
+            continue;
+        };
+        let Some(tag_len) = tag.end else {
+            out.push_str(&html[tag_start..]);
+            position = html.len();
+            break;
+        };
+        let dropped = (!tag.closing && !tag.self_closing)
+            .then(|| match tag.name.as_str() {
+                "audio" => element_bounds(html, tag_start, "audio").map(|(.., end)| end),
+                "div" | "section" | "figure" | "aside" | "p" => {
+                    let (inner, closing, end) = element_bounds(html, tag_start, &tag.name)?;
+                    let content = &html[inner..closing];
+                    (content.contains("<audio")
+                        && html_to_text(content).chars().count() <= PLAYER_CHROME_CHARS)
+                        .then_some(end)
+                }
+                _ => None,
+            })
+            .flatten();
+        match dropped {
+            Some(end) => position = end,
+            None => {
+                out.push_str(&html[tag_start..tag_start + tag_len]);
+                position = tag_start + tag_len;
+            }
+        }
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// The endnotes container Readability keeps at the end of the article.
+fn endnotes_bounds(html: &str) -> Option<ElementRange> {
+    let mut position = 0;
+    while let Some(tag_start) = html[position..].find('<').map(|at| position + at) {
+        let Some(tag) = parse_tag(&html[tag_start..]) else {
+            position = tag_start + 1;
+            continue;
+        };
+        let Some(tag_len) = tag.end else {
+            break;
+        };
+        let tag_html = &html[tag_start..tag_start + tag_len];
+        if !tag.closing
+            && matches!(tag.name.as_str(), "div" | "section" | "aside" | "ol")
+            && (has_class(tag_html, "footnotes")
+                || attribute_value(tag_html, "role") == Some("doc-endnotes"))
+            && let Some((inner, closing, end)) = element_bounds(html, tag_start, &tag.name)
+        {
+            return Some(ElementRange {
+                start: tag_start,
+                inner: inner..closing,
+                end,
+            });
+        }
+        position = tag_start + tag_len;
+    }
+    None
+}
+
+/// `(anchor id, note HTML)` for each list item in the endnotes container, in document order.
+fn endnote_items(inner: &str) -> Vec<(String, String)> {
+    let mut notes = Vec::new();
+    let mut position = 0;
+    while let Some(tag_start) = inner[position..].find('<').map(|at| position + at) {
+        let Some(tag) = parse_tag(&inner[tag_start..]) else {
+            position = tag_start + 1;
+            continue;
+        };
+        let Some(tag_len) = tag.end else {
+            break;
+        };
+        if tag.closing || tag.name != "li" {
+            position = tag_start + tag_len;
+            continue;
+        }
+        let Some((content, closing, end)) = element_bounds(inner, tag_start, "li") else {
+            position = tag_start + tag_len;
+            continue;
+        };
+        let id = attribute_value(&inner[tag_start..tag_start + tag_len], "id").unwrap_or_default();
+        if id.is_empty() {
+            return Vec::new();
+        }
+        notes.push((
+            id.to_string(),
+            strip_backreferences(&inner[content..closing]),
+        ));
+        position = end;
+    }
+    notes
+}
+
+/// The `↩` link back to the reference is navigation, not note content.
+fn strip_backreferences(note: &str) -> String {
+    let mut out = String::with_capacity(note.len());
+    let mut position = 0;
+    while let Some(tag_start) = note[position..].find('<').map(|at| position + at) {
+        out.push_str(&note[position..tag_start]);
+        let Some(tag) = parse_tag(&note[tag_start..]) else {
+            out.push('<');
+            position = tag_start + 1;
+            continue;
+        };
+        let Some(tag_len) = tag.end else {
+            out.push_str(&note[tag_start..]);
+            position = note.len();
+            break;
+        };
+        let tag_html = &note[tag_start..tag_start + tag_len];
+        let backreference = !tag.closing
+            && tag.name == "a"
+            && (has_class(tag_html, "footnote-backref")
+                || attribute_value(tag_html, "role") == Some("doc-backlink"))
+            && attribute_value(tag_html, "href").is_some_and(|href| href.starts_with('#'));
+        if backreference && let Some((.., end)) = element_bounds(note, tag_start, "a") {
+            position = end;
+            continue;
+        }
+        out.push_str(tag_html);
+        position = tag_start + tag_len;
+    }
+    out.push_str(&note[position..]);
+    out
+}
+
+/// `(note index, end offset)` when the element at `start` is a reference into `notes`. A wrapping
+/// superscript is consumed with the anchor so the Markdown reference does not nest inside it.
+fn footnote_reference(
+    html: &str,
+    start: usize,
+    name: &str,
+    notes: &[(String, String)],
+) -> Option<(usize, usize)> {
+    let (inner, closing, end) = element_bounds(html, start, name)?;
+    if name == "sup" {
+        let anchor = skip_html_whitespace(html, inner);
+        let (index, anchor_end) = footnote_reference(html, anchor, "a", notes)?;
+        return html[skip_html_whitespace(html, anchor_end)..closing]
+            .is_empty()
+            .then_some((index, end));
+    }
+    let target = attribute_value(&html[start..inner], "href")?.strip_prefix('#')?;
+    let index = notes.iter().position(|(id, _)| id == target)?;
+    // The label is the note's number; anything else is prose that must survive.
+    html_to_text(&html[inner..closing])
+        .trim()
+        .trim_matches(['[', ']', '(', ')'])
+        .parse::<u32>()
+        .ok()
+        .map(|_| (index, end))
+}
+
 /// Turn presentation-only controls retained by Readability into durable document semantics.
 /// Sidenotes become ordinary Markdown footnotes later in the pipeline; expand/collapse controls
 /// are discarded because Readability has already retained their complete content.
-fn normalize_extracted_controls(html: &str) -> NormalizedHtml {
+fn normalize_extracted_controls(html: &str, mut footnotes: Vec<String>) -> NormalizedHtml {
     let mut normalized = String::with_capacity(html.len());
-    let mut footnotes = Vec::new();
     let mut suppressed_spans = Vec::new();
     let mut position = 0;
 
@@ -1596,7 +2073,17 @@ pub fn strip_article_metadata(
 ) -> String {
     let markdown = strip_boundary_controls(markdown);
     let markdown = strip_leading_metadata(&markdown, published, source_slug);
-    strip_boundary_controls(&markdown)
+    let markdown = strip_boundary_controls(&markdown);
+    // Separators are presentation, not content: tidying them here rather than only at capture
+    // means an archive written by an older version reads correctly too. A body with no rule in it
+    // is left byte-for-byte alone, so nothing is rewritten for the sake of whitespace.
+    if markdown
+        .lines()
+        .any(|line| is_thematic_break(line, true) || line.trim_end().len() != line.len())
+    {
+        return protect_markdown_code(&markdown, tidy_markdown);
+    }
+    markdown
 }
 
 fn is_accessibility_label(text: &str) -> bool {
@@ -1622,12 +2109,14 @@ fn strip_boundary_controls(markdown: &str) -> String {
         .rsplit_once("\n\n")
         .map_or(trimmed, |(_, last)| last);
     if ![first, last].iter().any(|text| {
-        let text = text.to_ascii_lowercase();
-        text.contains("comment")
-            || text.contains("opens in")
-            || text.contains("advertisement")
-            || text.contains("updated")
-            || text.contains("corrected")
+        let lower = text.to_ascii_lowercase();
+        lower.contains("comment")
+            || lower.contains("opens in")
+            || lower.contains("advertisement")
+            || lower.contains("updated")
+            || lower.contains("corrected")
+            || lower.contains('|')
+            || text.trim().chars().all(|ch| ch == '\\')
     }) {
         return markdown.to_string();
     }
@@ -1722,10 +2211,17 @@ fn boundary_paragraph_text<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<(
 }
 
 fn is_boundary_control<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
+    if is_navigation_bar(node) {
+        return true;
+    }
     let Some((text, linked)) = boundary_paragraph_text(node) else {
         return false;
     };
     let text = text.trim();
+    // A line break whose surrounding content is gone renders as a stray escape.
+    if !text.is_empty() && text.chars().all(|ch| ch == '\\') {
+        return true;
+    }
     if is_accessibility_label(text) || is_update_notice(text) {
         return true;
     }
@@ -1754,6 +2250,52 @@ fn is_boundary_control<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
         return true;
     }
     linked && matches!(text, "no comments" | "leave a comment")
+}
+
+/// A row of links joined by pipes or bullets at a document boundary is the site's own footer or
+/// navigation. Prose that happens to carry several links separates them with ordinary punctuation,
+/// so the separators are what distinguishes the two.
+fn is_navigation_bar<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
+    use comrak::nodes::NodeValue;
+    if !matches!(node.data.borrow().value, NodeValue::Paragraph) {
+        return false;
+    }
+    let (mut links, mut between) = (0, String::new());
+    if !navigation_shape(node, &mut links, &mut between) || links < 3 {
+        return false;
+    }
+    let separators = between
+        .chars()
+        .filter(|ch| matches!(ch, '|' | '·' | '•' | '›' | '»'))
+        .count();
+    let residual = between.chars().filter(|ch| ch.is_alphanumeric()).count();
+    separators + 1 >= links && residual <= 24
+}
+
+/// `false` when the paragraph holds anything but links, inline emphasis and the text between them.
+fn navigation_shape<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    links: &mut usize,
+    between: &mut String,
+) -> bool {
+    use comrak::nodes::NodeValue;
+    node.children()
+        .all(|child| match &child.data.borrow().value {
+            NodeValue::Link(_) => {
+                *links += 1;
+                true
+            }
+            NodeValue::Text(value) => {
+                between.push_str(value);
+                true
+            }
+            NodeValue::SoftBreak | NodeValue::LineBreak => {
+                between.push(' ');
+                true
+            }
+            NodeValue::Emph | NodeValue::Strong => navigation_shape(child, links, between),
+            _ => false,
+        })
 }
 
 /// A standalone editorial note such as `This article was updated on 08 September 2026.` at a
@@ -1801,25 +2343,75 @@ fn is_update_notice(text: &str) -> bool {
             .is_some_and(|word| word.bytes().any(|byte| byte.is_ascii_digit()) || word.len() >= 3)
 }
 
-/// Remove a metadata line that readability promoted to the first Markdown paragraph. This covers
-/// a publication date (including a short suffix such as `- Link Blog`) and a source-name-only
-/// accessibility label. Compact name/date bylines require an exact publication-date match.
-/// A standalone pipe after the date is its orphaned metadata separator.
-/// Normal prose containing a date remains intact.
+/// What a leading block turned out to be, when it is metadata rather than the article's opening.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeadingMetadata {
+    /// A publication date, a relative timestamp, or a compact name/date byline.
+    Stamp,
+    /// The source's own name, promoted from an accessibility label.
+    SourceName,
+    /// A name or role line following one of the above.
+    Byline,
+}
+
+/// Remove the metadata lines readability promoted to the front of the article: a publication date
+/// (including a short suffix such as `- Link Blog`), a relative timestamp, the source's own name,
+/// and the byline that follows them. A standalone pipe after a date is its orphaned separator.
+/// Normal prose containing a date remains intact, and a byline only goes with a stamp it follows.
 pub fn strip_leading_metadata(
     markdown: &str,
     published: Option<DateTime<Utc>>,
     source_slug: &str,
 ) -> String {
-    let Some((first, rest)) = markdown.split_once("\n\n") else {
-        return markdown.to_string();
-    };
-    if first.lines().count() != 1 {
-        return markdown.to_string();
+    // Stored bodies can begin with a blank line; the first block is still the first block.
+    let mut rest = markdown.trim_start_matches('\n');
+    let mut bylines = 0;
+    let mut previous = None;
+    while let Some((first, tail)) = rest.split_once("\n\n") {
+        if first.lines().count() != 1 {
+            break;
+        }
+        let tail = tail.trim_start_matches('\n');
+        let plain = html_to_text(&render_markdown(first));
+        let Some(kind) = leading_metadata(first, &plain, published, source_slug, tail, previous)
+        else {
+            break;
+        };
+        if kind == LeadingMetadata::Byline {
+            bylines += 1;
+            if bylines > 3 {
+                break;
+            }
+        }
+        previous = Some(kind);
+        rest = tail;
+        if kind == LeadingMetadata::Stamp {
+            // The separator that sat between the date and whatever followed it is now orphaned.
+            if let Some((separator, after)) = rest.split_once("\n\n")
+                && is_lone_separator(separator)
+            {
+                rest = after.trim_start_matches('\n');
+            }
+        }
     }
-    let plain = html_to_text(&render_markdown(first));
-    let source_only = plain.chars().count() <= 80 && slug::slugify(plain.trim()) == source_slug;
-    let matching_date = date_prefixes(&plain)
+    rest.to_string()
+}
+
+fn leading_metadata(
+    block: &str,
+    plain: &str,
+    published: Option<DateTime<Utc>>,
+    source_slug: &str,
+    tail: &str,
+    previous: Option<LeadingMetadata>,
+) -> Option<LeadingMetadata> {
+    if plain.chars().count() <= 80 && slug::slugify(plain.trim()) == source_slug {
+        return Some(LeadingMetadata::SourceName);
+    }
+    if is_relative_timestamp(plain) {
+        return Some(LeadingMetadata::Stamp);
+    }
+    let dated = date_prefixes(plain)
         .filter_map(parse_date_only)
         .any(|candidate| {
             candidate.labelled
@@ -1831,18 +2423,87 @@ pub fn strip_leading_metadata(
                         .unsigned_abs()
                         <= 1
                 })
+                // A date the item does not share is still metadata when the publisher left its
+                // own separator behind it; prose never opens that way.
+                || tail
+                    .split_once("\n\n")
+                    .is_some_and(|(separator, _)| is_lone_separator(separator))
         })
-        || published.is_some_and(|published| {
-            matching_leading_byline(first, &plain, published.date_naive())
-        });
-    if !source_only && !matching_date {
-        return markdown.to_string();
+        || published
+            .is_some_and(|published| matching_leading_byline(block, plain, published.date_naive()));
+    if dated {
+        return Some(LeadingMetadata::Stamp);
     }
-    let rest = rest.trim_start_matches('\n');
-    if matching_date {
-        return rest.strip_prefix("|\n\n").unwrap_or(rest).to_string();
+    let after_byline = previous == Some(LeadingMetadata::Byline);
+    (previous.is_some() && is_byline_line(plain, after_byline)).then_some(LeadingMetadata::Byline)
+}
+
+/// A one- or two-character separator left over from a metadata row. Longer runs are rules.
+fn is_lone_separator(block: &str) -> bool {
+    let block = block.trim();
+    !block.is_empty()
+        && block.chars().count() <= 2
+        && block
+            .chars()
+            .all(|ch| matches!(ch, '|' | '·' | '•' | '—' | '–' | '-'))
+}
+
+/// `15 minutes ago`, `just now`: true when the page was read, meaningless in an archive.
+fn is_relative_timestamp(text: &str) -> bool {
+    let text = text.trim().to_ascii_lowercase();
+    if matches!(text.as_str(), "just now" | "yesterday" | "today") {
+        return true;
     }
-    rest.to_string()
+    let Some(rest) = text.strip_suffix(" ago") else {
+        return false;
+    };
+    let mut parts = rest.split_whitespace();
+    let (Some(count), Some(unit), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    (count.bytes().all(|byte| byte.is_ascii_digit())
+        || matches!(count, "a" | "an" | "one" | "two" | "three" | "few"))
+        && matches!(
+            unit.trim_end_matches('s'),
+            "second" | "minute" | "min" | "hour" | "hr" | "day" | "week" | "month" | "year"
+        )
+}
+
+/// `By Amy Walker`, `Amy Walker and`, `Nick Beake, Europe correspondent`: a name that announces
+/// itself as a byline. A bare Title Case line is indistinguishable from a kicker, so a name with a
+/// role only counts while a byline is already being read.
+fn is_byline_line(text: &str, after_byline: bool) -> bool {
+    let text = text.trim();
+    if text.is_empty()
+        || text.chars().count() > 60
+        || text.ends_with(['.', '!', '?', ':', ';', ','])
+        || text.split_whitespace().count() > 8
+    {
+        return false;
+    }
+    let name_like = |value: &str| {
+        let words: Vec<&str> = value.split_whitespace().collect();
+        (1..=4).contains(&words.len())
+            && words.iter().all(|word| {
+                word.chars().next().is_some_and(char::is_uppercase)
+                    && word
+                        .chars()
+                        .all(|ch| ch.is_alphabetic() || matches!(ch, '\'' | '’' | '-' | '.'))
+            })
+    };
+    if let Some(name) = text.strip_prefix("By ") {
+        return name_like(name.split(',').next().unwrap_or(name));
+    }
+    if let Some(name) = text
+        .strip_suffix(" and")
+        .or_else(|| text.strip_suffix(" &"))
+    {
+        return name_like(name);
+    }
+    after_byline
+        && text.split_once(',').is_some_and(|(name, role)| {
+            name_like(name) && (1..=5).contains(&role.split_whitespace().count())
+        })
 }
 
 fn matching_leading_byline(markdown: &str, plain: &str, published: NaiveDate) -> bool {
@@ -1959,10 +2620,20 @@ fn parse_date_only(raw: &str) -> Option<LeadingDate> {
         })
         .unwrap_or((value, false));
     let value = without_ordinal_suffixes(value);
-    ["%Y-%m-%d", "%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y"]
-        .iter()
-        .find_map(|format| NaiveDate::parse_from_str(value.trim(), format).ok())
-        .map(|date| LeadingDate { date, labelled })
+    // `%Y%m%d` is a compact permalink date; it only ever strips a line that matches the item's
+    // own publication date, so an unrelated eight-digit number stays put.
+    [
+        "%Y-%m-%d",
+        "%Y%m%d",
+        "%Y/%m/%d",
+        "%d %B %Y",
+        "%d %b %Y",
+        "%B %d, %Y",
+        "%b %d, %Y",
+    ]
+    .iter()
+    .find_map(|format| NaiveDate::parse_from_str(value.trim(), format).ok())
+    .map(|date| LeadingDate { date, labelled })
 }
 
 fn without_ordinal_suffixes(value: &str) -> String {
@@ -1996,24 +2667,54 @@ fn without_ordinal_suffixes(value: &str) -> String {
 fn tidy_markdown(markdown: &str) -> String {
     let mut out = String::with_capacity(markdown.len());
     let mut blank_run = 0;
+    let mut pending_break = false;
     for line in markdown.lines().map(str::trim_end) {
         if line.is_empty() {
             blank_run += 1;
             if blank_run > 1 {
                 continue;
             }
+        } else if is_thematic_break(line, blank_run > 0 || out.is_empty()) {
+            // Empty layout sections leave their separators stacked; one rule says the same thing.
+            if pending_break {
+                continue;
+            }
+            pending_break = true;
+            blank_run = 0;
         } else {
+            pending_break = false;
             blank_run = 0;
         }
         out.push_str(line);
         out.push('\n');
     }
-    let trimmed = out.trim().to_string();
+    // A separator with nothing after it once divided the article from a section that is now gone.
+    let mut trimmed = out.trim();
+    while let Some((rest, last)) = trimmed.rsplit_once('\n') {
+        if !is_thematic_break(last, rest.is_empty() || rest.ends_with('\n')) {
+            break;
+        }
+        trimmed = rest.trim_end();
+    }
+    let trimmed = trimmed.trim().to_string();
     if trimmed.is_empty() {
         trimmed
     } else {
         trimmed + "\n"
     }
+}
+
+/// A `---` run is only a thematic break when nothing above it could make it a setext heading.
+fn is_thematic_break(line: &str, starts_block: bool) -> bool {
+    let line = line.trim();
+    let Some(marker) = line.chars().next().filter(|c| matches!(c, '*' | '-' | '_')) else {
+        return false;
+    };
+    if marker == '-' && !starts_block {
+        return false;
+    }
+    line.chars().filter(|c| *c == marker).count() >= 3
+        && line.chars().all(|c| c == marker || c == ' ' || c == '\t')
 }
 
 /// comrak with GFM extensions and raw HTML escaped rather than passed through, so the output is
@@ -2608,7 +3309,35 @@ fn enhance_rendered_images(
         position = start + end;
     }
     out.push_str(&html[position..]);
-    out
+    wrap_scrollable_tables(&group_captioned_figures(&out))
+}
+
+/// A table is laid out as one box so its columns line up; the scrolling and the margin bleed
+/// belong to a wrapper around it, not to the table itself.
+fn wrap_scrollable_tables(html: &str) -> String {
+    if !html.contains("<table>") {
+        return html.to_string();
+    }
+    html.replace("<table>", "<div class=\"table-scroll\"><table>")
+        .replace("</table>", "</table></div>")
+}
+
+/// An image followed by a hard break and a short line is the figure/caption pair that Markdown
+/// cannot express. Restore the semantics so the caption reads as a caption instead of body prose.
+fn group_captioned_figures(html: &str) -> String {
+    static FIGURE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let figure = FIGURE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?s)<p>((?:<a [^>]*>)?<picture\b.*?</picture>(?:</a>)?)<br />\s*(.*?)</p>",
+        )
+        .expect("valid figure pattern")
+    });
+    figure
+        .replace_all(
+            html,
+            "<figure class=\"article-figure\">$1<figcaption>$2</figcaption></figure>",
+        )
+        .into_owned()
 }
 
 fn render_image_tag(
@@ -3563,16 +4292,19 @@ mod tests {
     #[test]
     fn accessibility_label_cleanup_only_removes_short_unformatted_markers() {
         let marker = "<span>\u{2060}(opens in a new window)</span>";
-        assert_eq!(normalize_extracted_controls(marker).html, "");
+        assert_eq!(normalize_extracted_controls(marker, Vec::new()).html, "");
         let literal = "<span><em>(opens in a new window)</em></span>";
-        assert_eq!(normalize_extracted_controls(literal).html, literal);
+        assert_eq!(
+            normalize_extracted_controls(literal, Vec::new()).html,
+            literal
+        );
         let deeply_nested = format!(
             "{}literal{}",
             "<span>".repeat(2_000),
             "</span>".repeat(2_000)
         );
         assert_eq!(
-            normalize_extracted_controls(&deeply_nested).html,
+            normalize_extracted_controls(&deeply_nested, Vec::new()).html,
             deeply_nested
         );
     }
@@ -3910,6 +4642,41 @@ mod tests {
     }
 
     #[test]
+    fn boundary_navigation_bars_and_orphaned_line_breaks_are_removed() {
+        // marc.info closes every archived message with a `<br>` and its own footer bar.
+        let footer = "[Configure](https://marc.info/?q=configure) | [About](https://marc.info/?q=about) | [News](https://marc.info/?q=news) | [Add a list](mailto:webguy@marc.info) | Sponsored by [KoreLogic](http://www.korelogic.com/)";
+        assert_eq!(
+            strip_article_metadata(
+                &format!("Actual article.\n\n\\\n\n{footer}\n"),
+                None,
+                "an-archive"
+            ),
+            "Actual article.\n"
+        );
+        // Prose that merely carries several links keeps its sentence.
+        let prose = "See [one](https://example.com/1), [two](https://example.com/2) and [three](https://example.com/3) for the details.";
+        assert_eq!(
+            strip_article_metadata(&format!("Actual article.\n\n{prose}\n"), None, "a-blog"),
+            format!("Actual article.\n\n{prose}\n")
+        );
+    }
+
+    #[test]
+    fn code_listings_drop_only_their_bracketed_navigation_lines() {
+        // marc.info wraps a whole mailing-list message, navigation included, in one `<pre>`.
+        let html = r#"<pre><b>[<a href="?m=1">prev in list</a>] [<a href="?m=2">next in list</a>] </b>
+List:       openbsd-tech
+
+  [not navigation] because this is code
+<b>[<a href="?m=1">prev in list</a>] [<a href="?m=2">next in list</a>] </b>
+</pre>"#;
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            "```\nList:       openbsd-tech\n\n  [not navigation] because this is code\n```\n"
+        );
+    }
+
+    #[test]
     fn comment_cleanup_preserves_article_content_and_code() {
         for body in [
             "The article has [0 comments](https://example.com/#comments).\n",
@@ -4039,9 +4806,18 @@ mod tests {
             );
             assert!(html.contains("syntax-"), "{html}");
         }
-        for language in ["text", "plaintext", "unknown-language", "evil\"<img/src=x>"] {
+        // A language Sublime has no grammar for still shows the name the publisher used.
+        for (language, label) in [("dockerfile", "Dockerfile"), ("zig", "Zig")] {
+            let html = render_markdown(&format!("```{language}\nFROM scratch\n```\n"));
+            assert!(
+                html.contains(&format!("data-language=\"{label}\"")),
+                "{html}"
+            );
+            assert!(!html.contains("syntax-"), "{html}");
+        }
+        for language in ["text", "plaintext", "evil\"<img/src=x>"] {
             let html = render_markdown(&format!("```{language}\nfn main() {{}}\n```\n"));
-            assert!(html.contains("data-language=\"Text\""), "{html}");
+            assert!(!html.contains("data-language"), "{html}");
             assert!(!html.contains("syntax-"), "{html}");
             assert!(!html.contains("<img"), "{html}");
         }
@@ -4072,9 +4848,10 @@ mod tests {
             "[an example]",
             "{}",
             "42",
+            "List:       openbsd-tech\nSubject:    GEFS preview\nFrom:       ori\nDate:       2026-09-15",
         ] {
             let html = render_markdown(&format!("```\n{code}\n```\n"));
-            assert!(html.contains("data-language=\"Text\""), "{html}");
+            assert!(!html.contains("data-language"), "{html}");
             assert!(!html.contains("syntax-"), "{html}");
         }
     }
@@ -4144,10 +4921,20 @@ mod tests {
                 }
             );
         }
-        let wrong_date = "Sep 02, 2025\n\n|\n\nBody.\n";
+        // A date the item does not share is still metadata when its separator sits behind it,
+        // but on its own it is prose.
         assert_eq!(
-            strip_leading_metadata(wrong_date, Some(published), "blog-google"),
-            wrong_date
+            strip_leading_metadata(
+                "Sep 02, 2025\n\n|\n\nBody.\n",
+                Some(published),
+                "blog-google"
+            ),
+            "Body.\n"
+        );
+        let unrelated_date = "Sep 02, 2025\n\nBody.\n";
+        assert_eq!(
+            strip_leading_metadata(unrelated_date, Some(published), "blog-google"),
+            unrelated_date
         );
         assert_eq!(
             strip_leading_metadata(
@@ -4418,6 +5205,265 @@ mod tests {
                 "[^2]: Next note.\n",
             )
         );
+    }
+
+    #[test]
+    /// Each case is a real opening kept by Readability: blog.google's date/separator hero row
+    /// and bbc.com's relative timestamp with its byline underneath.
+    fn leading_publisher_metadata_is_removed_block_by_block() {
+        let published = DateTime::parse_from_rfc3339("2026-09-16T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        for (body, expected) in [
+            // A stored body may begin with a blank line; the first block is still the first block.
+            ("\nSep 15, 2026\n\n|\n\nThe deck.\n", "The deck.\n"),
+            // A date the item does not share, with the publisher's separator still behind it.
+            ("May 19, 2026\n\n|\n\nThe deck.\n", "The deck.\n"),
+            // A relative timestamp and the byline under it.
+            (
+                "15 minutes ago\n\nAmy Walker and\n\nNick Beake, Europe correspondent\n\nReal body.\n",
+                "Real body.\n",
+            ),
+            ("Just now\n\nBy Amy Walker\n\nReal body.\n", "Real body.\n"),
+        ] {
+            assert_eq!(
+                strip_article_metadata(body, Some(published), "blog-google"),
+                expected,
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leading_prose_is_never_mistaken_for_publisher_metadata() {
+        let published = DateTime::parse_from_rfc3339("2026-09-16T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        for body in [
+            // An unrelated date with no separator behind it stays.
+            "May 19, 2026\n\nThe deck.\n",
+            // A name-shaped line with no stamp above it is the article's opening.
+            "Amy Walker and\n\nReal body.\n",
+            // A thematic break is not an orphaned separator.
+            "Sep 15, 2026\n\n---\n\nThe deck.\n",
+            // A Title Case kicker under a date is not a byline.
+            "Sep 15, 2026\n\nGoogle Cloud Next\n\nReal body.\n",
+            // A sentence fragment under a date is prose.
+            "Sep 15, 2026\n\nwe shipped something today\n\nReal body.\n",
+        ] {
+            let kept = strip_article_metadata(body, Some(published), "blog-google");
+            let second = body.trim_start_matches('\n').split("\n\n").nth(1).unwrap();
+            assert!(kept.contains(second), "{body:?} -> {kept:?}");
+        }
+    }
+
+    #[test]
+    fn figure_captions_survive_as_captions() {
+        // Pandoc marks a caption that repeats its alt text `aria-hidden`, as on bkovac.github.io.
+        let html = r#"<figure><img src="https://example.com/thing.jpg" alt="The thing" width="1225" height="1496"><figcaption aria-hidden="true">The thing</figcaption></figure>"#;
+        let markdown = to_markdown(html, Some(&base()));
+        assert_eq!(
+            markdown,
+            "![The thing](https://example.com/thing.jpg)\\\nThe thing\n"
+        );
+        let rendered = render_markdown(&markdown);
+        assert!(
+            rendered.contains("<figure class=\"article-figure\">"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("<figcaption>The thing</figcaption>"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_readability_pass_keeps_captions_hidden_only_from_screen_readers() {
+        let page = format!(
+            "<html><head><title>Post</title></head><body><article><h1>Post</h1><figure><img src=\"/one.jpg\" alt=\"The thing\" width=\"1225\" height=\"1496\"><figcaption aria-hidden=\"true\">The thing</figcaption></figure>{}</article></body></html>",
+            "<p>A paragraph of real prose so the article scores as readable content.</p>".repeat(6)
+        );
+        let article =
+            extract_article(&page, &Url::parse("https://example.com/post").unwrap()).unwrap();
+        assert!(article.html.contains("figcaption"), "{}", article.html);
+    }
+
+    #[test]
+    fn markdown_rebuilds_numbered_code_listings_laid_out_as_tables() {
+        // strix.ai renders snippets as a highlight.js table with a line-number gutter column.
+        let html = r#"<div class="hljs"><table><tbody>
+<tr><td class="linenos">1</td><td class="whitespace-pre"><span class="hljs-keyword">ARG</span> GITHUB_TOKEN</td></tr>
+<tr><td class="linenos">2</td><td class="whitespace-pre">  if [[ "$X" != "" ]]; then \</td></tr>
+<tr><td class="linenos">3</td><td class="whitespace-pre">  fi</td></tr>
+</tbody></table></div>"#;
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            "```\nARG GITHUB_TOKEN\n  if [[ \"$X\" != \"\" ]]; then \\\n  fi\n```\n"
+        );
+    }
+
+    #[test]
+    fn markdown_keeps_data_tables_that_merely_start_with_numbers() {
+        let html = r#"<table><tbody>
+<tr><td>1</td><td>First</td></tr>
+<tr><td>7</td><td>Second</td></tr>
+</tbody></table>"#;
+        let markdown = to_markdown(html, Some(&base()));
+        assert!(markdown.contains('|'), "{markdown}");
+        assert!(!markdown.contains("```"), "{markdown}");
+    }
+
+    #[test]
+    fn leaked_responsive_source_maps_resolve_to_a_real_image() {
+        // blog.google shipped an unrendered template in `src`, so the URL carried a JSON object.
+        let html = r#"<p><img alt="a chart showing the Speech to Speech Index" src="https://blog.google/models/gemini-3-8-live/{
+            &quot;mobile&quot;: &quot;https://storage.googleapis.com/images/evals__S2S-inde.width-500.format-webp.webp&quot;,
+            &quot;desktop&quot;: &quot;https://storage.googleapis.com/images/evals__S2S-ind.width-1000.format-webp.webp&quot;
+          }"></p>"#;
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            "![a chart showing the Speech to Speech Index](https://storage.googleapis.com/images/evals__S2S-ind.width-1000.format-webp.webp)\n"
+        );
+        // A URL that merely contains a brace is not a source map.
+        let plain = r#"<p><img alt="Chart" src="https://example.com/a%7Bb%7D.png"></p>"#;
+        assert!(
+            to_markdown(plain, Some(&base())).contains("a%7Bb%7D.png"),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn a_compact_permalink_date_is_metadata_only_when_the_item_shares_it() {
+        // attainablefelicity.mattkirkland.com opens with `<time>20260915</time>`.
+        let published = DateTime::parse_from_rfc3339("2026-09-15T18:45:31Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            strip_article_metadata(
+                "20260915\n\n## Chop up your books\n\nThis is my appeal.\n",
+                Some(published),
+                "hnrss-org-frontpage"
+            ),
+            "## Chop up your books\n\nThis is my appeal.\n"
+        );
+        // An eight-digit number that is not this item's date stays where it is.
+        let unrelated = "20190104\n\nThe build number above matters.\n";
+        assert_eq!(
+            strip_article_metadata(unrelated, Some(published), "hnrss-org-frontpage"),
+            unrelated
+        );
+    }
+
+    #[test]
+    fn tables_render_inside_their_own_scroll_container() {
+        // The table needs one layout box, or its header and body columns stop lining up.
+        let html = render_markdown(
+            "| Register | Action |\n| --- | --- |\n| `triangleCMD` | Start rendering. |\n",
+        );
+        assert!(
+            html.contains("<div class=\"table-scroll\"><table>"),
+            "{html}"
+        );
+        assert!(html.contains("</table></div>"), "{html}");
+        assert_eq!(html.matches("<table>").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn markdown_drops_audio_players_and_the_chrome_around_them() {
+        // blog.google's `uni-audio-player-tts` block, as Readability retains it.
+        let html = r#"<p>Deck paragraph.</p>
+<div data-component="uni-audio-player-tts" uni-l10n="{ &quot;timeText&quot;: &quot;[[duration]] minutes&quot; }" data-tts-audios="[{&quot;voice_name&quot;: &quot;Umbriel&quot;}]">
+  <p><audio title="The Gemini app is now available for Windows">
+      <source src="https://storage.googleapis.com/gweb-uniblog-publish-prod/media/tts_audio.mp3" type="audio/mpeg">
+      <p>Your browser does not support the audio element.</p>
+  </audio></p><div aria-label="">
+        <p><span>
+          Listen to article
+        </span></p><p>[[duration]] minutes</p>
+        <p><span tabindex="0" role="tooltip" aria-label="This content is generated by Google AI. Generative AI is experimental">
+          <p>This content is generated by Google AI. Generative AI is experimental</p>
+        </span></p></div>
+</div>
+<p>Article body.</p>"#;
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            "Deck paragraph.\n\nArticle body.\n"
+        );
+    }
+
+    #[test]
+    fn markdown_keeps_prose_that_merely_surrounds_an_audio_clip() {
+        let long = "Real prose that carries the argument of the article. ".repeat(12);
+        let html = format!(
+            r#"<div><p>{long}</p><audio><p>Your browser does not support the audio element.</p></audio></div>"#
+        );
+        let markdown = to_markdown(&html, Some(&base()));
+        assert!(markdown.contains("Real prose"), "{markdown}");
+        assert!(!markdown.contains("does not support"), "{markdown}");
+    }
+
+    #[test]
+    fn stacked_separators_are_tidied_in_archives_written_before_the_rule() {
+        // Capture-time tidying cannot reach a body already on the branch, so the build tidies too.
+        assert_eq!(
+            strip_article_metadata("Lead.\n\n* * *\n\n* * *\n\nBody.\n\n* * *\n", None, "blog"),
+            "Lead.\n\n* * *\n\nBody.\n"
+        );
+        // A rule inside a code block is code.
+        let fenced = "```\n* * *\n\n* * *\n```\n";
+        assert_eq!(strip_article_metadata(fenced, None, "blog"), fenced);
+    }
+
+    #[test]
+    fn markdown_collapses_stacked_and_trailing_separators() {
+        // blog.google's hero block emits two rules around a section that carries no content.
+        let html = "<p>Lead.</p><hr><hr><p>Body.</p><hr>";
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            "Lead.\n\n* * *\n\nBody.\n"
+        );
+    }
+
+    #[test]
+    fn markdown_rebuilds_standard_document_footnotes() {
+        // Hugo/Goldmark endnotes, as published by codyho.dev.
+        let html = r##"<p>Documented blobs<sup id="fnref:1"><a href="#fn:1" class="footnote-ref" role="doc-noteref">1</a></sup> so we could ship<sup id="fnref:2"><a href="#fn:2" class="footnote-ref" role="doc-noteref">2</a></sup>.</p>
+<h2 id="footnotes">Footnotes</h2>
+<div class="footnotes" role="doc-endnotes"><hr><ol>
+<li id="fn:1"><p>See <a href="/helpers">the helper programs</a>.&#160;<a href="#fnref:1" class="footnote-backref" role="doc-backlink">&#8617;</a></p></li>
+<li id="fn:2"><p>A brief list:</p><p>Second paragraph.&#160;<a href="#fnref:2" class="footnote-backref" role="doc-backlink">&#8617;</a></p></li>
+</ol></div>"##;
+
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            concat!(
+                "Documented blobs[^1] so we could ship[^2].\n\n",
+                "## Footnotes\n\n",
+                "[^1]: See [the helper programs](https://example.com/helpers).\n\n",
+                "[^2]: A brief list:\n\n",
+                "    Second paragraph.\n",
+            )
+        );
+    }
+
+    #[test]
+    fn markdown_keeps_endnote_lists_nothing_points_at() {
+        // Without a matching reference the note would vanish, so the original list is preserved.
+        let html = r##"<p>Body with no reference.</p>
+<div class="footnotes" role="doc-endnotes"><ol><li id="fn:1"><p>Orphan note.</p></li></ol></div>"##;
+        let markdown = to_markdown(html, Some(&base()));
+        assert!(markdown.contains("Orphan note."), "{markdown}");
+        assert!(!markdown.contains("[^1]"), "{markdown}");
+    }
+
+    #[test]
+    fn markdown_keeps_prose_links_that_point_into_the_endnotes() {
+        let html = r##"<p>Read <a href="#fn:1">the appendix</a> first.<sup><a href="#fn:1">1</a></sup></p>
+<div class="footnotes"><ol><li id="fn:1"><p>Appendix.</p></li></ol></div>"##;
+        let markdown = to_markdown(html, Some(&base()));
+        assert!(markdown.contains("[the appendix]("), "{markdown}");
+        assert!(markdown.contains("first.[^1]"), "{markdown}");
+        assert!(markdown.contains("[^1]: Appendix."), "{markdown}");
     }
 
     #[test]

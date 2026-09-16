@@ -49,7 +49,8 @@ src/store/                     the branch tree: items, state, seen, status, rete
 src/site/                      build orchestration, template context, minijinja env, outputs
 themes/default/                embedded theme (templates/, static/)
 tests/cli.rs                   end-to-end: bare origin + clone + httpmock + the real binary
-docs/git-model.md              the branch/ref contract; readme.md is user-facing
+docs/git-model.md              the branch/ref contract; readme.md is a short user-facing entry
+docs/{sources,reading,hosting}.md the user-facing reference the readme links out to
 ```
 
 ## Commands
@@ -79,6 +80,9 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   and keep navigation progressively functional without JavaScript.
 - A normal source URL is intentionally enough: keep HTML heuristics internal and remember the
   discovered feed endpoint. `type = "html"` and site-specific selectors are not public config.
+  A listing URL names a section, so probe conventional endpoints relative to it with or without a
+  trailing slash, never at the root, and only on first resolution. A discovered feed with no
+  entries loses to the listing that does have them.
 - Article ingestion must not launch a browser or embed Python. Detect challenges by the
   `cf-mitigated: challenge` response header, never by scripts also present in real articles.
   Preserve aggr's identity and configured headers when changing HTTP transports; see
@@ -92,6 +96,19 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   its strict option schema. Remove ` #` comments from raw lines before trimming whitespace.
   Scope inherited collection headers to the declaring origin or repository. Ordinary remote source
   URLs must not trigger config-time network probes; opaque collection endpoints use `collection = true`.
+- Cleanup that only needs the Markdown body belongs in the build, where it also reaches archives
+  written by an older version; cleanup that needs the original HTML belongs in capture. A build
+  never rewrites a stored body, not even for whitespace. `--reprocess` is the one path that
+  re-derives stored bodies from retained HTML: explicit, idempotent, and never shortening an item
+  whose companion was truncated.
+- Every cleaning rule carries a test built from the markup that motivated it, named in a comment,
+  plus the neighbouring case it must not touch.
+- Rebuild document semantics Markdown cannot express before conversion, not after: numbered
+  listing tables become code blocks, endnote lists and their references become Markdown footnotes,
+  figure captions become a hard break the renderer regroups into `<figure>`, and a headerless table
+  gains an empty header so it stays a table. An `<audio>` element has no player in the reader, so
+  drop it with the chrome around it. Leave a code block unlabelled rather than guessing its
+  language; a publisher's own name for a language outranks the grammar used to colour it.
 - Preserve existing body, HTML, and preview companions when explicit refresh fills missing media;
   apply shared boundary cleanup during both fetch and rendering so old archives benefit safely.
   Remove compact bylines only from a leading prose paragraph with a matching publication date.
@@ -160,7 +177,14 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - Scope completion counts to the other active search clauses and keep readable source aliases
   unambiguous. Infer searchable item types from primary content, not incidental article media.
 - Keep reading and supported media inside aggr whenever practical, with accessible original-link
-  fallbacks when a provider or browser prevents embedding.
+  fallbacks when a provider or browser prevents embedding. Activating a provider facade plays at
+  once: ask the player directly instead of trusting an `autoplay` parameter.
+- A shared selection addresses words, not DOM offsets, so the link survives a rebuild. Keep the
+  range in the fragment, update it live while the selection changes, and clear it when it empties.
+  The toolbar answers the reader's own gesture, never a restored selection, and scrolling with a
+  selection repositions it without re-deriving it: index the article once per page scope.
+- Mobile is a platform surface: a compact tab bar above the home indicator, colour rather than
+  underline for the current tab and for links, and no default tap highlight.
   Detect interactive canvas capabilities before stripping source HTML; retain only a metadata
   marker and load live originals automatically in an opaque-origin sandbox when the reader opens
   the article, never during ingestion. Release live frames when their page scope is disposed.
@@ -171,6 +195,9 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 
 Podcast URL resolution and provider limits are documented in [podcast sources](docs/podcasts.md);
 shared pipeline limits and cache boundaries are in [performance](docs/performance.md).
+
+Source configuration is documented in [sources](docs/sources.md), the reading experience in
+[reading](docs/reading.md), and deployment in [hosting](docs/hosting.md).
 
 See [the theme contract](docs/themes.md) for reader behavior and
 [interoperability](docs/interoperability.md) for source and preservation boundaries.
