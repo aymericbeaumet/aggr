@@ -35,9 +35,10 @@ aggr fetches and pushes through a remote named `origin`. A hosted runner needs w
 ```text
 README.md                                              what this branch is, how to edit it by hand
 .gitattributes                                         sources/*/seen.txt merge=union; LF everywhere
+.gitignore                                             .tmp*: an interrupted atomic write is never committed
 items/<source>/<yyyy>/<mm>/<yyyy-mm-dd>-<slug>.md      YAML front matter + readable Markdown
 items/<source>/<yyyy>/<mm>/<yyyy-mm-dd>-<slug>.html    stripped HTML from which Markdown was derived
-sources/<source>/state.toml                            upstream title/site URL, ETag, Last-Modified, body hash
+sources/<source>/state.toml                            identity, resolved_url, title/site URL, ETag, Last-Modified, body hash
 sources/<source>/seen.txt                              "<key> <yyyy-mm-dd>" per line, append-only
 status.toml                                            sources currently failing; absent when all is well
 ```
@@ -47,8 +48,18 @@ status.toml                                            sources currently failing
   alternate representations key on the path. The date is the upstream publication time, otherwise
   its update time, otherwise the time of first sight; the file is never moved. File names use
   lowercase ASCII slugs of at most 60 characters, with a stable item-derived hash on collision.
-- **Write once.** A normal sync never overwrites an existing `.md`; hand edits win. `aggr sync
-  --refresh` is the explicit exception, and the previous version remains in Git history.
+- **Bodies are written once.** A normal sync never rewrites an item's Markdown body and never
+  moves its path. Enrichment fills in place and never removes existing content: a publisher feed
+  can supply a missing audio URL or duration, and missing image and preview companions are
+  repaired beside the item. A feed-only capture is upgraded to the original article when the page
+  becomes available, keeping its path and dates. Hand edits to `hidden`, `labels`, `authors`, and
+  `first_seen` win over all of these. `aggr sync --refresh` and `--reprocess` are the explicit
+  exceptions that replace bodies, and the previous version remains in Git history.
+- **State is regenerated.** `sources/<source>/state.toml` holds what the next fetch needs:
+  `identity` is a hash of the unexpanded fetch inputs (credentials and `${ENV}` values never enter
+  history) that invalidates the discovered `resolved_url` when the config changes, alongside the
+  upstream title, site URL, and conditional-GET validators. Neither it nor `status.toml` holds
+  anything a sync cannot rebuild.
 - **Deleted stays deleted.** Dedupe keys derived from the entry id, normalized original URL, and
   `title|published` are appended to `seen.txt` when an item is written. They are never removed, so
   deleting a current item does not make a later fetch add it again.
@@ -164,13 +175,16 @@ aggr build --data-ref refs/aggr/last-good \
 With `--data-ref`, `build` skips source synchronization, discussion-network lookups, commits, and
 pushes, then renders the selected stored tree. Unavailable feeds, article pages, and discussion
 services therefore do not prevent this recovery build. Configuration loading can still fetch
-remote `include` files, so this is fully offline only when the effective config is local. Nor does
+remote collections, so this is fully offline only when the effective config is local. Nor does
 the flag freeze every other build input: the current theme and binary affect HTML, and
 time-dependent presentation can change between builds. The `Aggr-Config` trailer pins the tracked
-root config commit only; remote included config bodies are cache inputs, not committed data. For a
-repeatable recovery, keep all local includes and theme files in the primary branch, pin or vendor
-remote includes, retain the matching aggr binary, and record the intended public base URL. The
-render cache is an optimization, not part of the archive.
+root config commit only; remote collection bodies are cache inputs, not committed data. For a
+repeatable recovery, keep all local collection files and theme files in the primary branch, pin or
+vendor remote collections, retain the matching aggr binary, and record the intended public base
+URL. The render cache is an optimization, not part of the archive. `status.toml` and
+`sources/<source>/state.toml` are regenerated and self-healing: a malformed or missing file is read
+as absent, logged, and rewritten by the next sync that has something to record, so neither needs
+restoring from history.
 
 ## Editing the branch by hand
 

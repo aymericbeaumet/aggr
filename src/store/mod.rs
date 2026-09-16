@@ -21,6 +21,12 @@ pub const GITATTRIBUTES: &str = "\
 sources/*/seen.txt merge=union
 * text=auto eol=lf
 ";
+/// Atomic writes stage `.tmpXXXXXX` files (tempfile's default prefix) beside their target; a run
+/// killed before `persist` leaves one behind, and `git add -A` must never commit it.
+pub const GITIGNORE: &str = "\
+# aggr data branch. Interrupted atomic writes leave temporary files; they never belong in history.
+.tmp*
+";
 
 pub struct Store {
     root: PathBuf,
@@ -159,11 +165,16 @@ impl Store {
         self
     }
 
-    /// Write the branch README and `.gitattributes` when missing. Returns whether anything was
-    /// written.
+    /// Write the branch README, `.gitattributes` and `.gitignore` when missing. Each file is
+    /// checked on its own, so a branch created by an older version gains the files it lacks.
+    /// Returns whether anything was written.
     pub fn bootstrap(&self) -> Result<bool> {
         let mut wrote = false;
-        for (name, content) in [("README.md", README), (".gitattributes", GITATTRIBUTES)] {
+        for (name, content) in [
+            ("README.md", README),
+            (".gitattributes", GITATTRIBUTES),
+            (".gitignore", GITIGNORE),
+        ] {
             let path = self.checked_path(Path::new(name))?;
             if !path.exists() {
                 self.write_text(Path::new(name), content)?;
@@ -177,12 +188,12 @@ impl Store {
         self.root.join("sources").join(slug)
     }
 
+    /// Per-source fetch state. A file that fails to parse is logged and read as absent so one
+    /// hand edit never wedges every future sync; the next write replaces it with a well-formed one.
     pub fn source_state(&self, slug: &str) -> Result<SourceState> {
         let path = self.source_dir(slug).join("state.toml");
         match fs::read_to_string(&path) {
-            Ok(text) => {
-                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
-            }
+            Ok(text) => Ok(parse_regenerated(&path, &text)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(SourceState::default()),
             Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
         }
@@ -231,12 +242,12 @@ impl Store {
         self.write_text(&relative, &text)
     }
 
+    /// Sources currently in error. A file that fails to parse is logged and read as healthy so
+    /// one hand edit never wedges every future sync; the next transition rewrites it.
     pub fn status(&self) -> Result<Status> {
         let path = self.root.join("status.toml");
         match fs::read_to_string(&path) {
-            Ok(text) => {
-                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
-            }
+            Ok(text) => Ok(parse_regenerated(&path, &text)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Status::default()),
             Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
         }
@@ -1042,6 +1053,21 @@ impl Store {
     }
 }
 
+/// Parse a regenerated TOML file (`status.toml`, `state.toml`). Unlike items, these hold nothing
+/// the next sync cannot rebuild, so a malformed file degrades to the default with a warning.
+fn parse_regenerated<T: Default + serde::de::DeserializeOwned>(path: &Path, text: &str) -> T {
+    match toml::from_str(text) {
+        Ok(value) => value,
+        Err(err) => {
+            log::warn!(
+                "ignoring malformed {}; it will be regenerated: {err}",
+                path.display()
+            );
+            T::default()
+        }
+    }
+}
+
 fn normalized_absolute(path: &Path) -> Result<PathBuf> {
     let mut normalized = PathBuf::new();
     for component in std::path::absolute(path)?.components() {
@@ -1736,6 +1762,31 @@ mod tests {
                 .unwrap()
                 .contains("merge=union")
         );
+        assert_eq!(
+            fs::read_to_string(dir.path().join(".gitignore")).unwrap(),
+            GITIGNORE
+        );
+        assert!(GITIGNORE.lines().any(|line| line == ".tmp*"));
+    }
+
+    #[test]
+    fn bootstrap_adds_missing_files_to_an_existing_branch() {
+        // A branch created before `.gitignore` existed has README and .gitattributes only; the
+        // next bootstrap adds the missing file without touching the two it already has.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "hand-edited\n").unwrap();
+        fs::write(dir.path().join(".gitattributes"), GITATTRIBUTES).unwrap();
+        let store = Store::open(dir.path());
+        assert!(store.bootstrap().unwrap());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("README.md")).unwrap(),
+            "hand-edited\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join(".gitignore")).unwrap(),
+            GITIGNORE
+        );
+        assert!(!store.bootstrap().unwrap());
     }
 
     #[test]
@@ -1776,6 +1827,58 @@ mod tests {
         assert_eq!(store.seen("x").unwrap(), known(&["k1", "k2", "k3"]));
         let text = fs::read_to_string(dir.path().join("sources/x/seen.txt")).unwrap();
         assert_eq!(text, "k1 2026-09-02\nk2 2026-09-02\nk3 2026-09-02\n");
+    }
+
+    #[test]
+    fn malformed_status_reads_as_healthy_and_is_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path());
+        fs::write(dir.path().join("status.toml"), "not = = toml\n").unwrap();
+        assert_eq!(store.status().unwrap(), Status::default());
+
+        let mut status = Status::default();
+        status.errors.insert(
+            "a".into(),
+            SourceError {
+                message: "x".into(),
+                since: now(),
+            },
+        );
+        store.write_status(&status).unwrap();
+        let text = fs::read_to_string(dir.path().join("status.toml")).unwrap();
+        assert_eq!(toml::from_str::<Status>(&text).unwrap(), status);
+        assert_eq!(store.status().unwrap(), status);
+    }
+
+    #[test]
+    fn malformed_source_state_reads_as_absent_and_is_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path());
+        let path = dir.path().join("sources/x/state.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "not = = toml\n").unwrap();
+        assert_eq!(store.source_state("x").unwrap(), SourceState::default());
+
+        let state = SourceState {
+            identity: "source-hash".into(),
+            resolved_url: Some("https://example.net/feed.xml".into()),
+            ..Default::default()
+        };
+        assert!(store.write_source_state("x", &state).unwrap());
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(toml::from_str::<SourceState>(&text).unwrap(), state);
+        assert_eq!(store.source_state("x").unwrap(), state);
+    }
+
+    #[test]
+    fn unreadable_state_is_still_an_error() {
+        // Only malformed content is recoverable; a directory where the file should be is not.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path());
+        fs::create_dir_all(dir.path().join("status.toml")).unwrap();
+        assert!(store.status().is_err());
+        fs::create_dir_all(dir.path().join("sources/x/state.toml")).unwrap();
+        assert!(store.source_state("x").is_err());
     }
 
     #[test]
