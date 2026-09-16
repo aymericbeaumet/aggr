@@ -157,7 +157,35 @@ impl DevArgs {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory;
+
     use super::*;
+
+    #[test]
+    fn command_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn completions_are_generated_for_every_supported_shell() {
+        use clap_complete::Shell;
+        for shell in [
+            Shell::Bash,
+            Shell::Zsh,
+            Shell::Fish,
+            Shell::PowerShell,
+            Shell::Elvish,
+        ] {
+            let mut script = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "aggr", &mut script);
+            let script = String::from_utf8(script).unwrap();
+            assert!(
+                !script.trim().is_empty(),
+                "{shell}: empty completion script"
+            );
+            assert!(script.contains("aggr"), "{shell}: {script}");
+        }
+    }
 
     #[test]
     fn dev_has_local_defaults() {

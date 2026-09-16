@@ -141,7 +141,7 @@ images = true
 # An item has one category and any number of labels. Source labels are merged with feed labels.
 # labels = ["programming", "rust"]
 # headers = { Authorization = "Bearer ${TOKEN}" } # `${ENV}` values are expanded
-# html = true                # write sanitized raw HTML; defaults to `[store] html`
+# html = false               # skip the raw HTML sibling for this source; `[store] html = false` skips it everywhere
 # content = "heavy"          # override `[fetch] content` with `"heavy"` or `"light"`
 # previews = false           # override `[fetch] previews` for this source
 # images = false             # override `[fetch] images` for this source
