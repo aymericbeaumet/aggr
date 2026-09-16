@@ -427,7 +427,13 @@ pub(crate) fn ordered_article_candidates(
 
 pub(crate) fn html_candidate_groups(html: &str, base: &Url) -> HtmlCandidateGroups {
     let normalized = crate::content::normalize_image_sources(html);
-    let document = Html::parse_document(&normalized);
+    html_candidate_groups_in(&Html::parse_document(&normalized), base)
+}
+
+/// [`html_candidate_groups`] on an already parsed page. `document` must come from
+/// [`crate::content::normalize_image_sources`] output, so lazy and responsive sources are
+/// visible as `src` exactly as they are for the string variant.
+pub(crate) fn html_candidate_groups_in(document: &Html, base: &Url) -> HtmlCandidateGroups {
     let Ok(meta_selector) = Selector::parse("meta[property], meta[name]") else {
         return HtmlCandidateGroups::default();
     };

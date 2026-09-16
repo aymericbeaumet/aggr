@@ -41,16 +41,25 @@ impl MemorySite {
         }
     }
 
+    /// The snapshot the previous `aggr dev` promoted, or nothing when there is none. A snapshot
+    /// that cannot be read is removed as well: its dev key would otherwise keep matching, the
+    /// first rebuild would be skipped, and the placeholder would be served indefinitely.
     fn cached(root: &Path) -> Option<Self> {
-        root.join(".aggr-site")
-            .is_file()
-            .then(|| read_site(root, None))
-            .transpose()
-            .ok()
-            .flatten()
-            .map(|files| Self {
+        if !root.join(".aggr-site").is_file() {
+            return None;
+        }
+        match read_site(root, None) {
+            Ok(files) => Some(Self {
                 files: Arc::new(RwLock::new(files)),
-            })
+            }),
+            Err(err) => {
+                log::warn!("ignoring unusable dev snapshot {}: {err:#}", root.display());
+                if let Err(err) = remove_build(root) {
+                    log::warn!("could not remove the unusable dev snapshot: {err:#}");
+                }
+                None
+            }
+        }
     }
 
     #[cfg(test)]
@@ -973,6 +982,50 @@ pub fn content_type(path: &Path) -> &'static str {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn readable_cached_snapshots_are_restored_and_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cached = tmp.path().join("site");
+        std::fs::create_dir_all(&cached).unwrap();
+        std::fs::write(cached.join("index.html"), "restored").unwrap();
+        assert!(
+            MemorySite::cached(&cached).is_none(),
+            "a directory without the ownership marker is not a snapshot"
+        );
+        std::fs::write(cached.join(".aggr-site"), "1").unwrap();
+        let site = MemorySite::cached(&cached).unwrap();
+        assert_eq!(
+            site.response("/", "/").await.unwrap().1.as_slice(),
+            b"restored"
+        );
+        assert!(cached.join("index.html").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_cached_snapshots_are_discarded_so_the_dev_key_stops_matching() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let cached = tmp.path().join("site");
+        std::fs::create_dir_all(&cached).unwrap();
+        std::fs::write(cached.join(".aggr-site"), "1").unwrap();
+        std::fs::write(cached.join(DEV_KEY_FILE), "fingerprint").unwrap();
+        std::fs::write(cached.join("index.html"), "stale").unwrap();
+        std::fs::set_permissions(
+            cached.join("index.html"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        if std::fs::read(cached.join("index.html")).is_ok() {
+            // Running as root: an unreadable snapshot entry cannot be simulated.
+            return;
+        }
+        assert!(dev_key_matches(&cached, "fingerprint"));
+        assert!(MemorySite::cached(&cached).is_none());
+        assert!(!cached.exists(), "the unusable snapshot is removed");
+        assert!(!dev_key_matches(&cached, "fingerprint"));
+    }
 
     #[test]
     fn resolves_under_the_root_only() {

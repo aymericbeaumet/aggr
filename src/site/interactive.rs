@@ -33,15 +33,22 @@ impl InteractiveCtx {
 
 /// Canvas applications have no diagram pixels in their HTTP HTML. Record the capability before
 /// stripping executable content; rendering can offer the separately sandboxed live original.
+#[cfg(test)]
 pub(crate) fn is_interactive_document(page: &str) -> bool {
-    if !page
-        .as_bytes()
+    mentions_canvas(page) && is_interactive_document_in(&Html::parse_document(page))
+}
+
+/// The byte pre-check in front of [`is_interactive_document_in`]: a page without a `<canvas`
+/// tag is never an application, and most pages never need the parsed checks.
+pub(crate) fn mentions_canvas(page: &str) -> bool {
+    page.as_bytes()
         .windows(7)
         .any(|tag| tag.eq_ignore_ascii_case(b"<canvas"))
-    {
-        return false;
-    }
-    let document = Html::parse_document(page);
+}
+
+/// The parsed half of [`is_interactive_document`], for callers that already hold the document
+/// and passed [`mentions_canvas`].
+pub(crate) fn is_interactive_document_in(document: &Html) -> bool {
     static SELECTORS: OnceLock<Option<(Selector, Selector, Selector)>> = OnceLock::new();
     let Some((canvases, scripts, controls)) = SELECTORS.get_or_init(|| {
         Some((

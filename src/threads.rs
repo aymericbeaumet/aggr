@@ -39,6 +39,7 @@ const EXPANSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 
 /// Expand a public self-reply thread advertised by `page`, or by a conservative
 /// Mastodon-compatible status URL when the page omits discovery metadata.
+#[cfg(test)]
 pub async fn expand(
     page: &str,
     page_url: &Url,
@@ -46,22 +47,34 @@ pub async fn expand(
     client: &http::Client,
     cache: &ArticleCache,
 ) -> Result<Option<ExtractedArticle>> {
+    expand_alternates(activity_candidates(page, page_url), source, client, cache).await
+}
+
+/// [`expand`] from representations already discovered with [`activity_candidates_in`]; a page
+/// that advertised nothing costs no request and no timer.
+pub async fn expand_alternates(
+    candidates: Vec<Url>,
+    source: &Source,
+    client: &http::Client,
+    cache: &ArticleCache,
+) -> Result<Option<ExtractedArticle>> {
+    if candidates.is_empty() {
+        return Ok(None);
+    }
     tokio::time::timeout(
         EXPANSION_TIMEOUT,
-        expand_bounded(page, page_url, source, client, cache),
+        expand_bounded(candidates, source, client, cache),
     )
     .await
     .context("ActivityPub thread expansion exceeded 10 seconds")?
 }
 
 async fn expand_bounded(
-    page: &str,
-    page_url: &Url,
+    candidates: Vec<Url>,
     source: &Source,
     client: &http::Client,
     cache: &ArticleCache,
 ) -> Result<Option<ExtractedArticle>> {
-    let candidates = activity_candidates(page, page_url);
     let mut last_error = None;
     let mut remaining_requests = MAX_REQUESTS;
     for candidate in candidates {
@@ -89,10 +102,32 @@ async fn expand_bounded(
     }
 }
 
+/// Whether discovery can find anything on `page` at all: an advertised `activity+json` (or an
+/// `ld+json` alternate carrying the ActivityStreams profile) or a conservative status URL. The
+/// scan is case-insensitive like the `type` matching it stands in for, and cheap enough to run
+/// before any parse; ordinary articles fail it and are never parsed for alternates.
+pub fn may_advertise_activity(page: &str, page_url: &Url) -> bool {
+    conservative_status_url(page_url)
+        || page
+            .as_bytes()
+            .windows(8)
+            .any(|window| window.eq_ignore_ascii_case(b"activity"))
+}
+
+#[cfg(test)]
 fn activity_candidates(page: &str, page_url: &Url) -> Vec<Url> {
+    if !may_advertise_activity(page, page_url) {
+        return Vec::new();
+    }
+    activity_candidates_in(&Html::parse_document(page), page_url)
+}
+
+/// The representations worth a discovery request, in preference order: advertised same-origin
+/// alternates first, then the page itself when it looks like a status URL. Callers pre-check
+/// with [`may_advertise_activity`].
+pub fn activity_candidates_in(document: &Html, page_url: &Url) -> Vec<Url> {
     let mut candidates = Vec::new();
     let mut seen = BTreeSet::new();
-    let document = Html::parse_document(page);
     if let Ok(selector) = Selector::parse("link[rel][href]") {
         for link in document.select(&selector) {
             let rel = link.value().attr("rel").unwrap_or_default();
@@ -1184,6 +1219,33 @@ mod tests {
             activity_candidates("", &Url::parse("https://example.com/story/123").unwrap())
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn pages_without_markers_skip_discovery_before_any_parse() {
+        let article = Url::parse("https://blog.example/posts/hello").unwrap();
+        let status = Url::parse("https://social.example/@alice/123").unwrap();
+        let plain = r#"<html><head><link rel="alternate" type="application/rss+xml" href="/feed.xml"><script type="application/ld+json">{"@type":"Article"}</script></head><body><a href="/objects/1">thread</a></body></html>"#;
+        assert!(!may_advertise_activity(plain, &article));
+        assert!(activity_candidates(plain, &article).is_empty());
+        assert!(
+            may_advertise_activity(plain, &status),
+            "status URLs are probed on shape alone"
+        );
+        for marker in [
+            r#"<link rel="alternate" type="Application/Activity+JSON" href="/objects/1">"#,
+            r#"<link rel="alternate" type="application/ld+json; profile=&quot;https://www.w3.org/ns/activitystreams&quot;" href="/objects/1">"#,
+        ] {
+            assert!(may_advertise_activity(marker, &article), "{marker}");
+            assert_eq!(
+                activity_candidates(marker, &article)
+                    .iter()
+                    .map(Url::as_str)
+                    .collect::<Vec<_>>(),
+                ["https://blog.example/objects/1"],
+                "{marker}"
+            );
+        }
     }
 
     #[tokio::test]
