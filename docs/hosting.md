@@ -118,6 +118,24 @@ No GitHub API is involved in ordinary fetching, storage, rendering, or a direct 
 include. GitHub's reusable workflow, Pages deployment, repository shorthand, config wildcards,
 and web permalinks are optional provider integrations around that portable core.
 
+## Environment variables and exit codes
+
+Every option has a flag; a few also read the environment so a workflow step can set them once:
+
+| Variable | Effect |
+|---|---|
+| `AGGR_CONFIG` | Default for the global `--config` (otherwise `aggr.toml` in the current directory). |
+| `AGGR_BASE_URL` | Default for `--base-url` on `build` and `dev`. An empty value means unset, so a skipped workflow step cannot pass the empty URL. |
+| `AGGR_CACHE_DIR` | Root under which `dev` keeps its per-config cache, and where `clean` looks for it, instead of the operating system's cache directory. `sync` and `build` always use the repository-local `.aggr/cache`. |
+| `AGGR_BUILD_WORKERS` | Worker threads for the CPU-bound build phases: a positive integer, clamped to 1..=8. A value that is not a positive integer is ignored with a warning, and the machine's available parallelism is used, up to eight. |
+
+`sync` and `build` exit non-zero only for a configuration error, a git or IO error, or when every
+configured source failed (`every source failed`); one failing source is reported through
+`status.toml` and the run continues, so a scheduled workflow does not go red because one publisher
+is down. `check` is the strict one: it probes every source and exits non-zero when any probe fails
+(`N of M source(s) failed`), which makes it the right command for validating `aggr.toml` before a
+merge.
+
 ## Making a public snapshot discoverable
 
 Release builds give every published, retained item an indexable page with a self-canonical URL. The

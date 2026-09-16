@@ -17,8 +17,10 @@ refs/aggr/*        lightweight pointers to data commits
 ```
 
 The primary branch is often named `main`, but aggr does not depend on that name and never commits
-to the branch holding the config. The data worktree (`.aggr/data`) and build output (`_site/`) are
-added to `.git/info/exclude`, so `git status` stays clean without a `.gitignore` entry.
+to the branch holding the config. The whole `.aggr/` directory (the data worktree `.aggr/data`,
+the build cache `.aggr/cache`, and the `aggr.lock` file described below) and the build output
+(`_site/`) are added to `.git/info/exclude`, so `git status` stays clean without a `.gitignore`
+entry on the primary branch.
 
 The data branch shares no history with the primary branch; it starts from an orphan commit named
 `aggr: init` and is only ever extended. An item in an older commit therefore remains addressable by
@@ -38,11 +40,15 @@ README.md                                              what this branch is, how 
 .gitignore                                             .tmp*: an interrupted atomic write is never committed
 items/<source>/<yyyy>/<mm>/<yyyy-mm-dd>-<slug>.md      YAML front matter + readable Markdown
 items/<source>/<yyyy>/<mm>/<yyyy-mm-dd>-<slug>.html    stripped HTML from which Markdown was derived
-sources/<source>/state.toml                            identity, resolved_url, title/site URL, ETag, Last-Modified, body hash
+sources/<source>/state.toml                            identity, resolved_url, title/site URL, language, ETag, Last-Modified, body hash
 sources/<source>/seen.txt                              "<key> <yyyy-mm-dd>" per line, append-only
 status.toml                                            sources currently failing; absent when all is well
 ```
 
+- **Bootstrap files are regenerated.** `README.md`, `.gitattributes`, and `.gitignore` are written
+  when missing, each checked on its own, so a branch created by an older version gains the file it
+  lacks the next time a command opens the archive. The `.gitignore` keeps `.tmp*`, the temporary
+  file of an interrupted atomic write, out of `git add -A` and therefore out of history.
 - **Item paths are identities.** Storage stays date-partitioned, while the public site uses
   `/items/<source>/<stem>/` plus `.md`, `.txt`, `.rst`, and `.json` representations. Search and
   alternate representations key on the path. The date is the upstream publication time, otherwise
@@ -95,6 +101,11 @@ render the static site           →  from the selected data commit
   configuration errors, and data Git/IO errors make sync exit non-zero. After data is saved,
   an auxiliary recovery-pointer failure is reported as a warning and does not block rendering
   or deployment of the current snapshot.
+- **One mutating command at a time.** `sync`, `build`, and `clean` hold an exclusive advisory lock
+  on `.aggr/aggr.lock` while they run. A second one fails immediately, naming the holder's PID and
+  command, instead of racing on `git worktree add`, `git worktree prune`, or the rebase. `clean
+  --dry-run` only inspects the lock and creates neither the file nor `.aggr/`; `dev` guards its own
+  cache with a `dev.lock` in the same way.
 - **Push, never force.** A rejected push is followed by a fetch and rebase onto `origin/aggr`.
   `seen.txt` files union-merge through `.gitattributes`, while regenerated state files keep the
   current run's result. A history that cannot be rebased is a hard error with recovery instructions,

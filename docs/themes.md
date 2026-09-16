@@ -47,8 +47,14 @@ publication, exposes the word count on hover, and emits `wordCount` plus an ISO 
 
 Every non-utility page advertises the site feeds: `page.feed_path` is the collection prefix (`""`
 at the root) and `page.feed_title` the title to label its Atom, RSS and JSON Feed alternates with;
-404 and offline pages carry neither. `site.og_locale` is the site language in Open Graph form
-(`en_GB`). `sources[].feed_url` is the resolved feed endpoint when one is known, which the build
+404 and offline pages carry neither. `site.language` is the `[site] language` BCP 47 tag that the
+base template writes to `<html lang>`, and `site.og_locale` is the same value in Open Graph form
+(`en_GB`). `sources[].language` is the BCP 47 tag a publisher declares for its whole feed (RSS
+`<language>`, Atom `xml:lang`, JSON Feed `language`), canonicalised and recorded in the source
+state, and `item.language` inherits it; both are absent when the feed declares none. The default
+theme adds `lang` to the article element, the feed-row title, and the excerpt only when that tag
+differs from `site.language`, so a single-language instance renders exactly as before.
+`sources[].feed_url` is the resolved feed endpoint when one is known, which the build
 also publishes as `sources.opml` for other readers alongside `llms.txt` and `aggr.json`.
 
 Use `url_for` for internal pages and assets so the same output works at `/` or under a nested

@@ -144,11 +144,17 @@ chromedriver --port=9515 --allowed-ips=127.0.0.1
 AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser -- --ignored
 ```
 
-Set `AGGR_CHROME_BINARY` if Chrome is outside its usual location. CI installs matching browser
-and driver versions; failure screenshots and logs are saved under `target/browser-artifacts/`.
+Set `AGGR_CHROME_BINARY` if Chrome is outside its usual location and `AGGR_BROWSER_TIMEOUT_SECS`
+(default 45) when a loaded machine needs longer waits. CI installs matching browser and driver
+versions; failure screenshots and logs are saved under `target/browser-artifacts/`.
 
 Issues and pull requests are welcome. If aggr improves your reading workflow, star the repository
 and share your reader—the easiest way for someone else to begin is often to fork one that already
 works.
 
-MIT licensed.
+## License
+
+[MIT](LICENSE), copyright Aymeric Beaumet. Dependency licenses, RustSec advisories, and duplicate
+crate versions are checked against [`deny.toml`](deny.toml) with `cargo deny check`, which CI runs
+in its `deps` job; the notices of the embedded client bundle are in
+[`themes/default/static/client.LICENSE`](themes/default/static/client.LICENSE).

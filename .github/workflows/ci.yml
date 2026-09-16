@@ -165,6 +165,18 @@ jobs:
           save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - run: cargo build --locked
 
+  # Licenses, RustSec advisories, duplicate versions and registry sources of the dependency tree,
+  # as configured in deny.toml. The action ships cargo-deny; no toolchain or cache is needed.
+  deps:
+    name: deps (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --locked --all-features
+
   # The version is committed in two places; keep them equal before anything gets tagged.
   version:
     runs-on: ubuntu-latest

@@ -60,6 +60,35 @@ but aggr does not log in, complete challenges, or query third-party Instagram br
 profile cannot be read publicly, use the creator's website or feed instead. Meta's authorized
 Instagram APIs are a separate integration and are not enabled by adding an ordinary profile URL.
 
+## Source adapters
+
+Every engine under `src/sources/` claims URLs with a predicate, and `sources/mod.rs` tries them
+in this order before falling back to the generic feed path. A URL that no adapter claims is an
+ordinary feed or website; nothing here is public configuration.
+
+| Adapter | Accepted URLs | Details |
+|---|---|---|
+| `instagram.rs` | `instagram.com`, `www.instagram.com`, or `m.instagram.com` with a profile name as the path | the paragraph above |
+| `qwen.rs` | exactly `https://qwen.ai/blog` or `https://qwen.ai/research`; a trailing slash is accepted, any query string is not | below |
+| `podcast.rs` | Apple Podcasts show URLs, `open.spotify.com/show/<ID>`, Deezer show URLs, and the hosting providers whose show URL maps to a known feed endpoint | [podcast sources](podcasts.md) |
+| `feed.rs`, `html.rs` | every other `http(s)` URL: as a feed, then advertised and conventional endpoints, then the page's article list | [configuring sources](sources.md) |
+| `aggr.rs` | repository URLs, selected at configuration time (`type = "aggr"` engine) | [source definitions](#source-definitions-and-collections), [the git model](git-model.md#copying-another-instance) |
+| `youtube.rs` | not a dispatcher: it drops Shorts from every source's items, recognizes video URLs for inline players and posters, and reads public durations | [themes](themes.md#video-and-lead-media) |
+
+### Qwen
+
+Qwen's blog is rendered by JavaScript, so the adapter reads the site's public article endpoint
+(`/api/v2/article/retrieval?type=qwen_ai&language=en-US`) with aggr's ordinary client, headers,
+and conditional GET. The endpoint answers with a new request ID every time, so change detection
+hashes the article list alone: an unchanged list is an unchanged source. Each article becomes one
+item with its title, `https://qwen.ai/blog?id=<path>` as the link, its RFC 3339 date, author,
+tags as labels, the small cover image as the preview candidate, and the article HTML (the first
+of `.post-content`, `article`, `main`, or `body`) as content; the source is titled `Qwen` with
+`https://qwen.ai/` as its site URL. An article without a path, title, or content is a source
+error rather than an empty item. Because the API already carries the whole article, heavy mode
+never requests the JavaScript shell for it, and the daily retry that upgrades feed-only captures
+skips the source, as it does for light-mode and mirrored sources.
+
 ## Public threads
 
 Heavy article extraction joins public posts by the original author. Mastodon/ActivityPub follows

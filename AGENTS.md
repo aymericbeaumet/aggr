@@ -37,20 +37,64 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
 ## Layout
 
 ```
-src/main.rs, cli.rs            entry + clap types
-src/commands/*.rs              one file per subcommand; Project = config + sources + repo
-src/config.rs, config/         aggr.toml types, safe source collections, ${ENV}, validation
-src/git.rs                     worktree/orphan bootstrap, commit with trailers, push+rebase, refs
-src/http.rs                    reqwest client: UA, timeouts, size cap, conditional GET, retries
-src/sources/{mod,feed,html,aggr}.rs source dispatch, automatic feed/HTML discovery, aggr engine
-src/content.rs                 strip → sanitize → Markdown; html_to_text, excerpt
-src/model.rs                   front matter, dedupe keys, link normalization, file names, blob sha
-src/store/                     the branch tree: items, state, seen, status, retention, front matter
-src/site/                      build orchestration, template context, minijinja env, outputs
-themes/default/                embedded theme (templates/, static/)
-tests/cli.rs                   end-to-end: bare origin + clone + httpmock + the real binary
-docs/git-model.md              the branch/ref contract; readme.md is a short user-facing entry
-docs/{sources,reading,hosting}.md the user-facing reference the readme links out to
+src/main.rs, cli.rs                       entry + clap types; AGGR_CONFIG and AGGR_BASE_URL env defaults
+src/commands/mod.rs                       Project = config + sources + repo; the .aggr/ lock and worktree
+src/commands/sync.rs                      fetch, commit with trailers, push, move refs/aggr/last-good
+src/commands/build.rs                     sync then render, or render a pinned --data-ref
+src/commands/dev.rs                       isolated cache, in-memory snapshot, watch and live reload
+src/commands/fetch.rs                     shared fetch stage: per-source workers, heavy content, persistence
+src/commands/fetch/index.rs               one archive pass: stored URLs, paths, reconciliation indexes
+src/commands/fetch/links.rs               cross-source URL reservations for overlapping feeds
+src/commands/fetch/plan.rs                what an item becomes on disk, decided before any write
+src/commands/fetch/transaction.rs         per-source file transaction with rollback
+src/commands/fetch/repair.rs              post-feed repairs: missing media, feed-only capture upgrades
+src/commands/fetch/tests.rs               the fetch stage's unit tests
+src/commands/fetch/duration.rs            feed-parser receipts that gate conditional GET for durations
+src/commands/fetch/openreview.rs          public paper metadata instead of the challenged web app
+src/commands/fetch/podcast.rs             publisher-feed reconciliation of streaming-show items
+src/commands/fetch/recording.rs           bounded recording-duration probes with daily backoff
+src/commands/check.rs                     probe every source once; non-zero when any fails
+src/commands/clean.rs                     provably disposable targets only
+src/commands/init.rs                      aggr.toml and the optional GitHub workflow
+src/commands/lock.rs                      non-blocking advisory lock (.aggr/aggr.lock, dev.lock)
+src/commands/server.rs, server/client.rs  the dev HTTP server and its Vite passthrough
+src/config.rs, config/                    aggr.toml types, imports and collections, ${ENV}, BCP 47 tags, preferences, validation
+src/git.rs                                worktree/orphan bootstrap, commit with trailers, push+rebase, refs
+src/http.rs, http/transport.rs            reqwest client (UA, timeouts, size cap, conditional GET, retries) + wreq challenge fallback
+src/sources/mod.rs                        engine dispatch by URL predicate: instagram, qwen, podcast, then feed
+src/sources/feed.rs, html.rs              RSS/Atom/JSON via feed-rs; the discovery ladder from HTML
+src/sources/aggr.rs                       another aggr repository as a source
+src/sources/instagram.rs                  profile pages that expose post cards
+src/sources/podcast.rs                    show pages resolved to publisher feeds
+src/sources/qwen.rs                       Qwen's article API behind its JavaScript blog
+src/sources/youtube.rs, youtube/          Shorts filter, video URLs, posters, durations
+src/content.rs, content/                  strip → extract → Markdown → safe HTML; scan, cleanup, resources
+src/content_highlight.rs                  bounded build-time syntax highlighting
+src/media.rs, media/                      lossless article images; ThumbHash placeholders, srcset, SVG rasters, validation receipts
+src/media_duration.rs                     strict recording durations shared by feeds and players
+src/preview.rs, preview/pdf.rs            bounded thumbnails, PDF first pages
+src/threads.rs, threads/x.rs              ActivityPub and X thread expansion
+src/discussions.rs                        discussion-network lookups with cached backoff
+src/cache.rs                              cache roots, the Namespace registry, the render-fingerprint classification
+src/model.rs                              front matter, dedupe keys, link normalization, file names, blob sha
+src/store/                                the branch tree: items, state, seen, status, retention, front matter
+src/site/mod.rs                           build orchestration: phases, media windows, the timing line
+src/site/assets.rs                        content-addressed media gathered on workers, published in item order
+src/site/context.rs                       the template contract
+src/site/render.rs                        minijinja env with the layered template/static lookup
+src/site/outputs.rs                       feeds, OPML, discovery documents, sitemaps, redirect stubs
+src/site/pagefind.rs                      the search index and its cache key
+src/site/parallel.rs                      ordered map over at most 8 scoped workers; AGGR_BUILD_WORKERS
+src/site/{related,display,document,interactive,item_type,native_media,video}.rs  navigation and presentation contexts
+themes/default/                           embedded theme (templates/, static/ with the committed client bundle)
+web/                                      Svelte/TypeScript client; web/src/reader/ holds the tested reader modules
+tests/cli.rs                              end-to-end: bare origin + clone + httpmock + the real binary
+tests/clean.rs, local_sources.rs          cleanup and local-file source scenarios
+tests/support/                            shared integration helpers: git and environment isolation
+tests/browser/                            WebDriver contracts: harness.rs + one module per topic
+tests/browser_performance.rs              non-gating client benchmark
+docs/git-model.md                         the branch/ref contract; readme.md is a short user-facing entry
+docs/*.md                                 the user-facing reference the readme links out to
 ```
 
 ## Commands
@@ -89,6 +133,17 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   [interoperability](docs/interoperability.md) for native build requirements.
 - `sync` persists to git; `build` runs that same sync first; `dev` runs it against a namespaced
   OS cache and serves an atomic in-memory snapshot without committing or pushing.
+- Every `src/sources/*` adapter documents its accepted URL contract in
+  [interoperability](docs/interoperability.md#source-adapters); `sources/mod.rs` dispatches on
+  those predicates in order.
+- Every new `src/**/*.rs` file is classified in `src/cache.rs`: list it in
+  `render_implementation_sources()` when it can change rendered bytes, otherwise in
+  `RENDER_INDEPENDENT_SOURCES`. The classification unit test fails until it is.
+- Cache directories are registered in `cache::Namespace`; a unit test pins the reusable workflow's
+  `actions/cache` path list to that registry, so a new namespace changes both.
+- The browser suite (`tests/browser/`) is one module per topic, and every test builds its own
+  fixture site and Chrome session. `AGGR_BROWSER_TIMEOUT_SECS` lengthens its waits on a loaded
+  machine; `AGGR_BUILD_WORKERS` pins the build's worker count.
 
 ## Reader and ingestion invariants
 

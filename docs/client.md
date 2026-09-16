@@ -62,6 +62,21 @@ search display data. `Metadata.svelte` renders the same source/category/date/rea
 comments fields. Static and Svelte markup remain separate;
 parity tests cover their shared data, optional fields, escaping, and separators.
 
+The reader entry (`web/src/reader.ts`) wires small, individually tested modules under
+`web/src/reader/`: `dom` (`$`, `$$`, `el`, `setStyle`), `page-head` (the per-page `<head>` metadata
+a navigation carries over), `margin-notes` (same-page footnotes copied beside their references when
+the viewport has a margin column), `article-header` (fold and reading-progress arithmetic),
+`entries` (feed entry keys, age bands, and merging newly delivered entries), `pagination`
+(`feed-page` URLs and pager layout), `pull-refresh` (the touch pull-to-refresh state machine), and
+`shortcuts` (goto routes, external shortcuts, and scroll distances). Every start-up step runs through
+`safely(step, fn)` from `web/src/lifecycle.ts`: a throw is recorded on `window.__aggrErrors`,
+reported with `console.error`, and does not stop the next step, and the browser harness reads that
+list. `mountOver(target, mounts)` from `web/src/mount-over.ts` snapshots the server-rendered
+children before mounting components over them and puts them back when a mount throws or when the
+overlay is restored, so the no-JavaScript markup is never lost. `announce(text)` from
+`web/src/announce.ts` writes status text into the one polite live region (`#aggr-announcer`),
+clearing it first so a repeated message is announced again.
+
 ## Ownership and navigation
 
 The shared header contains `feed | browse | preferences`, with `aggr.toml` on the right and
@@ -129,6 +144,21 @@ Search URLs use the main feed and `?q=` exclusively; separate facet query parame
 source:"Underscore_" type:podcast -tag:sponsored sort:newest
 date:2026-08-01..2026-08-31 -"sponsored post"
 ```
+
+| Clause | Meaning |
+|---|---|
+| `word` | Full-text match in the indexed title and prose. |
+| `"exact phrase"` | The words together; a backslash escapes a quote or a backslash, and an unclosed quote is an error. |
+| `-word`, `-"phrase"`, `-tag:x` | Exclude what the clause matches; a minus inside quotes is text. |
+| `source:`, `category:`, `tag:`, `type:` | Facet by stable identifier or unique label; quote a value with spaces. |
+| `date:2026-09-08` | Published on that UTC day. |
+| `date:2026-08-01..2026-08-31` | Inclusive range; either side can be left open (`..2026-08-31`). |
+| `date:>=2026-09-01`, `date:>`, `date:<`, `date:<=`, `date:=` | Comparisons; `since:`, `after:`, `before:`, and `until:` are the same with a plain date. |
+| `date:today`, `yesterday`, `week`/`last7d`, `month`/`last30d`, `year` | Shortcuts, rewritten to absolute dates in the shared URL. |
+| `sort:relevance`, `sort:newest`, `sort:oldest` | Result order; the one clause that cannot be negated. |
+
+A known qualifier without a value is an error; an unknown qualifier and any `http(s)://` URL stay
+full text. The parser is `web/src/search/query.ts`.
 
 Unqualified words search the indexed title and full text. Quoted phrases match together; a leading
 minus excludes a word, phrase, or facet. `category:`, `source:`, `tag:`, and `type:` accept stable
