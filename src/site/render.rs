@@ -410,7 +410,7 @@ mod tests {
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
         assert!(base.contains("class=\"config-link\""));
-        assert!(base.contains(">aggr.toml ↗</a>"));
+        assert!(base.contains(">aggr.toml <span aria-hidden=\"true\">↗</span></a>"));
     }
 
     #[test]
@@ -424,7 +424,7 @@ mod tests {
         let preferences = std::str::from_utf8(preferences_file.data.as_ref()).unwrap();
         assert!(!preferences.contains("id=\"install-app\""));
         assert!(!preferences.contains("preferences-config"));
-        assert!(!preferences.contains(">aggr.toml ↗</a>"));
+        assert!(!preferences.contains(">aggr.toml <span aria-hidden=\"true\">↗</span></a>"));
         assert!(preferences.contains("data-preferences-root"));
         assert!(preferences.contains("<noscript>"));
         assert!(!preferences.contains("<input"));
@@ -488,8 +488,9 @@ mod tests {
         assert!(base.contains("rel=\"type\""));
         assert!(base.contains("name=\"aggr:network\""));
         assert!(base.contains("max-image-preview:large"));
-        assert!(base.contains("<meta name=\"twitter:card\" content=\"summary\">"));
-        assert!(!base.contains("summary_large_image"));
+        assert!(base.contains(
+            "<meta name=\"twitter:card\" content=\"{{ 'summary_large_image' if lead_image else 'summary' }}\">"
+        ));
         assert!(base.contains("data-nosnippet"));
         assert!(!base.contains("data-route=\"settings/\""));
 

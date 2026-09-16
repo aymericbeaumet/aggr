@@ -45,6 +45,12 @@ empty/title-only body reports zero for each. The default theme shows reading tim
 publication, exposes the word count on hover, and emits `wordCount` plus an ISO 8601
 `timeRequired` duration in structured data.
 
+Every non-utility page advertises the site feeds: `page.feed_path` is the collection prefix (`""`
+at the root) and `page.feed_title` the title to label its Atom, RSS and JSON Feed alternates with;
+404 and offline pages carry neither. `site.og_locale` is the site language in Open Graph form
+(`en_GB`). `sources[].feed_url` is the resolved feed endpoint when one is known, which the build
+also publishes as `sources.opml` for other readers alongside `llms.txt` and `aggr.json`.
+
 Use `url_for` for internal pages and assets so the same output works at `/` or under a nested
 mount. The default base template supplies the page-relative `<base>`; static asset names are
 content-hashed during the build. Public canonical and social URLs should use `site.base_url` only

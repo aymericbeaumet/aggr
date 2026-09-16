@@ -17,6 +17,8 @@ pub struct SiteCtx {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<SiteIdentityCtx>,
     pub language: String,
+    /// Open Graph locale derived from `language` (`en-GB` becomes `en_GB`).
+    pub og_locale: String,
     /// Path prefix every site link is built on, always starting and ending with `/`.
     pub base_path: String,
     /// Absolute URL of the site root when known (feed and canonical links).
@@ -100,6 +102,9 @@ pub struct PageCtx {
     pub canonical_url: Option<String>,
     /// Site-relative collection whose Atom/RSS/JSON feeds this page advertises.
     pub feed_path: Option<String>,
+    /// Human-readable name of the advertised feeds; the collection title on list pages and the
+    /// site title on pages that advertise the root feeds.
+    pub feed_title: Option<String>,
     /// Present for list pages. The shape follows Zola's paginator template contract so themes
     /// can use the same first/last/previous/next mental model.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -294,6 +299,8 @@ pub struct SourceCtx {
     pub slug: String,
     pub name: String,
     pub url: Option<String>,
+    /// Feed endpoint resolved by the fetch pipeline, when a public one is known.
+    pub feed_url: Option<String>,
     pub site_url: Option<String>,
     pub category: Option<String>,
     pub engine: String,
@@ -317,6 +324,11 @@ pub struct CategoryCtx {
     pub count: usize,
     pub latest: Option<DateTime<Utc>>,
     pub page: String,
+}
+
+/// Open Graph locales use an underscore between language and territory (`en_GB`).
+pub fn og_locale(language: &str) -> String {
+    language.replace('-', "_")
 }
 
 /// GitHub URLs for a file on the data branch.
@@ -1093,6 +1105,7 @@ mod tests {
             slug: "example".into(),
             name: "☀ Daily News 🗞️".into(),
             url: Some("https://news.example/feed.xml".into()),
+            feed_url: None,
             site_url: Some("https://news.example/".into()),
             category: None,
             engine: "web".into(),
@@ -1201,5 +1214,12 @@ mod tests {
         let serialized = serde_json::to_string(&context).unwrap();
         assert!(!serialized.contains("reddit"));
         assert!(!serialized.contains("discussion.example"));
+    }
+
+    #[test]
+    fn og_locale_uses_an_underscore_between_language_and_territory() {
+        assert_eq!(og_locale("en-GB"), "en_GB");
+        assert_eq!(og_locale("fr"), "fr");
+        assert_eq!(og_locale("zh-Hant-TW"), "zh_Hant_TW");
     }
 }

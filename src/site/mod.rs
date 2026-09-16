@@ -837,13 +837,13 @@ pub fn build(
     info: &BuildInfo,
 ) -> Result<Summary> {
     let started = std::time::Instant::now();
+    let mut phases: Vec<(&str, std::time::Duration)> = Vec::new();
     let mut phase_started = started;
-    let mut phase = |name: &str| {
+    let mut phase = |name: &'static str| {
         let now = std::time::Instant::now();
-        log::debug!(
-            "build {name}: {:.3}s",
-            now.duration_since(phase_started).as_secs_f64()
-        );
+        let elapsed = now.duration_since(phase_started);
+        log::debug!("build {name}: {:.3}s", elapsed.as_secs_f64());
+        phases.push((name, elapsed));
         phase_started = now;
     };
     let out = &info.out;
@@ -885,6 +885,7 @@ pub fn build(
                 same_as: identity.same_as.iter().map(ToString::to_string).collect(),
             }),
         language: config.site.language.clone(),
+        og_locale: context::og_locale(&config.site.language),
         base_path: base.clone(),
         base_url: info.base_url.clone().map(|url| ensure_trailing_slash(&url)),
         repository: repository.clone(),
@@ -1183,6 +1184,7 @@ pub fn build(
                     root: relative_root(&pager.path),
                     canonical_url: canonical_url(&site, &pager.path),
                     feed_path: Some(prefix.to_string()),
+                    feed_title: Some(title.to_string()),
                     paginator: Some(pager.context.clone()),
                 };
                 let page_items = &list[pager.range.clone()];
@@ -1287,6 +1289,9 @@ pub fn build(
      -> Result<String> {
         let page_number = 1;
         let utility_fallback = matches!(kind, "404" | "offline");
+        // Error, offline and manifest documents are not reading pages; everything else
+        // advertises the root feeds so an article page is enough to subscribe from.
+        let advertises_feeds = !matches!(kind, "404" | "offline" | "manifest");
         let page = PageCtx {
             kind: kind.to_string(),
             title: title.to_string(),
@@ -1307,7 +1312,8 @@ pub fn build(
             canonical_url: (!utility_fallback)
                 .then(|| canonical_url(&site, path))
                 .flatten(),
-            feed_path: None,
+            feed_path: advertises_feeds.then(String::new),
+            feed_title: advertises_feeds.then(|| site.title.clone()),
             paginator: None,
         };
         let items = page_items.unwrap_or(&archive_items);
@@ -1491,7 +1497,7 @@ pub fn build(
         let target = format!("{}{target}", site.base_path);
         write(
             &out.join(previous).join("index.html"),
-            outputs::redirect_stub(&target).as_bytes(),
+            outputs::redirect_stub(&site, &target).as_bytes(),
         )?;
     }
 
@@ -1517,9 +1523,19 @@ pub fn build(
     )?;
     write(
         &out.join("aggr.json"),
-        outputs::instance_descriptor(&site, &build_ctx)?.as_bytes(),
+        outputs::instance_descriptor(&site, &build_ctx, archive_updated.unwrap_or(build_ctx.time))?
+            .as_bytes(),
     )?;
     write(&out.join("llms.txt"), outputs::llms_txt(&site).as_bytes())?;
+    write(
+        &out.join("sources.opml"),
+        outputs::sources_opml(
+            &site,
+            archive_updated.unwrap_or(build_ctx.time),
+            &source_ctxs,
+        )
+        .as_bytes(),
+    )?;
     if let Some(root) = site.base_url.as_deref() {
         write(
             &out.join("linkset.json"),
@@ -1641,12 +1657,43 @@ pub fn build(
     }
 
     phase("offline catalog and worker");
-    log::debug!("build complete: {:.3}s", started.elapsed().as_secs_f64());
-    Ok(Summary {
+    let summary = Summary {
         pages,
         items: archive_items.len(),
         stubs,
-    })
+    };
+    let total = started.elapsed();
+    log::debug!("build complete: {:.3}s", total.as_secs_f64());
+    let report = build_report(&phases, total, summary);
+    log::info!("{report}");
+    // Debug logs are never enabled in the publish workflow; a notice reaches the run summary.
+    if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        println!("::notice title=aggr build::{report}");
+    }
+    Ok(summary)
+}
+
+/// One line with every phase's wall time and the totals, so a slow publish run shows where the
+/// time went. Phase names are the ones `docs/performance.md` reports against.
+fn build_report(
+    phases: &[(&str, std::time::Duration)],
+    total: std::time::Duration,
+    summary: Summary,
+) -> String {
+    let timings: Vec<String> = phases
+        .iter()
+        .map(|(name, elapsed)| format!("{name} {:.1}s", elapsed.as_secs_f64()))
+        .chain(std::iter::once(format!(
+            "total {:.1}s",
+            total.as_secs_f64()
+        )))
+        .collect();
+    format!(
+        "build: {} ({} pages, {} items)",
+        timings.join(", "),
+        summary.pages,
+        summary.items
+    )
 }
 
 /// Template/static lookup order: the project's own `templates/`+`static/`, then the configured
@@ -1715,6 +1762,7 @@ fn source_contexts(
                 slug: source.slug.clone(),
                 name,
                 url: source.public_url.clone(),
+                feed_url: public_http_url(state.resolved_url.as_deref()),
                 site_url: state.site_url.clone(),
                 category: source
                     .category
@@ -1732,14 +1780,9 @@ fn source_contexts(
         .collect::<Result<Vec<_>>>()?;
     for (slug, (count, latest)) in counts {
         let state = store.source_state(slug)?;
-        let public_url = |value: Option<String>| {
-            value
-                .and_then(|value| url::Url::parse(&value).ok())
-                .filter(|url| matches!(url.scheme(), "http" | "https"))
-                .map(|url| crate::config::public_url(&url, false))
-        };
-        let site_url = public_url(state.site_url);
-        let url = public_url(state.resolved_url).or_else(|| site_url.clone());
+        let site_url = public_http_url(state.site_url.as_deref());
+        let feed_url = public_http_url(state.resolved_url.as_deref());
+        let url = feed_url.clone().or_else(|| site_url.clone());
         let fallback = url
             .as_deref()
             .map(context::domain_of)
@@ -1751,6 +1794,7 @@ fn source_contexts(
             slug: slug.to_string(),
             name,
             url,
+            feed_url,
             site_url,
             category: None,
             engine: "web".into(),
@@ -1766,6 +1810,15 @@ fn source_contexts(
             .then_with(|| a.slug.cmp(&b.slug))
     });
     Ok(contexts)
+}
+
+/// A stored endpoint reduced to what may appear on a public page: HTTP(S) only, without
+/// credentials or sensitive query values.
+fn public_http_url(value: Option<&str>) -> Option<String> {
+    value
+        .and_then(|value| url::Url::parse(value).ok())
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .map(|url| crate::config::public_url(&url, false))
 }
 
 #[derive(Clone, Copy)]
@@ -2077,6 +2130,7 @@ mod tests {
                 root: "../../".into(),
                 canonical_url: None,
                 feed_path: None,
+                feed_title: None,
                 paginator: None,
             };
             let ctx = Ctx {
@@ -2560,6 +2614,26 @@ mod tests {
     }
 
     #[test]
+    fn build_report_lists_phases_totals_and_counts() {
+        let phases = [
+            (
+                "archive preparation",
+                std::time::Duration::from_millis(2_040),
+            ),
+            ("search index", std::time::Duration::from_millis(14_160)),
+        ];
+        let summary = Summary {
+            pages: 12,
+            items: 3,
+            stubs: 4,
+        };
+        assert_eq!(
+            build_report(&phases, std::time::Duration::from_millis(52_010), summary),
+            "build: archive preparation 2.0s, search index 14.2s, total 52.0s (12 pages, 3 items)"
+        );
+    }
+
+    #[test]
     fn render_generation_changes_only_at_visible_time_boundaries() {
         let at = day(3);
         let item = |path: &str, published| Item {
@@ -2596,6 +2670,116 @@ mod tests {
             render_generation(std::slice::from_ref(&cutoff), &site, at),
             render_generation(&[cutoff], &site, at + Duration::minutes(2))
         );
+    }
+
+    /// Hand-edited front matter may hold YAML that JSON cannot carry. Such items must still take
+    /// part in the render fingerprint and must never abort `content_version`.
+    #[test]
+    fn exotic_front_matter_extra_still_fingerprints_and_builds() {
+        use crate::model::{FrontMatter, file_stem, item_dir};
+        use crate::store::NewItem;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "");
+        let exotic = |note: &str| {
+            let mut junk = serde_yaml_ng::Mapping::new();
+            junk.insert(serde_yaml_ng::Value::Null, "x".into());
+            BTreeMap::from([
+                ("junk".to_string(), serde_yaml_ng::Value::Mapping(junk)),
+                ("ratio".to_string(), serde_yaml_ng::Value::from(f64::NAN)),
+                ("note".to_string(), note.into()),
+            ])
+        };
+        let date = day(10);
+        for note in ["a", "b"] {
+            let front = FrontMatter {
+                title: format!("Exotic {note}"),
+                link: format!("https://blog.example/exotic-{note}"),
+                source: "blog".into(),
+                published: Some(date),
+                first_seen: date,
+                extra: exotic(note),
+                ..Default::default()
+            };
+            store
+                .write_item(NewItem {
+                    dir: &item_dir("blog", date),
+                    stem: &file_stem(date, &front.title),
+                    front: &front,
+                    body: "Hello",
+                    html: None,
+                    preview: None,
+                    images: &[],
+                })
+                .unwrap();
+        }
+
+        let mut items = store.items().unwrap();
+        items.retain(|item| item.front.title.starts_with("Exotic"));
+        items.sort_by(|a, b| a.path.cmp(&b.path));
+        let [first, second] = items.as_mut_slice() else {
+            panic!("expected two exotic items, got {}", items.len());
+        };
+        // Same path and body: only the readable part of `extra` differs.
+        second.path = first.path.clone();
+        assert_ne!(
+            render_generation(std::slice::from_ref(first), &config.site, day(20)),
+            render_generation(std::slice::from_ref(second), &config.site, day(20)),
+        );
+
+        let build_info = info(dir.path().join("out"));
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+    }
+
+    /// Every cache the publish workflow keeps (media receipts, search index, service-worker
+    /// precache) assumes identical inputs give identical bytes, so nothing but the archive may
+    /// leak into the output. The fixture dates are absolute and days away from every age band and
+    /// river cutoff, so an hour of wall-clock drift between the builds changes no visible state.
+    /// The search index goes through the same input-keyed cache the workflow uses: Pagefind 1.5.2
+    /// encodes filter values in hash-map order (see the TODO in its `index/mod.rs`), so a cold
+    /// index is not byte-stable under load and cannot be part of this guarantee.
+    #[test]
+    fn identical_archives_build_byte_identical_trees_regardless_of_wall_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 3, "pwa = true\n");
+        let pagefind_cache = dir.path().join("pagefind-cache");
+        let tree = |name: &str, now: DateTime<Utc>| {
+            let out = dir.path().join(name);
+            let mut build_info = info(out.clone());
+            build_info.release = true;
+            build_info.now = now;
+            build_info.pagefind_cache = Some(pagefind_cache.clone());
+            build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+            output_digests(&out)
+        };
+        let first = tree("first", day(20));
+        let second = tree("second", day(20) + Duration::hours(1));
+        assert_eq!(
+            first.keys().collect::<Vec<_>>(),
+            second.keys().collect::<Vec<_>>()
+        );
+        for (path, digest) in &first {
+            assert_eq!(
+                &second[path],
+                digest,
+                "{} differs between two builds of the same archive",
+                path.display()
+            );
+        }
+    }
+
+    /// Relative path → SHA-1 of every regular file below `out`.
+    fn output_digests(out: &Path) -> BTreeMap<PathBuf, String> {
+        walkdir::WalkDir::new(out)
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                let relative = entry.path().strip_prefix(out).unwrap().to_path_buf();
+                let digest = crate::model::sha1_hex(std::fs::read(entry.path()).unwrap());
+                (relative, digest)
+            })
+            .collect()
     }
 
     /// A store with `count` items of one source, newest last, and a matching config.
@@ -3943,7 +4127,10 @@ category = "Science"
         assert!(river.contains("name=\"theme-color\""));
         assert!(river.contains("href=\"browse/\""), "{river}");
         assert!(river.contains("href=\"preferences/\""), "{river}");
-        assert!(river.contains("aggr.toml ↗</a>"), "{river}");
+        assert!(
+            river.contains("aggr.toml <span aria-hidden=\"true\">↗</span></a>"),
+            "{river}"
+        );
         assert!(out.join("preferences/index.html").is_file());
         assert!(!out.join("settings/index.html").exists());
         assert!(!out.join("pagefind/pagefind.js").exists());
@@ -4365,7 +4552,8 @@ same_as = ["https://social.example/@ada"]
         );
         assert!(!interactive.contains("<iframe"));
         assert!(
-            interactive.contains(">Open original ↗</a></figcaption>"),
+            interactive
+                .contains(">Open original <span aria-hidden=\"true\">↗</span></a></figcaption>"),
             "{interactive}"
         );
         assert!(!interactive.contains("if the interactive view is unavailable"));
@@ -4420,5 +4608,385 @@ same_as = ["https://social.example/@ada"]
         let river = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(!river.contains("<embed"), "{river}");
         assert!(!river.contains("<object"), "{river}");
+    }
+    #[test]
+    fn reading_pages_advertise_root_feeds_and_keep_microformats_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 2, "");
+        for mut item in store.items().unwrap() {
+            item.front.authors = vec!["Ada Lovelace".into(), "Grace Hopper".into()];
+            let (directory, stem) = item.path.rsplit_once('/').unwrap();
+            store
+                .write_item(crate::store::NewItem {
+                    dir: directory,
+                    stem,
+                    front: &item.front,
+                    body: &item.body,
+                    html: None,
+                    preview: None,
+                    images: &[],
+                })
+                .unwrap();
+        }
+        store
+            .write_source_state(
+                "blog",
+                &crate::store::SourceState {
+                    resolved_url: Some("https://blog.example/feed.xml".into()),
+                    site_url: Some("https://blog.example/".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let parse = |path: &str| {
+            scraper::Html::parse_document(&std::fs::read_to_string(out.join(path)).unwrap())
+        };
+        let select = |selector: &str| scraper::Selector::parse(selector).unwrap();
+
+        let article = parse("items/blog/2026-09-02-post-1/index.html");
+        let atom = article
+            .select(&select(
+                "link[rel=\"alternate\"][type=\"application/atom+xml\"]",
+            ))
+            .next()
+            .expect("article pages advertise the root Atom feed");
+        assert_eq!(atom.value().attr("href"), Some("atom.xml"));
+        assert_eq!(atom.value().attr("title"), Some("Demo <site>"));
+        assert_eq!(
+            article
+                .select(&select(
+                    "link[rel=\"alternate\"][type=\"application/rss+xml\"]"
+                ))
+                .next()
+                .and_then(|link| link.value().attr("href")),
+            Some("rss.xml")
+        );
+        assert_eq!(
+            article
+                .select(&select("link[rel=\"alternate\"][type=\"text/x-opml\"]"))
+                .next()
+                .and_then(|link| link.value().attr("href")),
+            Some("sources.opml")
+        );
+        assert_eq!(
+            article
+                .select(&select("meta[property=\"og:locale\"]"))
+                .next()
+                .and_then(|meta| meta.value().attr("content")),
+            Some("en")
+        );
+        for utility in ["404.html", "offline.html"] {
+            let document = parse(utility);
+            assert!(
+                document
+                    .select(&select("link[rel=\"alternate\"]"))
+                    .next()
+                    .is_none(),
+                "{utility} advertises no feed"
+            );
+        }
+        let river = parse("index.html");
+        let feed_name = river
+            .select(&select("main.h-feed > data.p-name"))
+            .next()
+            .expect("the h-feed names itself");
+        assert!(feed_name.value().attr("hidden").is_some());
+        assert!(
+            !feed_name
+                .value()
+                .attr("value")
+                .unwrap_or_default()
+                .is_empty()
+        );
+        assert_eq!(
+            river.select(&select("main.h-feed > data.p-name")).count(),
+            1
+        );
+        assert!(
+            parse("items/blog/2026-09-02-post-1/index.html")
+                .select(&select("data.p-name"))
+                .next()
+                .is_none(),
+            "article pages are not feeds"
+        );
+
+        let entry = article
+            .select(&select("article.h-entry"))
+            .next()
+            .expect("article root");
+        let url = entry
+            .select(&select(":scope > a.u-uid.u-url"))
+            .next()
+            .expect("the entry names its own URL");
+        assert_eq!(
+            url.value().attr("href"),
+            Some("items/blog/2026-09-02-post-1/")
+        );
+        let authors = entry
+            .select(&select(":scope > data.p-author.h-card"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            authors
+                .iter()
+                .map(|author| author.value().attr("value").unwrap())
+                .collect::<Vec<_>>(),
+            ["Ada Lovelace", "Grace Hopper"]
+        );
+        assert!(
+            entry
+                .select(&select(".article-more-card.h-entry"))
+                .next()
+                .is_some(),
+            "related cards are their own entries"
+        );
+        let outside_cards = |property: &str| {
+            entry.select(&select(property)).count()
+                - entry
+                    .select(&select(&format!(".article-more-card.h-entry {property}")))
+                    .count()
+        };
+        assert_eq!(outside_cards(".dt-published"), 1);
+        assert_eq!(outside_cards(".u-bookmark-of"), 1);
+        assert_eq!(outside_cards(".p-name"), 1);
+        for added in entry
+            .select(&select(":scope > a.u-url, :scope > data.p-author"))
+            .chain(river.select(&select("main > data.p-name")))
+        {
+            assert!(added.value().attr("hidden").is_some(), "{}", added.html());
+            assert!(
+                added.text().collect::<String>().is_empty(),
+                "{}",
+                added.html()
+            );
+        }
+        let glyph = select("a.config-link > span[aria-hidden=\"true\"]");
+        let config_link = article.select(&select("a.config-link")).next().unwrap();
+        assert_eq!(config_link.text().collect::<String>(), "aggr.toml ↗");
+        assert_eq!(article.select(&glyph).next().unwrap().inner_html(), "↗");
+        assert_eq!(
+            river
+                .select(&select("label[for=\"q\"]"))
+                .next()
+                .unwrap()
+                .text()
+                .collect::<String>(),
+            "Search articles"
+        );
+        assert_eq!(
+            parse("browse/index.html")
+                .select(&select("ul.browse-entries"))
+                .next()
+                .and_then(|list| list.value().attr("role")),
+            Some("list")
+        );
+
+        let opml = std::fs::read_to_string(out.join("sources.opml")).unwrap();
+        let imported = Config::parse_source_document(
+            opml.as_bytes(),
+            &url::Url::parse("https://u.github.io/repo/sources.opml").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(imported.len(), 1);
+        assert_eq!(
+            imported[0].url.as_deref(),
+            Some("https://blog.example/feed.xml"),
+            "the resolved endpoint wins over the configured URL"
+        );
+        assert!(opml.contains("htmlUrl=\"https://blog.example/\""), "{opml}");
+        let descriptor: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("aggr.json")).unwrap()).unwrap();
+        assert_eq!(
+            descriptor["discovery"]["opml"],
+            "https://u.github.io/repo/sources.opml"
+        );
+        assert!(
+            std::fs::read_to_string(out.join("llms.txt"))
+                .unwrap()
+                .contains("https://u.github.io/repo/sources.opml")
+        );
+        let stub_source = std::fs::read_to_string(out.join("sw.js")).unwrap();
+        assert!(
+            stub_source.contains("sources\\.opml"),
+            "the worker treats the list as mutable"
+        );
+    }
+
+    #[test]
+    fn social_cards_prefer_the_article_lead_image() {
+        let now = day(20);
+        let item = Item {
+            path: "items/blog/2026/09/2026-09-02-lead".into(),
+            front: crate::model::FrontMatter {
+                title: "Lead".into(),
+                link: "https://blog.example/lead".into(),
+                source: "blog".into(),
+                first_seen: now,
+                ..Default::default()
+            },
+            body: "Body".into(),
+        };
+        let mut ctx = ItemCtx::from_item(
+            &item,
+            ItemOptions {
+                reading_metrics: content::reading_metrics(&item.body),
+                source_name: "Blog",
+                category: None,
+                links: None,
+                excerpt: String::new(),
+                discussions: &[],
+                resolutions: &crate::discussions::ResolutionSet::default(),
+                now,
+            },
+        );
+        ctx.body_html = Some("<p>Body</p>".into());
+        let placeholder =
+            crate::media::placeholder::from_image(&image::DynamicImage::new_rgb8(4, 4)).unwrap();
+        ctx.preview = Some(PreviewCtx {
+            url: "assets/previews/small.jpg".into(),
+            width: 320,
+            height: 180,
+            alt: Some("A small card".into()),
+            color: Some("#285a8c".into()),
+            placeholder: placeholder.clone(),
+        });
+        let lead = ArticlePreviewCtx {
+            url: "assets/images/lead.jpg".into(),
+            width: 1200,
+            height: 630,
+            srcset: "assets/images/lead.jpg 1200w".into(),
+            color: "#285a8c".into(),
+            placeholder,
+        };
+        let render = |item: &ItemCtx, base_url: Option<&str>| {
+            let site = SiteCtx {
+                title: "Reader".into(),
+                description: String::new(),
+                identity: None,
+                language: "en-GB".into(),
+                og_locale: context::og_locale("en-GB"),
+                base_path: "/".into(),
+                base_url: base_url.map(str::to_string),
+                repository: None,
+                data_branch: "aggr".into(),
+                network_url: outputs::AGGR_NETWORK,
+                instance_type_url: outputs::AGGR_INSTANCE_TYPE,
+                pwa: false,
+                preferences: serde_json::json!({}),
+                config_page_url: None,
+                config_url: None,
+                has_categories: false,
+                discussions: Vec::new(),
+                entry_shortcuts: Vec::new(),
+                params: toml::Table::new(),
+            };
+            let build = BuildCtx {
+                time: now,
+                version: "1".into(),
+                app_version: "app".into(),
+                content_version: "content".into(),
+                config_sha: None,
+                data_sha: None,
+                generation: "g".into(),
+                release: false,
+            };
+            let shared = SharedCtx {
+                site: minijinja::Value::from_serialize(&site),
+                build: minijinja::Value::from_serialize(&build),
+                sources: minijinja::Value::from_serialize(Vec::<SourceCtx>::new()),
+                categories: minijinja::Value::from_serialize(Vec::<CategoryCtx>::new()),
+                tags: minijinja::Value::from_serialize(Vec::<CategoryCtx>::new()),
+            };
+            let page = PageCtx {
+                kind: "item".into(),
+                title: item.title.clone(),
+                document_title: item.title.clone(),
+                description: String::new(),
+                indexable: true,
+                path: item.url.clone(),
+                root: "../../".into(),
+                canonical_url: None,
+                feed_path: Some(String::new()),
+                feed_title: Some(site.title.clone()),
+                paginator: None,
+            };
+            let html = Renderer::new(Layers::default(), "")
+                .unwrap()
+                .render(
+                    "item.html",
+                    Ctx {
+                        shared: &shared,
+                        page,
+                        items: minijinja::Value::from_serialize(Vec::<ItemCtx>::new()),
+                        item: Some(item),
+                        source: None,
+                        category: None,
+                        html: None,
+                        schema: None,
+                    },
+                )
+                .unwrap();
+            scraper::Html::parse_document(&html)
+        };
+        let meta = |document: &scraper::Html, selector: &str| {
+            document
+                .select(&scraper::Selector::parse(selector).unwrap())
+                .next()
+                .and_then(|meta| meta.value().attr("content").map(str::to_string))
+        };
+
+        let card = render(&ctx, Some("https://reader.test/"));
+        assert_eq!(
+            meta(&card, "meta[property=\"og:image\"]").as_deref(),
+            Some("https://reader.test/assets/previews/small.jpg")
+        );
+        assert_eq!(
+            meta(&card, "meta[property=\"og:image:width\"]").as_deref(),
+            Some("320")
+        );
+        assert_eq!(
+            meta(&card, "meta[name=\"twitter:card\"]").as_deref(),
+            Some("summary")
+        );
+        assert_eq!(
+            meta(&card, "meta[property=\"og:locale\"]").as_deref(),
+            Some("en_GB")
+        );
+
+        ctx.article_preview = Some(lead);
+        let large = render(&ctx, Some("https://reader.test/"));
+        assert_eq!(
+            meta(&large, "meta[property=\"og:image\"]").as_deref(),
+            Some("https://reader.test/assets/images/lead.jpg")
+        );
+        assert_eq!(
+            meta(&large, "meta[property=\"og:image:width\"]").as_deref(),
+            Some("1200")
+        );
+        assert_eq!(
+            meta(&large, "meta[property=\"og:image:height\"]").as_deref(),
+            Some("630")
+        );
+        assert_eq!(
+            meta(&large, "meta[property=\"og:image:alt\"]").as_deref(),
+            Some("A small card")
+        );
+        assert_eq!(
+            meta(&large, "meta[name=\"twitter:image\"]").as_deref(),
+            Some("https://reader.test/assets/images/lead.jpg")
+        );
+        assert_eq!(
+            meta(&large, "meta[name=\"twitter:card\"]").as_deref(),
+            Some("summary_large_image")
+        );
+
+        let portable = render(&ctx, None);
+        assert_eq!(meta(&portable, "meta[property=\"og:image\"]"), None);
+        assert_eq!(
+            meta(&portable, "meta[name=\"twitter:card\"]").as_deref(),
+            Some("summary"),
+            "a large card needs an absolute image URL"
+        );
     }
 }

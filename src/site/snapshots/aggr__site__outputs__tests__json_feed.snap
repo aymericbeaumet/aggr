@@ -1,0 +1,60 @@
+---
+source: src/site/outputs.rs
+expression: "json_collection(&site, &site.title, \"\", &[item(), podcast()]).unwrap()"
+---
+{
+  "description": "Collected <carefully>",
+  "feed_url": "https://example.test/reads/feed.json",
+  "home_page_url": "https://example.test/reads/",
+  "items": [
+    {
+      "authors": [
+        {
+          "name": "A & B"
+        }
+      ],
+      "content_html": "<p>Clean &amp; <strong>complete</strong></p>",
+      "date_modified": "2026-09-02T09:30:00+00:00",
+      "date_published": "2026-09-02T08:30:00+00:00",
+      "external_url": "https://upstream.test/story?a=1&b=2",
+      "id": "urn:aggr:item:238368f1ec8ac4600ecd0506e49318be70adbd13",
+      "summary": "A concise <summary>",
+      "tags": [
+        "Engineering",
+        "Rust"
+      ],
+      "title": "A <safe> & useful story",
+      "url": "https://example.test/reads/items/source/a-story/"
+    },
+    {
+      "attachments": [
+        {
+          "duration_in_seconds": 1671,
+          "mime_type": "audio/mpeg",
+          "size_in_bytes": 12345,
+          "url": "https://cdn.podcast.test/episode-1.mp3?token=a&b=2"
+        }
+      ],
+      "authors": [
+        {
+          "name": "Host"
+        }
+      ],
+      "content_html": "<p>Clean &amp; <strong>complete</strong></p>",
+      "date_modified": "2026-09-02T09:30:00+00:00",
+      "date_published": "2026-09-02T08:30:00+00:00",
+      "external_url": "https://podcast.test/episodes/1",
+      "id": "urn:aggr:item:8ea144222273119928ca22f3fc1d62746ed12f7d",
+      "summary": "A concise <summary>",
+      "tags": [
+        "Engineering",
+        "Rust"
+      ],
+      "title": "Episode 1",
+      "url": "https://example.test/reads/items/podcast/episode-1/"
+    }
+  ],
+  "language": "en-GB",
+  "title": "Example & Reader",
+  "version": "https://jsonfeed.org/version/1.1"
+}

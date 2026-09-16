@@ -703,6 +703,13 @@ fn init_writes_config_and_workflow() {
         .args(["init", "--defaults", "--force"])
         .assert()
         .success();
+    // The shipped defaults activate no source, so this validates the whole file through the
+    // real binary without touching the network.
+    repo.aggr()
+        .arg("check")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"\(0 sources?\b").unwrap());
 }
 
 #[cfg(unix)]
@@ -1238,7 +1245,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
         "{index}"
     );
     assert!(index.contains("Hello there"));
-    assert!(index.contains(">aggr.toml ↗</a>"));
+    assert!(index.contains(">aggr.toml <span aria-hidden=\"true\">↗</span></a>"));
     assert!(index.contains(">built with aggr</a>"));
     assert!(index.contains("href=\"https://github.com/aymericbeaumet/aggr\""));
     assert!(index.contains("href=\"browse/\""), "{index}");

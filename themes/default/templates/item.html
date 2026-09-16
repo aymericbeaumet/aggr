@@ -17,7 +17,8 @@
 {% endblock %}
 {% block content %}
 <article class="item h-entry" data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}"{% if item.previous_article %} data-previous-url="{{ item.previous_article.url | url_for }}"{% endif %}{% if item.next_article %} data-next-url="{{ item.next_article.url | url_for }}"{% endif %}>
-  <a class="u-uid" href="{{ item.url | url_for }}" hidden></a>
+  <a class="u-uid u-url" href="{{ item.url | url_for }}" hidden></a>
+  {% for author in item.authors %}<data class="p-author h-card" value="{{ author }}" hidden></data>{% endfor %}
   <header class="itemhead">
     <h1 class="p-name" tabindex="-1"><span class="itemhead-title">{% for word in item.title | split(' ') %}{% if not loop.first %} {% endif %}{% if '/' in word %}<span class="itemhead-title-term">{{ word }}</span>{% else %}{{ word }}{% endif %}{% endfor %}</span></h1>
     {% include "_metadata.html" %}
@@ -79,7 +80,7 @@
         <span>Open interactive page ↗</span>
       </a>
     </div>
-    <figcaption><a href="{{ item.interactive.source_url }}" target="_blank" rel="noopener noreferrer">Open original ↗</a></figcaption>
+    <figcaption><a href="{{ item.interactive.source_url }}" target="_blank" rel="noopener noreferrer">Open original <span aria-hidden="true">↗</span></a></figcaption>
   </figure>
   {% elif item.article_preview %}
   <figure class="article-lead media-frame" data-thumbhash="{{ item.article_preview.placeholder.hash }}" style="--media-ratio: {{ item.article_preview.width }} / {{ item.article_preview.height }}; --image-placeholder: {{ item.article_preview.color }}; --image-preview: url('{{ item.article_preview.placeholder.data_url }}')">

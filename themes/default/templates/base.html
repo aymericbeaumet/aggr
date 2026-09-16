@@ -105,24 +105,29 @@ window.AGGRPreferences = (function () {
 <meta property="og:title" content="{{ page.title }}">
 {% if page.description %}<meta property="og:description" content="{{ page.description }}">{% endif %}
 {% if page.canonical_url %}<meta property="og:url" content="{{ page.canonical_url }}">{% endif %}
+<meta property="og:locale" content="{{ site.og_locale }}">
+{% set lead_image = site.base_url and item and item.article_preview %}
 {% if site.base_url %}
-{% if item and item.preview %}<meta property="og:image" content="{{ site.base_url }}{{ item.preview.url }}"><meta property="og:image:width" content="{{ item.preview.width }}"><meta property="og:image:height" content="{{ item.preview.height }}">{% if item.preview.alt %}<meta property="og:image:alt" content="{{ item.preview.alt }}">{% endif %}
+{% if lead_image %}<meta property="og:image" content="{{ site.base_url }}{{ item.article_preview.url | url_for }}"><meta property="og:image:width" content="{{ item.article_preview.width }}"><meta property="og:image:height" content="{{ item.article_preview.height }}">{% if item.preview and item.preview.alt %}<meta property="og:image:alt" content="{{ item.preview.alt }}">{% endif %}
+{% elif item and item.preview %}<meta property="og:image" content="{{ site.base_url }}{{ item.preview.url }}"><meta property="og:image:width" content="{{ item.preview.width }}"><meta property="og:image:height" content="{{ item.preview.height }}">{% if item.preview.alt %}<meta property="og:image:alt" content="{{ item.preview.alt }}">{% endif %}
 {% else %}<meta property="og:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | url_for }}"><meta property="og:image:alt" content="{{ site.title }} app icon">{% endif %}
 {% endif %}
-<meta name="twitter:card" content="summary">
+<meta name="twitter:card" content="{{ 'summary_large_image' if lead_image else 'summary' }}">
 <meta name="twitter:title" content="{{ page.title }}">
 {% if page.description %}<meta name="twitter:description" content="{{ page.description }}">{% endif %}
 {% if site.base_url %}
-{% if item and item.preview %}<meta name="twitter:image" content="{{ site.base_url }}{{ item.preview.url }}">{% if item.preview.alt %}<meta name="twitter:image:alt" content="{{ item.preview.alt }}">{% endif %}
+{% if lead_image %}<meta name="twitter:image" content="{{ site.base_url }}{{ item.article_preview.url | url_for }}">{% if item.preview and item.preview.alt %}<meta name="twitter:image:alt" content="{{ item.preview.alt }}">{% endif %}
+{% elif item and item.preview %}<meta name="twitter:image" content="{{ site.base_url }}{{ item.preview.url }}">{% if item.preview.alt %}<meta name="twitter:image:alt" content="{{ item.preview.alt }}">{% endif %}
 {% else %}<meta name="twitter:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | url_for }}"><meta name="twitter:image:alt" content="{{ site.title }} app icon">{% endif %}
 {% endif %}
 <link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
 <link rel="stylesheet" href="{{ 'assets/client.css' | url_for }}">
 <noscript><style>.progressive-image,.preview-image,.article-lead img{color:inherit}</style></noscript>
-{% if page.feed_path is not none %}{% set feed_path = page.feed_path %}
-<link rel="alternate" type="application/atom+xml" title="{{ page.title }}" href="{{ (feed_path ~ 'atom.xml') | url_for }}">
-<link rel="alternate" type="application/rss+xml" title="{{ page.title }}" href="{{ (feed_path ~ 'rss.xml') | url_for }}">
-<link rel="alternate" type="application/feed+json" title="{{ page.title }}" href="{{ (feed_path ~ 'feed.json') | url_for }}">
+{% if page.feed_path is not none %}{% set feed_path = page.feed_path %}{% set feed_title = page.feed_title or site.title %}
+<link rel="alternate" type="application/atom+xml" title="{{ feed_title }}" href="{{ (feed_path ~ 'atom.xml') | url_for }}">
+<link rel="alternate" type="application/rss+xml" title="{{ feed_title }}" href="{{ (feed_path ~ 'rss.xml') | url_for }}">
+<link rel="alternate" type="application/feed+json" title="{{ feed_title }}" href="{{ (feed_path ~ 'feed.json') | url_for }}">
+<link rel="alternate" type="text/x-opml" title="Subscriptions" href="{{ 'sources.opml' | url_for }}">
 {% endif %}
 {% if site.base_url %}<link rel="search" type="application/opensearchdescription+xml" title="{{ site.title }}" href="{{ 'opensearch.xml' | url_for }}">{% endif %}
 <link rel="icon" type="image/png" sizes="32x32" href="{{ 'assets/favicon-32.png' | url_for }}">
@@ -151,7 +156,7 @@ window.AGGRPreferences = (function () {
       <a class="menu-link" data-route="preferences/" data-kinds="preferences" href="{{ 'preferences/' | url_for }}"{% if page.kind == 'preferences' %} aria-current="page"{% endif %}>preferences</a>
     </div>
     <div class="nav-actions">
-      <a class="config-link"{% if not site.config_page_url and not site.config_url %} data-route="aggr.toml"{% endif %} href="{{ site.config_page_url or site.config_url or ('aggr.toml' | url_for) }}" target="_blank" rel="noopener noreferrer">aggr.toml ↗</a>
+      <a class="config-link"{% if not site.config_page_url and not site.config_url %} data-route="aggr.toml"{% endif %} href="{{ site.config_page_url or site.config_url or ('aggr.toml' | url_for) }}" target="_blank" rel="noopener noreferrer">aggr.toml <span aria-hidden="true">↗</span></a>
     </div>
   </nav>
 </header>
@@ -173,6 +178,7 @@ window.AGGRPreferences = (function () {
 <div data-shortcut-help-root></div>
 <main id="swup" class="main{% if page.paginator %} h-feed{% endif %}" tabindex="-1">
 <span id="aggr-page" data-root="{{ page.root }}" data-kind="{{ page.kind }}" data-app-version="{{ build.app_version }}" data-content-version="{{ build.content_version }}" hidden></span>
+{% if page.paginator %}<data class="p-name" value="{{ page.title }}" hidden></data>{% endif %}
 {% block content %}{% endblock %}
 </main>
 <footer class="footer" data-nosnippet><a href="https://github.com/aymericbeaumet/aggr" target="_blank" rel="noopener noreferrer">built with aggr</a></footer>

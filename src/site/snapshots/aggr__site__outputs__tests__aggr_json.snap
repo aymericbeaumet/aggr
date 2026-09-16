@@ -1,0 +1,45 @@
+---
+source: src/site/outputs.rs
+expression: "instance_descriptor(&site, &build(), at(9)).unwrap()"
+---
+{
+  "$schema": "https://raw.githubusercontent.com/aymericbeaumet/aggr/v1/docs/aggr-instance.schema.json",
+  "collections": {
+    "browse": "https://example.test/reads/browse/",
+    "categories": "https://example.test/reads/categories/",
+    "sources": "https://example.test/reads/sources/",
+    "tags": "https://example.test/reads/tags/"
+  },
+  "discovery": {
+    "linkset": "https://example.test/reads/linkset.json",
+    "opensearch": "https://example.test/reads/opensearch.xml",
+    "opml": "https://example.test/reads/sources.opml",
+    "search": "https://example.test/reads/?q=",
+    "search_manifest": "https://example.test/reads/search-manifest.json",
+    "sitemap": "https://example.test/reads/sitemap.xml",
+    "webmanifest": "https://example.test/reads/manifest.webmanifest"
+  },
+  "feeds": {
+    "atom": "https://example.test/reads/atom.xml",
+    "json": "https://example.test/reads/feed.json",
+    "rss": "https://example.test/reads/rss.xml"
+  },
+  "generator": {
+    "name": "aggr",
+    "url": "https://github.com/aymericbeaumet/aggr",
+    "version": "1.2.3"
+  },
+  "language": "en-GB",
+  "name": "Example & Reader",
+  "network": "https://github.com/aymericbeaumet/aggr#network",
+  "profile": "https://github.com/aymericbeaumet/aggr/blob/v1/docs/interoperability.md#aggr-network",
+  "schema_version": 1,
+  "source": {
+    "config": "https://raw.githubusercontent.com/owner/reader/deadbeef/aggr.toml",
+    "data": "https://github.com/owner/reader/tree/aggr",
+    "repository": "https://github.com/owner/reader"
+  },
+  "type": "aggr-instance",
+  "updated": "2026-09-02T09:30:00Z",
+  "url": "https://example.test/reads/"
+}

@@ -1,0 +1,18 @@
+---
+source: src/site/outputs.rs
+expression: output.root_xml()
+---
+<?xml version="1.0" encoding="utf-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://example.test/reads/</loc>
+    <lastmod>2026-09-02T09:30:00Z</lastmod>
+  </url>
+  <url>
+    <loc>https://example.test/reads/items/source/a-story/</loc>
+    <lastmod>2026-09-02T09:30:00Z</lastmod>
+  </url>
+  <url>
+    <loc>https://example.test/reads/browse/</loc>
+  </url>
+</urlset>

@@ -12,7 +12,7 @@
       <section class="browse-group browse-group-{{ directory_kind }}" id="{{ directory_kind }}" aria-labelledby="{{ directory_kind ~ '-title' if page.kind == 'browse' else 'page-title' }}">
         {% if page.kind == 'browse' %}<h2 id="{{ directory_kind }}-title">{{ directory_title }}</h2>{% endif %}
         {% if entries %}
-          <ul class="browse-entries" aria-label="{{ entries | length }} {{ directory_title | lower }}">
+          <ul class="browse-entries" role="list" aria-label="{{ entries | length }} {{ directory_title | lower }}">
           {% for entry in entries %}
             {% if entry.count > 0 or directory_kind == 'sources' %}
             <li class="browse-entry" data-directory-entry>

@@ -199,6 +199,14 @@ human-facing `/sources/`, `/categories/`, and `/tags/` directories link to those
 per-collection routes; `/browse/` combines the directories. Feed entries point their primary URL at the local
 clean-reading page and carry the original URL through the format's provenance field.
 
+The syndication surface is the same on every host: the three feed formats carry each episode or
+video enclosure (`rel=enclosure` in Atom, `<enclosure>` in RSS, `attachments` in JSON Feed) with
+its media type, byte size, and duration when the publisher declared them; `sources.opml` lists the
+followed feeds as an OPML 2.0 subscription list; `llms.txt` inventories the public resources; and
+`aggr.json` is the machine entry point. Every reading page advertises the root feeds and the OPML
+list. The OPML output round-trips through aggr's own importer: pointing another instance's
+`[[sources]].url` at `sources.opml` recreates the same feed URLs, names, and categories.
+
 ## Discovery and URL lookup
 
 A release build emits standard, server-rendered pages; crawlers do not need JavaScript. It also
