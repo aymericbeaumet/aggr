@@ -45,7 +45,7 @@ jobs:
     env:
       AGGR_CONFIG: ${{ inputs.config }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `@v1` is the stable workflow contract. Its major-channel input resolves the greatest
       # published v1.x.y binary at run time, independently of workflow changes.
