@@ -961,6 +961,9 @@ fn repository_commands_refuse_to_run_while_another_holds_the_lock() {
         write!(held, "4242 build").unwrap();
         held.flush().unwrap();
     }
+    // The holder's record beside the lock, as a real run leaves it (the locked file itself is
+    // unreadable to other processes on Windows).
+    std::fs::write(lock_dir.join("aggr.lock.holder"), "4242 build").unwrap();
     repo.aggr()
         .arg("sync")
         .assert()
