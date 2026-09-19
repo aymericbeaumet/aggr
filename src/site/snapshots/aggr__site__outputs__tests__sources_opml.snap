@@ -1,0 +1,15 @@
+---
+source: src/site/outputs.rs
+expression: "sources_opml(&site(), at(12), &sources())"
+---
+<?xml version="1.0" encoding="utf-8"?>
+<opml version="2.0">
+  <head>
+    <title>Example &amp; Reader</title>
+    <dateCreated>Wed, 2 Sep 2026 12:30:00 +0000</dateCreated>
+  </head>
+  <body>
+    <outline type="rss" text="Rust &amp; Friends" title="Rust &amp; Friends" xmlUrl="https://blog.rust-lang.org/feed.xml" htmlUrl="https://blog.rust-lang.org/" category="Engineering"/>
+    <outline type="rss" text="A &quot;Podcast&quot;" title="A &quot;Podcast&quot;" xmlUrl="https://feeds.podcast.test/show?token=abc"/>
+  </body>
+</opml>

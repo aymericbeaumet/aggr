@@ -42,6 +42,21 @@ export function enqueuePrefetch(queue: readonly string[], target: string, urgent
   return urgent ? [target, ...queue].slice(0, limit) : [...queue.slice(0, Math.max(0, limit - 1)), target];
 }
 
+/**
+ * The cache key for a speculative page load, or null when the link leaves the site, is not a page, or is the
+ * current page. Fragments and the transient `focus-search` flag never make a page distinct.
+ */
+export function prefetchKey(target: string, resolveBase: string, scope: string, current: { pathname: string; search: string }): string | null {
+  let url: URL;
+  try { url = new URL(target, resolveBase); } catch { return null; }
+  const site = new URL(scope);
+  if (url.origin !== site.origin || url.pathname.indexOf(site.pathname) !== 0 || url.pathname.slice(-1) !== '/') return null;
+  url.hash = '';
+  url.searchParams.delete('focus-search');
+  const key = url.pathname + url.search;
+  return key === current.pathname + current.search ? null : key;
+}
+
 export function keyboardObscuresNavigation(editing: boolean, layoutHeight: number, visibleHeight: number, scale: number): boolean {
   return editing && scale === 1 && layoutHeight - visibleHeight > 150;
 }

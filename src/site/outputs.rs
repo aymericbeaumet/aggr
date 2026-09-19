@@ -7,10 +7,11 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value};
 
-use super::context::{BuildCtx, ItemCtx, SiteCtx};
+use super::context::{BuildCtx, ItemCtx, SiteCtx, SourceCtx};
 
 const XML_DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
 const SITEMAP_NAMESPACE: &str = "http://www.sitemaps.org/schemas/sitemap/0.9";
+const DUBLIN_CORE_NAMESPACE: &str = "http://purl.org/dc/elements/1.1/";
 pub const AGGR_REPOSITORY: &str = "https://github.com/aymericbeaumet/aggr";
 pub const AGGR_NETWORK: &str = "https://github.com/aymericbeaumet/aggr#network";
 pub const AGGR_INSTANCE_TYPE: &str = "https://github.com/aymericbeaumet/aggr#instance";
@@ -30,19 +31,14 @@ pub fn updates(site: &SiteCtx, build: &BuildCtx) -> Result<String> {
 
 /// Public metadata that lets a crawler or another reader recognize and consume an aggr instance.
 /// URLs are absolute for release builds and descriptor-relative for portable local builds.
-pub fn instance_descriptor(site: &SiteCtx, build: &BuildCtx) -> Result<String> {
-    let endpoint = |path: &str| {
-        site.base_url.as_ref().map_or_else(
-            || {
-                if path.is_empty() {
-                    "./".to_string()
-                } else {
-                    path.to_string()
-                }
-            },
-            |_| site_url(site, path),
-        )
-    };
+/// `updated` is the newest archive change rather than the build clock: the descriptor sits in the
+/// worker's precache list, so rebuilding an unchanged archive must reproduce it byte for byte.
+pub fn instance_descriptor(
+    site: &SiteCtx,
+    build: &BuildCtx,
+    updated: DateTime<Utc>,
+) -> Result<String> {
+    let endpoint = |path: &str| site.endpoint(path);
     let config_url = site
         .config_url
         .clone()
@@ -67,6 +63,7 @@ pub fn instance_descriptor(site: &SiteCtx, build: &BuildCtx) -> Result<String> {
         "search_manifest".into(),
         Value::String(endpoint("search-manifest.json")),
     );
+    discovery.insert("opml".into(), Value::String(endpoint("sources.opml")));
     if site.base_url.is_some() {
         discovery.insert(
             "opensearch".into(),
@@ -99,7 +96,7 @@ pub fn instance_descriptor(site: &SiteCtx, build: &BuildCtx) -> Result<String> {
         "url": endpoint(""),
         "name": site.title,
         "language": site.language,
-        "updated": build.time.to_rfc3339_opts(SecondsFormat::Secs, true),
+        "updated": updated.to_rfc3339_opts(SecondsFormat::Secs, true),
         "generator": {
             "name": "aggr",
             "version": build.version,
@@ -118,24 +115,13 @@ pub fn instance_descriptor(site: &SiteCtx, build: &BuildCtx) -> Result<String> {
 }
 
 pub fn llms_txt(site: &SiteCtx) -> String {
-    let endpoint = |path: &str| {
-        site.base_url.as_ref().map_or_else(
-            || {
-                if path.is_empty() {
-                    "./".to_string()
-                } else {
-                    path.to_string()
-                }
-            },
-            |_| site_url(site, path),
-        )
-    };
+    let endpoint = |path: &str| site.endpoint(path);
     let config_url = site
         .config_url
         .clone()
         .unwrap_or_else(|| endpoint("aggr.toml"));
     let mut out = format!(
-        "# {}\n\n> {}\n\n## Resources\n\n- [Site]({})\n- [Instance metadata]({})\n- [Atom feed]({})\n- [RSS feed]({})\n- [JSON Feed]({})\n- [Browse]({})\n- [Sources]({})\n",
+        "# {}\n\n> {}\n\n## Resources\n\n- [Site]({})\n- [Instance metadata]({})\n- [Atom feed]({})\n- [RSS feed]({})\n- [JSON Feed]({})\n- [OPML subscriptions]({})\n- [Browse]({})\n- [Sources]({})\n",
         site.title,
         site.description,
         endpoint(""),
@@ -143,6 +129,7 @@ pub fn llms_txt(site: &SiteCtx) -> String {
         endpoint("atom.xml"),
         endpoint("rss.xml"),
         endpoint("feed.json"),
+        endpoint("sources.opml"),
         endpoint("browse/"),
         endpoint("sources/"),
     );
@@ -160,6 +147,59 @@ pub fn llms_txt(site: &SiteCtx) -> String {
             endpoint("sitemap.xml")
         ));
     }
+    out
+}
+
+/// OPML 2.0 subscription list of the followed feeds, so the site's sources can be imported by
+/// any other reader (including another aggr through `[[sources]].url`).
+///
+/// Only sources with a public HTTP(S) feed endpoint are listed: the endpoint the fetch pipeline
+/// resolved when it is known, otherwise the configured URL. Mirrored aggr repositories are Git
+/// remotes, not feeds, and are left out. `created` is the newest archive change rather than the
+/// build clock, so rebuilding an unchanged archive reproduces the document byte for byte.
+pub fn sources_opml(site: &SiteCtx, created: DateTime<Utc>, sources: &[SourceCtx]) -> String {
+    let mut out = String::with_capacity(512 + sources.len() * 192);
+    out.push_str(XML_DECLARATION);
+    out.push_str("<opml version=\"2.0\">\n  <head>\n");
+    element(&mut out, 4, "title", &site.title);
+    element(&mut out, 4, "dateCreated", &created.to_rfc2822());
+    out.push_str("  </head>\n  <body>\n");
+    for source in sources {
+        if source.engine != "web" {
+            continue;
+        }
+        let Some(feed_url) = source
+            .feed_url
+            .as_deref()
+            .or(source.url.as_deref())
+            .map(str::trim)
+            .filter(|url| absolute_http_url(url, "feed URL").is_ok())
+        else {
+            continue;
+        };
+        out.push_str("    <outline");
+        attribute(&mut out, "type", "rss");
+        attribute(&mut out, "text", &source.name);
+        attribute(&mut out, "title", &source.name);
+        attribute(&mut out, "xmlUrl", feed_url);
+        if let Some(html_url) = source
+            .site_url
+            .as_deref()
+            .filter(|url| absolute_http_url(url, "site URL").is_ok())
+        {
+            attribute(&mut out, "htmlUrl", html_url);
+        }
+        if let Some(category) = source
+            .category
+            .as_deref()
+            .map(str::trim)
+            .filter(|category| !category.is_empty())
+        {
+            attribute(&mut out, "category", category);
+        }
+        out.push_str("/>\n");
+    }
+    out.push_str("  </body>\n</opml>\n");
     out
 }
 
@@ -213,18 +253,103 @@ pub fn linkset_json(site: &SiteCtx, items: &[ItemCtx]) -> Result<String> {
 }
 
 /// A tiny, progressively functional migration page for a retired public route.
-pub fn redirect_stub(target: &str) -> String {
+pub fn redirect_stub(site: &SiteCtx, target: &str) -> String {
+    let language = escape(&site.language);
     let target = escape(target);
     format!(
-        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0;url={target}\">\
+        "<!doctype html><html lang=\"{language}\"><meta charset=\"utf-8\">\
+         <meta http-equiv=\"refresh\" content=\"0;url={target}\">\
          <meta name=\"robots\" content=\"noindex,follow\"><link rel=\"canonical\" href=\"{target}\">\
-         <title>Moved</title><a href=\"{target}\">Continue</a>\n"
+         <title>Moved</title><a href=\"{target}\">Continue</a></html>\n"
     )
+}
+
+/// A media file attached to an item: the podcast episode or video an entry is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Enclosure {
+    pub url: String,
+    pub mime: String,
+    /// Size in bytes when the publisher declared one.
+    pub length: Option<u64>,
+    /// Playing time in whole seconds when known.
+    pub duration: Option<u64>,
+}
+
+/// The enclosure an item carries, from the `audio_url`, `audio_type`, `audio_length` and
+/// `duration_seconds` extras written at capture time. Items archived before the type was retained
+/// fall back to the file extension; an unrecognized one yields no enclosure rather than a guess.
+pub fn enclosure(item: &ItemCtx) -> Option<Enclosure> {
+    let url = item
+        .extra
+        .get("audio_url")
+        .and_then(serde_yaml_ng::Value::as_str)
+        .map(str::trim)
+        .filter(|url| absolute_http_url(url, "enclosure URL").is_ok())?;
+    let mime = item
+        .extra
+        .get("audio_type")
+        .and_then(serde_yaml_ng::Value::as_str)
+        .map(str::trim)
+        .filter(|mime| mime.contains('/') && !mime.chars().any(char::is_whitespace))
+        .map(str::to_ascii_lowercase)
+        .or_else(|| mime_for_extension(url).map(str::to_string))?;
+    let count = |key: &str| {
+        item.extra
+            .get(key)
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+            })
+            .filter(|count| *count > 0)
+    };
+    Some(Enclosure {
+        url: url.to_string(),
+        mime,
+        length: count("audio_length"),
+        duration: count("duration_seconds"),
+    })
+}
+
+/// Media types for the enclosure formats podcast and video feeds actually publish.
+fn mime_for_extension(url: &str) -> Option<&'static str> {
+    let parsed = url::Url::parse(url).ok()?;
+    let file = parsed.path().rsplit('/').next()?;
+    let (_, extension) = file.rsplit_once('.')?;
+    match extension.to_ascii_lowercase().as_str() {
+        "mp3" => Some("audio/mpeg"),
+        "m4a" => Some("audio/mp4"),
+        "ogg" | "oga" => Some("audio/ogg"),
+        "opus" => Some("audio/opus"),
+        "wav" => Some("audio/wav"),
+        "flac" => Some("audio/flac"),
+        "mp4" | "m4v" => Some("video/mp4"),
+        "webm" => Some("video/webm"),
+        "mov" => Some("video/quicktime"),
+        _ => None,
+    }
+}
+
+/// Author names worth publishing: trimmed, non-empty, in declaration order.
+fn item_authors(item: &ItemCtx) -> Vec<&str> {
+    item.authors
+        .iter()
+        .map(|author| author.trim())
+        .filter(|author| !author.is_empty())
+        .collect()
 }
 
 /// Atom feed of the river's first page, so the site itself can be followed.
 pub fn atom_feed(site: &SiteCtx, build: &BuildCtx, items: &[ItemCtx]) -> String {
     atom_collection(site, build, &site.title, "", items)
+}
+
+/// Language of one entry when it differs from the feed-level `xml:lang` or `language`, compared
+/// case-insensitively as BCP 47 requires. `None` keeps a single-language feed byte-identical.
+fn entry_language<'a>(item: &'a ItemCtx, site: &SiteCtx) -> Option<&'a str> {
+    item.language
+        .as_deref()
+        .filter(|language| !language.eq_ignore_ascii_case(&site.language))
 }
 
 /// Serialize an Atom 1.0 collection.
@@ -264,6 +389,10 @@ pub fn atom_collection(
         escape(&self_url)
     ));
     element(&mut out, 2, "updated", &updated.to_rfc3339());
+    // Atom requires an author somewhere; the site stands in for entries without a byline.
+    out.push_str("  <author>\n");
+    element(&mut out, 4, "name", &site.title);
+    out.push_str("  </author>\n");
     out.push_str(&format!(
         "  <generator version=\"{}\" uri=\"https://github.com/aymericbeaumet/aggr\">aggr</generator>\n",
         escape(&build.version)
@@ -272,7 +401,12 @@ pub fn atom_collection(
     for item in items {
         let local = site_url(site, &item.url);
         let item_updated = item.updated.unwrap_or(item.date);
-        out.push_str("  <entry>\n");
+        match entry_language(item, site) {
+            Some(language) => {
+                out.push_str(&format!("  <entry xml:lang=\"{}\">\n", escape(language)));
+            }
+            None => out.push_str("  <entry>\n"),
+        }
         element(&mut out, 4, "id", &item_uid(item));
         out.push_str(&format!(
             "    <title type=\"text\">{}</title>\n",
@@ -288,15 +422,25 @@ pub fn atom_collection(
                 escape(&item.link)
             ));
         }
+        if let Some(enclosure) = enclosure(item) {
+            out.push_str(&format!(
+                "    <link rel=\"enclosure\" type=\"{}\" href=\"{}\"",
+                escape(&enclosure.mime),
+                escape(&enclosure.url)
+            ));
+            if let Some(length) = enclosure.length {
+                out.push_str(&format!(" length=\"{length}\""));
+            }
+            out.push_str("/>\n");
+        }
         if let Some(published) = item.published {
             element(&mut out, 4, "published", &published.to_rfc3339());
         }
         element(&mut out, 4, "updated", &item_updated.to_rfc3339());
-        let authors: Vec<_> = if item.authors.is_empty() {
-            vec![item.source_name.as_str()]
-        } else {
-            item.authors.iter().map(String::as_str).collect()
-        };
+        let mut authors = item_authors(item);
+        if authors.is_empty() && !item.source_name.trim().is_empty() {
+            authors.push(item.source_name.trim());
+        }
         for author in authors {
             out.push_str("    <author>\n");
             element(&mut out, 6, "name", author);
@@ -343,10 +487,11 @@ pub fn rss_collection(
     let mut out = String::with_capacity(4096);
 
     out.push_str(XML_DECLARATION);
-    out.push_str(
+    out.push_str(&format!(
         "<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\" \
-         xmlns:content=\"http://purl.org/rss/1.0/modules/content/\">\n<channel>\n",
-    );
+         xmlns:content=\"http://purl.org/rss/1.0/modules/content/\" \
+         xmlns:dc=\"{DUBLIN_CORE_NAMESPACE}\">\n<channel>\n",
+    ));
     element(&mut out, 2, "title", title);
     element(&mut out, 2, "link", &home);
     element(&mut out, 2, "description", &site.description);
@@ -373,7 +518,19 @@ pub fn rss_collection(
                 escape(&item.link)
             ));
         }
+        if let Some(enclosure) = enclosure(item) {
+            // RSS makes `length` mandatory; "0" is the conventional value for an unknown size.
+            out.push_str(&format!(
+                "    <enclosure url=\"{}\" length=\"{}\" type=\"{}\"/>\n",
+                escape(&enclosure.url),
+                enclosure.length.unwrap_or(0),
+                escape(&enclosure.mime)
+            ));
+        }
         element(&mut out, 4, "pubDate", &item.date.to_rfc2822());
+        for author in item_authors(item) {
+            element(&mut out, 4, "dc:creator", author);
+        }
         if !item.excerpt.is_empty() {
             element(&mut out, 4, "description", &item.excerpt);
         }
@@ -410,6 +567,9 @@ pub fn json_collection(
                 entry.insert("external_url".into(), Value::String(item.link.clone()));
             }
             entry.insert("title".into(), Value::String(item.title.clone()));
+            if let Some(language) = entry_language(item, site) {
+                entry.insert("language".into(), Value::String(language.to_string()));
+            }
             if let Some(preview) = &item.preview
                 && site.base_url.is_some()
             {
@@ -430,15 +590,31 @@ pub fn json_collection(
             if let Some(date) = item.updated {
                 entry.insert("date_modified".into(), Value::String(date.to_rfc3339()));
             }
-            if !item.authors.is_empty() {
+            let authors = item_authors(item);
+            if !authors.is_empty() {
                 entry.insert(
                     "authors".into(),
                     Value::Array(
-                        item.authors
-                            .iter()
+                        authors
+                            .into_iter()
                             .map(|name| serde_json::json!({"name": name}))
                             .collect(),
                     ),
+                );
+            }
+            if let Some(enclosure) = enclosure(item) {
+                let mut attachment = Map::new();
+                attachment.insert("url".into(), Value::String(enclosure.url));
+                attachment.insert("mime_type".into(), Value::String(enclosure.mime));
+                if let Some(length) = enclosure.length {
+                    attachment.insert("size_in_bytes".into(), Value::from(length));
+                }
+                if let Some(duration) = enclosure.duration {
+                    attachment.insert("duration_in_seconds".into(), Value::from(duration));
+                }
+                entry.insert(
+                    "attachments".into(),
+                    Value::Array(vec![Value::Object(attachment)]),
                 );
             }
             let categories = item_categories(item);
@@ -458,8 +634,11 @@ pub fn json_collection(
         Value::String("https://jsonfeed.org/version/1.1".into()),
     );
     feed.insert("title".into(), Value::String(title.into()));
-    feed.insert("home_page_url".into(), Value::String(home));
-    feed.insert("feed_url".into(), Value::String(self_url));
+    // JSON Feed defines both as URLs; a portable build only knows paths, and both are optional.
+    if site.base_url.is_some() {
+        feed.insert("home_page_url".into(), Value::String(home));
+        feed.insert("feed_url".into(), Value::String(self_url));
+    }
     if !site.description.is_empty() {
         feed.insert(
             "description".into(),
@@ -767,9 +946,9 @@ fn collection_path(path: &str) -> String {
     }
 }
 
+/// Feed and discovery links: absolute on a published site, `base_path`-relative on a portable one.
 fn site_url(site: &SiteCtx, path: &str) -> String {
-    let root = site.base_url.as_deref().unwrap_or(&site.base_path);
-    join_url(root, path)
+    site.absolute(path).unwrap_or_else(|| site.url(path))
 }
 
 fn feed_id(site: &SiteCtx, path: &str) -> String {
@@ -786,21 +965,6 @@ fn feed_id(site: &SiteCtx, path: &str) -> String {
 
 fn item_uid(item: &ItemCtx) -> String {
     format!("urn:aggr:item:{}", crate::model::sha1_hex(&item.path))
-}
-
-fn join_url(root: &str, path: &str) -> String {
-    let path = path.trim_start_matches('/');
-    if let Ok(mut root) = url::Url::parse(root) {
-        if !root.path().ends_with('/') {
-            let normalized = format!("{}/", root.path());
-            root.set_path(&normalized);
-        }
-        if let Ok(joined) = root.join(path) {
-            return joined.to_string();
-        }
-    }
-    let root = format!("{}/", root.trim_end_matches('/'));
-    format!("{root}{path}")
 }
 
 fn collection_updated(items: &[ItemCtx], fallback: DateTime<Utc>) -> DateTime<Utc> {
@@ -833,6 +997,15 @@ fn element(out: &mut String, indent: usize, name: &str, value: &str) {
     out.push_str("</");
     out.push_str(name);
     out.push_str(">\n");
+}
+
+/// Append ` name="value"` with the value escaped for a double-quoted XML attribute.
+fn attribute(out: &mut String, name: &str, value: &str) {
+    out.push(' ');
+    out.push_str(name);
+    out.push_str("=\"");
+    out.push_str(&escape(value));
+    out.push('"');
 }
 
 fn truncate_chars(text: &str, max: usize) -> &str {
@@ -995,6 +1168,7 @@ mod tests {
             description: "Collected <carefully>".into(),
             identity: None,
             language: "en-GB".into(),
+            og_locale: "en_GB".into(),
             base_path: "/reads/".into(),
             base_url: Some("https://example.test/reads/".into()),
             repository: None,
@@ -1040,6 +1214,7 @@ mod tests {
             feed_display: "upstream.example".into(),
             is_aggregated: false,
             is_youtube: false,
+            language: None,
             category: Some("Engineering".into()),
             date: at(8),
             age_band: "day",
@@ -1303,6 +1478,10 @@ mod tests {
                 .starts_with("urn:aggr:item:")
         );
         assert_eq!(json["items"][0]["content_text"], item.excerpt);
+        assert!(json.get("home_page_url").is_none());
+        assert!(json.get("feed_url").is_none());
+        assert!(json.get("icon").is_none());
+        assert!(json.get("favicon").is_none());
         assert!(!atom_feed(&site, &build(), &[item]).contains("<content type=\"html\">"));
     }
 
@@ -1328,12 +1507,13 @@ mod tests {
         site.config_url =
             Some("https://raw.githubusercontent.com/owner/reader/deadbeef/aggr.toml".into());
         let descriptor: Value =
-            serde_json::from_str(&instance_descriptor(&site, &build()).unwrap()).unwrap();
+            serde_json::from_str(&instance_descriptor(&site, &build(), at(9)).unwrap()).unwrap();
 
         assert_eq!(descriptor["schema_version"], 1);
         assert_eq!(descriptor["type"], "aggr-instance");
         assert_eq!(descriptor["network"], AGGR_NETWORK);
         assert_eq!(descriptor["url"], "https://example.test/reads/");
+        assert_eq!(descriptor["updated"], "2026-09-02T09:30:00Z");
         assert_eq!(
             descriptor["source"]["config"],
             "https://raw.githubusercontent.com/owner/reader/deadbeef/aggr.toml"
@@ -1379,7 +1559,7 @@ mod tests {
         site.config_url = None;
         site.has_categories = false;
         let descriptor: Value =
-            serde_json::from_str(&instance_descriptor(&site, &build()).unwrap()).unwrap();
+            serde_json::from_str(&instance_descriptor(&site, &build(), at(12)).unwrap()).unwrap();
 
         assert_eq!(descriptor["url"], "./");
         assert_eq!(descriptor["source"]["config"], "aggr.toml");
@@ -1517,7 +1697,12 @@ mod tests {
 
     #[test]
     fn stub_escapes_and_redirects() {
-        let stub = redirect_stub("https://github.com/o/r/blob/abc/items/x/a.md?a=1&b=\"2\"");
+        let stub = redirect_stub(
+            &site(),
+            "https://github.com/o/r/blob/abc/items/x/a.md?a=1&b=\"2\"",
+        );
+        assert!(stub.starts_with("<!doctype html><html lang=\"en-GB\">"));
+        assert!(stub.ends_with("</html>\n"));
         assert!(stub.contains("http-equiv=\"refresh\""));
         assert!(stub.contains("&amp;b=&quot;2&quot;"));
         assert!(!stub.contains("&b=\"2\""));
@@ -1529,6 +1714,606 @@ mod tests {
         assert_eq!(
             escape("a < b & c > \"d\"\0"),
             "a &lt; b &amp; c &gt; &quot;d&quot;"
+        );
+    }
+    fn podcast() -> ItemCtx {
+        let mut item = item();
+        item.path = "items/podcast/episode-1".into();
+        item.url = "items/podcast/episode-1/".into();
+        item.title = "Episode 1".into();
+        item.link = "https://podcast.test/episodes/1".into();
+        item.authors = vec!["  ".into(), " Host ".into()];
+        item.item_type = crate::site::item_type::ItemType::Podcast;
+        item.extra.insert(
+            "audio_url".into(),
+            "https://cdn.podcast.test/episode-1.mp3?token=a&b=2".into(),
+        );
+        item.extra.insert("audio_type".into(), "audio/mpeg".into());
+        item.extra.insert(
+            "audio_length".into(),
+            serde_yaml_ng::Value::from(12_345_u64),
+        );
+        item.extra.insert(
+            "duration_seconds".into(),
+            serde_yaml_ng::Value::from(1_671_u64),
+        );
+        item
+    }
+
+    fn sources() -> Vec<SourceCtx> {
+        let source = |slug: &str, name: &str, engine: &str| SourceCtx {
+            slug: slug.into(),
+            name: name.into(),
+            url: None,
+            feed_url: None,
+            site_url: None,
+            language: None,
+            category: None,
+            engine: engine.into(),
+            count: 1,
+            latest: Some(at(8)),
+            error: None,
+            page: format!("sources/{slug}/"),
+        };
+        vec![
+            SourceCtx {
+                url: Some("https://blog.rust-lang.org/".into()),
+                feed_url: Some("https://blog.rust-lang.org/feed.xml".into()),
+                site_url: Some("https://blog.rust-lang.org/".into()),
+                category: Some("Engineering".into()),
+                ..source("rust", "Rust & Friends", "web")
+            },
+            SourceCtx {
+                url: Some("https://feeds.podcast.test/show?token=abc".into()),
+                ..source("podcast", "A \"Podcast\"", "web")
+            },
+            SourceCtx {
+                url: Some("https://github.com/owner/reader".into()),
+                ..source("mirror", "Mirror", "aggr")
+            },
+            source("orphan", "Retained only", "web"),
+        ]
+    }
+
+    /// Drive a namespace-aware parser to the end so unbalanced tags, bad entities and undeclared
+    /// prefixes fail the test with the offending byte offset.
+    fn well_formed(xml: &str) {
+        use quick_xml::events::Event;
+        use quick_xml::name::ResolveResult;
+        let mut reader = quick_xml::NsReader::from_str(xml);
+        loop {
+            match reader.read_resolved_event() {
+                Ok((_, Event::Eof)) => break,
+                Ok((ResolveResult::Unknown(prefix), _)) => panic!(
+                    "undeclared namespace prefix {:?} at byte {}\n{xml}",
+                    String::from_utf8_lossy(&prefix),
+                    reader.buffer_position()
+                ),
+                Ok(_) => {}
+                Err(error) => panic!(
+                    "malformed XML at byte {}: {error}\n{xml}",
+                    reader.error_position()
+                ),
+            }
+        }
+    }
+
+    fn assert_matches_schema(value: &Value, schema: &Value) {
+        let object = value.as_object().expect("schema objects are JSON objects");
+        for required in schema["required"].as_array().into_iter().flatten() {
+            let key = required.as_str().unwrap();
+            assert!(object.contains_key(key), "missing required member {key}");
+        }
+        let properties = schema["properties"]
+            .as_object()
+            .expect("closed schemas declare their properties");
+        for (key, member) in object {
+            let declared = properties
+                .get(key)
+                .unwrap_or_else(|| panic!("member {key} is not declared by the schema"));
+            if let Some(constant) = declared.get("const") {
+                assert_eq!(member, constant, "{key}");
+            }
+            if declared.get("properties").is_some() {
+                assert_matches_schema(member, declared);
+            }
+            if declared.get("$ref") == Some(&Value::String("#/$defs/links".into())) {
+                for (name, link) in member.as_object().unwrap() {
+                    assert!(link.is_string(), "{key}.{name} must be a URL reference");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn atom_round_trips_through_a_standard_parser() {
+        let atom = atom_collection(
+            &site(),
+            &build(),
+            "Engineering",
+            "/categories/engineering",
+            &[item(), podcast()],
+        );
+        well_formed(&atom);
+        let feed = feed_rs::parser::parse(atom.as_bytes()).unwrap();
+
+        assert_eq!(
+            feed.id,
+            "https://example.test/reads/categories/engineering/"
+        );
+        assert_eq!(feed.title.unwrap().content, "Engineering");
+        assert_eq!(feed.updated, Some(at(9)));
+        assert_eq!(
+            feed.authors
+                .iter()
+                .map(|author| author.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Example & Reader"]
+        );
+        assert_eq!(feed.entries.len(), 2);
+        let entry = &feed.entries[0];
+        assert_eq!(entry.id, item_uid(&item()));
+        assert_eq!(
+            entry.title.as_ref().unwrap().content,
+            "A <safe> & useful story"
+        );
+        assert_eq!(entry.updated, Some(at(9)));
+        let alternate = entry
+            .links
+            .iter()
+            .find(|link| link.rel.as_deref() == Some("alternate"))
+            .unwrap();
+        assert_eq!(
+            alternate.href,
+            "https://example.test/reads/items/source/a-story/"
+        );
+        assert_eq!(
+            entry
+                .authors
+                .iter()
+                .map(|author| author.name.as_str())
+                .collect::<Vec<_>>(),
+            ["A & B"]
+        );
+    }
+
+    #[test]
+    fn rss_round_trips_through_a_standard_parser() {
+        let rss = rss_collection(&site(), &build(), "Example", "", &[item(), podcast()]);
+        well_formed(&rss);
+        let feed = feed_rs::parser::parse(rss.as_bytes()).unwrap();
+
+        assert!(!feed.id.is_empty());
+        assert_eq!(feed.title.unwrap().content, "Example");
+        assert_eq!(feed.updated, Some(at(9)));
+        assert_eq!(feed.entries.len(), 2);
+        let entry = &feed.entries[0];
+        assert_eq!(entry.id, item_uid(&item()));
+        assert_eq!(
+            entry.title.as_ref().unwrap().content,
+            "A <safe> & useful story"
+        );
+        assert_eq!(entry.published, Some(at(8)));
+        let alternate = entry
+            .links
+            .iter()
+            .find(|link| link.rel.as_deref().is_none_or(|rel| rel == "alternate"))
+            .unwrap();
+        assert_eq!(
+            alternate.href,
+            "https://example.test/reads/items/source/a-story/"
+        );
+        assert_eq!(
+            entry
+                .authors
+                .iter()
+                .map(|author| author.name.as_str())
+                .collect::<Vec<_>>(),
+            ["A & B"]
+        );
+    }
+
+    #[test]
+    fn json_feed_parses_with_unique_item_identities() {
+        let mut second = item();
+        second.path = "items/other/a-story".into();
+        second.url = "items/other/a-story/".into();
+        let feed: Value = serde_json::from_str(
+            &json_collection(&site(), "Example", "", &[item(), second, podcast()]).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(feed["version"], "https://jsonfeed.org/version/1.1");
+        assert_eq!(feed["title"], "Example");
+        let ids = feed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.iter().all(|id| !id.is_empty()));
+        assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
+    }
+
+    #[test]
+    fn sitemap_is_namespaced_absolute_and_uses_rfc3339_lastmod() {
+        let output = sitemap(
+            &[
+                SitemapUrl::new("https://example.test/a?x=1&y=2", Some(at(8))),
+                SitemapUrl::new("https://example.test/b", None),
+            ],
+            "https://example.test/sitemap.xml",
+            SitemapLimits::default(),
+        )
+        .unwrap();
+        let xml = output.root_xml();
+        well_formed(xml);
+        assert!(xml.contains("<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">"));
+        let locs = xml
+            .split("<loc>")
+            .skip(1)
+            .map(|rest| rest.split_once("</loc>").unwrap().0)
+            .collect::<Vec<_>>();
+        assert_eq!(locs.len(), 2);
+        for loc in locs {
+            let parsed = url::Url::parse(&loc.replace("&amp;", "&")).unwrap();
+            assert!(matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some());
+        }
+        let lastmods = xml
+            .split("<lastmod>")
+            .skip(1)
+            .map(|rest| rest.split_once("</lastmod>").unwrap().0)
+            .collect::<Vec<_>>();
+        assert_eq!(lastmods, ["2026-09-02T08:30:00Z"]);
+        assert!(
+            DateTime::parse_from_rfc3339(lastmods[0]).is_ok(),
+            "lastmod must be W3C datetime"
+        );
+    }
+
+    #[test]
+    fn instance_descriptor_matches_published_schema() {
+        let schema: Value =
+            serde_json::from_str(include_str!("../../docs/aggr-instance.schema.json")).unwrap();
+        let mut release = site();
+        release.repository = Some("owner/reader".into());
+        release.config_url =
+            Some("https://raw.githubusercontent.com/owner/reader/deadbeef/aggr.toml".into());
+        let mut portable = site();
+        portable.base_url = None;
+        portable.config_url = None;
+        portable.has_categories = false;
+        for site in [release, portable] {
+            let descriptor: Value =
+                serde_json::from_str(&instance_descriptor(&site, &build(), at(9)).unwrap())
+                    .unwrap();
+            assert_matches_schema(&descriptor, &schema);
+            assert_eq!(
+                descriptor["discovery"]["opml"].as_str().unwrap(),
+                if site.base_url.is_some() {
+                    "https://example.test/reads/sources.opml"
+                } else {
+                    "sources.opml"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn enclosure_reads_capture_metadata_and_falls_back_to_the_extension() {
+        assert_eq!(
+            enclosure(&podcast()),
+            Some(Enclosure {
+                url: "https://cdn.podcast.test/episode-1.mp3?token=a&b=2".into(),
+                mime: "audio/mpeg".into(),
+                length: Some(12_345),
+                duration: Some(1_671),
+            })
+        );
+        assert_eq!(enclosure(&item()), None, "articles have no enclosure");
+
+        let mut archived = podcast();
+        archived.extra.remove("audio_type");
+        archived.extra.remove("audio_length");
+        archived.extra.insert(
+            "audio_url".into(),
+            "https://cdn.podcast.test/Episode-1.M4A".into(),
+        );
+        assert_eq!(
+            enclosure(&archived),
+            Some(Enclosure {
+                url: "https://cdn.podcast.test/Episode-1.M4A".into(),
+                mime: "audio/mp4".into(),
+                length: None,
+                duration: Some(1_671),
+            })
+        );
+        for (file, mime) in [
+            ("a.mp3", "audio/mpeg"),
+            ("a.ogg", "audio/ogg"),
+            ("a.oga", "audio/ogg"),
+            ("a.opus", "audio/opus"),
+            ("a.wav", "audio/wav"),
+            ("a.flac", "audio/flac"),
+            ("a.mp4", "video/mp4"),
+            ("a.m4v", "video/mp4"),
+            ("a.webm", "video/webm"),
+            ("a.mov", "video/quicktime"),
+        ] {
+            assert_eq!(
+                mime_for_extension(&format!("https://cdn.test/media/{file}?x=1")),
+                Some(mime),
+                "{file}"
+            );
+        }
+
+        let mut unknown = archived.clone();
+        unknown
+            .extra
+            .insert("audio_url".into(), "https://cdn.podcast.test/stream".into());
+        assert_eq!(enclosure(&unknown), None, "no guessed media type");
+        let mut relative = podcast();
+        relative
+            .extra
+            .insert("audio_url".into(), "/episode-1.mp3".into());
+        assert_eq!(enclosure(&relative), None, "enclosures must be absolute");
+
+        let mut textual = podcast();
+        textual.extra.insert("audio_length".into(), "200".into());
+        textual.extra.insert("duration_seconds".into(), "0".into());
+        let textual = enclosure(&textual).unwrap();
+        assert_eq!((textual.length, textual.duration), (Some(200), None));
+    }
+
+    #[test]
+    fn feeds_carry_the_episode_enclosure_in_each_format() {
+        let atom = atom_feed(&site(), &build(), &[podcast()]);
+        let feed = feed_rs::parser::parse(atom.as_bytes()).unwrap();
+        let link = feed.entries[0]
+            .links
+            .iter()
+            .find(|link| link.rel.as_deref() == Some("enclosure"))
+            .expect("atom enclosure link");
+        assert_eq!(
+            link.href,
+            "https://cdn.podcast.test/episode-1.mp3?token=a&b=2"
+        );
+        assert_eq!(link.media_type.as_deref(), Some("audio/mpeg"));
+        assert_eq!(link.length, Some(12_345));
+
+        let rss = rss_collection(&site(), &build(), "Example", "", &[podcast()]);
+        let feed = feed_rs::parser::parse(rss.as_bytes()).unwrap();
+        let content = feed.entries[0]
+            .media
+            .iter()
+            .flat_map(|media| media.content.iter())
+            .find(|content| content.url.is_some())
+            .expect("rss enclosure");
+        assert_eq!(
+            content.url.as_ref().unwrap().as_str(),
+            "https://cdn.podcast.test/episode-1.mp3?token=a&b=2"
+        );
+        assert_eq!(
+            content.content_type.as_ref().unwrap().essence().to_string(),
+            "audio/mpeg"
+        );
+        assert_eq!(content.size, Some(12_345));
+
+        let mut unknown_size = podcast();
+        unknown_size.extra.remove("audio_length");
+        let rss = rss_collection(&site(), &build(), "Example", "", &[unknown_size]);
+        assert!(
+            rss.contains(
+                "<enclosure url=\"https://cdn.podcast.test/episode-1.mp3?token=a&amp;b=2\" length=\"0\" type=\"audio/mpeg\"/>"
+            ),
+            "{rss}"
+        );
+
+        let json: Value =
+            serde_json::from_str(&json_collection(&site(), "Example", "", &[podcast()]).unwrap())
+                .unwrap();
+        assert_eq!(
+            json["items"][0]["attachments"],
+            serde_json::json!([{
+                "url": "https://cdn.podcast.test/episode-1.mp3?token=a&b=2",
+                "mime_type": "audio/mpeg",
+                "size_in_bytes": 12_345,
+                "duration_in_seconds": 1_671,
+            }])
+        );
+        let json: Value =
+            serde_json::from_str(&json_collection(&site(), "Example", "", &[item()]).unwrap())
+                .unwrap();
+        assert!(json["items"][0].get("attachments").is_none());
+    }
+
+    #[test]
+    fn feeds_drop_blank_authors_and_name_the_site_as_feed_author() {
+        let mut anonymous = item();
+        anonymous.authors = vec!["   ".into()];
+        anonymous.source_name = " ".into();
+        let atom = atom_feed(&site(), &build(), &[podcast(), anonymous.clone()]);
+        well_formed(&atom);
+        assert!(atom.contains("  <author>\n    <name>Example &amp; Reader</name>\n  </author>\n"));
+        assert!(!atom.contains("<name></name>"));
+        assert!(!atom.contains("<name>   </name>"));
+        let feed = feed_rs::parser::parse(atom.as_bytes()).unwrap();
+        assert_eq!(
+            feed.entries[0]
+                .authors
+                .iter()
+                .map(|author| author.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Host"]
+        );
+        assert!(feed.entries[1].authors.is_empty());
+
+        let rss = rss_collection(&site(), &build(), "Example", "", &[podcast(), anonymous]);
+        well_formed(&rss);
+        assert!(rss.contains("xmlns:dc=\"http://purl.org/dc/elements/1.1/\""));
+        assert_eq!(rss.matches("<dc:creator>").count(), 1);
+        assert!(rss.contains("<dc:creator>Host</dc:creator>"));
+
+        let json: Value =
+            serde_json::from_str(&json_collection(&site(), "Example", "", &[podcast()]).unwrap())
+                .unwrap();
+        assert_eq!(
+            json["items"][0]["authors"],
+            serde_json::json!([{"name": "Host"}])
+        );
+    }
+
+    #[test]
+    fn sources_opml_round_trips_through_the_subscription_importer() {
+        let opml = sources_opml(&site(), at(12), &sources());
+        well_formed(&opml);
+        assert!(opml.starts_with(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<opml version=\"2.0\">\n  <head>\n    <title>Example &amp; Reader</title>\n    <dateCreated>Wed, 2 Sep 2026 12:30:00 +0000</dateCreated>\n  </head>\n"
+        ));
+        assert!(opml.contains("htmlUrl=\"https://blog.rust-lang.org/\""));
+        assert!(
+            !opml.contains("github.com/owner/reader"),
+            "git mirrors are not feeds"
+        );
+        assert!(
+            !opml.contains("Retained only"),
+            "sources without a URL are skipped"
+        );
+
+        let imported = crate::config::Config::parse_source_document(
+            opml.as_bytes(),
+            &url::Url::parse("https://example.test/reads/sources.opml").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            imported
+                .iter()
+                .map(|source| {
+                    (
+                        source.url.as_deref().unwrap(),
+                        source.name.as_deref().unwrap(),
+                        source.category.as_deref(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "https://blog.rust-lang.org/feed.xml",
+                    "Rust & Friends",
+                    Some("Engineering")
+                ),
+                (
+                    "https://feeds.podcast.test/show?token=abc",
+                    "A \"Podcast\"",
+                    None
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn llms_inventory_and_descriptor_advertise_the_subscription_list() {
+        assert!(
+            llms_txt(&site())
+                .contains("- [OPML subscriptions](https://example.test/reads/sources.opml)\n")
+        );
+        let mut portable = site();
+        portable.base_url = None;
+        assert!(llms_txt(&portable).contains("- [OPML subscriptions](sources.opml)\n"));
+    }
+
+    #[test]
+    fn entries_declare_a_language_only_when_it_differs_from_the_feed() {
+        let site = site();
+        let mut french = item();
+        french.language = Some("fr".into());
+        let mut same = podcast();
+        same.language = Some("en-gb".into());
+        let unknown = item();
+        assert_eq!(entry_language(&french, &site), Some("fr"));
+        assert_eq!(entry_language(&same, &site), None, "case-insensitive");
+        assert_eq!(entry_language(&unknown, &site), None);
+
+        let items = [french, same, unknown];
+        let atom = atom_collection(&site, &build(), "All", "", &items);
+        well_formed(&atom);
+        assert_eq!(atom.matches("<entry xml:lang=\"fr\">").count(), 1, "{atom}");
+        assert_eq!(atom.matches("<entry>").count(), 2, "{atom}");
+        // `xml:lang` is inherited by every child of the entry (RFC 4287 §2); feed-rs only reads it
+        // from `<content>`, so the entry attribute is checked on the serialized document above.
+        let parsed = feed_rs::parser::parse(atom.as_bytes()).unwrap();
+        assert_eq!(parsed.language.as_deref(), Some("en-GB"));
+        assert_eq!(parsed.entries.len(), 3);
+
+        let json: serde_json::Value =
+            serde_json::from_str(&json_collection(&site, "All", "", &items).unwrap()).unwrap();
+        assert_eq!(json["language"], "en-GB");
+        assert_eq!(json["items"][0]["language"], "fr");
+        assert!(json["items"][1].get("language").is_none());
+        assert!(json["items"][2].get("language").is_none());
+    }
+
+    #[test]
+    fn atom_golden() {
+        insta::assert_snapshot!("atom", atom_feed(&site(), &build(), &[item(), podcast()]));
+    }
+
+    #[test]
+    fn rss_golden() {
+        let site = site();
+        insta::assert_snapshot!(
+            "rss",
+            rss_collection(&site, &build(), &site.title, "", &[item(), podcast()])
+        );
+    }
+
+    #[test]
+    fn json_feed_golden() {
+        let site = site();
+        insta::assert_snapshot!(
+            "json_feed",
+            json_collection(&site, &site.title, "", &[item(), podcast()]).unwrap()
+        );
+    }
+
+    #[test]
+    fn sitemap_golden() {
+        let output = sitemap(
+            &[
+                SitemapUrl::new("https://example.test/reads/", Some(at(9))),
+                SitemapUrl::new(
+                    "https://example.test/reads/items/source/a-story/",
+                    Some(at(9)),
+                ),
+                SitemapUrl::new("https://example.test/reads/browse/", None),
+            ],
+            "https://example.test/reads/sitemap.xml",
+            SitemapLimits::default(),
+        )
+        .unwrap();
+        insta::assert_snapshot!("sitemap", output.root_xml());
+    }
+
+    #[test]
+    fn sources_opml_golden() {
+        insta::assert_snapshot!("sources_opml", sources_opml(&site(), at(12), &sources()));
+    }
+
+    #[test]
+    fn llms_txt_golden() {
+        insta::assert_snapshot!("llms_txt", llms_txt(&site()));
+    }
+
+    #[test]
+    fn aggr_json_golden() {
+        let mut site = site();
+        site.repository = Some("owner/reader".into());
+        site.config_url =
+            Some("https://raw.githubusercontent.com/owner/reader/deadbeef/aggr.toml".into());
+        insta::assert_snapshot!(
+            "aggr_json",
+            instance_descriptor(&site, &build(), at(9)).unwrap()
         );
     }
 }

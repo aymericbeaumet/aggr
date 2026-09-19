@@ -1,11 +1,10 @@
 //! `aggr dev`: immediately serve, then sync/build and live-reload without touching the repository.
 
-use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{Read as _, Seek as _, Write as _};
 use std::path::Path;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 
+use super::lock::Guard;
 use super::{Project, server};
 use crate::cli::DevArgs;
 use crate::store::Store;
@@ -58,67 +57,23 @@ fn dev_scratch(cache: &Path) -> Result<std::path::PathBuf> {
 /// race while atomically promoting builds and can make a freshly rendered page appear stale.
 #[derive(Debug)]
 pub(super) struct DevLock {
-    _file: File,
+    _guard: Guard,
 }
 
 impl DevLock {
     pub(super) fn acquire(cache: &Path, config: &Path) -> Result<Self> {
-        Self::open(cache, config, false)?.context("creating dev lock")
+        super::clean::validate_dev_lock(cache)?;
+        std::fs::create_dir_all(cache)
+            .with_context(|| format!("creating dev cache {}", cache.display()))?;
+        Ok(Self {
+            _guard: Guard::acquire(&cache.join("dev.lock"), "dev", config)?,
+        })
     }
 
     pub(super) fn inspect(cache: &Path, config: &Path) -> Result<Option<Self>> {
-        Self::open(cache, config, true)
-    }
-
-    fn open(cache: &Path, config: &Path, read_only: bool) -> Result<Option<Self>> {
         super::clean::validate_dev_lock(cache)?;
-        if !read_only {
-            std::fs::create_dir_all(cache)
-                .with_context(|| format!("creating dev cache {}", cache.display()))?;
-        }
-        let path = cache.join("dev.lock");
-        let mut file = match OpenOptions::new()
-            .create(!read_only)
-            .read(true)
-            .write(!read_only)
-            .truncate(false)
-            .open(&path)
-        {
-            Ok(file) => file,
-            Err(error) if read_only && error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            Err(error) => {
-                return Err(error).with_context(|| format!("opening dev lock {}", path.display()));
-            }
-        };
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => {
-                let mut owner = String::new();
-                let _ = file.read_to_string(&mut owner);
-                let owner = owner.trim();
-                let suffix = if owner.is_empty() {
-                    String::new()
-                } else {
-                    format!(" (PID {owner})")
-                };
-                bail!(
-                    "another `aggr dev` is already running for {}{suffix}",
-                    config.display()
-                );
-            }
-            Err(TryLockError::Error(err)) => {
-                return Err(err).with_context(|| format!("locking {}", path.display()));
-            }
-        }
-        if !read_only {
-            file.set_len(0)?;
-            file.rewind()?;
-            write!(file, "{}", std::process::id())?;
-            file.flush()?;
-        }
-        Ok(Some(Self { _file: file }))
+        Ok(Guard::inspect(&cache.join("dev.lock"), "dev", config)?
+            .map(|guard| Self { _guard: guard }))
     }
 }
 

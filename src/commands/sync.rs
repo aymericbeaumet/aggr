@@ -7,41 +7,47 @@ use anyhow::{Result, bail};
 use super::Project;
 use super::fetch::{self, Report};
 use crate::cli::{FetchArgs, SyncArgs};
+use crate::discussions::ResolutionSet;
 use crate::git::{CommitMessage, PushOutcome};
 use crate::store::Outcome;
 
 pub const LAST_GOOD: &str = "refs/aggr/last-good";
 
-pub async fn run(project: &Project, args: &SyncArgs) -> Result<()> {
-    if args.clean {
-        super::clean::run_project(project, None, false)?;
-    }
+/// Returns the discussion matches resolved for the synced data when that stage ran and
+/// succeeded, so a build following the sync does not have to resolve them a second time.
+/// `--clean` is handled by the dispatcher before the project is loaded.
+pub async fn run(project: &Project, args: &SyncArgs) -> Result<Option<ResolutionSet>> {
     let worktree = project.worktree()?;
+    if !args.fetch.dry_run {
+        sweep_cache(project);
+    }
     let first = worktree.head_sha()?.is_none();
-    let report = fetch::run(project, &worktree, &args.fetch).await?;
+    let report = fetch::run(project, worktree, &args.fetch).await?;
 
+    let mut discussions = None;
     if !args.fetch.dry_run && !project.config.networks.is_empty() {
         let cache = project.build_cache_dir()?;
         let store = crate::store::Store::open(worktree.dir());
-        if let Err(err) =
-            super::build::resolve_discussions(project, &store, &cache, chrono::Utc::now()).await
-        {
+        match super::build::resolve_discussions(project, &store, &cache, chrono::Utc::now()).await {
+            Ok(resolved) => discussions = Some(resolved),
             // Conversation links are enrichment. A provider outage must never prevent source
             // data from being committed, and the next sync will retry from the same cache state.
-            log::warn!("discussion matching: {err:#}");
+            Err(err) => log::warn!("discussion matching: {err:#}"),
         }
     }
 
     if args.fetch.dry_run {
         println!("dry run: {} new item(s), nothing committed", report.added());
-        return finish(&report);
+        finish(&report)?;
+        return Ok(discussions);
     }
     if args.fetch_only {
         println!(
             "fetch only: {} new item(s), nothing committed or pushed",
             report.added()
         );
-        return finish(&report);
+        finish(&report)?;
+        return Ok(discussions);
     }
 
     let message = commit_message(
@@ -74,7 +80,8 @@ pub async fn run(project: &Project, args: &SyncArgs) -> Result<()> {
         }
         println!("{head}");
     }
-    finish(&report)
+    finish(&report)?;
+    Ok(discussions)
 }
 
 /// The same required synchronization stage for dev, redirected to its private cache and stopped
@@ -97,6 +104,20 @@ fn finish(report: &Report) -> Result<()> {
         bail!("every source failed");
     }
     Ok(())
+}
+
+/// Drop cache files nothing reads any more before the run adds new ones. Housekeeping only: it is
+/// throttled to one pass a day inside the cache, a failure is reported, and the sync proceeds on
+/// the cache as it is.
+fn sweep_cache(project: &Project) {
+    let swept = project.build_cache_dir().and_then(|cache| {
+        crate::cache::sweep(&cache, Some(crate::media::image_failure_generation()))
+    });
+    match swept {
+        Ok(report) if report.throttled => {}
+        Ok(report) => log::debug!("cache sweep: {report}"),
+        Err(err) => log::warn!("cache sweep skipped: {err:#}"),
+    }
 }
 
 /// Subject says what changed, body lists sources, trailers make runs greppable.

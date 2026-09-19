@@ -1,0 +1,54 @@
+---
+source: src/site/outputs.rs
+expression: "atom_feed(&site(), &build(), &[item(), podcast()])"
+---
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en-GB">
+  <title>Example &amp; Reader</title>
+  <subtitle>Collected &lt;carefully&gt;</subtitle>
+  <id>https://example.test/reads/</id>
+  <link rel="alternate" type="text/html" href="https://example.test/reads/"/>
+  <link rel="self" type="application/atom+xml" href="https://example.test/reads/atom.xml"/>
+  <updated>2026-09-02T09:30:00+00:00</updated>
+  <author>
+    <name>Example &amp; Reader</name>
+  </author>
+  <generator version="1.2.3" uri="https://github.com/aymericbeaumet/aggr">aggr</generator>
+  <entry>
+    <id>urn:aggr:item:238368f1ec8ac4600ecd0506e49318be70adbd13</id>
+    <title type="text">A &lt;safe&gt; &amp; useful story</title>
+    <link rel="alternate" type="text/html" href="https://example.test/reads/items/source/a-story/"/>
+    <link rel="via" type="text/html" href="https://upstream.test/story?a=1&amp;b=2"/>
+    <published>2026-09-02T08:30:00+00:00</published>
+    <updated>2026-09-02T09:30:00+00:00</updated>
+    <author>
+      <name>A &amp; B</name>
+    </author>
+    <category term="Engineering"/>
+    <category term="Rust"/>
+    <source>
+      <title>Upstream</title>
+    </source>
+    <summary type="text">A concise &lt;summary&gt;</summary>
+    <content type="html">&lt;p&gt;Clean &amp;amp; &lt;strong&gt;complete&lt;/strong&gt;&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <id>urn:aggr:item:8ea144222273119928ca22f3fc1d62746ed12f7d</id>
+    <title type="text">Episode 1</title>
+    <link rel="alternate" type="text/html" href="https://example.test/reads/items/podcast/episode-1/"/>
+    <link rel="via" type="text/html" href="https://podcast.test/episodes/1"/>
+    <link rel="enclosure" type="audio/mpeg" href="https://cdn.podcast.test/episode-1.mp3?token=a&amp;b=2" length="12345"/>
+    <published>2026-09-02T08:30:00+00:00</published>
+    <updated>2026-09-02T09:30:00+00:00</updated>
+    <author>
+      <name>Host</name>
+    </author>
+    <category term="Engineering"/>
+    <category term="Rust"/>
+    <source>
+      <title>Upstream</title>
+    </source>
+    <summary type="text">A concise &lt;summary&gt;</summary>
+    <content type="html">&lt;p&gt;Clean &amp;amp; &lt;strong&gt;complete&lt;/strong&gt;&lt;/p&gt;</content>
+  </entry>
+</feed>

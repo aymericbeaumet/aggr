@@ -162,22 +162,53 @@ html[data-pull-state="settling"] .main {
 }
 @keyframes pull-refresh-spin { to { transform: rotate(360deg); } }
 [hidden] { display: none !important; }
-::selection { background: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--fg); }
+::selection { background: color-mix(in srgb, var(--warm) 32%, transparent); color: var(--fg); }
+
+/* Selecting article text offers one action: a link that reselects the same words for whoever
+   opens it. It follows the selection and never covers it. */
+.selection-share {
+  position: absolute;
+  z-index: 3;
+  display: flex;
+  padding: 0.2rem;
+  border-radius: 0.5rem;
+  background: var(--nav-bg);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
+}
+.selection-share[hidden] { display: none; }
+.selection-share-action {
+  min-height: 2rem;
+  padding: 0 0.85rem;
+  border: 0;
+  border-radius: 0.35rem;
+  background: none;
+  color: var(--nav-fg);
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 2rem;
+  cursor: pointer;
+}
+.selection-share-action:is(:hover, :focus-visible) { background: rgb(255 255 255 / 0.14); }
+@media (prefers-reduced-motion: no-preference) {
+  .selection-share { transition: opacity 0.12s ease; }
+}
 a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 a, button, input, select { -webkit-tap-highlight-color: color-mix(in srgb, var(--accent) 22%, transparent); }
 a:active, button:active { opacity: 0.68; }
-a:focus, button:focus, input:focus, select:focus, .directory-scroll:focus { outline: none; }
+a:focus, button:focus, input:focus, select:focus, .table-scroll:focus { outline: none; }
 a:focus-visible, button:focus-visible { background: var(--focus-surface); text-decoration: underline; text-decoration-thickness: 0.18em; text-underline-offset: 0.2em; }
 input:focus-visible, select:focus-visible { background: var(--code); box-shadow: inset 0 -3px 0 var(--fg); }
-.directory-scroll:focus-visible { background: var(--focus-surface); }
+.table-scroll:focus-visible { background: var(--focus-surface); }
 button, input, select { accent-color: var(--accent); }
 code, pre, kbd { font-family: var(--mono); font-size: 0.92em; }
 code { background: var(--code); padding: 0 0.25em; border-radius: 3px; }
 pre { background: var(--code); padding: 0.75rem; overflow: auto; border-radius: 4px; }
 pre code { background: none; padding: 0; }
+.body .math { font-family: "STIX Two Math", "Cambria Math", "Latin Modern Math", "Times New Roman", serif; font-size: 1.04em; }
+.body .math-display { display: block; margin: 1rem 0; text-align: center; overflow-x: auto; }
 .body .code-snippet { display: block; }
-.body .code-snippet::before { content: attr(data-language); display: block; margin-bottom: .65rem; color: var(--muted); font-family: var(--font); font-size: .7rem; font-weight: 400; line-height: 1.3; }
+.body .code-snippet[data-language]::before { content: attr(data-language); display: block; margin-bottom: .65rem; color: var(--muted); font-family: var(--font); font-size: .7rem; font-weight: 400; line-height: 1.3; }
 .body pre code .syntax-comment { color: var(--muted); font-style: italic; }
 .body pre code .syntax-keyword, .body pre code .syntax-storage { color: var(--warm); }
 .body pre code .syntax-string { color: var(--accent-strong); }
@@ -326,9 +357,13 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .shortcut-help-head h2 { margin: 0; font-size: 1.15rem; }
 .shortcut-help-head h2:focus { outline: none; }
 .shortcut-close { min-width: var(--tap-target); min-height: var(--tap-target); padding: 0; border: 0; color: var(--muted); background: transparent; font: 1.4rem/1 var(--font); cursor: pointer; }
-.shortcut-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.25rem 2rem; margin-top: 1rem; }
-.shortcut-groups h3 { margin: 0 0 0.45rem; color: var(--muted); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
-.shortcut-list { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 1rem; margin: 0; }
+/* Two columns of groups; every group's key and description tracks are shared subgrid columns, so
+   keys and descriptions line up down each column across all of its groups. */
+.shortcut-groups { display: grid; grid-template-columns: repeat(2, max-content minmax(0, 1fr)); column-gap: 1rem; row-gap: 1.25rem; margin-top: 1rem; }
+.shortcut-groups section { display: grid; grid-column: span 2; grid-template-columns: subgrid; column-gap: 1rem; align-content: start; }
+.shortcut-groups section:nth-child(odd) dd { padding-right: 1rem; }
+.shortcut-groups h3 { grid-column: span 2; margin: 0 0 0.45rem; color: var(--muted); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.shortcut-list { display: contents; margin: 0; }
 .shortcut-list > div { display: contents; }
 .shortcut-list dt, .shortcut-list dd { margin: 0; padding: 0.3rem 0; }
 .shortcut-list dd { color: var(--muted); overflow-wrap: anywhere; }
@@ -363,29 +398,9 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .listhead h1 { font-size: 1.15rem; margin: 0; }
 .listtools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 1rem; font-size: 0.85rem; color: var(--muted); }
 .listtools input[type=search] { min-height: var(--tap-target); font: inherit; padding: 0.45rem 0.6rem; border: 1px solid var(--control-border); border-radius: 4px; background: var(--panel); color: var(--fg); min-width: 16rem; }
-.listtools select, .search-controls select, .search-controls input, .preferences select, .preferences button { min-height: var(--tap-target); font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--control-border); border-radius: 4px; padding: 0.45rem 0.6rem; }
-.search-controls {
-  display: grid;
-  grid-template-columns: repeat(var(--filter-columns, 2), minmax(0, 1fr)) 5ch;
-  align-items: center;
-  gap: 0.6rem;
-  width: 100%;
-  margin: 0 0 1rem;
-}
-.search-controls:has(#category-filter) { --filter-columns: 3; }
-.search-controls select { width: 100%; min-width: 0; }
-.search-count { display: inline-block; width: 5ch; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.listtools select, .preferences select, .preferences button { min-height: var(--tap-target); font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--control-border); border-radius: 4px; padding: 0.45rem 0.6rem; }
 .toggle { min-height: var(--tap-target); display: inline-flex; align-items: center; user-select: none; cursor: pointer; }
 .empty { color: var(--muted); padding: 1rem 0; }
-.directory-scroll { overflow-x: auto; overscroll-behavior-inline: contain; }
-.directory { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-.directory th { padding: 0.3rem 0.4rem; color: var(--muted); border-bottom: 1px solid var(--faint); font-weight: 500; text-align: left; vertical-align: middle; }
-.directory td { padding: 0.3rem 0.4rem; border-bottom: 1px solid var(--faint); vertical-align: middle; }
-.directory .num { width: 5rem; text-align: right; font-variant-numeric: tabular-nums; }
-.directory a { display: inline-flex; align-items: center; }
-.directory a[aria-label] { justify-content: center; min-width: var(--tap-target); }
-.directory th:last-child, .directory td:last-child { width: 10rem; }
-.directory-detail { display: block; margin-top: 0.12rem; color: var(--muted); }
 
 /* rows */
 .rows { list-style: none; margin: 0; padding: 0; }
@@ -595,10 +610,36 @@ body[data-kind="item"] .main {
 .body :is(h1, h2, h3, h4, h5, h6)[id]::before { content: "#"; position: absolute; right: 100%; top: 0; margin-right: 0.3em; color: var(--muted); font-weight: 400; opacity: 0; pointer-events: none; }
 .body :is(h1, h2, h3, h4, h5, h6)[id]:hover::before { opacity: 1; }
 .body :is(h1, h2, h3, h4, h5, h6)[id]:target::before { opacity: 1; color: var(--accent-strong); }
+.body .article-figure { margin: 1.5em 0; }
+.body .article-figure > .article-picture { margin-block: 0; }
+.body figcaption { margin-top: 0.6em; color: var(--muted); font-size: 0.85em; font-style: italic; line-height: 1.5; text-align: center; text-wrap: pretty; }
 .body blockquote { margin: 1.5em 0; padding-inline-start: 1em; border-inline-start: 3px solid var(--faint); color: var(--fg); }
 .body pre { margin-block: 1.5em; max-width: 100%; font-size: 0.875em; line-height: 1.6; tab-size: 4; text-align: left; overflow-wrap: normal; }
-.body table { max-width: 100%; margin-block: 1.5em; border-collapse: collapse; display: block; overflow: auto; font-size: 0.9em; line-height: 1.5; }
+/* A wide table squashed into the reading measure is unreadable, so it borrows the page margins
+   and scrolls only once it outgrows those too. The table itself stays a single layout box so its
+   header and body columns line up. */
+.body .table-scroll {
+  --table-bleed: max(0px, (100cqi - 100%) / 2);
+  box-sizing: border-box;
+  width: calc(100% + 2 * var(--table-bleed));
+  margin-block: 1.5em;
+  margin-inline: calc(-1 * var(--table-bleed));
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+.body table {
+  width: 100%;
+  max-width: none;
+  margin-block: 1.5em;
+  border-collapse: collapse;
+  font-size: 0.9em;
+  line-height: 1.5;
+}
+.body .table-scroll > table { margin-block: 0; }
+.body :is(td, th) { min-width: 6.5rem; }
 .body th { text-align: start; background: var(--code); }
+/* A header aggr supplied because the source table had none carries no information. */
+.body thead:not(:has(th:not(:empty))) { display: none; }
 .body > hr:first-child { display: none; }
 .body > hr:first-child + * { margin-top: 0; }
 .body hr { margin-block: 2em; border: 0; border-top: 1px solid var(--faint); }
@@ -680,7 +721,6 @@ body[data-kind="item"] .main {
 .preferences button:disabled { cursor: not-allowed; opacity: 0.58; }
 .preferences .text-button { width: fit-content; border: 0; background: none; padding-left: 0; text-decoration: underline; text-underline-offset: 0.2em; }
 .preferences .text-button:focus-visible { background: var(--code); text-decoration-thickness: 0.18em; }
-.pwa-limit { font-size: 0.875rem; line-height: 1.5; }
 
 @media (min-width: 40.0625rem) {
   body { font-size: 16px; line-height: 1.5; }
@@ -727,24 +767,21 @@ body[data-kind="item"] .main {
 @media (max-width: 40rem) {
   :root { --rank-width: 3ch; }
   .row::before { display: none; }
+  .row.is-selected .title:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; }
   html { scroll-padding-bottom: calc(var(--bottom-nav-offset) + 1rem); }
   .main { padding-bottom: calc(var(--bottom-nav-offset) + 0.75rem); }
   html:not([data-density="comfortable"]) { --row-padding: 0.3rem; }
   html[data-density="comfortable"] { --row-padding: 0.65rem; }
   .meta > span { min-width: 0; overflow-wrap: anywhere; }
   .listtools input[type=search] { min-width: 0; width: 100%; }
-  .search-controls { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 5ch; }
-  .search-controls input[type="search"] { grid-column: 1 / -1; }
-  .search-controls select { min-width: 0; width: 100%; }
-  #search-sort { grid-column: 1 / 3; }
   .nav .brand { min-width: 0; }
   .brand-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .nav .config-link { white-space: nowrap; }
   .connection-status { bottom: calc(var(--bottom-nav-offset) + 0.75rem); }
   .connection-status.is-update { left: max(0.75rem, env(safe-area-inset-left)); }
   .article-more { grid-template-columns: 1fr; }
-  .directory th:last-child, .directory td:last-child { width: 7rem; }
-  .shortcut-groups { grid-template-columns: 1fr; }
+  .shortcut-groups { grid-template-columns: max-content minmax(0, 1fr); }
+  .shortcut-groups section:nth-child(odd) dd { padding-right: 0; }
 }
 
 @media (max-width: 22.5rem) {
@@ -754,9 +791,6 @@ body[data-kind="item"] .main {
 }
 
 @media (max-width: 30rem) {
-  .search-controls { grid-template-columns: minmax(0, 1fr); }
-  .search-controls input[type="search"], .search-controls select, #search-sort { grid-column: 1; }
-  .search-count { grid-column: 1; justify-self: end; }
   .pager { gap: 0.5rem; font-size: 0.8125rem; }
   .pager-side { gap: 0 0.5rem; }
 }
@@ -775,18 +809,17 @@ body[data-kind="item"] .main {
   .meta > * { min-height: 2rem; }
   html[data-density="comfortable"] .meta .domain,
   html[data-density="comfortable"] .meta > * { min-height: var(--tap-target); }
-  .views a, .pager a, .directory a {
+  .views a, .pager a {
     justify-content: center;
     min-width: var(--tap-target);
     min-height: var(--tap-target);
     padding-left: 0.2rem;
     padding-right: 0.2rem;
   }
-  .directory td { padding-block: 0; }
   .body .footnote-ref a { position: relative; }
   .body .footnote-ref a::before { content: ""; position: absolute; width: var(--tap-target); height: var(--tap-target); inset: 50% auto auto 50%; transform: translate(-50%, -50%); }
   .body .footnote-backref { display: inline-flex; align-items: center; justify-content: center; min-width: var(--tap-target); min-height: var(--tap-target); }
-  .domain, .page-header a, .meta a, .views a, .pager a, .directory a { text-decoration: underline; text-underline-offset: 0.14em; }
+  .domain, .page-header a, .meta a, .views a, .pager a { text-decoration: underline; text-underline-offset: 0.14em; }
   .itemhead .meta a { text-decoration: none; }
 }
 
@@ -920,7 +953,8 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   .top { border: 1px solid CanvasText; box-shadow: none; }
   .row.is-new > .cell::before { outline: 2px solid Highlight; outline-offset: -2px; }
   .search-excerpt mark { background: Highlight; color: HighlightText; }
-  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, .directory-scroll:focus-visible, .preferences-transfer summary:focus-visible { background: Highlight; color: HighlightText; text-decoration: underline; }
+  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, .table-scroll:focus-visible, .preferences-transfer summary:focus-visible { background: Highlight; color: HighlightText; text-decoration: underline; }
+  .row.is-selected .title:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
   .row::before { background: Highlight; forced-color-adjust: none; }
 }
 
@@ -937,18 +971,42 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
 .nav-separator { opacity: .5; font-weight: 400; }
 .feed-toolbar { min-width: 0; margin: 0.6rem 0 1rem; }
 .feed-search { display: flex; align-items: center; margin: 0; width: 100%; min-width: 0; }
-.feed-search input[type="search"] { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; color: var(--fg); background: var(--search-bg, var(--code)); border: 1px solid var(--faint); border-radius: .35rem; padding: .55rem 2.75rem .55rem .7rem; font: inherit; }
+/* One selector list for the server-rendered field and the mounted one, so their geometry cannot drift. */
+.feed-search input[type="search"], .search-input-line #q { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; color: var(--fg); background: var(--search-bg, var(--code)); border: 1px solid var(--faint); border-radius: .35rem; padding: .55rem 2.75rem .55rem .7rem; font: inherit; }
 .feed-search input::placeholder, .search-input-line input::placeholder { color: var(--muted); opacity: 1; }
 .feed-search #q:focus-visible, .search-input-line #q:focus-visible { box-shadow: none; border-color: var(--warm); }
+@media (prefers-contrast: more) {
+  .feed-search input[type="search"], .search-input-line #q { border-color: var(--control-border); }
+}
+@media (forced-colors: active) {
+  .feed-search input[type="search"], .search-input-line #q { border-color: ButtonBorder; }
+}
+/* Mounted search controls (web/src/search/Controls.svelte). Rules that were scoped to the component stay under
+   .search-control; the status paragraphs render next to it, so they keep their own class. */
+.search-control { position: relative; }
+.search-command { position: relative; width: 100%; min-width: 0; }
+.search-control form { margin: 0; width: 100%; }
+.search-control .search-input-line { position: relative; width: 100%; }
+.search-control .search-clear { position: absolute; inset-block: 0; right: 0; display: grid; place-items: center; width: 44px; min-height: 44px; padding: 0; border: 0; border-radius: .35rem; color: var(--muted); background: transparent; font-size: 1.5rem; line-height: 1; }
+.search-completions { position: absolute; z-index: 20; top: 100%; inset-inline: 0; max-height: min(24rem, 55vh); overflow-y: auto; border: 1px solid var(--faint); border-radius: .4rem; background: var(--bg); box-shadow: 0 6px 20px #0002; padding: .3rem; }
+.search-completion { display: flex; justify-content: space-between; align-items: center; gap: .75rem; min-height: 44px; padding: .4rem .65rem; border-radius: .25rem; cursor: pointer; }
+.search-completion[data-selected] { background: var(--code); }
+.search-control .completion-label { min-width: 0; overflow-wrap: anywhere; }
+.search-control small { flex: none; color: var(--muted); }
+.search-control .search-query-help { position: absolute; z-index: 21; bottom: calc(100% + .4rem); inset-inline-start: 0; box-sizing: border-box; max-width: min(38rem, 100%); padding: .5rem .65rem; border: 1px solid var(--faint); border-radius: .35rem; color: var(--muted); background: var(--bg); box-shadow: 0 3px 12px #0002; font-size: .75rem; line-height: 1.5; }
+.search-control .search-query-help[hidden] { display: none; }
+.search-error, .search-offline { font-size: .85rem; margin: .4rem 0; }
+.search-error { color: var(--warm); }
 .meta .source-resolved { color: var(--warm); }
 @media (max-width: 40rem) {
   .nav { column-gap: 0.2rem; }
   .nav-primary, .nav-actions { column-gap: 0.1rem; }
-  :root { --bottom-nav-offset: calc(57px + var(--mobile-safe-area)); }
+  :root { --bottom-nav-offset: calc(50px + var(--mobile-safe-area)); }
   .nav { flex-wrap: nowrap; }
   .nav .brand { flex: 1; overflow: hidden; }
   .nav .nav-primary, .footer { display: none; }
   .nav-actions { flex: none; }
+  /* Platform tab bars are a compact row above the home indicator, not a tall panel. */
   .mobile-tabs {
     position: fixed; inset: auto 0 0; z-index: 5;
     display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -956,17 +1014,29 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
     border-top: 1px solid var(--faint); background: var(--bg); color: var(--muted);
     contain: layout paint;
   }
+  @supports (backdrop-filter: blur(20px)) {
+    .mobile-tabs {
+      background: color-mix(in srgb, var(--bg) 78%, transparent);
+      backdrop-filter: saturate(180%) blur(20px);
+    }
+  }
   .mobile-tabs a {
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
-    height: 56px; min-width: 0; padding: 4px 0; color: inherit;
-    font-size: 11px; font-weight: 400; line-height: 1.2; text-decoration: none;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+    height: 49px; min-width: 0; padding: 3px 0; color: inherit;
+    font-size: 10px; font-weight: 500; line-height: 1.2; text-decoration: none;
+    letter-spacing: 0.01em;
     touch-action: manipulation; -webkit-user-select: none; user-select: none;
   }
   .mobile-tabs a:active { opacity: 1; background: color-mix(in srgb, var(--warm) 12%, var(--bg)); }
+  /* Colour alone marks the current tab, the way a platform tab bar does. */
   .mobile-tabs a[aria-current] { color: var(--warm); }
-  .mobile-tabs a[aria-current] span { text-decoration: underline; text-underline-offset: 3px; }
   .mobile-tabs a:focus-visible { outline: 2px solid var(--warm); outline-offset: -3px; }
   .mobile-tabs[data-keyboard-open] { visibility: hidden; pointer-events: none; }
+  /* Touch reading: links read as links by colour, without the desktop underline, and taps do not
+     flash the platform's default highlight rectangle. */
+  .body a, .body a:hover { text-decoration: none; }
+  .body a:focus-visible { text-decoration: underline; text-decoration-thickness: 0.12em; }
+  :is(a, button, summary, [role="button"]) { -webkit-tap-highlight-color: transparent; }
   .feed-search input[type="search"] { font-size: 1rem; }
   .row .rank { display: none; }
   .row-heading { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }

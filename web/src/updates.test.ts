@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createUpdates, connectionPresentation } from './updates';
+import { createUpdates, connectionPresentation, createConnectionAnnouncer } from './updates';
 
 afterEach(() => vi.useRealTimers());
 describe('independent application and content updates', () => {
@@ -32,5 +32,42 @@ describe('independent application and content updates', () => {
     vi.advanceTimersByTime(2300);
     expect(connectionPresentation(updates.snapshot()).refresh).toBe(true);
     updates.dispose();
+  });
+
+  it('announces each new status text once, staying quiet for unchanged or cleared status', () => {
+    vi.useFakeTimers();
+    const announce = vi.fn();
+    const updates = createUpdates({ appVersion: 'a', contentVersion: 'c' }, true);
+    const announcer = createConnectionAnnouncer(announce);
+    updates.subscribe(state => announcer(connectionPresentation(state)));
+    expect(announce).not.toHaveBeenCalled();
+    updates.setOnline(false);
+    expect(announce).toHaveBeenCalledWith('Offline — showing saved pages.');
+    updates.receive({ app_version: 'a', content_version: 'd' });
+    updates.setOnline(true);
+    expect(announce).toHaveBeenCalledTimes(1);
+    updates.setOnline(false);
+    expect(announce).toHaveBeenCalledTimes(2);
+    updates.setOnline(true);
+    updates.notice('Checking…', false, true);
+    expect(announce).toHaveBeenLastCalledWith('Checking…');
+    vi.advanceTimersByTime(2300);
+    updates.receive({ app_version: 'b', content_version: 'd' });
+    expect(announce).toHaveBeenLastCalledWith('Refresh to update');
+    updates.beginReload();
+    expect(announce).toHaveBeenCalledTimes(4);
+    updates.dispose();
+  });
+
+  it('does not announce the status a page starts with', () => {
+    const announce = vi.fn();
+    const updates = createUpdates({ appVersion: 'a', contentVersion: 'c' }, false);
+    const announcer = createConnectionAnnouncer(announce);
+    updates.subscribe(state => announcer(connectionPresentation(state)));
+    updates.receive({ app_version: 'a', content_version: 'd' });
+    expect(announce).not.toHaveBeenCalled();
+    updates.setOnline(true);
+    updates.setOnline(false);
+    expect(announce).toHaveBeenCalledWith('Offline — showing saved pages.');
   });
 });

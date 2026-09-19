@@ -2,15 +2,16 @@
 
 use std::borrow::Cow;
 use std::io::Read;
+use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use feed_rs::model::{Entry, Feed, Link, Text};
 use url::Url;
 
 use super::{Context, Fetch, SourceMeta, Validators};
 use crate::config::Source;
 use crate::content;
-use crate::http::{Request, Response};
+use crate::http::{Body, Request, Response};
 use crate::model::{RawItem, sha1_hex};
 
 pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
@@ -37,13 +38,11 @@ pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetc
             return fetch_fresh(url, source, ctx).await;
         }
         Err(primary) => {
-            if let Some(discovered) = discover_common(url, source, ctx).await {
-                return Ok(discovered);
-            }
-            return Err(primary).context("fetching the configured URL and common feed endpoints");
+            let budget = discovery_budget(ctx.client.timeout());
+            return recover(primary, url, source, ctx, budget).await;
         }
     };
-    interpret(response, source, ctx, previous).await
+    interpret(response, source, ctx, previous, remembered.is_none()).await
 }
 
 async fn fetch_local(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
@@ -127,13 +126,40 @@ async fn fetch_fresh(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fe
     let response = match request(url, source, ctx, &Validators::default()).await {
         Ok(response) => response,
         Err(primary) => {
-            if let Some(discovered) = discover_common(url, source, ctx).await {
-                return Ok(discovered);
-            }
-            return Err(primary).context("fetching the configured URL and common feed endpoints");
+            let budget = discovery_budget(ctx.client.timeout());
+            return recover(primary, url, source, ctx, budget).await;
         }
     };
-    interpret(response, source, ctx, Validators::default()).await
+    interpret(response, source, ctx, Validators::default(), true).await
+}
+
+/// One deadline for a whole discovery ladder. Every guess already gets the request timeout and
+/// its retries, so a dead or hostile publisher advertising dozens of endpoints would otherwise
+/// hold a source for minutes; three worst-case requests stay generous for one that answers.
+fn discovery_budget(request_timeout: Duration) -> Duration {
+    request_timeout
+        .saturating_mul(3)
+        .max(Duration::from_secs(60))
+}
+
+fn budget_exceeded(budget: Duration) -> String {
+    format!("feed discovery exceeded its {budget:?} budget")
+}
+
+/// The configured URL itself failed, so the conventional endpoints are the last resort.
+async fn recover(
+    primary: anyhow::Error,
+    url: &Url,
+    source: &Source,
+    ctx: &Context<'_>,
+    budget: Duration,
+) -> Result<Fetch> {
+    match tokio::time::timeout(budget, discover_common(url, source, ctx)).await {
+        Ok(Some(discovered)) => Ok(discovered),
+        Ok(None) => Err(primary),
+        Err(_) => Err(primary.context(budget_exceeded(budget))),
+    }
+    .context("fetching the configured URL and common feed endpoints")
 }
 
 pub(super) async fn request(
@@ -172,6 +198,7 @@ async fn interpret(
     source: &Source,
     ctx: &Context<'_>,
     previous: Validators,
+    first_discovery: bool,
 ) -> Result<Fetch> {
     let body = match response {
         Response::NotModified => {
@@ -195,7 +222,36 @@ async fn interpret(
     if let Ok(feed) = parse(&body.bytes, &body.final_url) {
         return Ok(changed(feed, &body.final_url, validators, &body.bytes));
     }
+    let budget = discovery_budget(ctx.client.timeout());
+    discover(body, source, ctx, validators, first_discovery, budget).await
+}
 
+/// The response is not a feed: advertised endpoints, conventional endpoints, then article cards,
+/// all under one deadline.
+async fn discover(
+    body: Body,
+    source: &Source,
+    ctx: &Context<'_>,
+    validators: Validators,
+    first_discovery: bool,
+    budget: Duration,
+) -> Result<Fetch> {
+    let ladder = discovery_ladder(&body, source, ctx, validators, first_discovery);
+    match tokio::time::timeout(budget, ladder).await {
+        Ok(result) => result,
+        Err(_) => {
+            Err(anyhow!(budget_exceeded(budget))).context("discovering a feed or article listing")
+        }
+    }
+}
+
+async fn discovery_ladder(
+    body: &Body,
+    source: &Source,
+    ctx: &Context<'_>,
+    validators: Validators,
+    first_discovery: bool,
+) -> Result<Fetch> {
     let page = body.html_text();
     let mut candidates = crate::sources::html::feed_links(&page, &body.final_url);
     candidates.extend(super::podcast::feed_links(&page, &body.final_url));
@@ -240,6 +296,21 @@ async fn interpret(
             meta,
             items,
         });
+    }
+    if super::podcast::is_deezer_show(&body.final_url) {
+        let (meta, items) = super::podcast::deezer_items(&page, &body.final_url)?;
+        return Ok(Fetch::Changed {
+            validators,
+            meta,
+            items,
+        });
+    }
+
+    // A real feed beats heuristic card extraction, so probe the conventional endpoints before
+    // reading the listing. Only the first resolution pays for it: afterwards the source remembers
+    // whichever endpoint answered.
+    if first_discovery && let Some(discovered) = discover_at(&body.final_url, source, ctx).await {
+        return Ok(discovered);
     }
 
     match crate::sources::html::extract(&page, &body.final_url) {
@@ -306,8 +377,26 @@ fn supplement_json_images(bytes: &[u8], base: &Url, items: &mut [RawItem]) {
     }
 }
 
+/// Conventional feed endpoints under the configured section only: a site-wide feed found at the
+/// root would quietly replace the section the user asked for.
+async fn discover_at(url: &Url, source: &Source, ctx: &Context<'_>) -> Option<Fetch> {
+    // A listing that reads fine is only worth replacing by a feed that actually carries entries:
+    // sites routinely keep an empty stock feed beside the posts they really publish.
+    probe_feeds(section_feed_urls(url), url, source, ctx, true).await
+}
+
 async fn discover_common(url: &Url, source: &Source, ctx: &Context<'_>) -> Option<Fetch> {
-    for candidate in common_feed_urls(url) {
+    probe_feeds(common_feed_urls(url), url, source, ctx, false).await
+}
+
+async fn probe_feeds(
+    candidates: Vec<Url>,
+    url: &Url,
+    source: &Source,
+    ctx: &Context<'_>,
+    require_entries: bool,
+) -> Option<Fetch> {
+    for candidate in candidates {
         if candidate == *url {
             continue;
         }
@@ -329,6 +418,10 @@ async fn discover_common(url: &Url, source: &Source, ctx: &Context<'_>) -> Optio
                 continue;
             }
         };
+        if require_entries && feed.entries.is_empty() {
+            log::debug!("{}: common feed {candidate} is empty", source.slug);
+            continue;
+        }
         return Some(changed(
             feed,
             &body.final_url,
@@ -344,7 +437,8 @@ async fn discover_common(url: &Url, source: &Source, ctx: &Context<'_>) -> Optio
     None
 }
 
-fn common_feed_urls(page: &Url) -> Vec<Url> {
+fn section_feed_urls(page: &Url) -> Vec<Url> {
+    let base = as_directory(page);
     let mut urls = Vec::new();
     for name in [
         "rss.xml",
@@ -355,16 +449,40 @@ fn common_feed_urls(page: &Url) -> Vec<Url> {
         "feed",
         "rss",
     ] {
-        if let Ok(url) = page.join(name) {
+        if let Ok(url) = base.join(name) {
             urls.push(url);
         }
     }
+    dedupe(urls)
+}
+
+fn common_feed_urls(page: &Url) -> Vec<Url> {
+    let mut urls = section_feed_urls(page);
     if let Ok(mut root) = page.join("/") {
         for name in ["feed.xml", "rss.xml", "atom.xml", "feed.atom", "index.xml"] {
             root.set_path(&format!("/{name}"));
             urls.push(root.clone());
         }
     }
+    dedupe(urls)
+}
+
+/// A listing URL names a section, so `…/blog` and `…/blog/` must resolve the same candidates.
+/// A final segment carrying an extension is a document and keeps its parent as the base.
+fn as_directory(page: &Url) -> Url {
+    let last = page
+        .path_segments()
+        .and_then(Iterator::last)
+        .unwrap_or_default();
+    if last.is_empty() || last.contains('.') {
+        return page.clone();
+    }
+    let mut directory = page.clone();
+    directory.set_path(&format!("{}/", page.path()));
+    directory
+}
+
+fn dedupe(mut urls: Vec<Url>) -> Vec<Url> {
     let mut seen = std::collections::HashSet::new();
     urls.retain(|url| seen.insert(url.as_str().to_owned()));
     urls
@@ -470,6 +588,9 @@ pub fn convert(feed: &Feed, feed_url: &Url) -> (SourceMeta, Vec<RawItem>) {
         site_url: pick_link(&feed.links)
             .map(|link| link.href.clone())
             .filter(|href| href != feed_url.as_str()),
+        // RSS `<language>`, the Atom `xml:lang` of `<feed>`, or JSON Feed `language`; entries
+        // may carry their own `xml:lang`, which a per-item value could use later.
+        language: feed.language.as_deref().and_then(super::normalize_language),
     };
     let items = feed
         .entries
@@ -480,7 +601,8 @@ pub fn convert(feed: &Feed, feed_url: &Url) -> (SourceMeta, Vec<RawItem>) {
 }
 
 fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<RawItem> {
-    let audio = entry
+    // The whole enclosure is kept: its media type and byte size are republished with the item.
+    let audio_content = entry
         .media
         .iter()
         .flat_map(|media| media.content.iter())
@@ -490,8 +612,13 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<RawItem> {
                 .as_ref()
                 .is_some_and(|kind| kind.ty() == "audio")
         })
-        .filter_map(|content| content.url.as_ref())
-        .find(|url| matches!(url.scheme(), "http" | "https"));
+        .find(|content| {
+            content
+                .url
+                .as_ref()
+                .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
+        });
+    let audio = audio_content.and_then(|content| content.url.as_ref());
     let link = pick_link(&entry.links)
         .map(|link| link.href.clone())
         .or_else(|| {
@@ -575,6 +702,14 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<RawItem> {
     let mut extra = std::collections::BTreeMap::new();
     if let Some(url) = audio {
         extra.insert("audio_url".to_string(), url.to_string().into());
+    }
+    if let Some(content) = audio_content {
+        if let Some(kind) = &content.content_type {
+            extra.insert("audio_type".to_string(), kind.essence().to_string().into());
+        }
+        if let Some(size) = content.size.filter(|size| *size > 0) {
+            extra.insert("audio_length".to_string(), size.into());
+        }
     }
     let duration = entry
         .media
@@ -830,6 +965,38 @@ Second paragraph.</media:description></media:group>
     }
 
     #[test]
+    fn source_language_comes_from_the_feed_and_is_canonicalised() {
+        let rss = |language: &str| {
+            format!(
+                r#"<rss version="2.0"><channel><title>T</title><link>https://example.com/</link>
+                <language>{language}</language>
+                <item><title>A</title><link>https://example.com/a</link></item></channel></rss>"#
+            )
+        };
+        let (meta, _) = parse(&rss("fr"), "https://example.com/feed.xml");
+        assert_eq!(meta.language.as_deref(), Some("fr"));
+        // feed-rs lowercases RSS languages; the region casing is restored.
+        let (meta, _) = parse(&rss("EN-gb"), "https://example.com/feed.xml");
+        assert_eq!(meta.language.as_deref(), Some("en-GB"));
+        let (meta, _) = parse(&rss("English (US)"), "https://example.com/feed.xml");
+        assert_eq!(meta.language, None);
+
+        let atom = r#"<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="zh-hant-tw">
+            <title>T</title><entry xml:lang="en"><id>a</id><title>A</title>
+            <link href="https://example.com/a"/></entry></feed>"#;
+        let (meta, _) = parse(atom, "https://example.com/feed.xml");
+        assert_eq!(meta.language.as_deref(), Some("zh-Hant-TW"));
+
+        let json = r#"{"version":"https://jsonfeed.org/version/1.1","title":"T","language":"de-DE",
+            "items":[{"id":"a","url":"https://example.com/a","title":"A"}]}"#;
+        let (meta, _) = parse(json, "https://example.com/feed.json");
+        assert_eq!(meta.language.as_deref(), Some("de-DE"));
+
+        let (meta, _) = parse(RSS, "https://example.com/feed.xml");
+        assert_eq!(meta.language, None, "no declaration stays unknown");
+    }
+
+    #[test]
     fn converts_rss() {
         let (meta, items) = parse(RSS, "https://example.com/feed.xml");
         assert_eq!(meta.title.as_deref(), Some("Example & Co"));
@@ -892,6 +1059,33 @@ Second paragraph.</media:description></media:group>
             items[0].extra["audio_url"].as_str(),
             Some("https://example.com/episode.mp3")
         );
+        assert_eq!(items[0].extra["audio_type"].as_str(), Some("audio/mpeg"));
+        assert_eq!(items[0].extra["audio_length"].as_u64(), Some(100));
+    }
+
+    #[test]
+    fn enclosure_metadata_is_optional_and_never_invented() {
+        let xml = r#"<rss version="2.0"><channel><title>Podcast</title><link>https://example.com</link><description>Show</description><item><guid isPermaLink="false">episode-id</guid><title>Episode</title><link>https://example.com/episodes/1</link><enclosure url="https://example.com/episode.m4a" type="audio/mp4; codecs=aac" length="0"/></item></channel></rss>"#;
+        let (_, items) = parse(xml, "https://example.com/feed.xml");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].extra["audio_url"].as_str(),
+            Some("https://example.com/episode.m4a")
+        );
+        assert_eq!(
+            items[0].extra["audio_type"].as_str(),
+            Some("audio/mp4"),
+            "parameters are not part of the media type"
+        );
+        assert!(
+            !items[0].extra.contains_key("audio_length"),
+            "a zero length is unknown, not zero bytes"
+        );
+        let xml = r#"<rss version="2.0"><channel><title>Blog</title><link>https://example.com</link><description>Posts</description><item><guid>post</guid><title>Post</title><link>https://example.com/post</link></item></channel></rss>"#;
+        let (_, items) = parse(xml, "https://example.com/feed.xml");
+        assert!(!items[0].extra.contains_key("audio_url"));
+        assert!(!items[0].extra.contains_key("audio_type"));
+        assert!(!items[0].extra.contains_key("audio_length"));
     }
 
     #[test]
@@ -1274,6 +1468,275 @@ Second paragraph.</media:description></media:group>
     }
 
     #[test]
+    fn conventional_feed_endpoints_treat_a_listing_path_as_a_section() {
+        let expected = [
+            "https://example.com/blog/rss.xml",
+            "https://example.com/blog/feed.xml",
+            "https://example.com/blog/atom.xml",
+            "https://example.com/blog/feed.atom",
+            "https://example.com/blog/index.xml",
+            "https://example.com/blog/feed",
+            "https://example.com/blog/rss",
+        ];
+        for page in ["https://example.com/blog", "https://example.com/blog/"] {
+            let urls = section_feed_urls(&Url::parse(page).unwrap());
+            assert_eq!(
+                urls.iter().map(Url::as_str).collect::<Vec<_>>(),
+                expected,
+                "{page}"
+            );
+        }
+        // A section probe never reaches the root: a site-wide feed is not what the user asked for.
+        assert!(
+            section_feed_urls(&Url::parse("https://example.com/blog").unwrap())
+                .iter()
+                .all(|url| url.path().starts_with("/blog/"))
+        );
+        assert!(
+            common_feed_urls(&Url::parse("https://example.com/blog").unwrap())
+                .iter()
+                .any(|url| url.path() == "/feed.xml")
+        );
+        // A document keeps its directory as the base instead of growing a segment.
+        assert!(
+            section_feed_urls(&Url::parse("https://example.com/blog/index.html").unwrap())
+                .iter()
+                .all(|url| url.path().starts_with("/blog/") && !url.path().contains("index.html"))
+        );
+    }
+
+    #[test]
+    fn conventional_endpoints_are_ordered_deduplicated_and_relative_to_the_section() {
+        let section = [
+            "https://x.test/blog/rss.xml",
+            "https://x.test/blog/feed.xml",
+            "https://x.test/blog/atom.xml",
+            "https://x.test/blog/feed.atom",
+            "https://x.test/blog/index.xml",
+            "https://x.test/blog/feed",
+            "https://x.test/blog/rss",
+            "https://x.test/feed.xml",
+            "https://x.test/rss.xml",
+            "https://x.test/atom.xml",
+            "https://x.test/feed.atom",
+            "https://x.test/index.xml",
+        ];
+        for page in ["https://x.test/blog/", "https://x.test/blog"] {
+            let urls = common_feed_urls(&Url::parse(page).unwrap());
+            assert_eq!(
+                urls.iter().map(Url::as_str).collect::<Vec<_>>(),
+                section,
+                "{page}"
+            );
+        }
+        // At the root the section and site-wide guesses coincide: each endpoint is probed once.
+        let root = common_feed_urls(&Url::parse("https://x.test/").unwrap());
+        assert_eq!(
+            root.iter().map(Url::as_str).collect::<Vec<_>>(),
+            [
+                "https://x.test/rss.xml",
+                "https://x.test/feed.xml",
+                "https://x.test/atom.xml",
+                "https://x.test/feed.atom",
+                "https://x.test/index.xml",
+                "https://x.test/feed",
+                "https://x.test/rss",
+            ]
+        );
+    }
+
+    #[test]
+    fn discovery_budget_allows_three_worst_case_requests_but_never_less_than_a_minute() {
+        assert_eq!(
+            discovery_budget(Duration::from_secs(20)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            discovery_budget(Duration::from_secs(45)),
+            Duration::from_secs(135)
+        );
+        assert_eq!(
+            discovery_budget(Duration::from_secs(1)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(discovery_budget(Duration::MAX), Duration::MAX);
+    }
+
+    #[tokio::test]
+    async fn a_failing_configured_url_falls_back_to_conventional_endpoints() {
+        let server = MockServer::start_async().await;
+        let configured = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/blog");
+                then.status(404);
+            })
+            .await;
+        let section = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/blog/feed.xml");
+                then.status(404);
+            })
+            .await;
+        let site = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/feed.xml");
+                then.status(200).body(RSS);
+            })
+            .await;
+        let others = server
+            .mock_async(|when, then| {
+                when.any_request();
+                then.status(404);
+            })
+            .await;
+        let url = Url::parse(&server.url("/blog")).unwrap();
+        let source = source(url.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let state = crate::store::SourceState::default();
+        let ctx = Context {
+            client: &client,
+            state: &state,
+            cache_dir: cache.path(),
+        };
+        let Fetch::Changed {
+            validators, items, ..
+        } = fetch(&url, &source, &ctx).await.unwrap()
+        else {
+            panic!("expected the site feed");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            validators.resolved_url.as_deref(),
+            Some(server.url("/feed.xml").as_str())
+        );
+        // The configured URL, the seven section guesses, then the first site-wide guess answers.
+        assert_eq!(configured.calls_async().await, 1);
+        assert_eq!(section.calls_async().await, 1);
+        assert_eq!(others.calls_async().await, 6);
+        assert_eq!(site.calls_async().await, 1);
+    }
+
+    async fn page(url: &Url, source: &Source, ctx: &Context<'_>) -> Body {
+        match request(url, source, ctx, &Validators::default())
+            .await
+            .unwrap()
+        {
+            Response::Ok(body) => body,
+            Response::NotModified => panic!("expected a page"),
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_shares_one_deadline_across_every_candidate() {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/blog");
+                then.status(200).body(
+                    r#"<link rel="alternate" type="application/rss+xml" href="/slow"><link rel="alternate" type="application/rss+xml" href="/feed.xml">"#,
+                );
+            })
+            .await;
+        for path in ["/slow", "/blog/rss.xml"] {
+            server
+                .mock_async(|when, then| {
+                    when.method(GET).path(path);
+                    then.status(404).delay(Duration::from_millis(600));
+                })
+                .await;
+        }
+        let feed = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/feed.xml");
+                then.status(200).body(RSS);
+            })
+            .await;
+        let url = Url::parse(&server.url("/blog")).unwrap();
+        let source = source(url.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig {
+            retries: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let state = crate::store::SourceState::default();
+        let ctx = Context {
+            client: &client,
+            state: &state,
+            cache_dir: cache.path(),
+        };
+        let listing = page(&url, &source, &ctx).await;
+
+        // The slow candidate answers within its own request timeout, yet the ladder as a whole
+        // stops at the shared deadline before the good candidate is ever asked.
+        let started = tokio::time::Instant::now();
+        let error = discover(
+            listing,
+            &source,
+            &ctx,
+            Validators::default(),
+            true,
+            Duration::from_millis(200),
+        )
+        .await
+        .err()
+        .expect("the deadline must end discovery");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("discovering a feed or article listing")
+                && message.contains("exceeded its 200ms budget"),
+            "{message}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(feed.calls_async().await, 0);
+
+        // With time to spare the same ladder resolves the good candidate.
+        let listing = page(&url, &source, &ctx).await;
+        let Fetch::Changed { validators, .. } = discover(
+            listing,
+            &source,
+            &ctx,
+            Validators::default(),
+            true,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap() else {
+            panic!("expected the advertised feed");
+        };
+        assert_eq!(
+            validators.resolved_url.as_deref(),
+            Some(server.url("/feed.xml").as_str())
+        );
+        assert_eq!(feed.calls_async().await, 1);
+
+        // The last resort after a failing configured URL keeps the failure and the deadline.
+        let error = recover(
+            anyhow!("HTTP 404"),
+            &url,
+            &source,
+            &ctx,
+            Duration::from_millis(200),
+        )
+        .await
+        .err()
+        .expect("the deadline must end recovery");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("fetching the configured URL and common feed endpoints")
+                && message.contains("exceeded its 200ms budget")
+                && message.ends_with("HTTP 404"),
+            "{message}"
+        );
+        assert_eq!(feed.calls_async().await, 1);
+    }
+
+    #[test]
     fn json_feed_images_survive_feed_rs_conversion() {
         let url = Url::parse("https://example.com/feed.json").unwrap();
         let bytes = br#"{"version":"https://jsonfeed.org/version/1.1","title":"Example","items":[{"id":"post","url":"https://example.com/post","content_text":"Body","image":"/image.jpg","banner_image":"/banner.webp"}]}"#;
@@ -1422,6 +1885,56 @@ Second paragraph.</media:description></media:group>
         assert_eq!(
             validators.resolved_url.as_deref(),
             Some(configured.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_section_url_prefers_its_conventional_feed_over_article_cards() {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/news");
+                then.status(200).body(
+                    "<title>News</title><article><h2><a href=\"/news/one\">One story</a></h2><time datetime=\"2026-09-02\"></time></article>",
+                );
+            })
+            .await;
+        // The first conventional candidate exists but publishes nothing, so probing continues.
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/news/rss.xml");
+                then.status(200)
+                    .body("<rss version=\"2.0\"><channel><title>Empty</title></channel></rss>");
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/news/feed.xml");
+                then.status(200).body(
+                    "<rss version=\"2.0\"><channel><title>News</title><item><title>One story</title><link>https://example.com/news/one</link></item></channel></rss>",
+                );
+            })
+            .await;
+        let configured = Url::parse(&server.url("/news")).unwrap();
+        let source = source(configured.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let state = crate::store::SourceState::default();
+        let cache = tempfile::tempdir().unwrap();
+        let ctx = Context {
+            client: &client,
+            state: &state,
+            cache_dir: cache.path(),
+        };
+        let Fetch::Changed {
+            items, validators, ..
+        } = fetch(&configured, &source, &ctx).await.unwrap()
+        else {
+            panic!("expected the discovered feed");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            validators.resolved_url.as_deref(),
+            Some(server.url("/news/feed.xml").as_str())
         );
     }
 }

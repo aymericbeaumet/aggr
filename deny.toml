@@ -1,0 +1,102 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+#
+# `cargo deny check` runs locally (`cargo install cargo-deny --locked`) and in the `deps` job of
+# .github/workflows/ci.yml. Every relaxation below names its reason; change the configuration
+# with the dependency change that makes an entry obsolete, never to make a failing check pass.
+
+[graph]
+# The binary compiles every feature it declares, and the release matrix covers Linux, macOS and
+# Windows on amd64 and arm64: check the whole graph rather than the host's slice of it.
+all-features = true
+
+[licenses]
+# aggr is MIT. This list is exhaustive: a crate whose license expression cannot be satisfied by
+# it fails the check. That is what keeps GPL-3.0 out (the older stable wreq-util release is
+# GPL-3.0; the pinned prereleases are Apache-2.0, see docs/interoperability.md) — cargo-deny has no separate
+# deny list any more, so do not "fix" a bump by adding a copyleft license here.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",        # arrayref, comrak
+  "BSD-3-Clause",        # bindgen, brotli, encoding_rs, lol_html, tiny-skia, zstd-sys
+  "ISC",                 # ring (Apache-2.0 AND ISC), rustls-webpki, scraper, untrusted
+  "Zlib",                # const_format, foldhash, konst, slotmap, zlib-rs
+  "Unicode-3.0",         # ICU4X (icu_*, zerovec, yoke, …) and unicode-ident
+  "Unicode-DFS-2016",    # finl_unicode
+  "MPL-2.0",             # Servo's cssparser and selectors; webdriver (dev only)
+  "BlueOak-1.0.0",       # minicbor
+  "CC0-1.0",             # notify
+  "CDLA-Permissive-2.0", # webpki-root-certs
+]
+# stringmetrics (dev, via httpmock) declares no SPDX expression, only an Apache-2.0 LICENSE file;
+# the default threshold recognises it without a clarification.
+confidence-threshold = 0.8
+exceptions = []
+
+[licenses.private]
+ignore = false
+
+[advisories]
+# The default RustSec database (https://github.com/rustsec/advisory-db). Each ignored advisory
+# explains why the current tree cannot drop it; delete the entry together with the fix.
+ignore = [
+  { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 is unmaintained but declared complete by its authors; syntect loads its bundled syntax and theme packs with it and has no bincode-free release" },
+  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained; pagefind pulls it through rust-patch-derive, at build time only" },
+  { id = "RUSTSEC-2024-0320", reason = "yaml-rust is unmaintained; syntect and pagefind (through twelf/serde_yaml) still depend on it" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+# Known duplicate generations, listed by their older version so a third one warns again. Remove an
+# entry when cargo-deny reports that the skipped crate was not encountered.
+skip = [
+  # RustCrypto 0.10 → 0.11: aggr and syntect use sha2/sha1 0.10 beside the 0.11 line.
+  { crate = "digest@0.10", reason = "sha1/sha2 0.10 generation" },
+  { crate = "sha2@0.10", reason = "sha1/sha2 0.10 generation" },
+  { crate = "block-buffer@0.10", reason = "sha1/sha2 0.10 generation" },
+  { crate = "crypto-common@0.1", reason = "sha1/sha2 0.10 generation" },
+  { crate = "cpufeatures@0.2", reason = "sha1/sha2 0.10 generation" },
+  # html5ever 0.38 → 0.39: htmd and markup5ever_rcdom lag scraper/ammonia.
+  { crate = "html5ever@0.38", reason = "htmd and markup5ever_rcdom" },
+  { crate = "markup5ever@0.38", reason = "htmd and markup5ever_rcdom" },
+  # Servo CSS crates: lol_html pins the previous selectors/cssparser generation.
+  { crate = "selectors@0.37", reason = "lol_html" },
+  { crate = "cssparser@0.36", reason = "lol_html" },
+  { crate = "cssparser-macros@0.6", reason = "lol_html" },
+  # hashbrown: indexmap 1 (serde_yaml via pagefind) and pagefind's own 0.16 beside 0.17.
+  { crate = "hashbrown@0.12", reason = "indexmap 1 via serde_yaml (pagefind)" },
+  { crate = "hashbrown@0.16", reason = "pagefind" },
+  { crate = "indexmap@1", reason = "serde_yaml via pagefind" },
+  # Proc-macro generations behind pagefind (config-derive, rust-patch-derive) and bindgen.
+  { crate = "syn@1", reason = "config-derive, proc-macro-error, rust-patch-derive" },
+  { crate = "syn@2", reason = "bindgen, cssparser-macros, derive_more" },
+  { crate = "heck@0.4", reason = "config-derive" },
+  { crate = "thiserror@1", reason = "twelf (pagefind) and webdriver (dev)" },
+  { crate = "thiserror-impl@1", reason = "twelf (pagefind) and webdriver (dev)" },
+  { crate = "toml@0.5", reason = "twelf (pagefind)" },
+  { crate = "shlex@1", reason = "bindgen" },
+  { crate = "itertools@0.13", reason = "bindgen" },
+  { crate = "nom@7", reason = "cexpr (bindgen), pori, wax" },
+  # Fontations 0.39/0.41 generations behind hayro's PDF rendering.
+  { crate = "read-fonts@0.39", reason = "hayro-interpret" },
+  { crate = "skrifa@0.42", reason = "hayro-interpret" },
+  { crate = "font-types@0.11", reason = "hayro-interpret" },
+  # Smaller pairs.
+  { crate = "base64@0.22", reason = "fantoccini, headers, httpmock (dev)" },
+  { crate = "bit-set@0.8", reason = "dom_query, fancy-regex" },
+  { crate = "bit-vec@0.8", reason = "bit-set 0.8" },
+  { crate = "getrandom@0.2", reason = "ring, redox_users" },
+  { crate = "miniz_oxide@0.8", reason = "png" },
+  { crate = "windows-sys@0.60", reason = "notify" },
+]
+skip-tree = [
+  # ring still targets windows-sys 0.52, which brings the whole windows-targets 0.52 family.
+  { crate = "windows-sys@0.52", reason = "ring" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

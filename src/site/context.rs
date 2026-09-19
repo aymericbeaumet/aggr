@@ -17,6 +17,8 @@ pub struct SiteCtx {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<SiteIdentityCtx>,
     pub language: String,
+    /// Open Graph locale derived from `language` (`en-GB` becomes `en_GB`).
+    pub og_locale: String,
     /// Path prefix every site link is built on, always starting and ending with `/`.
     pub base_path: String,
     /// Absolute URL of the site root when known (feed and canonical links).
@@ -41,6 +43,51 @@ pub struct SiteCtx {
     /// First nine feed entries, available to global `g 1` … `g 9` shortcuts.
     pub entry_shortcuts: Vec<String>,
     pub params: toml::Table,
+}
+
+impl SiteCtx {
+    /// Site-local reference under `base_path`: `/repo/atom.xml`. Portable across mirrors of
+    /// the same output tree, so redirects and fallbacks that must not encode an origin use it.
+    pub fn url(&self, path: &str) -> String {
+        join(&self.base_path, path)
+    }
+
+    /// Absolute URL under `base_url`, or `None` for a portable build that has no public root.
+    /// Canonical links, sitemaps and structured data only exist in the `Some` case.
+    pub fn absolute(&self, path: &str) -> Option<String> {
+        self.base_url.as_deref().map(|root| join(root, path))
+    }
+
+    /// Endpoint of a machine-readable descriptor: absolute when the site has a public root,
+    /// otherwise relative to the descriptor itself (`./` for the site root) so the document keeps
+    /// working when the output tree is served from anywhere.
+    pub fn endpoint(&self, path: &str) -> String {
+        self.absolute(path).unwrap_or_else(|| {
+            if path.is_empty() {
+                "./".to_string()
+            } else {
+                path.to_string()
+            }
+        })
+    }
+}
+
+/// Append `path` to `root`, whether `root` is an absolute URL or a site path. A URL root resolves
+/// through the URL parser so `.` segments and reserved characters come out normalized; a path root
+/// is joined textually. Exactly one `/` separates the two either way.
+fn join(root: &str, path: &str) -> String {
+    let path = path.trim_start_matches('/');
+    if let Ok(mut root) = url::Url::parse(root) {
+        if !root.path().ends_with('/') {
+            let normalized = format!("{}/", root.path());
+            root.set_path(&normalized);
+        }
+        if let Ok(joined) = root.join(path) {
+            return joined.to_string();
+        }
+    }
+    let root = format!("{}/", root.trim_end_matches('/'));
+    format!("{root}{path}")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,14 +130,14 @@ pub struct BuildCtx {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PageCtx {
-    /// `river`, `source`, `category`, `tag`, `browse`, `item`, `search`, `preferences`, `404`,
-    /// or `offline`.
+    /// `river`, `source`, `category`, `tag`, `browse`, `sources`, `categories`, `tags`, `item`,
+    /// `preferences`, `404`, `offline`, or `manifest`.
     pub kind: String,
     pub title: String,
     pub document_title: String,
     pub description: String,
-    /// Whether crawlers should index this page. Search, preferences, offline and error shells
-    /// remain useful to people and link discovery, but are not useful search results.
+    /// Whether crawlers should index this page. Preferences, offline and error shells remain
+    /// useful to people and link discovery, but are not useful search results.
     pub indexable: bool,
     /// Site path of this page, e.g. `sources/rust-blog/`.
     pub path: String,
@@ -100,6 +147,9 @@ pub struct PageCtx {
     pub canonical_url: Option<String>,
     /// Site-relative collection whose Atom/RSS/JSON feeds this page advertises.
     pub feed_path: Option<String>,
+    /// Human-readable name of the advertised feeds; the collection title on list pages and the
+    /// site title on pages that advertise the root feeds.
+    pub feed_title: Option<String>,
     /// Present for list pages. The shape follows Zola's paginator template contract so themes
     /// can use the same first/last/previous/next mental model.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -147,6 +197,10 @@ pub struct ItemCtx {
     pub feed_display: String,
     pub is_aggregated: bool,
     pub is_youtube: bool,
+    /// Publisher-declared BCP 47 tag inherited from the source. Templates and feeds mark it up
+    /// only when it differs from `site.language`, so single-language instances are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     pub category: Option<String>,
     pub date: DateTime<Utc>,
     /// Stable build-time age bucket used for the 1h, 3h and 24h visual boundaries.
@@ -216,6 +270,8 @@ pub struct ArticlePreviewCtx {
     pub url: String,
     pub width: u32,
     pub height: u32,
+    /// Alternative text for the hero or poster, from the publisher's own `<img alt>`.
+    pub alt: Option<String>,
     pub srcset: String,
     pub color: String,
     pub placeholder: crate::media::placeholder::Placeholder,
@@ -275,6 +331,7 @@ impl ArticlePreviewCtx {
             url,
             width: image.width,
             height: image.height,
+            alt: image.alt.as_deref().and_then(crate::content::image_alt),
             srcset: candidates
                 .iter()
                 .map(|(width, url)| format!("{url} {width}w"))
@@ -294,7 +351,11 @@ pub struct SourceCtx {
     pub slug: String,
     pub name: String,
     pub url: Option<String>,
+    /// Feed endpoint resolved by the fetch pipeline, when a public one is known.
+    pub feed_url: Option<String>,
     pub site_url: Option<String>,
+    /// Canonical BCP 47 tag the publisher declares for the whole source, when known.
+    pub language: Option<String>,
     pub category: Option<String>,
     pub engine: String,
     pub count: usize,
@@ -317,6 +378,11 @@ pub struct CategoryCtx {
     pub count: usize,
     pub latest: Option<DateTime<Utc>>,
     pub page: String,
+}
+
+/// Open Graph locales use an underscore between language and territory (`en_GB`).
+pub fn og_locale(language: &str) -> String {
+    language.replace('-', "_")
 }
 
 /// GitHub URLs for a file on the data branch.
@@ -555,6 +621,7 @@ impl ItemCtx {
         self.source_url = identity.url;
         self.feed_display = identity.feed_display;
         self.is_aggregated = identity.is_aggregated;
+        self.language = source.language.clone();
         self.metadata = super::display::Metadata::from(&*self);
     }
 
@@ -577,6 +644,7 @@ impl ItemCtx {
             is_aggregated: false,
             is_youtube: url::Url::parse(&item.front.link)
                 .is_ok_and(|url| crate::sources::youtube::is_video_url(&url)),
+            language: None,
             category: options.category.and_then(normalize_category),
             date: item.created_at(),
             age_band: age_band(options.now, item.created_at()),
@@ -723,6 +791,7 @@ mod tests {
         let image = crate::content::LocalImage {
             source: "https://publisher.test/lead.jpg".into(),
             original: "assets/images/master.jpg".into(),
+            alt: None,
             variants: vec![],
             width: 1200,
             height: 800,
@@ -825,6 +894,7 @@ mod tests {
         let image = crate::content::LocalImage {
             source: "https://i.ytimg.com/vi/video/maxresdefault.jpg".into(),
             original: "assets/images/master.jpg".into(),
+            alt: Some("  Video   poster ".into()),
             variants: [48, 320, 640, 960, 1280]
                 .into_iter()
                 .map(|width| crate::content::LocalImageVariant {
@@ -844,6 +914,7 @@ mod tests {
         let poster = super::ArticlePreviewCtx::from_image(&image);
         assert_eq!(poster.url, "assets/images/640.webp");
         assert_eq!((poster.width, poster.height), (1280, 720));
+        assert_eq!(poster.alt.as_deref(), Some("Video poster"));
         assert_eq!(
             poster.srcset,
             "assets/images/320.webp 320w, assets/images/640.webp 640w, assets/images/960.webp 960w, assets/images/master.jpg 1280w"
@@ -858,8 +929,152 @@ mod tests {
         assert_eq!(fallback.srcset, "assets/images/master.jpg 480w");
     }
 
+    #[test]
+    fn article_preview_alt_comes_from_the_localised_image_or_stays_absent() {
+        let image = crate::content::LocalImage {
+            source: "https://publisher.test/lead.jpg".into(),
+            original: "assets/images/master.jpg".into(),
+            alt: Some("Apple Watch  on\na wrist".into()),
+            variants: vec![],
+            width: 1200,
+            height: 800,
+            color: "#123456".into(),
+            placeholder: crate::media::placeholder::from_image(&image::DynamicImage::new_rgb8(
+                4, 4,
+            ))
+            .unwrap(),
+        };
+        let base = url::Url::parse("https://publisher.test/article").unwrap();
+        let lead = super::ArticlePreviewCtx::lead_image(
+            "<p>Article</p>",
+            &base,
+            std::slice::from_ref(&image),
+        )
+        .unwrap();
+        assert_eq!(lead.alt.as_deref(), Some("Apple Watch on a wrist"));
+        for alt in [None, Some("   ".to_string())] {
+            let card = crate::content::LocalImage {
+                alt,
+                ..image.clone()
+            };
+            assert_eq!(super::ArticlePreviewCtx::from_image(&card).alt, None);
+        }
+    }
+
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn site_links_follow_the_three_url_contracts() {
+        let site = |base_url: Option<&str>| SiteCtx {
+            title: "Reader".into(),
+            description: String::new(),
+            identity: None,
+            language: "en".into(),
+            og_locale: "en".into(),
+            base_path: crate::site::base_path(base_url),
+            base_url: base_url.map(str::to_string),
+            repository: None,
+            data_branch: "aggr".into(),
+            network_url: "",
+            instance_type_url: "",
+            pwa: false,
+            preferences: serde_json::json!({}),
+            config_page_url: None,
+            config_url: None,
+            has_categories: false,
+            discussions: Vec::new(),
+            entry_shortcuts: Vec::new(),
+            params: toml::Table::new(),
+        };
+        // (base_url, path) -> (url, absolute, endpoint)
+        let cases = [
+            (None, "", "/", None, "./"),
+            (None, "atom.xml", "/atom.xml", None, "atom.xml"),
+            (None, "items/a/b/", "/items/a/b/", None, "items/a/b/"),
+            (None, "/leading", "/leading", None, "/leading"),
+            (
+                Some("https://x.test/"),
+                "",
+                "/",
+                Some("https://x.test/"),
+                "https://x.test/",
+            ),
+            (
+                Some("https://x.test/"),
+                "atom.xml",
+                "/atom.xml",
+                Some("https://x.test/atom.xml"),
+                "https://x.test/atom.xml",
+            ),
+            (
+                Some("https://x.test/"),
+                "items/a/b/",
+                "/items/a/b/",
+                Some("https://x.test/items/a/b/"),
+                "https://x.test/items/a/b/",
+            ),
+            (
+                Some("https://x.test/"),
+                "/leading",
+                "/leading",
+                Some("https://x.test/leading"),
+                "https://x.test/leading",
+            ),
+            (
+                Some("https://x.test/repo/"),
+                "",
+                "/repo/",
+                Some("https://x.test/repo/"),
+                "https://x.test/repo/",
+            ),
+            (
+                Some("https://x.test/repo/"),
+                "atom.xml",
+                "/repo/atom.xml",
+                Some("https://x.test/repo/atom.xml"),
+                "https://x.test/repo/atom.xml",
+            ),
+            (
+                Some("https://x.test/repo/"),
+                "items/a/b/",
+                "/repo/items/a/b/",
+                Some("https://x.test/repo/items/a/b/"),
+                "https://x.test/repo/items/a/b/",
+            ),
+            (
+                Some("https://x.test/repo/"),
+                "/leading",
+                "/repo/leading",
+                Some("https://x.test/repo/leading"),
+                "https://x.test/repo/leading",
+            ),
+        ];
+        for (base_url, path, url, absolute, endpoint) in cases {
+            let site = site(base_url);
+            assert_eq!(site.url(path), url, "url {base_url:?} + {path:?}");
+            assert_eq!(
+                site.absolute(path).as_deref(),
+                absolute,
+                "absolute {base_url:?} + {path:?}"
+            );
+            assert_eq!(
+                site.endpoint(path),
+                endpoint,
+                "endpoint {base_url:?} + {path:?}"
+            );
+        }
+        // A root without its trailing slash still joins with exactly one separator.
+        assert_eq!(
+            join("https://x.test/repo", "atom.xml"),
+            "https://x.test/repo/atom.xml"
+        );
+        assert_eq!(join("/repo", "atom.xml"), "/repo/atom.xml");
+        assert_eq!(
+            join("https://x.test/repo/", "?q="),
+            "https://x.test/repo/?q="
+        );
+    }
 
     #[test]
     fn discussion_shortcuts_are_uppercase_distinct_and_reserve_original() {
@@ -1089,11 +1304,14 @@ mod tests {
         assert_eq!(context.source_name, "Example");
         assert_eq!(context.source_title, "Example");
         assert_eq!(context.feed_display, "Example");
+        assert_eq!(context.language, None, "unknown until the source says");
         context.set_source(&SourceCtx {
             slug: "example".into(),
             name: "☀ Daily News 🗞️".into(),
             url: Some("https://news.example/feed.xml".into()),
+            feed_url: None,
             site_url: Some("https://news.example/".into()),
+            language: Some("fr-FR".into()),
             category: None,
             engine: "web".into(),
             count: 1,
@@ -1103,6 +1321,7 @@ mod tests {
         });
         assert_eq!(context.source_name, "Daily News");
         assert_eq!(context.source_title, "example.com · via Daily News");
+        assert_eq!(context.language.as_deref(), Some("fr-FR"));
         let related = ArticleLinkCtx::from(&context);
         assert_eq!(related.title, context.title);
         assert_eq!(related.metadata.source_title, context.source_title);
@@ -1201,5 +1420,12 @@ mod tests {
         let serialized = serde_json::to_string(&context).unwrap();
         assert!(!serialized.contains("reddit"));
         assert!(!serialized.contains("discussion.example"));
+    }
+
+    #[test]
+    fn og_locale_uses_an_underscore_between_language_and_territory() {
+        assert_eq!(og_locale("en-GB"), "en_GB");
+        assert_eq!(og_locale("fr"), "fr");
+        assert_eq!(og_locale("zh-Hant-TW"), "zh_Hant_TW");
     }
 }

@@ -414,6 +414,15 @@ pub fn sha1_hex(input: impl AsRef<[u8]>) -> String {
     hex::encode(Sha1::digest(input.as_ref()))
 }
 
+/// The alternative text an image carries, at capture and into the reader: publisher whitespace
+/// runs collapsed, `None` when it was empty, and capped so a pasted paragraph does not become a
+/// screen-reader monologue.
+pub fn image_alt(alt: &str) -> Option<String> {
+    const MAX_CHARS: usize = 300;
+    let collapsed = alt.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!collapsed.is_empty()).then(|| collapsed.chars().take(MAX_CHARS).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,5 +657,22 @@ images:
         let malformed: FrontMatter =
             serde_yaml_ng::from_str("title: Still readable\nimages: broken\n").unwrap();
         assert!(malformed.images.is_empty());
+    }
+
+    #[test]
+    fn image_alt_collapses_whitespace_drops_empty_text_and_caps_length() {
+        let long = "é".repeat(400);
+        for (alt, expected) in [
+            (
+                "  A   diagram\n of the\tpipeline ",
+                Some("A diagram of the pipeline".to_string()),
+            ),
+            ("   ", None),
+            ("", None),
+            ("Chart", Some("Chart".to_string())),
+            (long.as_str(), Some("é".repeat(300))),
+        ] {
+            assert_eq!(image_alt(alt), expected, "{alt:?}");
+        }
     }
 }

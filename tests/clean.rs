@@ -1,5 +1,7 @@
 //! Cleanup runs only against isolated repositories and disposable cache fixtures.
 
+mod support;
+
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -9,6 +11,8 @@ use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use sha1::{Digest as _, Sha1};
 use tempfile::TempDir;
+
+use support::{aggr_command, git};
 
 struct Fixture {
     _temp: TempDir,
@@ -22,10 +26,10 @@ impl Fixture {
         let root = temp.path().canonicalize().unwrap().join("project");
         let cache = temp.path().canonicalize().unwrap().join("cache");
         std::fs::create_dir_all(&root).unwrap();
-        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["init", "-q", "-b", "main"]).unwrap();
         std::fs::write(root.join("aggr.toml"), config).unwrap();
-        git(&root, &["add", "aggr.toml"]);
-        git(&root, &["commit", "-qm", "config"]);
+        git(&root, &["add", "aggr.toml"]).unwrap();
+        git(&root, &["commit", "-qm", "config"]).unwrap();
         Self {
             _temp: temp,
             root,
@@ -34,18 +38,9 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::cargo_bin("aggr").unwrap();
-        command
-            .current_dir(&self.root)
-            .env("AGGR_CACHE_DIR", &self.cache);
-        for key in [
-            "AGGR_CONFIG",
-            "AGGR_BASE_URL",
-            "GITHUB_REPOSITORY",
-            "AGGR_CLEAN_UNSET",
-        ] {
-            command.env_remove(key);
-        }
+        // The scrub removes AGGR_CACHE_DIR; the fixture then points it at its disposable cache.
+        let mut command = aggr_command(&self.root);
+        command.env("AGGR_CACHE_DIR", &self.cache);
         command
     }
 
@@ -72,26 +67,6 @@ impl Fixture {
     }
 }
 
-fn git(root: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .current_dir(root)
-        .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.com")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.com")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
-
 fn assert_no_generated_state(fixture: &Fixture) {
     assert!(
         !fixture.root.join(".aggr").exists(),
@@ -107,6 +82,7 @@ fn assert_no_generated_state(fixture: &Fixture) {
     );
     assert!(
         git(&fixture.root, &["branch", "--list", "aggr"])
+            .unwrap()
             .trim()
             .is_empty(),
         "layout validation must run before creating the archive branch"
@@ -235,6 +211,7 @@ fn ordinary_commands_reject_symlinks_inside_owned_cache_namespaces() {
     );
     assert!(
         git(&build.root, &["branch", "--list", "aggr"])
+            .unwrap()
             .trim()
             .is_empty()
     );
@@ -284,6 +261,7 @@ fn repository_cache_namespace_cannot_contain_project_inputs() {
     );
     assert!(
         git(&fixture.root, &["branch", "--list", "aggr"])
+            .unwrap()
             .trim()
             .is_empty()
     );
@@ -299,8 +277,9 @@ fn repository_cache_namespace_cannot_contain_tracked_files() {
     git(
         &fixture.root,
         &["add", "-f", ".aggr/cache/hand-edited.toml"],
-    );
-    git(&fixture.root, &["commit", "-qm", "tracked cache conflict"]);
+    )
+    .unwrap();
+    git(&fixture.root, &["commit", "-qm", "tracked cache conflict"]).unwrap();
 
     fixture
         .command()
@@ -341,7 +320,7 @@ fn clean_is_offline_scoped_and_preserves_archive_and_unknown_output() {
     let fixture = Fixture::new("[[sources]]\nurl = 'http://127.0.0.1:1/unavailable.toml'\n");
     let dev = fixture.dev(&fixture.root.join("aggr.toml"));
     let build = fixture.root.join(".aggr/cache/build-v1");
-    git(&fixture.root, &["branch", "aggr"]);
+    git(&fixture.root, &["branch", "aggr"]).unwrap();
     fixture.put(&build.join("articles-v1/proof"), "cached");
     fixture.put(&dev.join("data/items/proof.md"), "disposable");
     fixture.put(&dev.join("fetch/proof"), "cached");
@@ -357,7 +336,7 @@ fn clean_is_offline_scoped_and_preserves_archive_and_unknown_output() {
         "hand edited archive",
     );
     fixture.put(&fixture.root.join("_site/handmade.html"), "keep");
-    let before = git(&fixture.root, &["show-ref"]);
+    let before = git(&fixture.root, &["show-ref"]).unwrap();
     fixture
         .command()
         .args(["clean", "--dry-run"])
@@ -381,7 +360,7 @@ fn clean_is_offline_scoped_and_preserves_archive_and_unknown_output() {
     );
     assert!(fixture.root.join(".aggr/data/items/proof.md").exists());
     assert!(fixture.root.join("_site/handmade.html").exists());
-    assert_eq!(git(&fixture.root, &["show-ref"]), before);
+    assert_eq!(git(&fixture.root, &["show-ref"]).unwrap(), before);
     fixture
         .command()
         .arg("clean")
@@ -469,7 +448,7 @@ fn clean_rejects_protected_and_tracked_output() {
     for out in [".", ".git", ".aggr/data", "src", "../"] {
         let fixture = Fixture::new(&format!("[site]\nout = '{out}'\n"));
         fixture.put(&fixture.root.join("src/main.rs"), "hand edited");
-        git(&fixture.root, &["add", "src/main.rs"]);
+        git(&fixture.root, &["add", "src/main.rs"]).unwrap();
         fixture.put(
             &fixture.root.join(".aggr/cache/build-v1/proof"),
             "keep on failure",

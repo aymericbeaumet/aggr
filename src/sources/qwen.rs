@@ -17,6 +17,48 @@ pub fn is_blog_url(url: &Url) -> bool {
         && url.query().is_none()
 }
 
+/// The `id` of a single post URL (`https://qwen.ai/blog?id=qwen3.8-omni-flash`), which the
+/// page itself renders only with JavaScript; the article API carries the same post.
+pub fn post_id(url: &Url) -> Option<String> {
+    (url.host_str() == Some("qwen.ai")
+        && matches!(url.path().trim_end_matches('/'), "/blog" | "/research"))
+    .then(|| {
+        url.query_pairs()
+            .find(|(key, _)| key == "id")
+            .map(|(_, value)| value.into_owned())
+    })
+    .flatten()
+    .filter(|id| !id.trim().is_empty())
+}
+
+/// One post from the article API behind `url`'s origin, when it lists `id`.
+pub async fn article(
+    url: &Url,
+    id: &str,
+    source: &Source,
+    client: &crate::http::Client,
+) -> Result<Option<RawItem>> {
+    let endpoint = url.join("/api/v2/article/retrieval?type=qwen_ai&language=en-US")?;
+    let response = client
+        .get(Request {
+            url: &endpoint,
+            headers: crate::http::source_headers(source, &endpoint),
+            etag: None,
+            last_modified: None,
+        })
+        .await?;
+    let Response::Ok(body) = response else {
+        return Ok(None);
+    };
+    let (_, items) = tokio::task::spawn_blocking(move || parse(&body.bytes, None))
+        .await
+        .context("parsing Qwen articles worker")??;
+    Ok(items
+        .into_iter()
+        .flatten()
+        .find(|item| item.id.as_deref() == Some(id)))
+}
+
 pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
     let endpoint = url.join("/api/v2/article/retrieval?type=qwen_ai&language=en-US")?;
     let previous = if ctx.state.identity == source.identity {
@@ -60,6 +102,7 @@ pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetc
         meta: SourceMeta {
             title: Some("Qwen".into()),
             site_url: Some("https://qwen.ai/".into()),
+            language: None,
         },
         items,
     })
@@ -157,6 +200,52 @@ mod tests {
             "content":"<html><body><nav>Navigation</nav><article><div class='post-content'><p>Actual research</p><img src='https://images.example/chart.png'></div></article><footer>Footer</footer></body></html>",
             "extra":{"date":"2026-08-03T10:00:00+08:00","author":"Qwen Team","tags":["Research"],"cover_small":"https://images.example/cover.png"}
         }]}})
+    }
+
+    #[test]
+    fn single_post_urls_name_their_article() {
+        assert_eq!(
+            post_id(&Url::parse("https://qwen.ai/blog?id=qwen3.8-omni-flash").unwrap()).as_deref(),
+            Some("qwen3.8-omni-flash")
+        );
+        for value in [
+            "https://qwen.ai/blog",
+            "https://qwen.ai/blog?id=",
+            "https://example.com/blog?id=x",
+        ] {
+            assert!(post_id(&Url::parse(value).unwrap()).is_none(), "{value}");
+        }
+    }
+
+    #[tokio::test]
+    async fn single_posts_are_read_from_the_article_api() {
+        let server = httpmock::MockServer::start_async().await;
+        let api = server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v2/article/retrieval")
+                    .query_param("type", "qwen_ai");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(payload("r1"));
+            })
+            .await;
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let source = crate::commands::fetch::tests::source();
+        let url = Url::parse(&server.url("/blog?id=qwen-release")).unwrap();
+        let post = article(&url, "qwen-release", &source, &client)
+            .await
+            .unwrap()
+            .expect("the listed post");
+        assert!(post.content_html.unwrap().contains("Actual research"));
+        assert_eq!(post.preview_candidates.len(), 1);
+        assert!(
+            article(&url, "missing", &source, &client)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        api.assert_calls_async(2).await;
     }
 
     #[test]

@@ -206,10 +206,9 @@ impl Loader {
                             );
                             continue;
                         }
-                        if declaring.is_remote()
-                            && !declaring.same_origin(&actual)
-                            && !self.allow_remote_chains
-                        {
+                        // `targets` already vetoed the requested location, so only a redirect
+                        // can have moved the collection to a forbidden origin.
+                        if !chain_allowed(&declaring, &actual, self.allow_remote_chains) {
                             log::warn!(
                                 "ignoring remote collection {actual}: cross-origin source chains require [fetch] allow_remote_source_chains = true"
                             );
@@ -265,7 +264,7 @@ impl Loader {
             return Ok(vec![Location::Local(path)]);
         }
         if let Some(url) = remote_url(pattern)? {
-            return self.remote_targets(url, collection).await;
+            return self.remote_targets(declaring, url, collection).await;
         }
         match declaring {
             Location::Local(file) => {
@@ -300,7 +299,15 @@ impl Loader {
         }
     }
 
-    async fn remote_targets(&mut self, url: Url, collection: bool) -> Result<Vec<Location>> {
+    /// Absolute remote targets. A forbidden cross-origin hop is refused here, before the GitHub
+    /// API or the document is requested; `expand_sources` re-checks after reading because a
+    /// redirect can still move an allowed collection off its origin.
+    async fn remote_targets(
+        &mut self,
+        declaring: &Location,
+        url: Url,
+        collection: bool,
+    ) -> Result<Vec<Location>> {
         let segments: Vec<_> = url.path_segments().into_iter().flatten().collect();
         let github_config = collection
             || collection_path(url.path())
@@ -310,6 +317,7 @@ impl Loader {
             && let Some(location) = github_location(&url, self.github_api.as_ref())?
             && (collection || collection_path(&location.path))
         {
+            self.ensure_chain_allowed(declaring, &Location::GitHub(location.clone()))?;
             return self.github_targets(location.repo, location.path).await;
         }
         if has_glob(url.path()) {
@@ -319,7 +327,19 @@ impl Loader {
                 safe_url(&url)
             );
         }
-        Ok(vec![Location::Generic(url)])
+        let fetched = collection || collection_path(url.path());
+        let target = Location::Generic(url);
+        if fetched {
+            self.ensure_chain_allowed(declaring, &target)?;
+        }
+        Ok(vec![target])
+    }
+
+    fn ensure_chain_allowed(&self, declaring: &Location, target: &Location) -> Result<()> {
+        if chain_allowed(declaring, target, self.allow_remote_chains) {
+            return Ok(());
+        }
+        bail!("cross-origin source chains require [fetch] allow_remote_source_chains = true")
     }
 
     async fn github_targets(
@@ -792,6 +812,13 @@ fn has_glob(value: &str) -> bool {
     value.contains(['*', '?', '['])
 }
 
+/// Whether a document declared at `declaring` may expand the collection at `target`. Local
+/// documents are trusted; a remote one stays on its own origin (or GitHub repository) unless the
+/// root config opted into broader chains.
+fn chain_allowed(declaring: &Location, target: &Location, allow_remote_chains: bool) -> bool {
+    !declaring.is_remote() || allow_remote_chains || declaring.same_origin(target)
+}
+
 fn safe_url(url: &Url) -> String {
     super::public_url(url, false)
 }
@@ -943,7 +970,7 @@ mod tests {
         collection.assert_calls(1);
         local_feed.assert_calls(0);
         remote_feed.assert_calls(0);
-        rejected_collection.assert_calls(1);
+        rejected_collection.assert_calls(0);
         assert_eq!(expansion.sources.len(), 2);
         assert_eq!(expansion.sources[0].headers.len(), 1);
         assert!(expansion.sources[1].headers.is_empty());
@@ -997,6 +1024,107 @@ mod tests {
         feed.assert_calls(0);
         assert_eq!(expansion.sources.len(), 1);
         assert!(expansion.sources[0].headers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn same_origin_collections_redirected_cross_origin_are_dropped_after_one_request() {
+        use httpmock::prelude::*;
+        crate::http::install_crypto_provider();
+        let trusted = MockServer::start();
+        let other = MockServer::start();
+        let collection = trusted.mock(|when, then| {
+            when.method(GET).path("/collection.toml");
+            then.status(200).body("[[sources]]\nurl = './alias.toml'\n");
+        });
+        let alias = trusted.mock(|when, then| {
+            when.method(GET).path("/alias.toml");
+            then.status(302).header("Location", other.url("/hop.toml"));
+        });
+        let hop = other.mock(|when, then| {
+            when.method(GET).path("/hop.toml");
+            then.status(200)
+                .body("[[sources]]\nurl = 'https://hop.example/feed'\n");
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("aggr.toml");
+        std::fs::write(&root, "").unwrap();
+        let expansion = expand(
+            vec![SourceConfig {
+                url: Some(trusted.url("/collection.toml")),
+                ..Default::default()
+            }],
+            root,
+            &FetchConfig::default(),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        collection.assert_calls(1);
+        // The hop is only visible once the redirect has been followed, so it costs one request.
+        alias.assert_calls(1);
+        hop.assert_calls(1);
+        assert!(expansion.sources.is_empty());
+        assert_eq!(expansion.remote.len(), 1);
+    }
+
+    #[test]
+    fn chain_policy_follows_the_declaring_origin() {
+        fn generic(url: &str) -> Location {
+            Location::Generic(Url::parse(url).unwrap())
+        }
+        fn github(repo: &str, reference: &str) -> Location {
+            let (owner, name) = repo.split_once('/').unwrap();
+            Location::GitHub(GitHubFile {
+                repo: GitHubRepo {
+                    owner: owner.into(),
+                    name: name.into(),
+                    reference: Some(reference.into()),
+                    api: Url::parse("https://api.github.com/").unwrap(),
+                },
+                path: "aggr.toml".into(),
+            })
+        }
+        let local = || Location::Local(PathBuf::from("/reader/aggr.toml"));
+        let one = || generic("https://one.example/a.toml");
+        let cases = [
+            (local(), local(), false, true),
+            (
+                local(),
+                generic("https://other.example/x.toml"),
+                false,
+                true,
+            ),
+            (local(), github("o/r", "main"), false, true),
+            (one(), generic("https://one.example/b/c.toml"), false, true),
+            (one(), generic("http://one.example/b.toml"), false, false),
+            (
+                one(),
+                generic("https://one.example:8443/b.toml"),
+                false,
+                false,
+            ),
+            (one(), generic("https://two.example/b.toml"), false, false),
+            (one(), generic("https://two.example/b.toml"), true, true),
+            (one(), github("o/r", "main"), false, false),
+            (one(), local(), false, false),
+            (github("o/r", "main"), github("o/r", "dev"), false, true),
+            (
+                github("o/r", "main"),
+                github("o/other", "main"),
+                false,
+                false,
+            ),
+            (github("o/r", "main"), one(), false, false),
+            (github("o/r", "main"), one(), true, true),
+        ];
+        for (declaring, target, allow, expected) in cases {
+            assert_eq!(
+                chain_allowed(&declaring, &target, allow),
+                expected,
+                "{declaring} -> {target} with allow_remote_source_chains = {allow}"
+            );
+        }
     }
 
     #[tokio::test]

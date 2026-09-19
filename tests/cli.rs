@@ -1,6 +1,8 @@
 //! End-to-end: a bare origin, a clone holding `aggr.toml`, feeds served by httpmock, and the
 //! real binary. Nothing here touches the network or the user's git configuration.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
@@ -15,6 +17,8 @@ use httpmock::prelude::*;
 use predicates::prelude::*;
 use sha1::Digest as _;
 use tempfile::TempDir;
+
+use support::{aggr_command, bare_origin_with_clone, git};
 
 const FEED: &str = r#"<?xml version="1.0"?>
 <rss version="2.0"><channel><title>Demo blog</title><link>https://demo.example/</link>
@@ -42,21 +46,7 @@ struct TestRepo {
 impl TestRepo {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let origin = tmp.path().join("origin.git");
-        git(
-            tmp.path(),
-            &["init", "-q", "--bare", "-b", "main", "origin.git"],
-        );
-        let clone = tmp.path().join("clone");
-        git(
-            tmp.path(),
-            &[
-                "clone",
-                "-q",
-                origin.to_str().unwrap(),
-                clone.to_str().unwrap(),
-            ],
-        );
+        let (origin, clone) = bare_origin_with_clone(tmp.path()).unwrap();
         Self {
             _tmp: tmp,
             origin,
@@ -72,29 +62,13 @@ impl TestRepo {
 
     fn write_raw_config(&self, config: &str) {
         std::fs::write(self.clone.join("aggr.toml"), config).unwrap();
-        git(&self.clone, &["add", "-A"]);
-        git(&self.clone, &["commit", "-q", "-m", "config"]);
-        git(&self.clone, &["push", "-q", "-u", "origin", "main"]);
+        git(&self.clone, &["add", "-A"]).unwrap();
+        git(&self.clone, &["commit", "-q", "-m", "config"]).unwrap();
+        git(&self.clone, &["push", "-q", "-u", "origin", "main"]).unwrap();
     }
 
     fn aggr(&self) -> Command {
-        let mut cmd = Command::cargo_bin("aggr").unwrap();
-        cmd.current_dir(&self.clone);
-        for (key, value) in git_env() {
-            cmd.env(key, value);
-        }
-        for key in [
-            "GITHUB_ACTIONS",
-            "GITHUB_REPOSITORY",
-            "GITHUB_TOKEN",
-            "GH_TOKEN",
-            "AGGR_BASE_URL",
-            "AGGR_CONFIG",
-            "AGGR_CACHE_DIR",
-        ] {
-            cmd.env_remove(key);
-        }
-        cmd
+        aggr_command(&self.clone)
     }
 
     fn origin_rev(&self, rev: &str) -> Option<String> {
@@ -211,31 +185,6 @@ fn wait_for_cached_site(root: &Path, timeout: Duration) {
         thread::sleep(Duration::from_millis(25));
     }
     panic!("aggr dev did not populate its persistent cache");
-}
-
-fn git_env() -> Vec<(&'static str, String)> {
-    vec![
-        ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
-        ("GIT_CONFIG_NOSYSTEM", "1".into()),
-        ("GIT_AUTHOR_NAME", "t".into()),
-        ("GIT_AUTHOR_EMAIL", "t@t".into()),
-        ("GIT_COMMITTER_NAME", "t".into()),
-        ("GIT_COMMITTER_EMAIL", "t@t".into()),
-    ]
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let mut cmd = Command::new("git");
-    cmd.args(args).current_dir(dir);
-    for (key, value) in git_env() {
-        cmd.env(key, value);
-    }
-    let out = cmd.output().unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 fn preview_image() -> Vec<u8> {
@@ -703,6 +652,13 @@ fn init_writes_config_and_workflow() {
         .args(["init", "--defaults", "--force"])
         .assert()
         .success();
+    // The shipped defaults activate no source, so this validates the whole file through the
+    // real binary without touching the network.
+    repo.aggr()
+        .arg("check")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"\(0 sources?\b").unwrap());
 }
 
 #[cfg(unix)]
@@ -954,7 +910,8 @@ fn build_publishes_data_despite_an_unrelated_recovery_pointer() {
     git(
         &repo.origin,
         &["update-ref", "refs/aggr/last-good", "refs/heads/main"],
-    );
+    )
+    .unwrap();
     let old = repo.origin_rev("refs/aggr/last-good");
     repo.aggr()
         .args(["build", "--out", "_site"])
@@ -976,6 +933,79 @@ fn build_publishes_data_despite_an_unrelated_recovery_pointer() {
         .success();
     assert_eq!(repo.origin_rev("refs/heads/aggr"), tip);
     assert_eq!(repo.origin_rev("refs/aggr/last-good"), old);
+}
+
+#[test]
+fn repository_commands_refuse_to_run_while_another_holds_the_lock() {
+    let server = MockServer::start();
+    let feed = server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200).body(FEED);
+    });
+    let repo = TestRepo::new();
+    repo.write_config(&server.url("/feed.xml"), "");
+
+    // Another `aggr build` is in flight: it holds the same advisory lock this process would.
+    let lock_dir = repo.clone.join(".aggr");
+    std::fs::create_dir_all(&lock_dir).unwrap();
+    let mut held = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_dir.join("aggr.lock"))
+        .unwrap();
+    held.try_lock().unwrap();
+    {
+        use std::io::Write as _;
+        write!(held, "4242 build").unwrap();
+        held.flush().unwrap();
+    }
+    // The holder's record beside the lock, as a real run leaves it (the locked file itself is
+    // unreadable to other processes on Windows).
+    std::fs::write(lock_dir.join("aggr.lock.holder"), "4242 build").unwrap();
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "another `aggr build` is already running for",
+        ))
+        .stderr(predicate::str::contains("(PID 4242)"));
+    repo.aggr()
+        .arg("clean")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is already running for"));
+    feed.assert_calls(0);
+    assert!(!repo.data_dir().exists(), "no archive checkout was created");
+    assert!(repo.origin_rev("refs/heads/aggr").is_none());
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&repo.clone)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout).trim(),
+        "",
+        "the lock file is excluded even when the command was refused"
+    );
+
+    // Released: the same command proceeds and leaves nothing untracked behind.
+    drop(held);
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo: +2"));
+    feed.assert_calls(1);
+    assert!(repo.origin_rev("refs/heads/aggr").is_some());
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&repo.clone)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&status.stdout).trim(), "");
 }
 
 #[test]
@@ -1096,8 +1126,8 @@ fn sync_bootstraps_appends_and_leaves_no_trace_when_nothing_changed() {
         .join("items/demo/2026/09/2026-09-02-third.md");
     std::fs::remove_file(&doomed).unwrap();
     std::fs::remove_file(doomed.with_extension("html")).unwrap();
-    git(&repo.data_dir(), &["commit", "-qam", "delete third"]);
-    git(&repo.data_dir(), &["push", "-q", "origin", "aggr"]);
+    git(&repo.data_dir(), &["commit", "-qam", "delete third"]).unwrap();
+    git(&repo.data_dir(), &["push", "-q", "origin", "aggr"]).unwrap();
     let deleted_tip = repo.origin_rev("refs/heads/aggr").unwrap();
     // A different body (so the hash guard does not short-circuit) listing the same entries.
     third.delete();
@@ -1123,6 +1153,179 @@ fn sync_bootstraps_appends_and_leaves_no_trace_when_nothing_changed() {
             .origin_files("aggr")
             .contains(&"items/demo/2026/09/2026-09-02-third.md".to_string())
     );
+}
+
+#[test]
+fn sync_records_a_publisher_rename_without_churning_on_title_whitespace() {
+    let server = MockServer::start();
+    let mut feed = server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200).body(FEED);
+    });
+    let repo = TestRepo::new();
+    repo.write_config(&server.url("/feed.xml"), "");
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("aggr: init"));
+    let tip = repo.origin_rev("refs/heads/aggr").unwrap();
+    let state = repo.origin_show("aggr", "sources/demo/state.toml");
+    assert!(state.contains("title = \"Demo blog\""), "{state}");
+
+    // Reformatted whitespace in the channel title is the same title: no commit.
+    feed.delete();
+    let mut reformatted = server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200).body(FEED.replace(
+            "<title>Demo blog</title>",
+            "<title>  Demo \n  blog </title>",
+        ));
+    });
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing new"));
+    assert_eq!(
+        repo.origin_rev("refs/heads/aggr").as_deref(),
+        Some(tip.as_str()),
+        "a whitespace-only title change must leave no commit"
+    );
+
+    // A real rename with no new entries is recorded as an update commit.
+    reformatted.delete();
+    let renamed_feed = FEED.replace(
+        "<title>Demo blog</title>",
+        "<title>Demo blog, renamed</title>",
+    );
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200).body(renamed_feed.clone());
+    });
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("aggr: update"));
+    let renamed_tip = repo.origin_rev("refs/heads/aggr").unwrap();
+    assert_ne!(renamed_tip, tip);
+    assert_eq!(
+        repo.origin_rev("refs/aggr/last-good").as_deref(),
+        Some(renamed_tip.as_str())
+    );
+    let state = repo.origin_show("aggr", "sources/demo/state.toml");
+    assert!(state.contains("title = \"Demo blog, renamed\""), "{state}");
+    let log = repo.origin_log("aggr");
+    assert!(log.starts_with("aggr: update\n"), "{log}");
+    assert_eq!(
+        repo.origin_files("aggr")
+            .iter()
+            .filter(|file| file.starts_with("items/") && file.ends_with(".md"))
+            .count(),
+        2,
+        "the rename adds no items"
+    );
+
+    // The same bytes again: nothing to record.
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo: unchanged"))
+        .stdout(predicate::str::contains("nothing new"));
+    assert_eq!(
+        repo.origin_rev("refs/heads/aggr").as_deref(),
+        Some(renamed_tip.as_str())
+    );
+}
+
+#[test]
+fn feed_only_captures_are_upgraded_in_place_and_keep_hand_edits() {
+    let server = MockServer::start();
+    let feed = format!(
+        r#"<?xml version="1.0"?>
+<rss version="2.0"><channel><title>Heavy blog</title><link>https://heavy.example/</link>
+<item><title>Deep dive</title><link>{article}</link><guid>deep-dive</guid>
+<pubDate>Tue, 01 Sep 2026 10:00:00 GMT</pubDate>
+<description><![CDATA[<p>Only the teaser paragraph from the feed.</p>]]></description></item>
+</channel></rss>"#,
+        article = server.url("/deep-dive")
+    );
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200)
+            .header("content-type", "application/rss+xml")
+            .body(feed.clone());
+    });
+    let mut missing = server.mock(|when, then| {
+        when.method(GET).path("/deep-dive");
+        then.status(404);
+    });
+    let repo = TestRepo::new();
+    repo.write_raw_config(&format!(
+        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\ncontent = \"heavy\"\nimages = false\npreviews = false\n[[sources]]\nurl = \"{}\"\nname = \"Demo\"\n",
+        server.url("/feed.xml")
+    ));
+
+    // The page is unavailable at capture time: the feed content is archived as a stand-in.
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo: +1"));
+    missing.assert_calls(1);
+    let path = "items/demo/2026/09/2026-09-01-deep-dive.md";
+    let stored = repo.origin_show("aggr", path);
+    assert!(stored.contains("\ncontent: feed\n"), "{stored}");
+    assert!(stored.contains("Only the teaser paragraph"), "{stored}");
+    assert!(!stored.contains("\nhidden:"), "{stored}");
+    let (_, before) = item_front(&repo, "aggr", "deep-dive");
+
+    // Hide the item by hand on the data branch, the way the git model documents.
+    let file = repo.data_dir().join(path);
+    let markdown = std::fs::read_to_string(&file).unwrap();
+    let (front, body) = markdown
+        .strip_prefix("---\n")
+        .unwrap()
+        .split_once("\n---\n")
+        .unwrap();
+    std::fs::write(&file, format!("---\n{front}\nhidden: true\n---\n{body}")).unwrap();
+    git(&repo.data_dir(), &["commit", "-qam", "hide deep dive"]).unwrap();
+    git(&repo.data_dir(), &["push", "-q", "origin", "aggr"]).unwrap();
+    let hidden_tip = repo.origin_rev("refs/heads/aggr").unwrap();
+
+    // The original page comes back: the body is upgraded in place and the hand edit survives.
+    missing.delete();
+    let page = server.mock(|when, then| {
+        when.method(GET).path("/deep-dive");
+        then.status(200).header("content-type", "text/html").body(
+            "<html><head><title>Deep dive</title></head><body><article><h1>Deep dive</h1><p>The complete article explains the design in depth, with every paragraph the publisher wrote and enough prose for the extractor to accept it as the main content of the page.</p><p>A second paragraph keeps the extraction meaningful and well above the readability thresholds used for short pages.</p></article></body></html>",
+        );
+    });
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo: +1"))
+        .stdout(predicate::str::contains("aggr: +1 item"));
+    page.assert_calls(1);
+    assert_ne!(repo.origin_rev("refs/heads/aggr").unwrap(), hidden_tip);
+    let (upgraded_path, after) = item_front(&repo, "aggr", "deep-dive");
+    assert_eq!(upgraded_path, path, "the upgrade keeps the item's path");
+    assert_eq!(after["hidden"], serde_yaml_ng::Value::Bool(true));
+    assert_eq!(after["content"].as_str(), Some("extracted"));
+    assert_eq!(after["html"].as_str(), Some("2026-09-01-deep-dive.html"));
+    assert_eq!(after["first_seen"], before["first_seen"]);
+    assert_eq!(after["published"], before["published"]);
+    assert_eq!(after["summary"], before["summary"]);
+    assert!(after["replicated_at"].is_null(), "{after:?}");
+    let upgraded = repo.origin_show("aggr", path);
+    let body = upgraded.split_once("\n---\n").unwrap().1;
+    assert!(body.contains("The complete article explains"), "{body}");
+    assert!(!body.contains("Only the teaser paragraph"), "{body}");
+    let html = repo.origin_show("aggr", "items/demo/2026/09/2026-09-01-deep-dive.html");
+    assert!(html.contains("A second paragraph"), "{html}");
 }
 
 #[test]
@@ -1178,9 +1381,9 @@ fn source_errors_are_recorded_on_transition_only_and_all_failed_is_fatal() {
         server.url("/broken.xml")
     );
     std::fs::write(repo.clone.join("aggr.toml"), config).unwrap();
-    git(&repo.clone, &["add", "-A"]);
-    git(&repo.clone, &["commit", "-qm", "config"]);
-    git(&repo.clone, &["push", "-q", "-u", "origin", "main"]);
+    git(&repo.clone, &["add", "-A"]).unwrap();
+    git(&repo.clone, &["commit", "-qm", "config"]).unwrap();
+    git(&repo.clone, &["push", "-q", "-u", "origin", "main"]).unwrap();
 
     repo.aggr()
         .arg("sync")
@@ -1238,7 +1441,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
         "{index}"
     );
     assert!(index.contains("Hello there"));
-    assert!(index.contains(">aggr.toml ↗</a>"));
+    assert!(index.contains(">aggr.toml <span aria-hidden=\"true\">↗</span></a>"));
     assert!(index.contains(">built with aggr</a>"));
     assert!(index.contains("href=\"https://github.com/aymericbeaumet/aggr\""));
     assert!(index.contains("href=\"browse/\""), "{index}");

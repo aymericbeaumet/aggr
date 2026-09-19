@@ -5,13 +5,14 @@
 
 pub mod placeholder;
 pub(crate) mod srcset;
+mod stored_cache;
 mod vector;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Cursor, Read as _, Write as _};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use image::{
@@ -19,7 +20,6 @@ use image::{
     ImageDecoder as _, ImageFormat, ImageReader,
 };
 use scraper::{Html, Selector};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Semaphore;
 use url::Url;
@@ -27,6 +27,8 @@ use url::Url;
 use crate::config::{FetchConfig, Source};
 use crate::http;
 use crate::model::{ArticleImage, ImageFile};
+
+pub(crate) use stored_cache::StoredAssetCache;
 
 const MIN_AXIS: u32 = 1;
 pub(crate) const MAX_STORED_RENDITIONS: usize = 7;
@@ -59,30 +61,32 @@ pub struct Candidate {
     pub alt: Option<String>,
 }
 
-/// Status badges remain readable body images, but are not article artwork.
+/// Status badges remain readable body images, but are not article artwork. Badge services name
+/// themselves: the host or a path segment carries `badge`, `badgen` or `shields`. An image proxy
+/// that hex-encodes the origin in its last path segment is unwrapped one level.
 pub fn is_status_badge(source: &str) -> bool {
+    fn labelled(value: &str) -> bool {
+        value
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .any(|token| matches!(token, "badge" | "badges" | "badgen" | "shield" | "shields"))
+    }
     fn matches(source: &str, allow_proxy: bool) -> bool {
         let Ok(url) = Url::parse(source) else {
             return false;
         };
-        let host = url.host_str().unwrap_or_default();
-        let path = url.path();
-        match host {
-            "github.com" => {
-                path.ends_with("/badge.svg")
-                    && (path.contains("/actions/") || path.contains("/workflows/"))
-            }
-            "img.shields.io" | "shields.io" | "badgen.net" | "badge.fury.io" => true,
-            "repology.org" => path.starts_with("/badge/"),
-            "camo.githubusercontent.com" if allow_proxy => path
+        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        let path = url.path().to_ascii_lowercase();
+        if labelled(&host) || path.split('/').any(labelled) {
+            return true;
+        }
+        allow_proxy
+            && path
                 .rsplit('/')
                 .next()
-                .filter(|value| value.len() <= 8192)
+                .filter(|value| value.len() <= 8192 && value.len() % 2 == 0)
                 .and_then(|value| hex::decode(value).ok())
                 .and_then(|value| String::from_utf8(value).ok())
-                .is_some_and(|value| matches(&value, false)),
-            _ => false,
-        }
+                .is_some_and(|value| value.starts_with("http") && matches(&value, false))
     }
     matches(source, true)
 }
@@ -101,6 +105,10 @@ pub struct MediaLimits {
     pub download_concurrency: usize,
     pub decode_concurrency: usize,
     pub decode_timeout: Duration,
+    /// Wall-clock budget for one article's image candidates. Candidates are still fetched one
+    /// at a time; once the budget is spent the remaining candidates are skipped and the images
+    /// already retained are kept, so one slow CDN cannot occupy its source for many minutes.
+    pub article_timeout: Duration,
     pub rendition_widths: Vec<u32>,
 }
 
@@ -116,6 +124,7 @@ impl Default for MediaLimits {
             download_concurrency: 8,
             decode_concurrency: 1,
             decode_timeout: Duration::from_secs(15),
+            article_timeout: Duration::from_secs(120),
             rendition_widths: vec![320, 640, 960, 1280, 1600],
         }
     }
@@ -365,287 +374,11 @@ impl Asset {
     }
 }
 
-const MAX_ASSET_RECEIPT_BYTES: usize = 8 * 1024;
-const ASSET_RECEIPT_SLOTS: usize = 16_384;
-const ASSET_RECEIPT_WAYS: usize = 4;
-
-/// Local validation receipts contain no master pixels. Fixed slots bound disk usage without
-/// scanning a large cache; collisions only cause a fresh validation, never incorrect reuse.
-pub(crate) struct StoredAssetCache {
-    root: PathBuf,
-    slots: usize,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AssetReceipt {
-    key: String,
-    checksum: String,
-    value: ValidatedAsset,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ValidatedAsset {
-    color: String,
-    master_hash: String,
-    variants: Vec<CachedRendition>,
-    thumbhash: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CachedRendition {
-    index: usize,
-    hash: String,
-}
-
-impl StoredAssetCache {
-    pub(crate) fn new(root: impl AsRef<Path>) -> Self {
-        Self {
-            root: root.as_ref().join("validated-images-v2"),
-            slots: ASSET_RECEIPT_SLOTS,
-        }
-    }
-
-    pub(crate) fn restore(
-        &self,
-        metadata: &ArticleImage,
-        master: Vec<u8>,
-        mut variants: Vec<Vec<u8>>,
-    ) -> Result<Asset> {
-        let key = stored_asset_key(metadata, &master, &variants);
-        if let Ok(key) = &key
-            && let Ok(value) = self.read(key)
-            && let Ok(placeholder) = placeholder::from_hash(&value.thumbhash)
-            && let Ok((extension, hash, mut renditions)) = value.parts(metadata, &master, &variants)
-        {
-            for (cached, rendition) in value.variants.iter().zip(&mut renditions) {
-                rendition.bytes = std::mem::take(&mut variants[cached.index]);
-            }
-            return Ok(Asset {
-                source_url: metadata.source.clone(),
-                source_hash: crate::model::sha1_hex(metadata.source.as_bytes()),
-                alt: None,
-                master_bytes: master,
-                master_extension: extension,
-                master_hash: hash,
-                width: metadata.original.width,
-                height: metadata.original.height,
-                dominant_color: value.color,
-                placeholder,
-                renditions,
-            });
-        }
-        // Keep validation and fallback semantics identical when caching is unavailable or stale.
-        let input_hashes = variants
-            .iter()
-            .map(|bytes| hex::encode(Sha256::digest(bytes)))
-            .collect::<Vec<_>>();
-        let asset = Asset::from_stored(metadata, master, variants)?;
-        if let Ok(key) = key {
-            let _ = self.write(&key, &asset, metadata, &input_hashes);
-        }
-        Ok(asset)
-    }
-
-    fn slots(&self, key: &str) -> Result<Vec<PathBuf>> {
-        let prefix = key.get(..4).context("invalid image cache key")?;
-        let capacity = self.slots.max(1);
-        let bucket =
-            usize::from(u16::from_str_radix(prefix, 16)?) % capacity.div_ceil(ASSET_RECEIPT_WAYS);
-        let first = bucket * ASSET_RECEIPT_WAYS;
-        Ok((first..(first + ASSET_RECEIPT_WAYS).min(capacity))
-            .map(|slot| self.root.join(format!("{slot:04x}.json")))
-            .collect())
-    }
-
-    fn read(&self, key: &str) -> Result<ValidatedAsset> {
-        self.slots(key)?
-            .into_iter()
-            .find_map(|path| Self::read_slot(&path, key).ok())
-            .context("image validation receipt missing")
-    }
-
-    fn read_slot(path: &Path, key: &str) -> Result<ValidatedAsset> {
-        let receipt = Self::receipt(path)?;
-        ensure!(receipt.key == key, "image cache slot changed");
-        Ok(receipt.value)
-    }
-
-    fn receipt(path: &Path) -> Result<AssetReceipt> {
-        let metadata = std::fs::symlink_metadata(path)?;
-        ensure!(
-            metadata.is_file() && metadata.len() <= MAX_ASSET_RECEIPT_BYTES as u64,
-            "invalid image cache receipt"
-        );
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take((MAX_ASSET_RECEIPT_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)?;
-        ensure!(
-            bytes.len() <= MAX_ASSET_RECEIPT_BYTES,
-            "image cache receipt too large"
-        );
-        let receipt: AssetReceipt = serde_json::from_slice(&bytes)?;
-        ensure!(
-            receipt.checksum == hex::encode(Sha256::digest(serde_json::to_vec(&receipt.value)?)),
-            "image cache receipt checksum changed"
-        );
-        Ok(receipt)
-    }
-
-    fn replacement(&self, key: &str) -> Result<PathBuf> {
-        let mut oldest = None;
-        for path in self.slots(key)? {
-            match Self::receipt(&path) {
-                Ok(receipt) if receipt.key != key => {}
-                _ => return Ok(path),
-            }
-            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                return Ok(path);
-            };
-            let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
-            if oldest.as_ref().is_none_or(|(_, time)| modified < *time) {
-                oldest = Some((path, modified));
-            }
-        }
-        oldest
-            .map(|(path, _)| path)
-            .context("image cache has no slots")
-    }
-
-    fn write(
-        &self,
-        key: &str,
-        asset: &Asset,
-        metadata: &ArticleImage,
-        input_hashes: &[String],
-    ) -> Result<()> {
-        let mut variants = Vec::new();
-        for rendition in &asset.renditions {
-            let input_hash = hex::encode(Sha256::digest(&rendition.bytes));
-            if let Some(index) = input_hashes.iter().enumerate().position(|(index, hash)| {
-                hash == &input_hash
-                    && metadata.variants.get(index).is_some_and(|file| {
-                        (file.width, file.height) == (rendition.width, rendition.height)
-                    })
-            }) {
-                variants.push(CachedRendition {
-                    index,
-                    hash: rendition.hash.clone(),
-                });
-            }
-        }
-        let value = ValidatedAsset {
-            color: asset.dominant_color.clone(),
-            master_hash: asset.master_hash.clone(),
-            variants,
-            thumbhash: asset.placeholder.hash.clone(),
-        };
-        let checksum = hex::encode(Sha256::digest(serde_json::to_vec(&value)?));
-        let bytes = serde_json::to_vec(&AssetReceipt {
-            key: key.into(),
-            checksum,
-            value,
-        })?;
-        ensure!(
-            bytes.len() <= MAX_ASSET_RECEIPT_BYTES,
-            "image validation receipt too large"
-        );
-        std::fs::create_dir_all(&self.root)?;
-        let mut temporary = tempfile::NamedTempFile::new_in(&self.root)?;
-        temporary.write_all(&bytes)?;
-        temporary.persist(self.replacement(key)?)?;
-        Ok(())
-    }
-}
-
-impl ValidatedAsset {
-    fn parts(
-        &self,
-        metadata: &ArticleImage,
-        master: &[u8],
-        variants: &[Vec<u8>],
-    ) -> Result<(&'static str, String, Vec<Rendition>)> {
-        let limits = MediaLimits::default();
-        let (stem, _) = metadata
-            .original
-            .file
-            .rsplit_once(".image-")
-            .context("invalid image owner")?;
-        ensure!(
-            metadata.is_valid_for(stem) && variants.len() == metadata.variants.len(),
-            "invalid cached image metadata"
-        );
-        ensure!(
-            variants.len() <= MAX_STORED_RENDITIONS,
-            "too many cached renditions"
-        );
-        ensure!(
-            self.color.len() == 7
-                && self.color.starts_with('#')
-                && self.color[1..].bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "invalid cached image color"
-        );
-        ensure!(
-            metadata
-                .color
-                .as_ref()
-                .is_none_or(|color| color == &self.color),
-            "cached image color changed"
-        );
-        validate_stored_dimensions(metadata.original.width, metadata.original.height, &limits)?;
-        let (_, extension, hash) = stored_identity_with_hash(
-            master,
-            &metadata.original,
-            StoredKind::Master,
-            &limits,
-            self.master_hash.clone(),
-        )?;
-        ensure!(
-            self.variants
-                .windows(2)
-                .all(|indices| indices[0].index < indices[1].index),
-            "invalid cached rendition order"
-        );
-        let mut retained = master.len();
-        let mut renditions = Vec::new();
-        for cached in &self.variants {
-            let index = cached.index;
-            let bytes = variants
-                .get(index)
-                .context("invalid cached rendition index")?;
-            let file = metadata
-                .variants
-                .get(index)
-                .context("invalid cached rendition metadata")?;
-            let (_, extension, hash) = stored_identity_with_hash(
-                bytes,
-                file,
-                StoredKind::Rendition,
-                &limits,
-                cached.hash.clone(),
-            )?;
-            validate_stored_dimensions(file.width, file.height, &limits)?;
-            ensure!(bytes.len() < master.len(), "invalid cached rendition size");
-            retained = retained
-                .checked_add(bytes.len())
-                .context("cached images exceed article limit")?;
-            renditions.push(Rendition {
-                bytes: Vec::new(),
-                extension,
-                hash,
-                width: file.width,
-                height: file.height,
-            });
-        }
-        ensure!(
-            retained <= limits.max_article_bytes,
-            "cached images exceed article limit"
-        );
-        Ok((extension, hash, renditions))
-    }
+/// Directory name of the image-failure markers written by this media implementation; an older
+/// generation's markers are stale and may be swept.
+pub(crate) fn image_failure_generation() -> &'static str {
+    static GENERATION: OnceLock<String> = OnceLock::new();
+    GENERATION.get_or_init(|| hex::encode(implementation_fingerprint()))
 }
 
 fn implementation_fingerprint() -> &'static [u8; 32] {
@@ -655,6 +388,7 @@ fn implementation_fingerprint() -> &'static [u8; 32] {
         hash.update(include_bytes!("media.rs"));
         hash.update(include_bytes!("media/placeholder.rs"));
         hash.update(include_bytes!("media/srcset.rs"));
+        hash.update(include_bytes!("media/stored_cache.rs"));
         hash.update(include_bytes!("media/vector.rs"));
         hash.update(include_bytes!(
             "media/fonts/AtkinsonHyperlegible-Regular.ttf"
@@ -662,33 +396,6 @@ fn implementation_fingerprint() -> &'static [u8; 32] {
         hash.update(include_bytes!("../Cargo.lock"));
         hash.finalize().into()
     })
-}
-
-fn stored_asset_key(
-    metadata: &ArticleImage,
-    master: &[u8],
-    variants: &[Vec<u8>],
-) -> Result<String> {
-    let implementation = implementation_fingerprint();
-    let limits = MediaLimits::default();
-    ensure!(
-        master.len() <= limits.max_file_bytes
-            && variants.len() <= MAX_STORED_RENDITIONS
-            && variants
-                .iter()
-                .all(|bytes| bytes.len() <= limits.max_file_bytes),
-        "image cache inputs exceed limits"
-    );
-    let mut hash = Sha256::new();
-    hash.update(implementation);
-    let metadata = serde_json::to_vec(metadata)?;
-    hash.update((metadata.len() as u64).to_le_bytes());
-    hash.update(metadata);
-    for bytes in std::iter::once(master).chain(variants.iter().map(Vec::as_slice)) {
-        hash.update((bytes.len() as u64).to_le_bytes());
-        hash.update(bytes);
-    }
-    Ok(hex::encode(hash.finalize()))
 }
 
 fn image_file(stem: &str, part: AssetPart<'_>) -> ImageFile {
@@ -710,7 +417,7 @@ pub fn article_candidates(
     let lead = previews.iter().find_map(|candidate| {
         safe_image_url(&candidate.url, base).map(|url| Candidate {
             url,
-            alt: clean_alt(candidate.alt.as_deref()),
+            alt: candidate.alt.as_deref().and_then(crate::model::image_alt),
         })
     });
     let mut seen = BTreeSet::new();
@@ -740,7 +447,7 @@ pub fn body_candidates(html: &str, base: &Url) -> Vec<Candidate> {
             let key = url.as_str().to_string();
             seen.insert(key).then(|| Candidate {
                 url,
-                alt: clean_alt(image.value().attr("alt")),
+                alt: image.value().attr("alt").and_then(crate::model::image_alt),
             })
         })
         .collect()
@@ -866,13 +573,6 @@ fn decode_image_origin(encoded: &str) -> Option<Url> {
     safe_image_url(recovered.as_str(), &recovered)
 }
 
-fn clean_alt(value: Option<&str>) -> Option<String> {
-    value
-        .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|value| !value.is_empty())
-        .map(|value| value.chars().take(300).collect())
-}
-
 /// Old comma-split source sets sometimes retained only a CDN transform such as q_auto:good.
 /// Recover it only when the saved source set identifies exactly one original image.
 fn archived_image_request_url(url: &Url, html: &str, base: &Url) -> Option<Url> {
@@ -898,8 +598,8 @@ fn archived_image_request_url(url: &Url, html: &str, base: &Url) -> Option<Url> 
                 let Some(full) = safe_image_url(candidate.url, base) else {
                     continue;
                 };
-                if full.host_str() != Some("substackcdn.com")
-                    || !full.path().starts_with("/image/fetch/")
+                // The `/image/fetch/<transforms>/<encoded origin>` layout of fetch-style CDNs.
+                if !full.path().contains("/image/fetch/")
                     || !candidate
                         .url
                         .split(',')
@@ -951,6 +651,10 @@ impl Fetcher {
             limits.decode_concurrency > 0,
             "media decode concurrency must be positive"
         );
+        ensure!(
+            limits.article_timeout >= Duration::from_secs(fetch.timeout_secs),
+            "media article timeout must be at least the request timeout"
+        );
         let client = http::Client::new(&FetchConfig {
             timeout_secs: fetch.timeout_secs,
             max_body_bytes: limits.max_file_bytes,
@@ -967,9 +671,11 @@ impl Fetcher {
     }
 
     pub fn with_cache(mut self, directory: &Path) -> Self {
-        static GENERATION: OnceLock<String> = OnceLock::new();
-        let generation = GENERATION.get_or_init(|| hex::encode(implementation_fingerprint()));
-        self.failure_cache = Some(directory.join("image-failures-v1").join(generation));
+        self.failure_cache = Some(
+            crate::cache::Namespace::ImageFailures
+                .dir(directory)
+                .join(image_failure_generation()),
+        );
         self
     }
 
@@ -1101,6 +807,7 @@ impl Fetcher {
         let mut retained = 0_usize;
         let mut seen = BTreeSet::new();
         let mut resolved = BTreeMap::<Url, usize>::new();
+        let started = Instant::now();
         for candidate in candidates.iter().take(self.limits.max_candidates) {
             if !seen.insert(&candidate.url) {
                 continue;
@@ -1116,6 +823,20 @@ impl Fetcher {
                 continue;
             }
             if assets.len() >= max_assets || downloaded >= max_bytes {
+                break;
+            }
+            // Checked between candidates only: an in-flight request keeps its own timeout and
+            // its outcome, so a slow but successful image is never marked as failed.
+            if started.elapsed() >= self.limits.article_timeout {
+                log::debug!(
+                    "{}: image budget of {:?} spent after {:?}: keeping {} images, skipping the \
+                     remaining candidates from {}",
+                    source.slug,
+                    self.limits.article_timeout,
+                    started.elapsed(),
+                    assets.len(),
+                    candidate.url
+                );
                 break;
             }
             if let Some(index) = resolved.get(&request_url) {
@@ -1761,7 +1482,7 @@ mod tests {
     use super::*;
     use image::{ImageBuffer, ImageEncoder as _, Rgba};
 
-    fn png(image: &DynamicImage) -> Vec<u8> {
+    pub(super) fn png(image: &DynamicImage) -> Vec<u8> {
         let mut bytes = Cursor::new(Vec::new());
         image.write_to(&mut bytes, ImageFormat::Png).unwrap();
         bytes.into_inner()
@@ -1790,7 +1511,7 @@ mod tests {
         bytes
     }
 
-    fn candidate(url: &str) -> Candidate {
+    pub(super) fn candidate(url: &str) -> Candidate {
         Candidate {
             url: Url::parse(url).unwrap(),
             alt: Some("An image".into()),
@@ -1894,8 +1615,9 @@ mod tests {
             hex::encode("https://repology.org/badge/vertical-allrepos/bzip3.svg")
         )));
         for source in [
-            "https://example.com/badge.svg",
+            "https://example.com/logo.svg",
             "https://github.com/user/project/raw/main/diagram.svg",
+            "https://example.com/gallery/badgers-in-spring.jpg",
             "https://camo.githubusercontent.com/hash/invalid",
         ] {
             assert!(!is_status_badge(source));
@@ -2223,392 +1945,6 @@ mod tests {
                 .collect(),
         )
         .unwrap();
-    }
-
-    #[test]
-    fn stored_asset_cache_reuses_validation_across_instances_and_checks_changed_inputs() {
-        let directory = tempfile::tempdir().unwrap();
-        let cache = StoredAssetCache::new(directory.path());
-        let source = DynamicImage::ImageRgb8(ImageBuffer::from_fn(160, 96, |x, y| {
-            image::Rgb([(x % 251) as u8, (y % 239) as u8, ((x + y) % 241) as u8])
-        }));
-        let prepared = prepare_asset(
-            &candidate("https://example.com/cache.png"),
-            png(&source),
-            &MediaLimits::default(),
-        )
-        .unwrap();
-        let metadata = prepared.metadata("cached");
-        let variants = prepared
-            .renditions
-            .iter()
-            .map(|r| r.bytes.clone())
-            .collect::<Vec<_>>();
-        let restore =
-            |cache: &StoredAssetCache, metadata: &ArticleImage, variants: Vec<Vec<u8>>| {
-                cache.restore(metadata, prepared.master_bytes.clone(), variants)
-            };
-        reset_stored_decode_count();
-        let cold = restore(&cache, &metadata, variants.clone()).unwrap();
-        assert!(stored_decode_count() > 0);
-        reset_stored_decode_count();
-        let warm = restore(
-            &StoredAssetCache::new(directory.path()),
-            &metadata,
-            variants.clone(),
-        )
-        .unwrap();
-        assert_eq!(warm, cold);
-        assert_eq!(
-            stored_decode_count(),
-            0,
-            "a reopened cache must skip image decoding and resizing"
-        );
-        let mut altered = metadata.clone();
-        altered.original.width += 1;
-        assert!(restore(&cache, &altered, variants.clone()).is_err());
-        assert!(stored_decode_count() > 0);
-        reset_stored_decode_count();
-        let mut damaged = variants;
-        damaged[0][0] ^= 1;
-        let repaired = restore(&cache, &metadata, damaged).unwrap();
-        assert_eq!(repaired.master_bytes, prepared.master_bytes);
-        assert!(
-            stored_decode_count() > 0,
-            "changed bytes must be revalidated"
-        );
-        assert_ne!(repaired.renditions, cold.renditions);
-    }
-
-    #[test]
-    fn warm_receipts_transfer_buffers_and_reject_changed_identities() {
-        let directory = tempfile::tempdir().unwrap();
-        let cache = StoredAssetCache::new(directory.path());
-        let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(320, 192, |x, y| {
-            image::Rgb([(x % 251) as u8, (y % 239) as u8, ((x + y) % 241) as u8])
-        }));
-        let prepared = prepare_asset(
-            &candidate("https://example.com/buffers.png"),
-            png(&image),
-            &MediaLimits::default(),
-        )
-        .unwrap();
-        let metadata = prepared.metadata("buffers");
-        let inputs = || {
-            prepared
-                .renditions
-                .iter()
-                .map(|part| part.bytes.clone())
-                .collect::<Vec<_>>()
-        };
-        let cold = cache
-            .restore(&metadata, prepared.master_bytes.clone(), inputs())
-            .unwrap();
-        assert!(!cold.renditions.is_empty());
-        let master = prepared.master_bytes.clone();
-        let master_pointer = master.as_ptr();
-        let variants = inputs();
-        let pointers = variants.iter().map(Vec::as_ptr).collect::<Vec<_>>();
-        let warm = cache.restore(&metadata, master, variants).unwrap();
-        assert_eq!(warm, cold);
-        assert_eq!(warm.master_bytes.as_ptr(), master_pointer);
-        for (variant, pointer) in warm.renditions.iter().zip(pointers) {
-            assert_eq!(
-                variant.bytes.as_ptr(),
-                pointer,
-                "warm validation must transfer owned bytes"
-            );
-        }
-
-        let key = stored_asset_key(&metadata, &prepared.master_bytes, &inputs()).unwrap();
-        let path = cache
-            .slots(&key)
-            .unwrap()
-            .into_iter()
-            .find(|path| path.is_file())
-            .unwrap();
-        let mut receipt = StoredAssetCache::receipt(&path).unwrap();
-        receipt.value.master_hash = "0".repeat(40);
-        receipt.checksum = hex::encode(Sha256::digest(serde_json::to_vec(&receipt.value).unwrap()));
-        std::fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
-        reset_stored_decode_count();
-        assert_eq!(
-            cache
-                .restore(&metadata, prepared.master_bytes.clone(), inputs())
-                .unwrap(),
-            cold
-        );
-        assert!(
-            stored_decode_count() > 0,
-            "inconsistent cached identities require fresh validation"
-        );
-
-        let mut changed = prepared.master_bytes.clone();
-        let last = changed.len() - 1;
-        changed[last] ^= 1;
-        assert!(
-            cache.restore(&metadata, changed, inputs()).is_err(),
-            "every current master byte remains covered by SHA-256"
-        );
-    }
-
-    #[test]
-    #[ignore = "opt-in CPU benchmark for cold and warm retained-image validation"]
-    fn benchmark_stored_asset_receipts() {
-        let directory = tempfile::tempdir().unwrap();
-        let cache = StoredAssetCache::new(directory.path());
-        let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(1600, 900, |x, y| {
-            image::Rgb([
-                ((x * 17 + y * 13) % 251) as u8,
-                ((x ^ y) % 239) as u8,
-                ((x * y) % 241) as u8,
-            ])
-        }));
-        let prepared = prepare_asset(
-            &candidate("https://example.com/benchmark.png"),
-            png(&image),
-            &MediaLimits::default(),
-        )
-        .unwrap();
-        let metadata = prepared.metadata("benchmark");
-        let inputs = || {
-            prepared
-                .renditions
-                .iter()
-                .map(|part| part.bytes.clone())
-                .collect::<Vec<_>>()
-        };
-        let bytes = prepared.master_bytes.len()
-            + prepared
-                .renditions
-                .iter()
-                .map(|part| part.bytes.len())
-                .sum::<usize>();
-        let begin = std::time::Instant::now();
-        let expected = cache
-            .restore(&metadata, prepared.master_bytes.clone(), inputs())
-            .unwrap();
-        let cold = begin.elapsed();
-        let repetitions = 100;
-        reset_stored_decode_count();
-        let begin = std::time::Instant::now();
-        for _ in 0..repetitions {
-            let asset = cache
-                .restore(&metadata, prepared.master_bytes.clone(), inputs())
-                .unwrap();
-            assert_eq!(asset.master_hash, expected.master_hash);
-            std::hint::black_box(asset);
-        }
-        let warm = begin.elapsed();
-        assert_eq!(stored_decode_count(), 0);
-        // Quantify the byte pass eliminated on receipt hits, separately from allocation/read costs.
-        let begin = std::time::Instant::now();
-        for _ in 0..repetitions {
-            std::hint::black_box(crate::model::sha1_hex(&prepared.master_bytes));
-            for part in &prepared.renditions {
-                std::hint::black_box(crate::model::sha1_hex(&part.bytes));
-                std::hint::black_box(part.bytes.clone());
-            }
-        }
-        let avoided = begin.elapsed();
-        eprintln!(
-            "image receipt benchmark: bytes={bytes} variants={} cold={cold:?} warm_per_asset={:?} avoided_sha1_and_copies_per_asset={:?} repetitions={repetitions}",
-            prepared.renditions.len(),
-            warm / repetitions,
-            avoided / repetitions
-        );
-    }
-
-    #[test]
-    fn stored_asset_cache_preserves_inline_placeholders_and_recovers_from_corruption() {
-        let directory = tempfile::tempdir().unwrap();
-        let cache = StoredAssetCache::new(directory.path());
-        let prepared = prepare_asset(
-            &candidate("https://example.com/legacy-cache.png"),
-            png(&DynamicImage::new_rgba8(160, 96)),
-            &MediaLimits::default(),
-        )
-        .unwrap();
-        let mut metadata = prepared.metadata("legacy-cache");
-        metadata.variants.clear();
-        metadata.color = None;
-        let restore = || {
-            cache
-                .restore(&metadata, prepared.master_bytes.clone(), vec![])
-                .unwrap()
-        };
-        let cold = restore();
-        assert!(cold.renditions.is_empty());
-        assert_eq!(
-            placeholder::from_hash(&cold.placeholder.hash).unwrap(),
-            cold.placeholder
-        );
-        reset_stored_decode_count();
-        assert_eq!(restore(), cold);
-        assert_eq!(stored_decode_count(), 0);
-        let receipt = std::fs::read_dir(&cache.root)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        std::fs::write(&receipt, b"incomplete cache receipt").unwrap();
-        assert_eq!(restore(), cold);
-        assert!(stored_decode_count() > 0);
-        std::fs::write(&receipt, vec![0; MAX_ASSET_RECEIPT_BYTES + 1]).unwrap();
-        reset_stored_decode_count();
-        assert_eq!(restore(), cold);
-        assert!(stored_decode_count() > 0);
-        let mut invalid: AssetReceipt =
-            serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
-        invalid.value.variants = vec![CachedRendition {
-            index: usize::MAX,
-            hash: "0".repeat(40),
-        }];
-        invalid.checksum = hex::encode(Sha256::digest(serde_json::to_vec(&invalid.value).unwrap()));
-        std::fs::write(&receipt, serde_json::to_vec(&invalid).unwrap()).unwrap();
-        reset_stored_decode_count();
-        assert_eq!(restore(), cold);
-        assert!(
-            stored_decode_count() > 0,
-            "invalid receipt indices must fall back to complete validation"
-        );
-        use base64::Engine as _;
-        for bad_hash in [
-            base64::engine::general_purpose::STANDARD.encode([0; 5]),
-            "A".repeat(100),
-        ] {
-            let mut invalid = StoredAssetCache::receipt(&receipt).unwrap();
-            invalid.value.thumbhash = bad_hash;
-            invalid.checksum =
-                hex::encode(Sha256::digest(serde_json::to_vec(&invalid.value).unwrap()));
-            std::fs::write(&receipt, serde_json::to_vec(&invalid).unwrap()).unwrap();
-            reset_stored_decode_count();
-            assert_eq!(restore(), cold);
-            assert!(
-                stored_decode_count() > 0,
-                "invalid cached ThumbHash must regenerate from the master"
-            );
-        }
-    }
-
-    #[test]
-    fn stored_asset_cache_retains_colliding_keys_without_revalidation() {
-        let directory = tempfile::tempdir().unwrap();
-        let cache = StoredAssetCache {
-            root: directory.path().join("bounded"),
-            slots: 4,
-        };
-        let prepared = prepare_asset(
-            &candidate("https://example.com/colliding.png"),
-            png(&DynamicImage::new_rgba8(80, 48)),
-            &MediaLimits::default(),
-        )
-        .unwrap();
-        let inputs = prepared
-            .renditions
-            .iter()
-            .map(|r| r.bytes.clone())
-            .collect::<Vec<_>>();
-        let metadata = (0..)
-            .map(|index| prepared.metadata(&format!("collision-{index}")))
-            .filter(|metadata| {
-                let key = stored_asset_key(metadata, &prepared.master_bytes, &inputs).unwrap();
-                u16::from_str_radix(&key[..4], 16)
-                    .unwrap()
-                    .is_multiple_of(4)
-            })
-            .take(4)
-            .collect::<Vec<_>>();
-        let restore = |metadata: &ArticleImage| {
-            cache
-                .restore(
-                    metadata,
-                    prepared.master_bytes.clone(),
-                    prepared
-                        .renditions
-                        .iter()
-                        .map(|r| r.bytes.clone())
-                        .collect(),
-                )
-                .unwrap()
-        };
-        let cold = metadata.iter().map(restore).collect::<Vec<_>>();
-        let timestamps = std::fs::read_dir(&cache.root)
-            .unwrap()
-            .map(|entry| {
-                let entry = entry.unwrap();
-                (entry.path(), entry.metadata().unwrap().modified().unwrap())
-            })
-            .collect::<Vec<_>>();
-        for _ in 0..2 {
-            reset_stored_decode_count();
-            assert_eq!(metadata.iter().map(restore).collect::<Vec<_>>(), cold);
-            assert_eq!(stored_decode_count(), 0, "collisions must not thrash");
-        }
-        for (path, modified) in timestamps {
-            assert_eq!(
-                std::fs::metadata(path).unwrap().modified().unwrap(),
-                modified
-            );
-        }
-        restore(&prepared.metadata("overflow"));
-        assert_eq!(std::fs::read_dir(&cache.root).unwrap().count(), 4);
-    }
-
-    #[test]
-    fn stored_asset_cache_collisions_and_unwritable_cache_preserve_full_validation() {
-        let directory = tempfile::tempdir().unwrap();
-        let cache = StoredAssetCache {
-            root: directory.path().join("bounded"),
-            slots: 1,
-        };
-        for suffix in ["one", "two", "one"] {
-            let prepared = prepare_asset(
-                &candidate(&format!("https://example.com/{suffix}.png")),
-                png(&DynamicImage::new_rgba8(80, 48)),
-                &MediaLimits::default(),
-            )
-            .unwrap();
-            let metadata = prepared.metadata(suffix);
-            reset_stored_decode_count();
-            let restored = cache
-                .restore(
-                    &metadata,
-                    prepared.master_bytes.clone(),
-                    prepared
-                        .renditions
-                        .iter()
-                        .map(|r| r.bytes.clone())
-                        .collect(),
-                )
-                .unwrap();
-            assert_eq!(restored.master_bytes, prepared.master_bytes);
-            assert!(stored_decode_count() > 0);
-            assert_eq!(std::fs::read_dir(&cache.root).unwrap().count(), 1);
-        }
-        let blocked = directory.path().join("blocked");
-        std::fs::write(&blocked, b"regular file").unwrap();
-        let cache = StoredAssetCache {
-            root: blocked,
-            slots: 1,
-        };
-        let prepared = prepare_asset(
-            &candidate("https://example.com/unwritable.png"),
-            png(&DynamicImage::new_rgba8(80, 48)),
-            &MediaLimits::default(),
-        )
-        .unwrap();
-        let metadata = prepared.metadata("unwritable");
-        assert!(
-            cache
-                .restore(
-                    &metadata,
-                    prepared.master_bytes,
-                    prepared.renditions.into_iter().map(|r| r.bytes).collect()
-                )
-                .is_ok()
-        );
     }
 
     #[test]
@@ -3301,5 +2637,90 @@ mod tests {
 
         assert_eq!((one.len(), two.len()), (1, 1));
         assert!(started.elapsed() >= Duration::from_millis(180));
+    }
+
+    #[test]
+    fn article_timeout_must_cover_one_request() {
+        let fetch = FetchConfig {
+            timeout_secs: 20,
+            ..FetchConfig::default()
+        };
+        let limits = |article_timeout| MediaLimits {
+            article_timeout,
+            ..MediaLimits::default()
+        };
+        assert!(Fetcher::new(&fetch, limits(Duration::from_secs(19))).is_err());
+        assert!(Fetcher::new(&fetch, limits(Duration::from_secs(20))).is_ok());
+        assert!(Fetcher::new(&fetch, MediaLimits::default()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn article_timeout_stops_after_a_hanging_candidate_and_keeps_earlier_images() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start_async().await;
+        let first = server
+            .mock_async(|when, then| {
+                when.path("/first.png");
+                then.status(200).body(png(&DynamicImage::new_rgba8(80, 48)));
+            })
+            .await;
+        let hanging = server
+            .mock_async(|when, then| {
+                when.path("/hanging.png");
+                then.status(200)
+                    .delay(Duration::from_secs(3))
+                    .body(png(&DynamicImage::new_rgba8(64, 32)));
+            })
+            .await;
+        let later = server
+            .mock_async(|when, then| {
+                when.path("/later.png");
+                then.status(200).body(png(&DynamicImage::new_rgba8(48, 24)));
+            })
+            .await;
+        let last = server
+            .mock_async(|when, then| {
+                when.path("/last.png");
+                then.status(200).body(png(&DynamicImage::new_rgba8(40, 20)));
+            })
+            .await;
+        let config = crate::config::Config::parse(&format!(
+            "[[sources]]\nurl = {:?}\n",
+            server.url("/feed")
+        ))
+        .unwrap();
+        let source = config.sources().unwrap().remove(0);
+        let fetcher = Fetcher::new(
+            &FetchConfig {
+                timeout_secs: 1,
+                retries: 0,
+                ..FetchConfig::default()
+            },
+            MediaLimits {
+                article_timeout: Duration::from_secs(1),
+                ..MediaLimits::default()
+            },
+        )
+        .unwrap();
+        let candidates = ["first.png", "hanging.png", "later.png", "last.png"]
+            .map(|path| candidate(&server.url(format!("/{path}"))));
+
+        let started = std::time::Instant::now();
+        let assets = fetcher.fetch(&candidates, &source).await;
+
+        assert_eq!(
+            assets
+                .iter()
+                .map(|asset| asset.source_url.as_str())
+                .collect::<Vec<_>>(),
+            [server.url("/first.png")]
+        );
+        assert_eq!((assets[0].width, assets[0].height), (80, 48));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        first.assert_calls(1);
+        hanging.assert_calls(1);
+        later.assert_calls(0);
+        last.assert_calls(0);
     }
 }

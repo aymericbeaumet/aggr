@@ -60,6 +60,35 @@ but aggr does not log in, complete challenges, or query third-party Instagram br
 profile cannot be read publicly, use the creator's website or feed instead. Meta's authorized
 Instagram APIs are a separate integration and are not enabled by adding an ordinary profile URL.
 
+## Source adapters
+
+Every engine under `src/sources/` claims URLs with a predicate, and `sources/mod.rs` tries them
+in this order before falling back to the generic feed path. A URL that no adapter claims is an
+ordinary feed or website; nothing here is public configuration.
+
+| Adapter | Accepted URLs | Details |
+|---|---|---|
+| `instagram.rs` | `instagram.com`, `www.instagram.com`, or `m.instagram.com` with a profile name as the path | the paragraph above |
+| `qwen.rs` | exactly `https://qwen.ai/blog` or `https://qwen.ai/research`; a trailing slash is accepted, any query string is not | below |
+| `podcast.rs` | Apple Podcasts show URLs, `open.spotify.com/show/<ID>`, Deezer show URLs, and the hosting providers whose show URL maps to a known feed endpoint | [podcast sources](podcasts.md) |
+| `feed.rs`, `html.rs` | every other `http(s)` URL: as a feed, then advertised and conventional endpoints, then the page's article list | [configuring sources](sources.md) |
+| `aggr.rs` | repository URLs, selected at configuration time (`type = "aggr"` engine) | [source definitions](#source-definitions-and-collections), [the git model](git-model.md#copying-another-instance) |
+| `youtube.rs` | not a dispatcher: it drops Shorts from every source's items, recognizes video URLs for inline players and posters, and reads public durations | [themes](themes.md#video-and-lead-media) |
+
+### Qwen
+
+Qwen's blog is rendered by JavaScript, so the adapter reads the site's public article endpoint
+(`/api/v2/article/retrieval?type=qwen_ai&language=en-US`) with aggr's ordinary client, headers,
+and conditional GET. The endpoint answers with a new request ID every time, so change detection
+hashes the article list alone: an unchanged list is an unchanged source. Each article becomes one
+item with its title, `https://qwen.ai/blog?id=<path>` as the link, its RFC 3339 date, author,
+tags as labels, the small cover image as the preview candidate, and the article HTML (the first
+of `.post-content`, `article`, `main`, or `body`) as content; the source is titled `Qwen` with
+`https://qwen.ai/` as its site URL. An article without a path, title, or content is a source
+error rather than an empty item. Because the API already carries the whole article, heavy mode
+never requests the JavaScript shell for it, and the daily retry that upgrades feed-only captures
+skips the source, as it does for light-mode and mirrored sources.
+
 ## Public threads
 
 Heavy article extraction joins public posts by the original author. Mastodon/ActivityPub follows
@@ -96,7 +125,10 @@ ordinary response and article cache; challenge pages are not successful article 
 This is an HTTP transport fallback implemented in Rust, with BoringSSL linked into the binary.
 It does not run Python, a browser, JavaScript challenges, or an external proxy service, and does
 not import browser cookies or obtain challenge cookies. Sites requiring interactive verification
-can still refuse the request. Failed article extraction retains the available RSS/feed content.
+can still refuse the request. Failed article extraction retains the available RSS/feed content,
+as does a page whose server HTML is only a script's loading message (`loading…`, `reconnecting…`,
+"enable JavaScript") outside its header, navigation and footer: aggr never runs the scripts that
+would fill it, so the placeholder is not an article.
 
 Readability receives explicit image-and-caption figure structure as article content before its
 boilerplate filters run. This preserves charts whose IDs happen to contain words such as `replies`;
@@ -112,8 +144,9 @@ table with the chart title and its caption, so the figures stay readable and sea
 chart itself is not reproduced. Rows and columns are bounded.
 
 An item that only kept feed content because the original page was unavailable (a Cloudflare
-challenge, an outage, or a rate limit at capture time) is retried on later runs: at most eight per
-source per run, once a day per page, giving up after seven attempts. A successful retry rewrites
+challenge, an outage, or a rate limit at capture time), or whose archived body is such a loading
+placeholder, is retried on later runs: at most eight per source per run, once a day per page,
+giving up after seven attempts. A successful retry rewrites
 the body, retained HTML, and media while keeping the item's path, dates, labels, and authors.
 Explicit refresh still forces a new capture regardless of this schedule.
 
@@ -198,6 +231,14 @@ The same names live below `sources/<slug>/`, `categories/<slug>/`, and `tags/<sl
 human-facing `/sources/`, `/categories/`, and `/tags/` directories link to those stable
 per-collection routes; `/browse/` combines the directories. Feed entries point their primary URL at the local
 clean-reading page and carry the original URL through the format's provenance field.
+
+The syndication surface is the same on every host: the three feed formats carry each episode or
+video enclosure (`rel=enclosure` in Atom, `<enclosure>` in RSS, `attachments` in JSON Feed) with
+its media type, byte size, and duration when the publisher declared them; `sources.opml` lists the
+followed feeds as an OPML 2.0 subscription list; `llms.txt` inventories the public resources; and
+`aggr.json` is the machine entry point. Every reading page advertises the root feeds and the OPML
+list. The OPML output round-trips through aggr's own importer: pointing another instance's
+`[[sources]].url` at `sources.opml` recreates the same feed URLs, names, and categories.
 
 ## Discovery and URL lookup
 

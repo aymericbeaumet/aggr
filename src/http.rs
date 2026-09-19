@@ -10,8 +10,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use reqwest::header::{
-    CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH,
-    LAST_MODIFIED, LOCATION, RETRY_AFTER,
+    ACCEPT, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue, IF_MODIFIED_SINCE,
+    IF_NONE_MATCH, LAST_MODIFIED, LOCATION, RETRY_AFTER,
 };
 use tokio::time::Instant;
 use url::Url;
@@ -84,6 +84,18 @@ pub fn source_headers<'a>(
     } else {
         &[]
     }
+}
+
+/// `headers` with any `Accept` replaced by `accept`: an endpoint that negotiates its
+/// representation must not be handed the preference configured for the feed itself.
+pub fn with_accept(headers: &[(String, String)], accept: &str) -> Vec<(String, String)> {
+    let mut headers = headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("accept"))
+        .cloned()
+        .collect::<Vec<_>>();
+    headers.push(("Accept".into(), accept.into()));
+    headers
 }
 
 pub fn is_html_content_type(content_type: Option<&str>) -> bool {
@@ -225,6 +237,11 @@ impl Client {
         self.max_body_bytes
     }
 
+    /// Total budget of one request, retries included.
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
     pub fn new(config: &FetchConfig) -> Result<Self> {
         install_crypto_provider();
         let inner = reqwest::Client::builder()
@@ -270,6 +287,10 @@ impl Client {
             value.set_sensitive(true);
             headers.insert(name, value);
         }
+        // reqwest adds this itself; the compatible transport sends no Accept unless told to.
+        headers
+            .entry(ACCEPT)
+            .or_insert_with(|| HeaderValue::from_static("*/*"));
         if let Some(etag) = request.etag
             && let Ok(value) = HeaderValue::from_str(etag)
         {
@@ -673,6 +694,88 @@ mod tests {
         .unwrap();
         let error = client.get(Request::get(&url)).await.unwrap_err();
         assert!(!format!("{error:#}").contains("private-test-secret"));
+    }
+
+    #[test]
+    fn retry_after_reads_seconds_and_http_dates() {
+        assert_eq!(retry_after("30"), Some(Duration::from_secs(30)));
+        assert_eq!(retry_after(" 30 "), Some(Duration::from_secs(30)));
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc2822();
+        let delay = retry_after(&future).expect("RFC 2822 dates are HTTP dates");
+        assert!(
+            (Duration::from_secs(3590)..=Duration::from_secs(3600)).contains(&delay),
+            "{delay:?}"
+        );
+        assert_eq!(
+            retry_after("Sun, 06 Nov 1994 08:49:37 GMT"),
+            Some(Duration::ZERO),
+            "a past date means retry now"
+        );
+        assert_eq!(
+            retry_after("Sunday, 06-Nov-94 08:49:37 GMT"),
+            None,
+            "the obsolete RFC 850 form is not parsed"
+        );
+        assert_eq!(retry_after("soon"), None);
+        assert_eq!(retry_after(""), None);
+        assert_eq!(retry_after("-5"), None);
+    }
+
+    #[test]
+    fn with_accept_replaces_the_configured_preference_only() {
+        let configured = vec![
+            ("Accept".to_string(), "text/html".to_string()),
+            ("Authorization".to_string(), "Bearer t".to_string()),
+            ("ACCEPT".to_string(), "*/*".to_string()),
+        ];
+        assert_eq!(
+            with_accept(&configured, "application/json"),
+            [
+                ("Authorization".to_string(), "Bearer t".to_string()),
+                ("Accept".to_string(), "application/json".to_string()),
+            ]
+        );
+        assert_eq!(
+            with_accept(&[], "application/json"),
+            [("Accept".to_string(), "application/json".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn both_transports_send_a_default_accept_unless_one_is_configured() {
+        for (configured, expected) in [
+            (None, "accept: */*"),
+            (Some("application/xml"), "accept: application/xml"),
+        ] {
+            let (url, server) = interrupted_body_server(vec![
+                b"HTTP/1.1 403 Forbidden\r\nCf-Mitigated: challenge\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ncomplete",
+            ])
+            .await;
+            let headers = configured
+                .map(|accept| vec![("Accept".to_string(), accept.to_string())])
+                .unwrap_or_default();
+            let Response::Ok(body) = client()
+                .get(Request {
+                    headers: &headers,
+                    ..Request::get(&url)
+                })
+                .await
+                .unwrap()
+            else {
+                panic!("expected article");
+            };
+            assert_eq!(body.text(), "complete");
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 2, "ordinary then compatible transport");
+            for request in requests {
+                assert!(
+                    request.contains(expected),
+                    "{expected:?} missing in {request}"
+                );
+                assert_eq!(request.matches("accept:").count(), 1, "{request}");
+            }
+        }
     }
 
     #[tokio::test]

@@ -772,7 +772,7 @@ self.addEventListener("fetch", function (event) {
   if (url.pathname.indexOf(BASE) !== 0) return;
   var acceptsHtml = (request.headers.get("accept") || "").indexOf("text/html") !== -1;
   var isSwup = (request.headers.get("x-requested-with") || "").toLowerCase() === "swup";
-  var mutable = /\/(?:atom|rss|feed)\.xml$|\/(?:feed|aggr|linkset|updates|pagefind-entry)\.json$|\/manifest\.webmanifest$|\/opensearch\.xml$|\/sitemap(?:-\d+)?\.xml$|\/robots\.txt$|\/(?:aggr\.toml|llms\.txt)$/.test(url.pathname);
+  var mutable = /\/(?:atom|rss|feed)\.xml$|\/(?:feed|aggr|linkset|updates|pagefind-entry)\.json$|\/manifest\.webmanifest$|\/opensearch\.xml$|\/sitemap(?:-\d+)?\.xml$|\/robots\.txt$|\/(?:aggr\.toml|llms\.txt|sources\.opml)$/.test(url.pathname);
   var articleRepresentation = url.pathname.indexOf(BASE + "items/") === 0 && /\.(?:md|txt|rst|json)$/.test(url.pathname);
   if (url.pathname === BASE + "search-manifest.json" || url.pathname === BASE + "search-catalog.json") {
     event.respondWith(searchManifestResponse(request, event, url.pathname === BASE + "search-catalog.json"));

@@ -1,0 +1,41 @@
+---
+source: src/site/outputs.rs
+expression: "rss_collection(&site, &build(), &site.title, \"\", &[item(), podcast()])"
+---
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<channel>
+  <title>Example &amp; Reader</title>
+  <link>https://example.test/reads/</link>
+  <description>Collected &lt;carefully&gt;</description>
+  <language>en-GB</language>
+  <atom:link href="https://example.test/reads/rss.xml" rel="self" type="application/rss+xml"/>
+  <lastBuildDate>Wed, 2 Sep 2026 09:30:00 +0000</lastBuildDate>
+  <generator>aggr</generator>
+  <item>
+    <title>A &lt;safe&gt; &amp; useful story</title>
+    <link>https://example.test/reads/items/source/a-story/</link>
+    <guid isPermaLink="false">urn:aggr:item:238368f1ec8ac4600ecd0506e49318be70adbd13</guid>
+    <atom:link href="https://upstream.test/story?a=1&amp;b=2" rel="via" type="text/html"/>
+    <pubDate>Wed, 2 Sep 2026 08:30:00 +0000</pubDate>
+    <dc:creator>A &amp; B</dc:creator>
+    <description>A concise &lt;summary&gt;</description>
+    <content:encoded>&lt;p&gt;Clean &amp;amp; &lt;strong&gt;complete&lt;/strong&gt;&lt;/p&gt;</content:encoded>
+    <category>Engineering</category>
+    <category>Rust</category>
+  </item>
+  <item>
+    <title>Episode 1</title>
+    <link>https://example.test/reads/items/podcast/episode-1/</link>
+    <guid isPermaLink="false">urn:aggr:item:8ea144222273119928ca22f3fc1d62746ed12f7d</guid>
+    <atom:link href="https://podcast.test/episodes/1" rel="via" type="text/html"/>
+    <enclosure url="https://cdn.podcast.test/episode-1.mp3?token=a&amp;b=2" length="12345" type="audio/mpeg"/>
+    <pubDate>Wed, 2 Sep 2026 08:30:00 +0000</pubDate>
+    <dc:creator>Host</dc:creator>
+    <description>A concise &lt;summary&gt;</description>
+    <content:encoded>&lt;p&gt;Clean &amp;amp; &lt;strong&gt;complete&lt;/strong&gt;&lt;/p&gt;</content:encoded>
+    <category>Engineering</category>
+    <category>Rust</category>
+  </item>
+</channel>
+</rss>

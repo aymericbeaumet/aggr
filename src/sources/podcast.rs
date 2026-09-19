@@ -30,13 +30,20 @@ pub fn is_spotify_show(url: &Url) -> bool {
     host(url) == "open.spotify.com" && spotify_show_id(url).is_some()
 }
 
+pub fn is_deezer_show(url: &Url) -> bool {
+    host(url) == "deezer.com" && deezer_show_id(url).is_some()
+}
+
 pub fn is_show_url(url: &Url) -> bool {
-    apple_lookup(url).is_some() || is_spotify_show(url) || direct_feed(url).is_some()
+    apple_lookup(url).is_some()
+        || is_spotify_show(url)
+        || is_deezer_show(url)
+        || direct_feed(url).is_some()
 }
 
 pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
-    if is_spotify_show(url) {
-        return fetch_spotify(url, source, ctx).await;
+    if is_spotify_show(url) || is_deezer_show(url) {
+        return fetch_streaming_show(url, source, ctx).await;
     }
     if ctx.state.identity == source.identity && ctx.state.resolved_url.is_some() {
         match feed::fetch(url, source, ctx).await {
@@ -97,23 +104,25 @@ async fn fetch_apple(
     )
 }
 
-async fn fetch_spotify(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
+/// Streaming directories (Spotify, Deezer) publish episode metadata but no feed. Read their public
+/// listing once, then upgrade to the publisher's own RSS whenever the catalog identifies it.
+async fn fetch_streaming_show(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
     let remembered = ctx.state.resolved_url.as_deref().and_then(web_url);
     if ctx.state.identity == source.identity
         && remembered
             .as_ref()
-            .is_some_and(|endpoint| !is_spotify_show(endpoint))
+            .is_some_and(|endpoint| !is_streaming_show(endpoint))
     {
         match feed::fetch(url, source, ctx).await {
-            Ok(result) if !spotify_result(&result) => return Ok(result),
-            Ok(result) => return prefer_spotify_rss(result, source, ctx).await,
+            Ok(result) if !streaming_result(&result) => return Ok(result),
+            Ok(result) => return prefer_publisher_rss(result, source, ctx).await,
             Err(error) => log::debug!(
-                "{}: rediscovering Spotify publisher feed: {error:#}",
+                "{}: rediscovering streaming publisher feed: {error:#}",
                 source.slug
             ),
         }
     }
-    // Spotify fallback captures remember the Spotify page itself. Reparse it once to discover the
+    // Streaming fallback captures remember the show page itself. Reparse it once to discover the
     // publisher feed even when that page's HTTP validators have not changed.
     let state = crate::store::SourceState::default();
     let fresh = Context {
@@ -121,10 +130,14 @@ async fn fetch_spotify(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<
         ..*ctx
     };
     let result = feed::fetch(url, source, &fresh).await?;
-    prefer_spotify_rss(result, source, ctx).await
+    prefer_publisher_rss(result, source, ctx).await
 }
 
-fn spotify_result(result: &Fetch) -> bool {
+fn is_streaming_show(url: &Url) -> bool {
+    is_spotify_show(url) || is_deezer_show(url)
+}
+
+fn streaming_result(result: &Fetch) -> bool {
     let validators = match result {
         Fetch::Changed { validators, .. } | Fetch::Unchanged { validators } => validators,
     };
@@ -132,18 +145,18 @@ fn spotify_result(result: &Fetch) -> bool {
         .resolved_url
         .as_deref()
         .and_then(web_url)
-        .is_some_and(|url| is_spotify_show(&url))
+        .is_some_and(|url| is_streaming_show(&url))
 }
 
-async fn prefer_spotify_rss(result: Fetch, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
+async fn prefer_publisher_rss(result: Fetch, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
     if let Fetch::Changed { meta, items, .. } = &result
-        && spotify_result(&result)
-        && let Some(lookup) = spotify_catalog_query(meta, items)
+        && streaming_result(&result)
+        && let Some(lookup) = catalog_query(meta, items)
     {
-        match resolve_spotify_rss(&lookup, meta, items, source, ctx).await {
+        match resolve_publisher_rss(&lookup, meta, items, source, ctx).await {
             Ok(feed) => return Ok(feed),
             Err(error) => log::debug!(
-                "{}: keeping public Spotify episodes: {error:#}",
+                "{}: keeping public episode metadata: {error:#}",
                 source.slug
             ),
         }
@@ -151,15 +164,25 @@ async fn prefer_spotify_rss(result: Fetch, source: &Source, ctx: &Context<'_>) -
     Ok(result)
 }
 
-fn spotify_catalog_query(meta: &SourceMeta, items: &[RawItem]) -> Option<Url> {
+fn catalog_query(meta: &SourceMeta, items: &[RawItem]) -> Option<Url> {
     let title = meta.title.as_deref()?.trim();
-    let publisher = items.first()?.authors.first()?.trim();
-    if title.is_empty() || publisher.is_empty() {
+    if title.is_empty() {
         return None;
     }
+    let publisher = items
+        .first()
+        .and_then(|item| item.authors.first())
+        .map(|publisher| publisher.trim())
+        .filter(|publisher| !publisher.is_empty());
     let mut url = Url::parse("https://itunes.apple.com/search").ok()?;
     url.query_pairs_mut()
-        .append_pair("term", &format!("{title} {publisher}"))
+        .append_pair(
+            "term",
+            &match publisher {
+                Some(publisher) => format!("{title} {publisher}"),
+                None => title.to_string(),
+            },
+        )
         .append_pair("entity", "podcast")
         .append_pair("limit", "10");
     Some(url)
@@ -173,38 +196,51 @@ fn normalized_identity(value: &str) -> String {
         .collect()
 }
 
-fn catalog_feed(bytes: &[u8], title: &str, publisher: &str) -> Option<Url> {
+/// A directory's publisher label does not always match the catalog's artist name, so an exact
+/// title-and-publisher match is preferred and a unique exact title match is the fallback. Either
+/// way the caller still checks the resolved feed against the directory's own episodes.
+fn catalog_feed(bytes: &[u8], title: &str, publisher: Option<&str>) -> Option<Url> {
     let title = normalized_identity(title);
-    let publisher = normalized_identity(publisher);
-    if title.is_empty() || publisher.is_empty() {
+    let publisher = publisher.map(normalized_identity).filter(|p| !p.is_empty());
+    if title.is_empty() {
         return None;
     }
     let catalog: Value = serde_json::from_slice(bytes).ok()?;
-    let candidates = catalog
-        .get("results")?
-        .as_array()?
-        .iter()
-        .filter(|show| {
-            show.get("collectionName")
-                .and_then(Value::as_str)
-                .is_some_and(|name| normalized_identity(name) == title)
-                && show
-                    .get("artistName")
+    let shows = catalog.get("results")?.as_array()?;
+    let feeds = |matching: &dyn Fn(&Value) -> bool| {
+        shows
+            .iter()
+            .filter(|show| {
+                show.get("collectionName")
                     .and_then(Value::as_str)
-                    .is_some_and(|name| normalized_identity(name) == publisher)
-        })
-        .filter_map(|show| {
-            show.get("feedUrl")
+                    .is_some_and(|name| normalized_identity(name) == title)
+                    && matching(show)
+            })
+            .filter_map(|show| {
+                show.get("feedUrl")
+                    .and_then(Value::as_str)
+                    .and_then(web_url)
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    let unique = |candidates: BTreeSet<Url>| {
+        (candidates.len() == 1)
+            .then(|| candidates.into_iter().next())
+            .flatten()
+    };
+    if let Some(publisher) = publisher.as_deref()
+        && let Some(url) = unique(feeds(&|show: &Value| {
+            show.get("artistName")
                 .and_then(Value::as_str)
-                .and_then(web_url)
-        })
-        .collect::<BTreeSet<_>>();
-    (candidates.len() == 1)
-        .then(|| candidates.into_iter().next())
-        .flatten()
+                .is_some_and(|name| normalized_identity(name) == publisher)
+        }))
+    {
+        return Some(url);
+    }
+    unique(feeds(&|_: &Value| true))
 }
 
-fn matching_episodes(spotify: &[RawItem], feed: &[RawItem]) -> bool {
+fn matching_episodes(directory: &[RawItem], feed: &[RawItem]) -> bool {
     let keys = |items: &[RawItem]| {
         items
             .iter()
@@ -214,21 +250,21 @@ fn matching_episodes(spotify: &[RawItem], feed: &[RawItem]) -> bool {
             })
             .collect::<BTreeSet<_>>()
     };
-    keys(spotify).intersection(&keys(feed)).take(2).count() == 2
+    keys(directory).intersection(&keys(feed)).take(2).count() == 2
 }
 
-async fn resolve_spotify_rss(
+async fn resolve_publisher_rss(
     lookup: &Url,
     meta: &SourceMeta,
     items: &[RawItem],
     source: &Source,
     ctx: &Context<'_>,
 ) -> Result<Fetch> {
-    let title = meta.title.as_deref().context("Spotify show has no title")?;
+    let title = meta.title.as_deref().context("show has no title")?;
     let publisher = items
         .first()
         .and_then(|item| item.authors.first())
-        .context("Spotify show has no publisher")?;
+        .map(String::as_str);
     let Response::Ok(body) = ctx
         .client
         .get(crate::http::Request {
@@ -242,7 +278,7 @@ async fn resolve_spotify_rss(
         bail!("podcast catalog returned no results");
     };
     let endpoint = catalog_feed(&body.bytes, title, publisher)
-        .context("catalog has no unique exact show and publisher match")?;
+        .context("catalog has no unique exact show match")?;
     let result = feed::fetch_endpoint(&endpoint, source, ctx).await?;
     if let Fetch::Changed {
         items: episodes, ..
@@ -251,7 +287,7 @@ async fn resolve_spotify_rss(
     {
         return Ok(result);
     }
-    bail!("publisher feed does not match at least two public Spotify episode titles and dates")
+    bail!("publisher feed does not match at least two public episode titles and dates")
 }
 
 fn apple_id(url: &Url) -> Option<&str> {
@@ -477,6 +513,151 @@ fn spotify_show_id(url: &Url) -> Option<&str> {
         .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric()))
 }
 
+/// `/show/<id>`, optionally behind a locale segment such as `/fr/show/<id>`.
+fn deezer_show_id(url: &Url) -> Option<&str> {
+    let parts: Vec<_> = url
+        .path_segments()?
+        .filter(|part| !part.is_empty())
+        .collect();
+    let id = match parts.as_slice() {
+        ["show", id, ..] => id,
+        [locale, "show", id, ..] if locale.len() <= 5 => id,
+        _ => return None,
+    };
+    numeric(id).then_some(*id)
+}
+
+pub fn deezer_items(page: &str, url: &Url) -> Result<(SourceMeta, Vec<RawItem>)> {
+    let id = deezer_show_id(url).context("expected a Deezer show URL")?;
+    let state: Value = serde_json::from_str(
+        embedded_object(page, "window.__DZR_APP_STATE__")
+            .context("Deezer did not expose public episode metadata")?,
+    )
+    .context("parsing Deezer public show metadata")?;
+    let show = state.get("DATA").context("Deezer metadata has no show")?;
+    let meta = SourceMeta {
+        title: show
+            .get("SHOW_NAME")
+            .and_then(Value::as_str)
+            .map(crate::content::html_to_text),
+        site_url: Some(format!("https://www.deezer.com/show/{id}")),
+        language: None,
+    };
+    // The label publishes the show; the catalog may credit a different host, so it is only a hint.
+    let publisher = show
+        .get("LABEL_NAME")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let episodes = state
+        .pointer("/EPISODES/data")
+        .and_then(Value::as_array)
+        .context("Deezer did not expose this show's public episode listing")?;
+    let mut items = Vec::new();
+    let mut seen = BTreeSet::new();
+    for episode in episodes {
+        let Some(id) = episode
+            .get("EPISODE_ID")
+            .and_then(Value::as_str)
+            .filter(|id| numeric(id))
+        else {
+            continue;
+        };
+        if !seen.insert(id.to_owned()) {
+            continue;
+        }
+        let Some(title) = episode
+            .get("EPISODE_TITLE")
+            .and_then(Value::as_str)
+            .filter(|title| !title.trim().is_empty())
+        else {
+            continue;
+        };
+        let summary = episode
+            .get("EPISODE_DESCRIPTION")
+            .and_then(Value::as_str)
+            .map(crate::content::html_to_text)
+            .filter(|value| !value.is_empty());
+        let published = episode
+            .get("EPISODE_PUBLISHED_TIMESTAMP")
+            .and_then(Value::as_str)
+            .and_then(|value| {
+                crate::sources::html::parse_date(value, Some("%Y-%m-%d %H:%M:%S"))
+                    .or_else(|| crate::sources::html::parse_date(value, None))
+            });
+        let mut extra = std::collections::BTreeMap::new();
+        if let Some(seconds) = episode
+            .get("DURATION")
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+            })
+            .filter(|duration| *duration > 0)
+        {
+            extra.insert("duration_seconds".into(), seconds.into());
+        }
+        if let Some(audio) = episode
+            .get("EPISODE_DIRECT_STREAM_URL")
+            .and_then(Value::as_str)
+            .and_then(web_url)
+        {
+            extra.insert("audio_url".into(), audio.to_string().into());
+        }
+        let artwork = episode
+            .get("EPISODE_IMAGE_MD5")
+            .or_else(|| episode.get("SHOW_ART_MD5"))
+            .or_else(|| show.get("SHOW_ART_MD5"))
+            .and_then(Value::as_str)
+            .filter(|md5| md5.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .and_then(|md5| {
+                web_url(&format!(
+                    "https://cdn-images.dzcdn.net/images/talk/{md5}/1000x1000-000000-80-0-0.jpg"
+                ))
+            });
+        items.push(RawItem {
+            id: Some(format!("deezer:episode:{id}")),
+            title: crate::content::html_to_text(title),
+            link: format!("https://www.deezer.com/episode/{id}"),
+            published,
+            updated: None,
+            first_seen: None,
+            authors: publisher
+                .map(|name| vec![name.to_string()])
+                .unwrap_or_default(),
+            labels: vec![],
+            summary,
+            content_html: None,
+            extra,
+            preview_candidates: artwork
+                .map(|url| {
+                    vec![crate::preview::Candidate {
+                        url: url.to_string(),
+                        alt: None,
+                    }]
+                })
+                .unwrap_or_default(),
+            preview: None,
+            images: vec![],
+        });
+    }
+    if items.is_empty() {
+        bail!(
+            "Deezer did not expose any public episodes; configure the publisher's RSS feed instead"
+        );
+    }
+    Ok((meta, items))
+}
+
+/// The JSON literal assigned to `<name>` in an inline script.
+fn embedded_object<'a>(page: &'a str, name: &str) -> Option<&'a str> {
+    let start = page.find(name)? + name.len();
+    let rest = page[start..].trim_start().strip_prefix('=')?.trim_start();
+    rest.starts_with('{')
+        .then(|| crate::content::balanced_json_object(rest))
+        .flatten()
+}
+
 pub fn spotify_items(page: &str, url: &Url) -> Result<(SourceMeta, Vec<RawItem>)> {
     let id = spotify_show_id(url).context("expected a Spotify show URL")?;
     let document = Html::parse_document(page);
@@ -496,6 +677,7 @@ pub fn spotify_items(page: &str, url: &Url) -> Result<(SourceMeta, Vec<RawItem>)
     let meta = SourceMeta {
         title: show.get("name").and_then(Value::as_str).map(str::to_string),
         site_url: Some(format!("https://open.spotify.com/show/{id}")),
+        language: None,
     };
     let episodes = show
         .pointer("/pages/items")
@@ -609,26 +791,72 @@ mod tests {
             {"collectionName":"Underscore_","artistName":"Micode","feedUrl":"https://publisher.example/feed"}
         ]}"#;
         assert_eq!(
-            catalog_feed(catalog, "Underscore_", "Micode")
+            catalog_feed(catalog, "Underscore_", Some("Micode"))
                 .unwrap()
                 .as_str(),
             "https://publisher.example/feed"
         );
-        assert!(catalog_feed(catalog, "Underscore", "").is_none());
-        assert!(catalog_feed(catalog, "Another show", "Micode").is_none());
+        // Two shows share the title, so an unmatched publisher label stays ambiguous.
+        assert!(catalog_feed(catalog, "Underscore_", Some("Label")).is_none());
+        assert!(catalog_feed(catalog, "Underscore_", None).is_none());
+        assert!(catalog_feed(catalog, "Underscore", Some("")).is_none());
+        assert!(catalog_feed(catalog, "Another show", Some("Micode")).is_none());
         let ambiguous = br#"{"results":[
             {"collectionName":"Same","artistName":"Same","feedUrl":"https://one.example/feed"},
             {"collectionName":"Same","artistName":"Same","feedUrl":"https://two.example/feed"}
         ]}"#;
-        assert!(catalog_feed(ambiguous, "Same", "Same").is_none());
+        assert!(catalog_feed(ambiguous, "Same", Some("Same")).is_none());
         for url in [
             "javascript:alert(1)",
             "https://user:secret@example.com/feed",
             "file:///tmp/feed",
         ] {
             let catalog = serde_json::to_vec(&serde_json::json!({"results":[{"collectionName":"Same","artistName":"Same","feedUrl":url}]})).unwrap();
-            assert!(catalog_feed(&catalog, "Same", "Same").is_none());
+            assert!(catalog_feed(&catalog, "Same", Some("Same")).is_none());
         }
+    }
+
+    #[test]
+    fn a_unique_title_match_stands_in_for_a_publisher_label_the_catalog_does_not_share() {
+        let catalog = br#"{"results":[
+            {"collectionName":"Le rendez-vous Tech","artistName":"NotPatrick","feedUrl":"https://feeds.example/rdv-tech"},
+            {"collectionName":"Le rendez-vous Jeux","artistName":"NotPatrick","feedUrl":"https://feeds.example/rdv-jeux"}
+        ]}"#;
+        assert_eq!(
+            catalog_feed(catalog, "Le rendez-vous Tech", Some("frenchspin"))
+                .unwrap()
+                .as_str(),
+            "https://feeds.example/rdv-tech"
+        );
+    }
+
+    #[test]
+    fn deezer_show_pages_expose_public_episodes() {
+        let page = r#"<script>window.__DZR_APP_STATE__ = {"DATA":{"SHOW_ID":"8153","SHOW_NAME":"Le rendez-vous Tech","LABEL_NAME":"frenchspin","SHOW_ART_MD5":"1a968927e0523400f8b9b882f6128939"},"EPISODES":{"data":[
+            {"EPISODE_ID":"934706832","EPISODE_TITLE":"Episode with } brace","EPISODE_DESCRIPTION":"Notes","DURATION":"5601","EPISODE_PUBLISHED_TIMESTAMP":"2026-09-15 14:00:00","EPISODE_DIRECT_STREAM_URL":"https://sphinx.example/media.mp3","EPISODE_IMAGE_MD5":"1a968927e0523400f8b9b882f6128939"},
+            {"EPISODE_ID":"934706832","EPISODE_TITLE":"Duplicate"},
+            {"EPISODE_ID":"not-numeric","EPISODE_TITLE":"Rejected"}
+        ]}};</script>"#;
+        let url = Url::parse("https://www.deezer.com/fr/show/8153").unwrap();
+        assert!(is_deezer_show(&url));
+        assert!(!is_deezer_show(
+            &Url::parse("https://www.deezer.com/fr/album/8153").unwrap()
+        ));
+        let (meta, items) = deezer_items(page, &url).unwrap();
+        assert_eq!(meta.title.as_deref(), Some("Le rendez-vous Tech"));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Episode with } brace");
+        assert_eq!(items[0].link, "https://www.deezer.com/episode/934706832");
+        assert_eq!(items[0].authors, ["frenchspin"]);
+        assert_eq!(
+            items[0].published.unwrap().to_rfc3339(),
+            "2026-09-15T14:00:00+00:00"
+        );
+        assert_eq!(items[0].extra["duration_seconds"], 5601);
+        assert_eq!(
+            items[0].extra["audio_url"],
+            "https://sphinx.example/media.mp3"
+        );
     }
 
     #[tokio::test]
@@ -824,7 +1052,7 @@ mod tests {
             cache_dir: directory.path(),
         };
         let (meta, items) = public_spotify_items();
-        let result = resolve_spotify_rss(
+        let result = resolve_publisher_rss(
             &Url::parse(&server.url("/search")).unwrap(),
             &meta,
             &items,
@@ -858,7 +1086,7 @@ mod tests {
             })
             .await;
         let (meta, public_items) = public_spotify_items();
-        let error = resolve_spotify_rss(
+        let error = resolve_publisher_rss(
             &Url::parse(&server.url("/search")).unwrap(),
             &meta,
             &public_items,

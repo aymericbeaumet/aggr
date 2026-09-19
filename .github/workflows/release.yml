@@ -56,46 +56,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install native TLS build dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake libclang-dev build-essential
-      - name: Install native TLS build dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install cmake llvm
-          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
-      - name: Configure native Windows compiler environment
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
-      - name: Configure native TLS build dependencies (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
-          if (!(Test-Path (Join-Path $llvmBin 'libclang.dll'))) {
-            throw "The runner's native LLVM installation is missing libclang.dll"
-          }
-          "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
-          $llvmBin >> $env:GITHUB_PATH
-          'CMAKE_GENERATOR=Ninja' >> $env:GITHUB_ENV
-          if ('${{ runner.arch }}' -eq 'ARM64') {
-            'CC=clang-cl' >> $env:GITHUB_ENV
-            'CXX=clang-cl' >> $env:GITHUB_ENV
-            'ASM=clang-cl' >> $env:GITHUB_ENV
-          } else {
-            choco install nasm --yes --no-progress
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            (Join-Path $env:ProgramFiles 'NASM') >> $env:GITHUB_PATH
-          }
-          cmake --version
-          ninja --version
+      - uses: ./.github/actions/native-deps
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          # Release builds only ever run on tag refs, whose caches main and pull requests can
+          # never restore; restore the branch caches but never add tag-scoped entries.
+          save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - run: cargo build --release --locked
       - shell: bash
         env:
@@ -107,7 +74,7 @@ jobs:
           else
             tar -C target/release -czf "dist/$ARCHIVE.tar.gz" aggr
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: aggr-${{ matrix.name }}
           path: dist/*
@@ -118,7 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true

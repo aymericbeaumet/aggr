@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { createNavigation, enqueuePrefetch, keyboardObscuresNavigation } from './navigation';
+import { createNavigation, enqueuePrefetch, keyboardObscuresNavigation, prefetchKey } from './navigation';
 
 it('canonicalizes the address, saved position key and Swup history together', () => {
   const replaceState = vi.fn();
@@ -45,4 +45,16 @@ it('hides bottom controls for an editing keyboard, not browser chrome or pinch z
   expect(keyboardObscuresNavigation(false, 844, 500, 1)).toBe(false);
   expect(keyboardObscuresNavigation(true, 844, 740, 1)).toBe(false);
   expect(keyboardObscuresNavigation(true, 844, 500, 2)).toBe(false);
+});
+
+it('keys speculative loads by page, ignoring fragments, the search focus flag, other sites and the current page', () => {
+  const base = 'https://reader.test/nested/';
+  const current = { pathname: '/nested/', search: '?q=rust' };
+  expect(prefetchKey('items/one/#top', base, base, current)).toBe('/nested/items/one/');
+  expect(prefetchKey(base + '?focus-search=1&q=svelte', base, base, current)).toBe('/nested/?q=svelte');
+  expect(prefetchKey(base + '?q=rust#list', base, base, current)).toBeNull();
+  expect(prefetchKey('items/one/index.html', base, base, current)).toBeNull();
+  expect(prefetchKey('https://elsewhere.test/nested/items/one/', base, base, current)).toBeNull();
+  expect(prefetchKey('/other/items/one/', base, base, current)).toBeNull();
+  expect(prefetchKey('http://[bad', base, base, current)).toBeNull();
 });

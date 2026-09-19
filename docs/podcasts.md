@@ -51,8 +51,10 @@ before that feed is available outside Spotify. Apple can also omit RSS for shows
 publishers disable [catalog distribution](https://podcasters.apple.com/support/897-submit-a-show).
 
 The archive retains episode text, artwork and public links. RSS audio enclosure URLs are kept
-as `extra.audio_url`; an enclosure is also the item link when the feed supplies no episode
-page. Audio/video files are not downloaded by these adapters. Offline article storage therefore
+as `extra.audio_url`, with the enclosure's declared media type as `extra.audio_type` and its
+byte size, when the feed states a positive one, as `extra.audio_length`; the site's Atom, RSS,
+and JSON Feed outputs republish the three as enclosure metadata. An enclosure is also the item
+link when the feed supplies no episode page. Audio/video files are not downloaded by these adapters. Offline article storage therefore
 does not promise offline podcast playback or private media access.
 
 For example, the Underscore_ Spotify show resolves to

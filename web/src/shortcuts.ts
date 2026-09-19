@@ -1,5 +1,6 @@
 import { flushSync, mount, unmount } from 'svelte';
 import ShortcutHelp from './components/ShortcutHelp.svelte';
+import { mountOver } from './mount-over';
 import type { AppContext } from './contracts';
 
 export interface ShortcutHelpHandle {
@@ -45,12 +46,17 @@ export function bindShortcutDialog(dialog: HTMLDialogElement) {
   };
 }
 
+/** A handle that does nothing: what the page keeps when the shortcut dialog could not be mounted. */
+export function inertShortcutHelp(): ShortcutHelpHandle {
+  return { open() {}, close() {}, toggle() {}, async dispose() {} };
+}
+
 export function mountShortcutHelp(root: ParentNode = document, discussions: AppContext['discussions'] = []): ShortcutHelpHandle {
   const target = root.querySelector<HTMLElement>('[data-shortcut-help-root]');
   let component: ReturnType<typeof mount> | undefined;
   if (target) {
-    target.replaceChildren();
-    component = mount(ShortcutHelp, { target, props: { discussions } });
+    // The static dialog markup comes back if the mount fails; a successful mount owns it until disposal.
+    [component] = mountOver(target, [() => mount(ShortcutHelp, { target, props: { discussions } })]).mounted;
     flushSync();
   }
   const dialog = target?.querySelector<HTMLDialogElement>('#shortcut-help');

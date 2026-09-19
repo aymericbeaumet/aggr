@@ -12,6 +12,10 @@ use url::Url;
 use super::SourceMeta;
 use crate::model::{RawItem, normalize_link};
 
+/// Every candidate costs a request with the full fetch timeout, so a page that links hundreds of
+/// archive feeds is capped. Advertised `<link>` endpoints come first; the cap only drops anchors.
+const MAX_FEED_CANDIDATES: usize = 16;
+
 /// Feed endpoints advertised in metadata or recognizable body links, in document order. The
 /// candidates are still fetched and parsed before aggr trusts them.
 pub fn feed_links(page: &str, page_url: &Url) -> Vec<Url> {
@@ -60,20 +64,20 @@ pub fn feed_links(page: &str, page_url: &Url) -> Vec<Url> {
         }
     }
 
-    let Ok(anchors) = Selector::parse("a[href]") else {
-        return feeds;
-    };
-    for anchor in document.select(&anchors) {
-        if let Some(url) = anchor
-            .value()
-            .attr("href")
-            .and_then(|href| base.join(href).ok())
-            .filter(feedish)
-            && seen.insert(url.as_str().to_string())
-        {
-            feeds.push(url);
+    if let Ok(anchors) = Selector::parse("a[href]") {
+        for anchor in document.select(&anchors) {
+            if let Some(url) = anchor
+                .value()
+                .attr("href")
+                .and_then(|href| base.join(href).ok())
+                .filter(feedish)
+                && seen.insert(url.as_str().to_string())
+            {
+                feeds.push(url);
+            }
         }
     }
+    feeds.truncate(MAX_FEED_CANDIDATES);
     feeds
 }
 
@@ -113,6 +117,11 @@ pub fn extract(page: &str, page_url: &Url) -> Result<(SourceMeta, Vec<RawItem>)>
     let meta = SourceMeta {
         title: select_text(&document, "title"),
         site_url: Some(page_url.origin().ascii_serialization() + "/"),
+        language: document
+            .root_element()
+            .value()
+            .attr("lang")
+            .and_then(super::normalize_language),
     };
     let mut items = json_ld_items(&document, page_url);
     items.extend(card_items(&document, page_url)?);
@@ -485,6 +494,27 @@ mod tests {
     }
 
     #[test]
+    fn feed_candidates_are_bounded_and_keep_advertised_links_first() {
+        let anchors = (0..50)
+            .map(|index| format!(r#"<a href="/archive/{index}/feed">Year {index}</a>"#))
+            .collect::<String>();
+        let page = format!(
+            r#"<head><link rel="alternate" type="application/rss+xml" href="/rss.xml"></head><body>{anchors}<a href="/archive/0/feed">Repeated</a></body>"#
+        );
+        let base = Url::parse("https://example.com/").unwrap();
+        let links = feed_links(&page, &base);
+        assert_eq!(links.len(), MAX_FEED_CANDIDATES);
+        assert_eq!(links[0].as_str(), "https://example.com/rss.xml");
+        let expected = (0..15)
+            .map(|index| format!("https://example.com/archive/{index}/feed"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            links[1..].iter().map(Url::as_str).collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
     fn extracts_heading_cards_without_configuration() {
         let base = Url::parse("https://example.com/news/").unwrap();
         let (meta, items) = extract(PAGE, &base).unwrap();
@@ -498,6 +528,24 @@ mod tests {
         );
         assert_eq!(items[1].title, "Second article");
         assert_eq!(items[2].title, "Third article");
+    }
+
+    #[test]
+    fn source_language_comes_from_the_html_lang_attribute() {
+        let base = Url::parse("https://example.com/news/").unwrap();
+        let (meta, _) = extract(PAGE, &base).unwrap();
+        assert_eq!(meta.language, None, "no declaration stays unknown");
+        for (declared, expected) in [
+            ("FR-fr", Some("fr-FR")),
+            ("en", Some("en")),
+            ("", None),
+            ("en_US", None),
+        ] {
+            let page = PAGE.replacen("<html>", &format!("<html lang=\"{declared}\">"), 1);
+            let (meta, items) = extract(&page, &base).unwrap();
+            assert_eq!(meta.language.as_deref(), expected, "{declared:?}");
+            assert_eq!(items.len(), 3);
+        }
     }
 
     #[test]

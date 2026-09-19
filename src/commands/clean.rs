@@ -11,11 +11,16 @@ use crate::cli::CleanArgs;
 use crate::config::Config;
 
 pub fn run(config_path: &Path, args: &CleanArgs) -> Result<()> {
-    run_project(
-        &load_project(config_path)?,
-        args.out.as_deref(),
-        args.dry_run,
-    )
+    let project = load_project(config_path)?;
+    // Removing the repository cache while a sync or build is writing it would leave that run with
+    // a half-deleted tree; the same lock those commands hold keeps the two apart. A dry run only
+    // reports, so it checks for a holder without leaving a lock file behind.
+    let _guard = if args.dry_run {
+        project.inspect_lock("clean")?
+    } else {
+        Some(project.lock("clean")?)
+    };
+    run_project(&project, args.out.as_deref(), args.dry_run)
 }
 
 pub(super) fn load_project(config_path: &Path) -> Result<Project> {
@@ -35,6 +40,7 @@ pub(super) fn load_project(config_path: &Path) -> Result<Project> {
         config_path,
         repo: crate::git::Repo::discover(&root)?,
         root,
+        worktree: Default::default(),
     })
 }
 

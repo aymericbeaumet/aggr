@@ -6,9 +6,9 @@
     <div class="row-copy">
     <div class="row-heading">
       <span class="rank" aria-hidden="true">{{ rank }}.</span>
-      <a class="title p-name u-url" data-row-open href="{{ item.url | url_for }}">{{ item.title }}</a>
+      <a class="title p-name u-url" data-row-open href="{{ item.url | url_for }}"{% if item.language and item.language | lower != site.language | lower %} lang="{{ item.language }}"{% endif %}>{{ item.title }}</a>
     </div>
-    {% if site.params.excerpts and item.excerpt %}<p class="excerpt">{{ item.excerpt }}</p>{% endif %}
+    {% if site.params.excerpts and item.excerpt %}<p class="excerpt"{% if item.language and item.language | lower != site.language | lower %} lang="{{ item.language }}"{% endif %}>{{ item.excerpt }}</p>{% endif %}
     {% include "_metadata.html" %}
     </div>
     {% if item.preview %}<span class="preview-media" data-thumbhash="{{ item.preview.placeholder.hash }}" style="--preview-color: {{ item.preview.color }}; --image-preview: url('{{ item.preview.placeholder.data_url }}')"><img class="preview-image" src="{{ item.preview.url | url_for }}" width="{{ item.preview.width }}" height="{{ item.preview.height }}" alt="{{ item.preview.alt or '' }}" loading="lazy" decoding="async"></span>{% endif %}

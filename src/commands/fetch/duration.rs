@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 
+use crate::cache::Namespace;
 use crate::config::{Engine, Source};
 use crate::store::SourceState;
 
@@ -23,7 +24,7 @@ pub(super) fn prepare(
         return Ok(None);
     }
     let receipt = Receipt {
-        path: cache_dir.join("feed-parsing").join(format!(
+        path: Namespace::FeedParsing.dir(cache_dir).join(format!(
             "{}.receipt",
             crate::model::sha1_hex(source.identity.as_bytes())
         )),

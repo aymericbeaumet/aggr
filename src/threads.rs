@@ -10,16 +10,18 @@ pub use x::canonical_url as canonical_x_url;
 pub use x::expand as expand_x;
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::sync::LazyLock;
 
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use scraper::{Html, Selector};
 use serde_json::Value;
 use url::{Origin, Url};
 
 use crate::cache::ArticleCache;
 use crate::config::Source;
-use crate::content::{self, ExtractedArticle};
+use crate::content::{self, ExtractedArticle, escape_html};
 use crate::http;
 
 const ACTIVITY_ACCEPT: &str = "application/activity+json, application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"";
@@ -37,6 +39,7 @@ const EXPANSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 
 /// Expand a public self-reply thread advertised by `page`, or by a conservative
 /// Mastodon-compatible status URL when the page omits discovery metadata.
+#[cfg(test)]
 pub async fn expand(
     page: &str,
     page_url: &Url,
@@ -44,22 +47,34 @@ pub async fn expand(
     client: &http::Client,
     cache: &ArticleCache,
 ) -> Result<Option<ExtractedArticle>> {
+    expand_alternates(activity_candidates(page, page_url), source, client, cache).await
+}
+
+/// [`expand`] from representations already discovered with [`activity_candidates_in`]; a page
+/// that advertised nothing costs no request and no timer.
+pub async fn expand_alternates(
+    candidates: Vec<Url>,
+    source: &Source,
+    client: &http::Client,
+    cache: &ArticleCache,
+) -> Result<Option<ExtractedArticle>> {
+    if candidates.is_empty() {
+        return Ok(None);
+    }
     tokio::time::timeout(
         EXPANSION_TIMEOUT,
-        expand_bounded(page, page_url, source, client, cache),
+        expand_bounded(candidates, source, client, cache),
     )
     .await
     .context("ActivityPub thread expansion exceeded 10 seconds")?
 }
 
 async fn expand_bounded(
-    page: &str,
-    page_url: &Url,
+    candidates: Vec<Url>,
     source: &Source,
     client: &http::Client,
     cache: &ArticleCache,
 ) -> Result<Option<ExtractedArticle>> {
-    let candidates = activity_candidates(page, page_url);
     let mut last_error = None;
     let mut remaining_requests = MAX_REQUESTS;
     for candidate in candidates {
@@ -87,10 +102,32 @@ async fn expand_bounded(
     }
 }
 
+/// Whether discovery can find anything on `page` at all: an advertised `activity+json` (or an
+/// `ld+json` alternate carrying the ActivityStreams profile) or a conservative status URL. The
+/// scan is case-insensitive like the `type` matching it stands in for, and cheap enough to run
+/// before any parse; ordinary articles fail it and are never parsed for alternates.
+pub fn may_advertise_activity(page: &str, page_url: &Url) -> bool {
+    conservative_status_url(page_url)
+        || page
+            .as_bytes()
+            .windows(8)
+            .any(|window| window.eq_ignore_ascii_case(b"activity"))
+}
+
+#[cfg(test)]
 fn activity_candidates(page: &str, page_url: &Url) -> Vec<Url> {
+    if !may_advertise_activity(page, page_url) {
+        return Vec::new();
+    }
+    activity_candidates_in(&Html::parse_document(page), page_url)
+}
+
+/// The representations worth a discovery request, in preference order: advertised same-origin
+/// alternates first, then the page itself when it looks like a status URL. Callers pre-check
+/// with [`may_advertise_activity`].
+pub fn activity_candidates_in(document: &Html, page_url: &Url) -> Vec<Url> {
     let mut candidates = Vec::new();
     let mut seen = BTreeSet::new();
-    let document = Html::parse_document(page);
     if let Ok(selector) = Selector::parse("link[rel][href]") {
         for link in document.select(&selector) {
             let rel = link.value().attr("rel").unwrap_or_default();
@@ -439,12 +476,7 @@ impl<'a> Remote<'a> {
         }
         self.requests += 1;
 
-        let mut headers = http::source_headers(self.source, url)
-            .iter()
-            .filter(|(name, _)| !name.eq_ignore_ascii_case("accept"))
-            .cloned()
-            .collect::<Vec<_>>();
-        headers.push(("Accept".into(), ACTIVITY_ACCEPT.into()));
+        let headers = http::with_accept(http::source_headers(self.source, url), ACTIVITY_ACCEPT);
         let cached = self.cache.load(url, &headers)?;
         let response = self
             .client
@@ -656,6 +688,14 @@ fn render(posts: &[Post], order: &[usize]) -> ExtractedArticle {
     ExtractedArticle { html, image }
 }
 
+/// A terminal post counter in archived Markdown, where comrak escapes the square brackets.
+static MARKDOWN_COUNTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?:^|\s)(\(([0-9]{1,4})/([0-9]{1,4})\)|\\?\[([0-9]{1,4})/([0-9]{1,4})\\?\]|([0-9]{1,4})/([0-9]{1,4}))\s*$",
+    )
+    .expect("valid markdown thread counter pattern")
+});
+
 /// Present an archived social thread as uninterrupted prose: remove terminal post counters,
 /// post separators, and generated per-post links or partial-thread notices from earlier
 /// captures. The metadata original link already reaches the thread. Stored sources stay intact.
@@ -666,11 +706,6 @@ pub fn clean_archived_thread(markdown: &str, link: &str) -> String {
     if canonical_x_url(&url).is_none() && !conservative_status_url(&url) {
         return markdown.to_string();
     }
-    let Ok(counter) = regex::Regex::new(
-        r"(?:^|\s)(\(([0-9]{1,4})/([0-9]{1,4})\)|\\?\[([0-9]{1,4})/([0-9]{1,4})\\?\]|([0-9]{1,4})/([0-9]{1,4}))\s*$",
-    ) else {
-        return markdown.to_string();
-    };
     use comrak::nodes::NodeValue;
     let arena = comrak::Arena::new();
     let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
@@ -696,7 +731,7 @@ pub fn clean_archived_thread(markdown: &str, link: &str) -> String {
                 .last_child()
                 .is_some_and(|node| matches!(node.data.borrow().value, NodeValue::Text(_)))
             && let Some(range) = source_range(paragraph)
-            && let Some(captures) = counter.captures(&markdown[range.clone()])
+            && let Some(captures) = MARKDOWN_COUNTER.captures(&markdown[range.clone()])
             && let Some(marker) = captures.get(1)
         {
             let raw = &markdown[range.clone()];
@@ -788,6 +823,19 @@ fn thread_footer_link<'a>(node: &'a comrak::nodes::AstNode<'a>, labels: &[&str])
             .is_some()
 }
 
+/// A terminal post counter in a captured post's HTML text node.
+static HTML_COUNTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?:^|\s)(\(([0-9]{1,4})/([0-9]{1,4})\)|\[([0-9]{1,4})/([0-9]{1,4})\]|^([0-9]{1,4})/([0-9]{1,4}))\s*$",
+    )
+    .expect("valid HTML thread counter pattern")
+});
+/// Only whitespace, closing tags and line breaks may follow a counter for it to be terminal.
+static TRAILING_MARKUP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:\s|</[a-z][a-z0-9]*\s*>|<br\s*/?>)*$")
+        .expect("valid trailing markup pattern")
+});
+
 fn strip_thread_counter(html: &str) -> String {
     let document = Html::parse_fragment(html);
     let Some(last) = document.tree.nodes().rfind(
@@ -805,12 +853,7 @@ fn strip_thread_counter(html: &str) -> String {
     let scraper::node::Node::Text(text) = last.value() else {
         return html.to_string();
     };
-    let Ok(counter) = regex::Regex::new(
-        r"(?:^|\s)(\(([0-9]{1,4})/([0-9]{1,4})\)|\[([0-9]{1,4})/([0-9]{1,4})\]|^([0-9]{1,4})/([0-9]{1,4}))\s*$",
-    ) else {
-        return html.to_string();
-    };
-    let Some(captures) = counter.captures(text) else {
+    let Some(captures) = HTML_COUNTER.captures(text) else {
         return html.to_string();
     };
     let Some(marker) = captures.get(1) else {
@@ -851,10 +894,7 @@ fn strip_thread_counter(html: &str) -> String {
         return html.to_string();
     };
     let end = start + marker.len();
-    let Ok(closing) = regex::Regex::new(r"(?i)^(?:\s|</[a-z][a-z0-9]*\s*>|<br\s*/?>)*$") else {
-        return html.to_string();
-    };
-    if !closing.is_match(&html[end..]) {
+    if !TRAILING_MARKUP.is_match(&html[end..]) {
         return html.to_string();
     }
     format!("{}{}", html[..start].trim_end(), &html[end..])
@@ -1022,15 +1062,6 @@ fn points_to_other_accounts(url: &Url) -> bool {
     })
 }
 
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1179,6 +1210,33 @@ mod tests {
             activity_candidates("", &Url::parse("https://example.com/story/123").unwrap())
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn pages_without_markers_skip_discovery_before_any_parse() {
+        let article = Url::parse("https://blog.example/posts/hello").unwrap();
+        let status = Url::parse("https://social.example/@alice/123").unwrap();
+        let plain = r#"<html><head><link rel="alternate" type="application/rss+xml" href="/feed.xml"><script type="application/ld+json">{"@type":"Article"}</script></head><body><a href="/objects/1">thread</a></body></html>"#;
+        assert!(!may_advertise_activity(plain, &article));
+        assert!(activity_candidates(plain, &article).is_empty());
+        assert!(
+            may_advertise_activity(plain, &status),
+            "status URLs are probed on shape alone"
+        );
+        for marker in [
+            r#"<link rel="alternate" type="Application/Activity+JSON" href="/objects/1">"#,
+            r#"<link rel="alternate" type="application/ld+json; profile=&quot;https://www.w3.org/ns/activitystreams&quot;" href="/objects/1">"#,
+        ] {
+            assert!(may_advertise_activity(marker, &article), "{marker}");
+            assert_eq!(
+                activity_candidates(marker, &article)
+                    .iter()
+                    .map(Url::as_str)
+                    .collect::<Vec<_>>(),
+                ["https://blog.example/objects/1"],
+                "{marker}"
+            );
+        }
     }
 
     #[tokio::test]

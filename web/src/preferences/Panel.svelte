@@ -26,37 +26,35 @@
 {#snippet help(id: string, label: string, explanation: string)}
 <details class="preference-help"><summary aria-label={label} title={explanation}>?</summary><span {id} class="preference-help-text">{explanation}</span></details>
 {/snippet}
+{#snippet selectSetting(key: string, id: string = key)}
+{@const field = fields[key]}
+<label class="setting" for={id}><strong>{field.label}</strong><select {id} data-preference={key} value={String(state.values[key])} onchange={change}>{#each field.options as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
+{/snippet}
 
     
     <section class="preferences-group" aria-labelledby="appearance-heading">
       <h2 id="appearance-heading">Appearance</h2>
-      <label class="setting" for="theme-mode">
-        <strong>{fields["theme"].label}</strong>
-        <select id="theme-mode" data-preference="theme" value={String(state.values["theme"])} onchange={change}>{#each fields["theme"].options as option}<option value={option.value}>{option.label}</option>{/each}</select>
-      </label>
-      <label class="setting" for="motion"><strong>{fields["motion"].label}</strong><select id="motion" data-preference="motion" value={String(state.values["motion"])} onchange={change}>{#each fields["motion"].options as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
+      {@render selectSetting("theme", "theme-mode")}
+      {@render selectSetting("motion")}
     </section>
     <section class="preferences-group" aria-labelledby="reading-heading">
       <h2 id="reading-heading">Reading</h2>
-      <label class="setting" for="font-family"><strong>{fields["font-family"].label}</strong><select id="font-family" data-preference="font-family" value={String(state.values["font-family"])} onchange={change}>{#each fields["font-family"].options as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
-      <label class="setting" for="text-size"><strong>{fields["text-size"].label}</strong><select id="text-size" data-preference="text-size" value={String(state.values["text-size"])} onchange={change}>{#each fields["text-size"].options as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
-      <label class="setting" for="reading-width"><strong>{fields["reading-width"].label}</strong><select id="reading-width" data-preference="reading-width" value={String(state.values["reading-width"])} onchange={change}>{#each fields["reading-width"].options as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
-      <label class="setting" for="line-spacing"><strong>{fields["line-spacing"].label}</strong><select id="line-spacing" data-preference="line-spacing" value={String(state.values["line-spacing"])} onchange={change}>{#each fields["line-spacing"].options as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
-      <label class="setting" for="paragraph-spacing"><strong>{fields["paragraph-spacing"].label}</strong><select id="paragraph-spacing" data-preference="paragraph-spacing" value={String(state.values["paragraph-spacing"])} onchange={change}>{#each fields["line-spacing"].options as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
+      {@render selectSetting("font-family")}
+      {@render selectSetting("text-size")}
+      {@render selectSetting("reading-width")}
+      {@render selectSetting("line-spacing")}
+      {@render selectSetting("paragraph-spacing")}
       <label class="setting" for="paragraph-indent"><strong>{fields["paragraph-indent"].label}</strong><input id="paragraph-indent" data-preference="paragraph-indent" type="checkbox" checked={Boolean(state.values["paragraph-indent"])} onchange={change}></label>
-      <label class="setting" for="text-align"><strong>{fields["text-align"].label}</strong><select id="text-align" data-preference="text-align" value={String(state.values["text-align"])} onchange={change}>{#each fields["text-align"].options as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
-      <label class="setting" for="letter-spacing"><strong>{fields["letter-spacing"].label}</strong><select id="letter-spacing" data-preference="letter-spacing" value={String(state.values["letter-spacing"])} onchange={change}>{#each fields["letter-spacing"].options as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
-      <label class="setting" for="word-spacing"><strong>{fields["word-spacing"].label}</strong><select id="word-spacing" data-preference="word-spacing" value={String(state.values["word-spacing"])} onchange={change}>{#each fields["letter-spacing"].options as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
+      {@render selectSetting("text-align")}
+      {@render selectSetting("letter-spacing")}
+      {@render selectSetting("word-spacing")}
     </section>
     <section class="preferences-group" aria-labelledby="feed-heading">
       <h2 id="feed-heading">Feed</h2>
-      <label class="setting" for="density"><strong>{fields["density"].label}</strong><select id="density" data-preference="density" value={String(state.values["density"])} onchange={change}>{#each fields["density"].options as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
-      <label class="setting" for="thumbnails"><strong>{fields["thumbnails"].label}</strong><select id="thumbnails" data-preference="thumbnails" value={String(state.values["thumbnails"])} onchange={change}>{#each fields["thumbnails"].options as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
-      <label class="setting" for="feed-page-size"><strong>{fields["feed-page-size"].label}</strong><select id="feed-page-size" data-preference="feed-page-size" value={String(state.values["feed-page-size"])} onchange={change}>{#each fields["feed-page-size"].options as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
-      <label class="setting" for="date-format">
-        <strong>{fields["date-format"].label}</strong>
-        <select id="date-format" data-preference="date-format" value={String(state.values["date-format"])} onchange={change}>{#each fields["date-format"].options as option}<option value={option.value}>{option.label}</option>{/each}</select>
-      </label>
+      {@render selectSetting("density")}
+      {@render selectSetting("thumbnails")}
+      {@render selectSetting("feed-page-size")}
+      {@render selectSetting("date-format")}
     </section>
     <section class="preferences-group" aria-labelledby="keyboard-heading">
       <h2 id="keyboard-heading">Keyboard</h2>

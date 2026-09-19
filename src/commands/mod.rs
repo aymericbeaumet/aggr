@@ -7,10 +7,12 @@ pub mod clean;
 pub mod dev;
 pub mod fetch;
 pub mod init;
+pub mod lock;
 pub mod server;
 pub mod sync;
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context as _, Result};
 use clap::CommandFactory as _;
@@ -27,14 +29,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             clap_complete::generate(shell, &mut Cli::command(), "aggr", &mut std::io::stdout());
             Ok(())
         }
-        Command::Sync(mut args) => {
+        Command::Sync(args) => {
             if args.clean {
                 clean::run(&cli.config, &crate::cli::CleanArgs::default())?;
-                args.clean = false;
             }
-            sync::run(&Project::load(&cli.config).await?, &args).await
+            let project = Project::load(&cli.config).await?;
+            let _guard = project.lock("sync")?;
+            sync::run(&project, &args).await.map(|_| ())
         }
-        Command::Build(mut args) => {
+        Command::Build(args) => {
             if args.clean {
                 clean::run(
                     &cli.config,
@@ -43,13 +46,13 @@ pub async fn run(cli: Cli) -> Result<()> {
                         dry_run: false,
                     },
                 )?;
-                args.clean = false;
             }
             let project = if args.data_ref.is_some() {
                 Project::load_offline(&cli.config).await?
             } else {
                 Project::load(&cli.config).await?
             };
+            let _guard = project.lock("build")?;
             build::sync_and_run(&project, &args).await
         }
         Command::Dev(args) => dev::run(&cli.config, &args).await,
@@ -65,6 +68,8 @@ pub struct Project {
     /// Directory holding `aggr.toml`; themes and `templates/` are resolved against it.
     pub root: PathBuf,
     pub repo: Repo,
+    /// The data branch checkout, established once per process by [`Project::worktree`].
+    worktree: OnceLock<Worktree>,
 }
 
 impl Project {
@@ -94,6 +99,7 @@ impl Project {
             config_path,
             root,
             repo,
+            worktree: OnceLock::new(),
         };
         project.validate_layout()?;
         Ok(project)
@@ -104,8 +110,36 @@ impl Project {
         clean::validate_project_layout(self)
     }
 
-    /// The data branch checked out at `[store] dir`, created on first use.
-    pub fn worktree(&self) -> Result<Worktree> {
+    /// Serialise the commands that mutate this repository's `.aggr/` state for as long as the
+    /// returned guard lives. Two runs racing to create, prune or rebase the shared data checkout
+    /// would corrupt it; the second one fails at once instead. Called only after the layout was
+    /// validated, so a rejected configuration still leaves no `.aggr/` behind.
+    pub(super) fn lock(&self, subject: &str) -> Result<lock::Guard> {
+        let dir = self.repo.root().join(".aggr");
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        // The namespace as a whole is aggr's, not only the archive and cache directories below
+        // it that register themselves: the lock file must never show up in `git status` either.
+        self.repo.exclude(&dir)?;
+        lock::Guard::acquire(&self.lock_path(), subject, self.repo.root())
+    }
+
+    /// [`Project::lock`] for a command that only reports: it still refuses to run beside a
+    /// mutating command, but creates neither the lock file nor `.aggr/` when there is none.
+    pub(super) fn inspect_lock(&self, subject: &str) -> Result<Option<lock::Guard>> {
+        lock::Guard::inspect(&self.lock_path(), subject, self.repo.root())
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        self.repo.root().join(".aggr").join("aggr.lock")
+    }
+
+    /// The data branch checked out at `[store] dir`, created on first use. The fetch, prune, and
+    /// rebase that establish it run once per process: build's own sync already brought the branch
+    /// up to date, and the commands hold the only reference to the checkout in between.
+    pub fn worktree(&self) -> Result<&Worktree> {
+        if let Some(worktree) = self.worktree.get() {
+            return Ok(worktree);
+        }
         // Fetch/build can write through nested cache paths after opening the archive. Reject a
         // redirected cache tree before bootstrap makes any persistent project change.
         clean::validate_owned_cache_dir(
@@ -116,7 +150,7 @@ impl Project {
             .repo
             .ensure_worktree(&self.config.store.branch, &self.config.store.dir)?;
         Store::open(worktree.dir()).bootstrap()?;
-        Ok(worktree)
+        Ok(self.worktree.get_or_init(|| worktree))
     }
 
     /// Repository-local cache for build/sync. It is never shared with `aggr dev`.

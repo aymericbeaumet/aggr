@@ -45,6 +45,18 @@ empty/title-only body reports zero for each. The default theme shows reading tim
 publication, exposes the word count on hover, and emits `wordCount` plus an ISO 8601
 `timeRequired` duration in structured data.
 
+Every non-utility page advertises the site feeds: `page.feed_path` is the collection prefix (`""`
+at the root) and `page.feed_title` the title to label its Atom, RSS and JSON Feed alternates with;
+404 and offline pages carry neither. `site.language` is the `[site] language` BCP 47 tag that the
+base template writes to `<html lang>`, and `site.og_locale` is the same value in Open Graph form
+(`en_GB`). `sources[].language` is the BCP 47 tag a publisher declares for its whole feed (RSS
+`<language>`, Atom `xml:lang`, JSON Feed `language`), canonicalised and recorded in the source
+state, and `item.language` inherits it; both are absent when the feed declares none. The default
+theme adds `lang` to the article element, the feed-row title, and the excerpt only when that tag
+differs from `site.language`, so a single-language instance renders exactly as before.
+`sources[].feed_url` is the resolved feed endpoint when one is known, which the build
+also publishes as `sources.opml` for other readers alongside `llms.txt` and `aggr.json`.
+
 Use `url_for` for internal pages and assets so the same output works at `/` or under a nested
 mount. The default base template supplies the page-relative `<base>`; static asset names are
 content-hashed during the build. Public canonical and social URLs should use `site.base_url` only
@@ -134,8 +146,15 @@ The default theme uses plain links, a responsive header with visible navigation,
 column of approximately 65 characters. Its warm light/dark palettes, focus styling, and code
 colors are defined in `static/style.css`. Code is highlighted during Rust rendering with `syntax-`
 span classes and a small `.code-snippet[data-language]` label. Publisher language hints take
-precedence over conservative detection; ambiguous or unsupported snippets remain plain text.
-Labels are CSS-generated so copied code stays unchanged. No client-side highlighter is loaded.
+precedence over conservative detection; a snippet whose language stays ambiguous carries no
+`data-language` attribute at all, so the label disappears rather than reading “Text”. Labels are
+CSS-generated so copied code stays unchanged. No client-side highlighter is loaded.
+
+A figure and its caption render as `figure.article-figure` wrapping the picture and a `figcaption`.
+Tables are wrapped in `div.table-scroll`, which borrows the page margins and scrolls; the table
+itself stays one layout box so its header and body columns line up, and a header row aggr supplied
+for a source table that had none is hidden. Selecting article text mounts a
+`.selection-share` toolbar; see [the reader](reading.md#sharing-a-passage).
 
 When extending the default script, keep these relationships intact:
 
@@ -189,7 +208,7 @@ scrolls instantly to the top, accounting for the sticky header and mobile viewpo
 `O` opens the original and configured uppercase discussion shortcuts target the selected feed
 result or current article. The separate
 directories do not have local filters.
-The [README keyboard map](../readme.md#read-comfortably) describes the controls.
+The [reader keyboard map](reading.md#keyboard) describes the controls.
 
 Keep keyboard focus visible with an underline or contrasting surface. The default script marks
 programmatic main focus with `data-navigation-focus`, suppressing only the large container

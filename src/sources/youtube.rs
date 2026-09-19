@@ -1,6 +1,9 @@
 use url::Url;
 
-use crate::{content::ExtractedArticle, http};
+use crate::{
+    content::{ExtractedArticle, escape_html},
+    http,
+};
 
 mod duration;
 pub use duration::duration_seconds;
@@ -184,15 +187,6 @@ fn transcript_html(bytes: &[u8], video: &Url) -> Option<String> {
     }
     html.push_str("</section>");
     Some(html)
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('\"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 pub fn is_short_url(url: &Url) -> bool {

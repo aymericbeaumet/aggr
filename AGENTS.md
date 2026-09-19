@@ -37,19 +37,64 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
 ## Layout
 
 ```
-src/main.rs, cli.rs            entry + clap types
-src/commands/*.rs              one file per subcommand; Project = config + sources + repo
-src/config.rs, config/         aggr.toml types, safe source collections, ${ENV}, validation
-src/git.rs                     worktree/orphan bootstrap, commit with trailers, push+rebase, refs
-src/http.rs                    reqwest client: UA, timeouts, size cap, conditional GET, retries
-src/sources/{mod,feed,html,aggr}.rs source dispatch, automatic feed/HTML discovery, aggr engine
-src/content.rs                 strip → sanitize → Markdown; html_to_text, excerpt
-src/model.rs                   front matter, dedupe keys, link normalization, file names, blob sha
-src/store/                     the branch tree: items, state, seen, status, retention, front matter
-src/site/                      build orchestration, template context, minijinja env, outputs
-themes/default/                embedded theme (templates/, static/)
-tests/cli.rs                   end-to-end: bare origin + clone + httpmock + the real binary
-docs/git-model.md              the branch/ref contract; readme.md is user-facing
+src/main.rs, cli.rs                       entry + clap types; AGGR_CONFIG and AGGR_BASE_URL env defaults
+src/commands/mod.rs                       Project = config + sources + repo; the .aggr/ lock and worktree
+src/commands/sync.rs                      fetch, commit with trailers, push, move refs/aggr/last-good
+src/commands/build.rs                     sync then render, or render a pinned --data-ref
+src/commands/dev.rs                       isolated cache, in-memory snapshot, watch and live reload
+src/commands/fetch.rs                     shared fetch stage: per-source workers, heavy content, persistence
+src/commands/fetch/index.rs               one archive pass: stored URLs, paths, reconciliation indexes
+src/commands/fetch/links.rs               cross-source URL reservations for overlapping feeds
+src/commands/fetch/plan.rs                what an item becomes on disk, decided before any write
+src/commands/fetch/transaction.rs         per-source file transaction with rollback
+src/commands/fetch/repair.rs              post-feed repairs: missing media, feed-only capture upgrades
+src/commands/fetch/tests.rs               the fetch stage's unit tests
+src/commands/fetch/duration.rs            feed-parser receipts that gate conditional GET for durations
+src/commands/fetch/openreview.rs          public paper metadata instead of the challenged web app
+src/commands/fetch/podcast.rs             publisher-feed reconciliation of streaming-show items
+src/commands/fetch/recording.rs           bounded recording-duration probes with daily backoff
+src/commands/check.rs                     probe every source once; non-zero when any fails
+src/commands/clean.rs                     provably disposable targets only
+src/commands/init.rs                      aggr.toml and the optional GitHub workflow
+src/commands/lock.rs                      non-blocking advisory lock (.aggr/aggr.lock, dev.lock)
+src/commands/server.rs, server/client.rs  the dev HTTP server and its Vite passthrough
+src/config.rs, config/                    aggr.toml types, imports and collections, ${ENV}, BCP 47 tags, preferences, validation
+src/git.rs                                worktree/orphan bootstrap, commit with trailers, push+rebase, refs
+src/http.rs, http/transport.rs            reqwest client (UA, timeouts, size cap, conditional GET, retries) + wreq challenge fallback
+src/sources/mod.rs                        engine dispatch by URL predicate: instagram, qwen, podcast, then feed
+src/sources/feed.rs, html.rs              RSS/Atom/JSON via feed-rs; the discovery ladder from HTML
+src/sources/aggr.rs                       another aggr repository as a source
+src/sources/instagram.rs                  profile pages that expose post cards
+src/sources/podcast.rs                    show pages resolved to publisher feeds
+src/sources/qwen.rs                       Qwen's article API behind its JavaScript blog
+src/sources/youtube.rs, youtube/          Shorts filter, video URLs, posters, durations
+src/content.rs, content/                  strip → extract → Markdown → safe HTML; scan, cleanup, resources
+src/content_highlight.rs                  bounded build-time syntax highlighting
+src/media.rs, media/                      lossless article images; ThumbHash placeholders, srcset, SVG rasters, validation receipts
+src/media_duration.rs                     strict recording durations shared by feeds and players
+src/preview.rs, preview/pdf.rs            bounded thumbnails, PDF first pages
+src/threads.rs, threads/x.rs              ActivityPub and X thread expansion
+src/discussions.rs                        discussion-network lookups with cached backoff
+src/cache.rs                              cache roots, the Namespace registry, the render-fingerprint classification
+src/model.rs                              front matter, dedupe keys, link normalization, file names, blob sha
+src/store/                                the branch tree: items, state, seen, status, retention, front matter
+src/site/mod.rs                           build orchestration: phases, media windows, the timing line
+src/site/assets.rs                        content-addressed media gathered on workers, published in item order
+src/site/context.rs                       the template contract
+src/site/render.rs                        minijinja env with the layered template/static lookup
+src/site/outputs.rs                       feeds, OPML, discovery documents, sitemaps, redirect stubs
+src/site/pagefind.rs                      the search index and its cache key
+src/site/parallel.rs                      ordered map over at most 8 scoped workers; AGGR_BUILD_WORKERS
+src/site/{related,display,document,interactive,item_type,native_media,video}.rs  navigation and presentation contexts
+themes/default/                           embedded theme (templates/, static/ with the committed client bundle)
+web/                                      Svelte/TypeScript client; web/src/reader/ holds the tested reader modules
+tests/cli.rs                              end-to-end: bare origin + clone + httpmock + the real binary
+tests/clean.rs, local_sources.rs          cleanup and local-file source scenarios
+tests/support/                            shared integration helpers: git and environment isolation
+tests/browser/                            WebDriver contracts: harness.rs + one module per topic
+tests/browser_performance.rs              non-gating client benchmark
+docs/git-model.md                         the branch/ref contract; readme.md is a short user-facing entry
+docs/*.md                                 the user-facing reference the readme links out to
 ```
 
 ## Commands
@@ -79,12 +124,26 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   and keep navigation progressively functional without JavaScript.
 - A normal source URL is intentionally enough: keep HTML heuristics internal and remember the
   discovered feed endpoint. `type = "html"` and site-specific selectors are not public config.
+  A listing URL names a section, so probe conventional endpoints relative to it with or without a
+  trailing slash, never at the root, and only on first resolution. A discovered feed with no
+  entries loses to the listing that does have them.
 - Article ingestion must not launch a browser or embed Python. Detect challenges by the
   `cf-mitigated: challenge` response header, never by scripts also present in real articles.
   Preserve aggr's identity and configured headers when changing HTTP transports; see
   [interoperability](docs/interoperability.md) for native build requirements.
 - `sync` persists to git; `build` runs that same sync first; `dev` runs it against a namespaced
   OS cache and serves an atomic in-memory snapshot without committing or pushing.
+- Every `src/sources/*` adapter documents its accepted URL contract in
+  [interoperability](docs/interoperability.md#source-adapters); `sources/mod.rs` dispatches on
+  those predicates in order.
+- Every new `src/**/*.rs` file is classified in `src/cache.rs`: list it in
+  `render_implementation_sources()` when it can change rendered bytes, otherwise in
+  `RENDER_INDEPENDENT_SOURCES`. The classification unit test fails until it is.
+- Cache directories are registered in `cache::Namespace`; a unit test pins the reusable workflow's
+  `actions/cache` path list to that registry, so a new namespace changes both.
+- The browser suite (`tests/browser/`) is one module per topic, and every test builds its own
+  fixture site and Chrome session. `AGGR_BROWSER_TIMEOUT_SECS` lengthens its waits on a loaded
+  machine; `AGGR_BUILD_WORKERS` pins the build's worker count.
 
 ## Reader and ingestion invariants
 
@@ -92,6 +151,19 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   its strict option schema. Remove ` #` comments from raw lines before trimming whitespace.
   Scope inherited collection headers to the declaring origin or repository. Ordinary remote source
   URLs must not trigger config-time network probes; opaque collection endpoints use `collection = true`.
+- Cleanup that only needs the Markdown body belongs in the build, where it also reaches archives
+  written by an older version; cleanup that needs the original HTML belongs in capture. A build
+  never rewrites a stored body, not even for whitespace. `--reprocess` is the one path that
+  re-derives stored bodies from retained HTML: explicit, idempotent, and never shortening an item
+  whose companion was truncated.
+- Every cleaning rule carries a test built from the markup that motivated it, named in a comment,
+  plus the neighbouring case it must not touch.
+- Rebuild document semantics Markdown cannot express before conversion, not after: numbered
+  listing tables become code blocks, endnote lists and their references become Markdown footnotes,
+  figure captions become a hard break the renderer regroups into `<figure>`, and a headerless table
+  gains an empty header so it stays a table. An `<audio>` element has no player in the reader, so
+  drop it with the chrome around it. Leave a code block unlabelled rather than guessing its
+  language; a publisher's own name for a language outranks the grammar used to colour it.
 - Preserve existing body, HTML, and preview companions when explicit refresh fills missing media;
   apply shared boundary cleanup during both fetch and rendering so old archives benefit safely.
   Remove compact bylines only from a leading prose paragraph with a matching publication date.
@@ -160,7 +232,14 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - Scope completion counts to the other active search clauses and keep readable source aliases
   unambiguous. Infer searchable item types from primary content, not incidental article media.
 - Keep reading and supported media inside aggr whenever practical, with accessible original-link
-  fallbacks when a provider or browser prevents embedding.
+  fallbacks when a provider or browser prevents embedding. Activating a provider facade plays at
+  once: ask the player directly instead of trusting an `autoplay` parameter.
+- A shared selection addresses words, not DOM offsets, so the link survives a rebuild. Keep the
+  range in the fragment, update it live while the selection changes, and clear it when it empties.
+  The toolbar answers the reader's own gesture, never a restored selection, and scrolling with a
+  selection repositions it without re-deriving it: index the article once per page scope.
+- Mobile is a platform surface: a compact tab bar above the home indicator, colour rather than
+  underline for the current tab and for links, and no default tap highlight.
   Detect interactive canvas capabilities before stripping source HTML; retain only a metadata
   marker and load live originals automatically in an opaque-origin sandbox when the reader opens
   the article, never during ingestion. Release live frames when their page scope is disposed.
@@ -171,6 +250,9 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 
 Podcast URL resolution and provider limits are documented in [podcast sources](docs/podcasts.md);
 shared pipeline limits and cache boundaries are in [performance](docs/performance.md).
+
+Source configuration is documented in [sources](docs/sources.md), the reading experience in
+[reading](docs/reading.md), and deployment in [hosting](docs/hosting.md).
 
 See [the theme contract](docs/themes.md) for reader behavior and
 [interoperability](docs/interoperability.md) for source and preservation boundaries.

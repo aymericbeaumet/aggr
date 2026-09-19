@@ -6,6 +6,13 @@ ordinary remote feed/page URLs; only known or explicitly declared collections ex
 Network work uses Tokio and bounded semaphores. Git persistence and source transactions remain
 ordered, so concurrent ingestion preserves rollback, deduplication, and no-op runs.
 
+Beyond those two configured limits the fetch stage bounds itself per process: two articles are
+converted at once and two are persisted at once (both stages are CPU-bound), eight
+recording-duration probes may be in flight, a page's feed discovery considers at most 16 candidate
+endpoints (advertised `<link>` elements first, so the cap only drops body anchors), one source's
+whole discovery ladder shares a deadline of three request timeouts or 60 seconds, whichever is
+longer, and one article's image downloads share a 120-second deadline.
+
 The initial archive scan builds normalized deduplication links, per-source paths for explicit
 refresh, and a compact Spotify episode index for publisher-feed reconciliation. Workers share these
 indexes instead of rescanning the whole archive once per source. The indexes retain identifiers
@@ -38,8 +45,9 @@ binary article links skip HTML extraction to avoid downloading the same original
 Build-time preview fallback reuses retained image renditions and memoizes up to 64 decoding
 results. Dimensions from retained publisher HTML are inspected only for articles with image
 markup; text-only articles avoid the additional read and sanitization. Render fingerprints
-include the display, preferences, document, and native-media implementations to invalidate stale
-snapshots when those components change.
+include every module that can change rendered bytes (a unit test classifies each source file as
+fingerprinted or render-independent) and name loaded config files by their repository-relative
+path, so the same checkout at another location shares a fingerprint.
 
 Stored-image validation receipts live under the existing build/dev cache in `validated-images-v2`.
 They reuse verified rendition choices, derived colors, and ThumbHashes across builds
@@ -55,8 +63,15 @@ the small inline PNG from its validated hash without decoding the master. The fi
 remains a cold operation, and large cold images are deliberately validated one at a time.
 
 Static article pages and portable representations render with at most eight scoped CPU workers,
-limited by available parallelism. Small archives render sequentially. Outputs and sitemap order
-remain deterministic; all workers join before errors propagate. The existing rendered-site,
+limited by available parallelism or by `AGGR_BUILD_WORKERS`. `parallel::map` hands inputs to those
+workers through a shared claim cursor (each thread takes the next unclaimed input, so a few slow
+articles never leave the others idle) and writes results into preallocated slots, so the output
+keeps input order whatever the thread count; fewer than eight inputs run on the calling thread.
+The media phase gathers archived media (reads, validation, decoding) on the same workers one
+window at a time, about two items per worker and never below eight, and publishes each window on
+the build thread in item order, so the dedupe map, memo state, and output bytes never depend on
+timing while the assets held in memory stay bounded. Outputs and sitemap order remain
+deterministic; all workers join before errors propagate. The existing rendered-site,
 Pagefind, article-response, extraction, and dev caches remain in use. Offline catalogs hash each
 shared asset once per build. Worker downloads reuse verified revisions across deployments.
 
@@ -77,6 +92,41 @@ Pagefind output is reused by its input fingerprint. Upstream Pagefind can order 
 differently on a cold rebuild, producing different bytes for an equivalent index. Preserving the
 cache keeps no-op index and worker versions stable; a cold rebuild may change the content index
 version, but never the application-release fingerprint.
+
+## Caches on GitHub Actions
+
+`src/cache.rs` is the registry of every `.aggr/cache/build-v1` namespace; `Namespace::ci_cached`
+decides which ones the reusable workflow carries between runners, and a unit test holds the
+workflow's `actions/cache` paths to that list. Only derived state about bytes the site already
+publishes qualifies, because it invalidates itself: `validated-images-v2` (content-keyed receipts),
+`pagefind-v1` (index keyed by its input fingerprint), `feed-parsing` (parser-version receipts that
+gate conditional GET), and the timestamped backoff markers in `discussions-v1`, `image-failures-v1`,
+`capture-retries-v1` and `recording-duration-v1`. Each run saves under its own key and the next run
+restores the newest entry; the save runs only after a successful build.
+
+`articles-v1` holds raw original-page responses. It is private to the machine that fetched it and is
+never uploaded. `render-v1` is not cached on Actions either: the fingerprint folds each item's age
+band (1 h, 3 h, 24 h) into the generation, so any item under a day old changes it, and a full site
+of a 1,100-item instance is about 2.4 GB per entry. Uploading one per run exhausted the 10 GB
+repository cache quota for entries that almost never hit.
+
+Nothing in these caches expires by age except the backoff markers, so `aggr sync` sweeps the build
+cache at most once a day (`cache::sweep`, remembered in `.aggr/cache/build-v1/.last-sweep`; a dry
+run never sweeps). Under `articles-v1` it removes every `bodies/<sha1>.html` that no `entries/*.toml`
+references any more (a page that changed leaves its previous body behind) and every
+`extracted/<version>/` directory of an earlier extractor version. Bodies themselves have no TTL: a
+body stays as long as one entry points at it, however old, because it is what conditional GET
+revalidates against. The same pass can drop `image-failures-v1/<generation>/` directories of earlier
+media implementations, since `sync` passes the current generation. The
+sweep is best-effort: a path that cannot be removed is logged at debug and retried on the next pass,
+and no sweep failure ever fails the sync. The marker lives in the git-excluded cache, so a run that
+finds nothing new still leaves no trace in the repository.
+
+A warm run on Actions therefore still renders every page, but skips cold image validation and
+Pagefind indexing, fetches feeds conditionally, and honours the image, capture and duration
+backoffs. Expect rendering to dominate the build; the cold image validation that took about seven
+minutes on a 1,120-item instance disappears once the receipt cache restores. The first run after a
+cache eviction is cold again.
 
 These changes remove repeated work and allow independent work to overlap. They do not change
 storage retention or guarantee a fixed speedup; source latency, image dimensions, CPU availability,
@@ -99,8 +149,16 @@ in flight. Search result images stay under Svelte ownership without a second sta
 
 ## Measuring changes
 
-Use `RUST_LOG=aggr=debug` on builds or dev to see archive, media, page-rendering, index, and offline
-preparation timings without verbose dependency logs affecting the measurements. Compare cold caches,
+Every build logs one info line (`-v`) of the form `build: <phase> Xs, …, total Xs (N pages, M
+items)`, naming the seven phases in build order: archive preparation, media and item metadata,
+feed and directory pages, article pages and representations, feeds and static assets, search index,
+and offline catalog and worker. Under GitHub Actions the same line is also printed as a `::notice`,
+so it reaches the run summary without debug logging. The search phase is where a cold run
+legitimately differs from a warm one: an index rebuilt from scratch can differ byte-for-byte
+because upstream Pagefind fills its word and filter maps from hash maps, which the reused
+`pagefind-v1` entry masks. Use `RUST_LOG=aggr=debug` on builds or dev to see archive, media,
+page-rendering, index, and offline preparation timings without verbose dependency logs affecting
+the measurements. Compare cold caches,
 warm rebuilds, and no-op builds separately. Avoid simultaneous source
 edits and competing CPU-heavy jobs during timing comparisons.
 
@@ -166,6 +224,12 @@ The development profile keeps basic optimization for aggr itself and stronger op
 image decoding (including PNG filtering), regular-expression matching, and SHA-1/SHA-256. Other dependencies keep Cargo's fast
 unoptimized development build. Warm asset validation still reads and SHA-256 hashes retained bytes; receipts reuse the previously
 verified SHA-1 asset identities without a second byte pass.
+
+The profile emits line tables instead of full DWARF. Backtraces and profiles keep file and line
+information, while the debug information that dominated linking is gone: a one-line edit to
+`src/main.rs` rebuilds in about 6 s instead of about 19 s on an M-series laptop, which is what
+`cargo run -- dev` pays on every restart. Use `RUSTFLAGS="-g"` for a session that needs full
+variable inspection under a debugger.
 
 Keep the local `target/` directory between edits. Cargo enables incremental compilation for the
 application by default; changing compiler flags, profiles, or target directories can discard that

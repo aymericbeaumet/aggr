@@ -1,8 +1,9 @@
-import { mount, tick, unmount } from 'svelte';
+import { mount, tick } from 'svelte';
 import { writable } from 'svelte/store';
 import Controls from './Controls.svelte';
 import { revealSearchInput } from './focus';
 import Results from './Results.svelte';
+import { mountOver } from '../mount-over';
 import { acceptCompletion, complete, completionMenu, isCompletingFacet, stableCompletions, type Completion, type CompletionMenu } from './completion';
 import { completionContext, LatestFacets } from './completion-context';
 import { readableQuery, resolveFacet } from './facets';
@@ -14,6 +15,11 @@ import type { ViewState } from './state';
 export type { SearchOptions, SearchHandle } from './types';
 export { facetURL } from './query';
 export { createSearchSession, type SearchSession } from './engine';
+
+/** A handle that does nothing: what the page keeps when the search controls could not be mounted. */
+export function inertSearchHandle(): SearchHandle {
+  return { async destroy() {}, focus() {}, refresh() {}, isActive: () => false, updateOfflineStatus() {}, updateDates() {}, select() {} };
+}
 
 export function mountSearch(options: SearchOptions): SearchHandle {
   const { root, resultsRoot, staticFeed, base } = options;
@@ -34,7 +40,10 @@ export function mountSearch(options: SearchOptions): SearchHandle {
     isOffline: !navigator.onLine, hasOfflineStatus: false, savedURLs: new Set(), cachedPreviews: new Set()
   };
   const model = writable(state);
-  const update = (changes: Partial<ViewState>) => { state = { ...state, ...changes }; model.set(state); };
+  const update = (changes: Partial<ViewState>) => {
+    if (destroyed) return;
+    state = { ...state, ...changes }; model.set(state);
+  };
   const engine = options.session;
   engine.setOnline(navigator.onLine);
   let manifest: SearchCatalog | undefined;
@@ -48,7 +57,6 @@ export function mountSearch(options: SearchOptions): SearchHandle {
   let online = navigator.onLine;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const bindings = new AbortController();
-  const fallback = [...root.childNodes].map(node => node.cloneNode(true));
   const staticList = staticFeed?.querySelector<HTMLElement>('#list');
   const staticID = staticList?.id;
   const wasHidden = staticFeed?.hidden ?? false;
@@ -254,15 +262,17 @@ export function mountSearch(options: SearchOptions): SearchHandle {
     if (!manifest) loadFacets();
   }
 
-  root.replaceChildren();
-  const controls = mount(Controls, { target: root, props: {
-    model, change, choose, submit: () => { if (!composing) { dismiss(); void perform(); } },
-    move: (direction: number) => !composing && state.ready && state.page.results.length > 0 && options.moveSelection(direction),
-    open: () => !composing && state.ready && !state.busy && state.page.results.length > 0 && options.openSelected(),
-    clear: () => { options.onQueryChanged(); reset(); }, caret: (cursor: number) => { if (cursor !== state.cursor) { update({ cursor }); suggestions(); } }, focusInput, revealInput,
-    dismiss, blur: () => { menu = completionMenu(menu, 'blur'); update({ open: false }); }
-  } });
-  const results = mount(Results, { target: resultsRoot, props: { model, pageChanged: (page: number) => { void perform(page); } } });
+  // The static form comes back if either component fails to mount, and again when the page is disposed.
+  const overlay = mountOver(root, [
+    () => mount(Controls, { target: root, props: {
+      model, change, choose, submit: () => { if (!composing) { dismiss(); void perform(); } },
+      move: (direction: number) => !composing && state.ready && state.page.results.length > 0 && options.moveSelection(direction),
+      open: () => !composing && state.ready && !state.busy && state.page.results.length > 0 && options.openSelected(),
+      clear: () => { options.onQueryChanged(); reset(); }, caret: (cursor: number) => { if (cursor !== state.cursor) { update({ cursor }); suggestions(); } }, focusInput, revealInput,
+      dismiss, blur: () => { menu = completionMenu(menu, 'blur'); update({ open: false }); }
+    } }),
+    () => mount(Results, { target: resultsRoot, props: { model, pageChanged: (page: number) => { void perform(page); } } })
+  ]);
   window.addEventListener('popstate', () => {
     const url = new URL(location.href), query = queryFromLocation(url);
     dismiss();
@@ -297,10 +307,7 @@ export function mountSearch(options: SearchOptions): SearchHandle {
       destroyed = true; generation++; clearTimeout(timer); bindings.abort();
       latestFacets.clear();
       queryWarmup?.abort();
-      disposal = Promise.all([unmount(controls), unmount(results)]).then(() => {
-        showResults(false);
-        root.replaceChildren(...fallback);
-      });
+      disposal = overlay.restore().then(() => showResults(false));
       return disposal;
     }
   };

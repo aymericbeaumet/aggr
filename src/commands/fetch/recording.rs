@@ -6,13 +6,21 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, bail};
 use url::Url;
 
-use crate::cache::ArticleCache;
+use crate::cache::{ArticleCache, Namespace};
 use crate::config::Source;
 use crate::http::{self, Request, Response};
 use crate::model::RawItem;
 use crate::site::item_type::ItemType;
 
 const RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Whether an item plays a recording: a podcast episode, an audio file, or a video page.
+pub(super) fn is_recording(link: &str, audio: Option<&str>) -> bool {
+    matches!(
+        ItemType::from_urls(link, audio),
+        ItemType::Podcast | ItemType::Audio | ItemType::Video
+    )
+}
 
 pub(super) async fn infer(
     raw: &RawItem,
@@ -46,10 +54,7 @@ async fn infer_at(
         .get("audio_url")
         .and_then(|value| value.as_str())
         .and_then(safe_url);
-    if !matches!(
-        ItemType::from_urls(&raw.link, audio.as_ref().map(Url::as_str)),
-        ItemType::Podcast | ItemType::Audio | ItemType::Video
-    ) {
+    if !is_recording(&raw.link, audio.as_ref().map(Url::as_str)) {
         return Ok(None);
     }
     let Some(url) = safe_url(&raw.link) else {
@@ -77,7 +82,7 @@ async fn infer_at(
     if failures.blocked(&url) {
         return Ok(None);
     }
-    let probe = Probe(cache_dir.join("recording-duration-v1").join(format!(
+    let probe = Probe(Namespace::RecordingDuration.dir(cache_dir).join(format!(
         "{}.probe",
         crate::model::sha1_hex(format!("{}\0{:?}\0{:?}", url, headers, audio))
     )));
@@ -240,6 +245,25 @@ mod tests {
         format!(
             r#"<script type="application/ld+json">{{"@type":"AudioObject","contentUrl":"{audio}","duration":"PT27M51S"}}</script>"#
         )
+    }
+
+    #[test]
+    fn recordings_are_video_pages_audio_files_and_podcast_episodes() {
+        assert!(is_recording(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            None
+        ));
+        assert!(is_recording("https://cdn.example/episode.mp3", None));
+        assert!(is_recording(
+            "https://publisher.example/episode",
+            Some("https://cdn.example/episode.mp3")
+        ));
+        assert!(!is_recording("https://publisher.example/article", None));
+        assert!(!is_recording(
+            "https://publisher.example/article",
+            Some("not a url")
+        ));
+        assert!(!is_recording("https://publisher.example/paper.pdf", None));
     }
 
     #[tokio::test]
@@ -420,7 +444,7 @@ mod tests {
             .unwrap(),
             None
         );
-        assert!(!directory.path().join("recording-duration-v1").exists());
+        assert!(!Namespace::RecordingDuration.dir(directory.path()).exists());
         failed.delete_async().await;
         let ready = server
             .mock_async(|when, then| {

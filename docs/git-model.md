@@ -17,8 +17,10 @@ refs/aggr/*        lightweight pointers to data commits
 ```
 
 The primary branch is often named `main`, but aggr does not depend on that name and never commits
-to the branch holding the config. The data worktree (`.aggr/data`) and build output (`_site/`) are
-added to `.git/info/exclude`, so `git status` stays clean without a `.gitignore` entry.
+to the branch holding the config. The whole `.aggr/` directory (the data worktree `.aggr/data`,
+the build cache `.aggr/cache`, and the `aggr.lock` file described below) and the build output
+(`_site/`) are added to `.git/info/exclude`, so `git status` stays clean without a `.gitignore`
+entry on the primary branch.
 
 The data branch shares no history with the primary branch; it starts from an orphan commit named
 `aggr: init` and is only ever extended. An item in an older commit therefore remains addressable by
@@ -35,20 +37,35 @@ aggr fetches and pushes through a remote named `origin`. A hosted runner needs w
 ```text
 README.md                                              what this branch is, how to edit it by hand
 .gitattributes                                         sources/*/seen.txt merge=union; LF everywhere
+.gitignore                                             .tmp*: an interrupted atomic write is never committed
 items/<source>/<yyyy>/<mm>/<yyyy-mm-dd>-<slug>.md      YAML front matter + readable Markdown
 items/<source>/<yyyy>/<mm>/<yyyy-mm-dd>-<slug>.html    stripped HTML from which Markdown was derived
-sources/<source>/state.toml                            upstream title/site URL, ETag, Last-Modified, body hash
+sources/<source>/state.toml                            identity, resolved_url, title/site URL, language, ETag, Last-Modified, body hash
 sources/<source>/seen.txt                              "<key> <yyyy-mm-dd>" per line, append-only
 status.toml                                            sources currently failing; absent when all is well
 ```
 
+- **Bootstrap files are regenerated.** `README.md`, `.gitattributes`, and `.gitignore` are written
+  when missing, each checked on its own, so a branch created by an older version gains the file it
+  lacks the next time a command opens the archive. The `.gitignore` keeps `.tmp*`, the temporary
+  file of an interrupted atomic write, out of `git add -A` and therefore out of history.
 - **Item paths are identities.** Storage stays date-partitioned, while the public site uses
   `/items/<source>/<stem>/` plus `.md`, `.txt`, `.rst`, and `.json` representations. Search and
   alternate representations key on the path. The date is the upstream publication time, otherwise
   its update time, otherwise the time of first sight; the file is never moved. File names use
   lowercase ASCII slugs of at most 60 characters, with a stable item-derived hash on collision.
-- **Write once.** A normal sync never overwrites an existing `.md`; hand edits win. `aggr sync
-  --refresh` is the explicit exception, and the previous version remains in Git history.
+- **Bodies are written once.** A normal sync never rewrites an item's Markdown body and never
+  moves its path. Enrichment fills in place and never removes existing content: a publisher feed
+  can supply a missing audio URL or duration, and missing image and preview companions are
+  repaired beside the item. A feed-only capture is upgraded to the original article when the page
+  becomes available, keeping its path and dates. Hand edits to `hidden`, `labels`, `authors`, and
+  `first_seen` win over all of these. `aggr sync --refresh` and `--reprocess` are the explicit
+  exceptions that replace bodies, and the previous version remains in Git history.
+- **State is regenerated.** `sources/<source>/state.toml` holds what the next fetch needs:
+  `identity` is a hash of the unexpanded fetch inputs (credentials and `${ENV}` values never enter
+  history) that invalidates the discovered `resolved_url` when the config changes, alongside the
+  upstream title, site URL, and conditional-GET validators. Neither it nor `status.toml` holds
+  anything a sync cannot rebuild.
 - **Deleted stays deleted.** Dedupe keys derived from the entry id, normalized original URL, and
   `title|published` are appended to `seen.txt` when an item is written. They are never removed, so
   deleting a current item does not make a later fetch add it again.
@@ -84,6 +101,11 @@ render the static site           →  from the selected data commit
   configuration errors, and data Git/IO errors make sync exit non-zero. After data is saved,
   an auxiliary recovery-pointer failure is reported as a warning and does not block rendering
   or deployment of the current snapshot.
+- **One mutating command at a time.** `sync`, `build`, and `clean` hold an exclusive advisory lock
+  on `.aggr/aggr.lock` while they run. A second one fails immediately, naming the holder's PID and
+  command, instead of racing on `git worktree add`, `git worktree prune`, or the rebase. `clean
+  --dry-run` only inspects the lock and creates neither the file nor `.aggr/`; `dev` guards its own
+  cache with a `dev.lock` in the same way.
 - **Push, never force.** A rejected push is followed by a fetch and rebase onto `origin/aggr`.
   `seen.txt` files union-merge through `.gitattributes`, while regenerated state files keep the
   current run's result. A history that cannot be rebased is a hard error with recovery instructions,
@@ -164,13 +186,16 @@ aggr build --data-ref refs/aggr/last-good \
 With `--data-ref`, `build` skips source synchronization, discussion-network lookups, commits, and
 pushes, then renders the selected stored tree. Unavailable feeds, article pages, and discussion
 services therefore do not prevent this recovery build. Configuration loading can still fetch
-remote `include` files, so this is fully offline only when the effective config is local. Nor does
+remote collections, so this is fully offline only when the effective config is local. Nor does
 the flag freeze every other build input: the current theme and binary affect HTML, and
 time-dependent presentation can change between builds. The `Aggr-Config` trailer pins the tracked
-root config commit only; remote included config bodies are cache inputs, not committed data. For a
-repeatable recovery, keep all local includes and theme files in the primary branch, pin or vendor
-remote includes, retain the matching aggr binary, and record the intended public base URL. The
-render cache is an optimization, not part of the archive.
+root config commit only; remote collection bodies are cache inputs, not committed data. For a
+repeatable recovery, keep all local collection files and theme files in the primary branch, pin or
+vendor remote collections, retain the matching aggr binary, and record the intended public base
+URL. The render cache is an optimization, not part of the archive. `status.toml` and
+`sources/<source>/state.toml` are regenerated and self-healing: a malformed or missing file is read
+as absent, logged, and rewritten by the next sync that has something to record, so neither needs
+restoring from history.
 
 ## Editing the branch by hand
 

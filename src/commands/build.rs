@@ -9,24 +9,33 @@ use chrono::Utc;
 
 use super::Project;
 use crate::cli::BuildArgs;
+use crate::discussions::ResolutionSet;
+use crate::site::{self, BuildInfo, Summary};
+use crate::store::Store;
 
 /// Public `aggr build`: live data is synced first, while a pinned ref is rendered as-is.
+/// `--clean` is handled by the dispatcher before the project is loaded.
 pub async fn sync_and_run(project: &Project, args: &BuildArgs) -> Result<()> {
     // Validate ownership before sync can create a worktree, write state, or fetch anything.
     // Site rendering and cache restoration both replace the output recursively.
     super::clean::validate_output(project, &out_dir(project, args))?;
-    if args.clean {
-        super::clean::run_project(project, args.out.as_deref(), false)?;
-    }
-    if args.data_ref.is_none() {
-        super::sync::run(project, &crate::cli::SyncArgs::default()).await?;
-    }
-    run_prevalidated(project, args).await.map(|_| ())
+    let discussions = if args.data_ref.is_none() {
+        super::sync::run(project, &crate::cli::SyncArgs::default()).await?
+    } else {
+        None
+    };
+    run_prevalidated(project, args, discussions)
+        .await
+        .map(|_| ())
 }
-use crate::site::{self, BuildInfo, Summary};
-use crate::store::Store;
 
-async fn run_prevalidated(project: &Project, args: &BuildArgs) -> Result<Summary> {
+/// `resolved` carries the discussion matches the preceding sync already computed for this data;
+/// without it (a sync stage that was skipped or failed to match) they are resolved here.
+async fn run_prevalidated(
+    project: &Project,
+    args: &BuildArgs,
+    resolved: Option<ResolutionSet>,
+) -> Result<Summary> {
     let worktree = project.worktree()?;
     let out = out_dir(project, args);
     let base_url = base_url(project, args)?;
@@ -53,7 +62,9 @@ async fn run_prevalidated(project: &Project, args: &BuildArgs) -> Result<Summary
     let discussions = if args.data_ref.is_some() {
         // A pinned archive build is the recovery path: do not turn optional live discussion
         // enrichment into another network dependency.
-        crate::discussions::ResolutionSet::default()
+        ResolutionSet::default()
+    } else if let Some(resolved) = resolved {
+        resolved
     } else {
         resolve_discussions(project, &store, &cache_dir, now).await?
     };
@@ -61,6 +72,7 @@ async fn run_prevalidated(project: &Project, args: &BuildArgs) -> Result<Summary
     let fingerprint = crate::cache::render_fingerprint(crate::cache::RenderFingerprint {
         config: &project.config,
         project_root: &project.root,
+        repo_root: project.repo.root(),
         config_sha: config_sha.as_deref(),
         data_sha: data_sha.as_deref(),
         base_url: base_url.as_deref(),
@@ -125,7 +137,7 @@ pub fn run_ephemeral(
     data_dir: &Path,
     out: &Path,
     cache_dir: &Path,
-    discussions: crate::discussions::ResolutionSet,
+    discussions: ResolutionSet,
 ) -> Result<Summary> {
     let store = Store::open(data_dir).with_image_cache(cache_dir);
     let now = Utc::now();
@@ -161,7 +173,17 @@ pub async fn resolve_discussions(
     store: &Store,
     cache_dir: &Path,
     now: chrono::DateTime<Utc>,
-) -> Result<crate::discussions::ResolutionSet> {
+) -> Result<ResolutionSet> {
+    // Mirrors the provider check inside `discussions::resolve`: without a lookup provider there
+    // is nothing to match, so the archive is not parsed only to be discarded.
+    if project
+        .config
+        .networks
+        .iter()
+        .all(|network| network.provider.is_none())
+    {
+        return Ok(ResolutionSet::default());
+    }
     let items = store.items()?;
     let client = Arc::new(crate::http::Client::new(&project.config.fetch)?);
     crate::discussions::resolve(&project.config.networks, &items, client, cache_dir, now).await

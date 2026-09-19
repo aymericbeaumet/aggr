@@ -1,5 +1,6 @@
 import { createAudio } from "./audio";
 import { enhanceInteractive } from "./interactive";
+import { originalLabel } from "./labels";
 import { createNativeTiming, createProviderTiming, finiteDuration, formatPlaybackEnd, playbackTiming, updateConsumption, type PlaybackTimingState } from "./media-timing";
 
 export interface MediaOptions {
@@ -106,6 +107,8 @@ export function createMedia(options: MediaOptions) {
       && !["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)) return;
     player.dataset.videoBound = "true";
     const inline = player.classList.contains("video-player-inline");
+    // Read before externalLinks() can append ", opens in a new tab" to the preview label.
+    const frameTitle = originalLabel(preview);
 
     function mountPlayer(autoplay: boolean) {
       if (!player || player.dataset.videoMounted === "true") return;
@@ -119,7 +122,7 @@ export function createMedia(options: MediaOptions) {
       }
       const frame = document.createElement("iframe");
       frame.src = url.href;
-      frame.title = preview.getAttribute("aria-label") || "";
+      frame.title = frameTitle;
       frame.loading = autoplay ? "eager" : "lazy";
       frame.allow = "autoplay; encrypted-media; fullscreen; picture-in-picture";
       frame.allowFullscreen = true;
@@ -131,7 +134,22 @@ export function createMedia(options: MediaOptions) {
         player.classList.add("is-loaded");
         player.removeAttribute("aria-busy");
         preview.hidden = true;
+        // An `autoplay` parameter alone leaves YouTube and Vimeo showing their own play button
+        // when the browser's autoplay heuristics decline, costing the reader a second click.
+        // The activating click is still the gesture that authorized this, so ask the player too.
+        if (autoplay) requestPlayback();
       }, { once: true, signal: listeners.signal });
+
+      function requestPlayback() {
+        const target = frame.contentWindow;
+        if (!target) return;
+        if (provider === "youtube") {
+          target.postMessage(JSON.stringify({ event: "listening", id: "aggr-play", channel: "widget" }), url.origin);
+          target.postMessage(JSON.stringify({ event: "command", func: "playVideo", args: [], id: "aggr-play", channel: "widget" }), url.origin);
+        } else if (provider === "vimeo") {
+          target.postMessage({ method: "play" }, url.origin);
+        }
+      }
       if (!inline && (provider === "youtube" || provider === "vimeo")) {
         const display = timingDisplay(player);
         const timing = createProviderTiming({

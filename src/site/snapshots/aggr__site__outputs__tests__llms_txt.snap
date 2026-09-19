@@ -1,0 +1,23 @@
+---
+source: src/site/outputs.rs
+expression: llms_txt(&site())
+---
+# Example & Reader
+
+> Collected <carefully>
+
+## Resources
+
+- [Site](https://example.test/reads/)
+- [Instance metadata](https://example.test/reads/aggr.json)
+- [Atom feed](https://example.test/reads/atom.xml)
+- [RSS feed](https://example.test/reads/rss.xml)
+- [JSON Feed](https://example.test/reads/feed.json)
+- [OPML subscriptions](https://example.test/reads/sources.opml)
+- [Browse](https://example.test/reads/browse/)
+- [Sources](https://example.test/reads/sources/)
+- [Categories](https://example.test/reads/categories/)
+- [Tags](https://example.test/reads/tags/)
+- [Source configuration](https://example.test/reads/aggr.toml)
+- [Original URL to snapshot linkset](https://example.test/reads/linkset.json)
+- [Sitemap](https://example.test/reads/sitemap.xml)

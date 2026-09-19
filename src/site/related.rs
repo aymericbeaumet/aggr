@@ -336,6 +336,7 @@ mod tests {
             feed_display: "example.com".into(),
             is_aggregated: false,
             is_youtube: false,
+            language: None,
             category: Some(category.into()),
             date,
             age_band: "fresh",

@@ -116,6 +116,7 @@ fn changed_fetch(url: &Url, via: String, checked_out_tip: String, items: Vec<Raw
         meta: SourceMeta {
             title: (!title.is_empty()).then_some(title),
             site_url: Some(via),
+            language: None,
         },
         items,
     }
@@ -246,7 +247,9 @@ pub fn convert(item: &Item, html: Option<String>, via: &str) -> RawItem {
         let body = item.body.trim();
         (!body.is_empty()).then(|| content::render_markdown(body))
     });
-    let mut extra = front.extra.clone();
+    // A remote archive may carry hand-edited YAML that JSON cannot hold; the copy must stay
+    // serializable wherever it lands.
+    let mut extra = crate::store::frontmatter::json_safe_extra(front.extra.clone());
     let origin = extra
         .get("via")
         .cloned()
@@ -355,6 +358,25 @@ mod tests {
 
         let with_html = convert(&item(), Some("<p>raw</p>".into()), "x");
         assert_eq!(with_html.content_html.as_deref(), Some("<p>raw</p>"));
+    }
+
+    #[test]
+    fn converted_extra_stays_json_safe() {
+        let mut item = item();
+        let mut junk = serde_yaml_ng::Mapping::new();
+        junk.insert(Value::Null, "x".into());
+        junk.insert("kept".into(), "y".into());
+        item.front.extra.insert("junk".into(), Value::Mapping(junk));
+        item.front
+            .extra
+            .insert("ratio".into(), Value::from(f64::NAN));
+        assert!(serde_json::to_string(&item.front.extra).is_err());
+
+        let raw = convert(&item, None, "https://github.com/friend/reads");
+        let extra = serde_json::to_value(&raw.extra).unwrap();
+        assert_eq!(extra["junk"], serde_json::json!({"kept": "y"}));
+        assert_eq!(extra["ratio"], serde_json::Value::Null);
+        assert_eq!(extra["origin"], "https://github.com/friend/reads");
     }
 
     #[test]

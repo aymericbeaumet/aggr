@@ -2,7 +2,8 @@
   import { Command } from 'bits-ui';
   import type { Readable } from 'svelte/store';
   import type { ViewState } from './state';
-  import { selectedCompletion, type Completion } from './completion';
+  import { untrack } from 'svelte';
+  import { completionHighlight, selectedCompletion, type Completion } from './completion';
 
   let { model, change, caret, choose, submit, move, open, clear, focusInput, revealInput, dismiss, blur }: {
     model: Readable<ViewState>;
@@ -15,10 +16,27 @@
   let composing = $state(false);
   let value = $state('');
   let selected = $state('');
+  // Set once the user drives the highlight (arrows or pointer) so store emissions do not snap it back to the first item.
+  let moved = $state(false);
+  let seenQuery = '';
   let hovering = $state(false), helpDismissed = $state(false);
   const helpVisible = $derived(hovering && !helpDismissed);
+  // Only a new suggestions array may re-render the menu, and each item's value must stay a stable derived id:
+  // bits-ui re-registers an item whenever its `value` prop is dirtied and then re-selects the first entry after
+  // the tick, which is what snapped an arrowed-to highlight back on every unrelated store emission.
+  const suggestions = $derived($model.suggestions);
   $effect(() => { value = $model.query; });
-  $effect(() => { selected = selectedCompletion($model.suggestions, selected)?.id || ''; });
+  $effect(() => {
+    const { open, query, suggestions } = $model;
+    untrack(() => {
+      if (query !== seenQuery || !open || !suggestions.length) moved = false;
+      seenQuery = query;
+      // `selected` is the live Command.Root binding (bits-ui writes it synchronously on every arrow or pointer move).
+      // A moved highlight that is still listed is never echoed back, so an emission cannot restore a previous item.
+      const highlight = completionHighlight(suggestions, selected, moved);
+      if (highlight !== undefined && highlight !== selected) selected = highlight;
+    });
+  });
 
   function inputChanged(event: Event) {
     const target = event.currentTarget as HTMLInputElement;
@@ -47,6 +65,7 @@
     // Without suggestions the arrows walk the results and Enter opens the selected one.
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       if (move(event.key === 'ArrowDown' ? 1 : -1)) { event.preventDefault(); event.stopPropagation(); }
+      else if ($model.open && $model.suggestions.length) moved = true;
       return;
     }
     if (event.key === 'Enter' && (!$model.open || !$model.suggestions.length)) {
@@ -67,16 +86,17 @@
         onfocus={focusInput} onblur={() => { window.setTimeout(() => { if (!input?.closest('.search-command')?.contains(document.activeElement)) blur(); }, 100); }}
         oncompositionstart={() => { composing = true; }}
         oncompositionend={(event) => { composing = false; inputChanged(event); }}>
-        {#snippet child({ props })}<input {...props} bind:value aria-expanded={$model.open && $model.suggestions.length > 0} />{/snippet}
+        {#snippet child({ props })}<input {...props} bind:value aria-expanded={$model.open && $model.suggestions.length > 0} aria-controls={$model.open && $model.suggestions.length > 0 ? 'search-completions' : undefined} />{/snippet}
       </Command.Input>
       {#if $model.query}<button type="button" class="search-clear" aria-label="Clear search" onclick={() => { clear(); input?.focus({ preventScroll: true }); }}>×</button>{/if}
     </div>
   </form>
   {#if $model.open && $model.suggestions.length}
-    <Command.List class="search-completions" aria-label="Search suggestions">
+    <Command.List id="search-completions" class="search-completions" aria-label="Search suggestions">
       <Command.Viewport>
-        {#each $model.suggestions as suggestion (suggestion.id)}
-          <Command.Item value={suggestion.id} onSelect={() => choose(suggestion)} class="search-completion" data-completion-id={suggestion.id}>
+        {#each suggestions as suggestion (suggestion.id)}
+          {@const id = suggestion.id}
+          <Command.Item value={id} onSelect={() => choose(suggestion)} onpointermove={() => { moved = true; }} class="search-completion" data-completion-id={id}>
             <span class="completion-label">{suggestion.label}</span>
             {#if suggestion.detail || suggestion.count !== undefined}<small>{suggestion.detail}{suggestion.count !== undefined ? ` · ${suggestion.count}` : ''}</small>{/if}
           </Command.Item>
@@ -92,20 +112,3 @@
 {#if $model.error}<p class="search-error" role="alert">{$model.error}</p>{/if}
 {#if $model.offline}<p class="search-offline" role="status">{$model.offline}</p>{/if}
 
-<style>
-  .search-control { position: relative; }
-  :global(.search-command) { position: relative; width: 100%; min-width: 0; }
-  form { margin: 0; width: 100%; }
-  .search-input-line { position: relative; width: 100%; }
-  :global(.search-input-line #q) { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; padding: .55rem 2.75rem .55rem .7rem; border: 1px solid var(--faint); border-radius: .35rem; color: var(--fg); background: var(--search-bg, var(--code)); font: inherit; }
-  .search-clear { position: absolute; inset-block: 0; right: 0; display: grid; place-items: center; width: 44px; min-height: 44px; padding: 0; border: 0; border-radius: .35rem; color: var(--muted); background: transparent; font-size: 1.5rem; line-height: 1; }
-  :global(.search-completions) { position: absolute; z-index: 20; top: 100%; inset-inline: 0; max-height: min(24rem, 55vh); overflow-y: auto; border: 1px solid var(--faint); border-radius: .4rem; background: var(--bg); box-shadow: 0 6px 20px #0002; padding: .3rem; }
-  :global(.search-completion) { display: flex; justify-content: space-between; align-items: center; gap: .75rem; min-height: 44px; padding: .4rem .65rem; border-radius: .25rem; cursor: pointer; }
-  :global(.search-completion[data-selected]) { background: var(--code); }
-  .completion-label { min-width: 0; overflow-wrap: anywhere; }
-  small { flex: none; color: var(--muted); }
-  .search-query-help { position: absolute; z-index: 21; bottom: calc(100% + .4rem); inset-inline-start: 0; box-sizing: border-box; max-width: min(38rem, 100%); padding: .5rem .65rem; border: 1px solid var(--faint); border-radius: .35rem; color: var(--muted); background: var(--bg); box-shadow: 0 3px 12px #0002; font-size: .75rem; line-height: 1.5; }
-  .search-query-help[hidden] { display: none; }
-  .search-error, .search-offline { font-size: .85rem; margin: .4rem 0; }
-  .search-error { color: var(--warm); }
-</style>

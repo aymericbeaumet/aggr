@@ -7,9 +7,10 @@ append-only and never rewritten, so every commit stays reachable and every
 ```
 items/<source>/<yyyy>/<mm>/<yyyy-mm-dd>-<slug>.md     one item: YAML front matter + Markdown
 items/<source>/<yyyy>/<mm>/<yyyy-mm-dd>-<slug>.html   the raw HTML that Markdown was derived from
-sources/<source>/state.toml                           upstream title, ETag, Last-Modified, body hash
+sources/<source>/state.toml                           upstream title, site URL, identity, resolved feed URL, ETag, Last-Modified, body hash
 sources/<source>/seen.txt                             dedupe keys of everything ever stored
 status.toml                                           sources currently failing (absent when all is well)
+.gitattributes, .gitignore                            LF everywhere, seen.txt merges by union, temp files stay unstaged
 ```
 
 ## Editing by hand

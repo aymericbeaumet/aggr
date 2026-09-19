@@ -471,19 +471,23 @@ impl Drop for TempCheckout {
 /// Tip of `branch` at `url` without cloning anything; `None` when the branch does not exist.
 pub fn remote_tip(url: &str, branch: &str) -> Result<Option<String>> {
     let spec = format!("refs/heads/{branch}");
-    let out = git(
-        Path::new("."),
-        &["ls-remote", "--refs", "--exit-code", url, &spec],
-    );
-    match out {
-        Ok(out) => Ok(stdout(&out)
-            .lines()
-            .find_map(|line| line.split_once('\t').map(|(sha, _)| sha.to_string()))),
-        // ls-remote exits 2 when the ref is missing, 128 when the remote is unreachable.
-        Err(err) if format!("{err:#}").contains("(exit status: 2)") => Ok(None),
-        Err(err) => Err(err),
+    let args = ["ls-remote", "--refs", "--exit-code", url, &spec];
+    let out = command(Path::new("."), &args)
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    // `--exit-code` makes ls-remote exit 2 when no ref matches; an unreachable remote exits 128.
+    // The numeric code is the contract, not its rendering in an error message.
+    if out.status.code() == Some(MISSING_REF_EXIT_CODE) {
+        return Ok(None);
     }
+    let out = check(out, &args)?;
+    Ok(stdout(&out)
+        .lines()
+        .find_map(|line| line.split_once('\t').map(|(sha, _)| sha.to_string())))
 }
+
+/// `git ls-remote --exit-code` when the remote is reachable but holds no matching ref.
+const MISSING_REF_EXIT_CODE: i32 = 2;
 
 /// Keep a depth-1 checkout of `url`'s `branch` in `dir`, returning the tip sha. Used to read
 /// another aggr repository's data branch without any history.
@@ -582,12 +586,18 @@ fn zero_oid(dir: &Path) -> Result<String> {
     Ok("0".repeat(if format == "sha256" { 64 } else { 40 }))
 }
 
+/// Every git invocation: no credential prompts, no stdin, and the C locale so the few places
+/// that read git's human-facing output ("Everything up-to-date", "[rejected]", "non-fast-forward",
+/// "fetch first") see the same words on every machine.
 fn command(dir: &Path, args: &[&str]) -> Command {
     log::debug!("git {} (in {})", args.join(" "), dir.display());
     let mut cmd = Command::new("git");
     cmd.args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .env("LANGUAGE", "")
         .stdin(Stdio::null());
     #[cfg(test)]
     {
@@ -1318,5 +1328,130 @@ mod tests {
             .ensure_worktree("aggr", Path::new(".aggr/data"))
             .unwrap_err();
         assert!(format!("{err:#}").contains("not a worktree"), "{err:#}");
+    }
+
+    #[test]
+    fn command_pins_the_locale_and_disables_prompts() {
+        let cmd = command(Path::new("."), &["status"]);
+        let envs: Vec<(String, Option<String>)> = cmd
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for (key, value) in [
+            ("LC_ALL", "C"),
+            ("LANG", "C"),
+            ("LANGUAGE", ""),
+            ("GIT_TERMINAL_PROMPT", "0"),
+        ] {
+            assert!(
+                envs.contains(&(key.to_string(), Some(value.to_string()))),
+                "{key}={value:?} missing from {envs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_tip_distinguishes_a_missing_branch_from_an_unreachable_remote() {
+        let (tmp, repo) = fixture();
+        let origin = tmp.path().join("origin.git");
+        let url = origin.to_str().unwrap();
+        assert_eq!(remote_tip(url, "aggr").unwrap(), None);
+
+        let wt = repo
+            .ensure_worktree("aggr", Path::new(".aggr/data"))
+            .unwrap();
+        fs::write(wt.dir().join("README.md"), "data\n").unwrap();
+        let sha = wt
+            .commit(&CommitMessage {
+                subject: "aggr: init".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .unwrap();
+        wt.push().unwrap();
+        assert_eq!(
+            remote_tip(url, "aggr").unwrap().as_deref(),
+            Some(sha.as_str())
+        );
+
+        let missing = tmp.path().join("nowhere.git");
+        let err = remote_tip(missing.to_str().unwrap(), "aggr").unwrap_err();
+        assert!(format!("{err:#}").contains("ls-remote"), "{err:#}");
+    }
+
+    #[test]
+    fn redacted_remote_strips_credentials_query_and_fragment() {
+        let cases = [
+            // Credentials are the reason this exists: they must never reach `.git/config`.
+            (
+                "https://user:s3cret@github.com/o/r.git",
+                Some("https://github.com/o/r.git"),
+            ),
+            (
+                "https://x-access-token:ghp_abc@github.com/o/r.git",
+                Some("https://github.com/o/r.git"),
+            ),
+            // Query and fragment could also smuggle a token; they are dropped as well.
+            (
+                "https://github.com/o/r.git?token=abc#frag",
+                Some("https://github.com/o/r.git"),
+            ),
+            // A plain URL is returned unchanged (the parser keeps a trailing path as is).
+            (
+                "https://github.com/o/r.git",
+                Some("https://github.com/o/r.git"),
+            ),
+            // ssh:// URLs parse; the transport user is stripped like any other username. The
+            // mirror still fetches from the effective URL, so this only changes the label.
+            (
+                "ssh://git@github.com/o/r.git",
+                Some("ssh://github.com/o/r.git"),
+            ),
+            // SCP-style remotes are not URLs for `url::Url`, so nothing is redacted and `mirror`
+            // leaves origin exactly as cloned. Such a remote carries a transport user, never a
+            // password, so no credential is retained by keeping it.
+            ("git@github.com:o/r.git", None),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(redacted_remote(raw).as_deref(), expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn interrupted_atomic_writes_are_never_committed() {
+        // A process killed between creating tempfile's `.tmpXXXXXX` and persisting it leaves the
+        // file under `items/`; the bootstrap `.gitignore` keeps `git add -A` from staging it.
+        let (_tmp, repo) = local_fixture(true);
+        let wt = repo
+            .ensure_worktree("aggr", Path::new(".aggr/data"))
+            .unwrap();
+        let store = crate::store::Store::open(wt.dir());
+        assert!(store.bootstrap().unwrap());
+        let items = wt.dir().join("items/demo/2026/09");
+        fs::create_dir_all(&items).unwrap();
+        fs::write(items.join(".tmpAbC123"), "partial").unwrap();
+        fs::write(items.join("2026-09-01-hello.md"), "---\ntitle: x\n---\n").unwrap();
+        wt.commit(&CommitMessage {
+            subject: "aggr: init".into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+        let tree = sh(wt.dir(), &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(tree.contains(".gitignore"), "{tree}");
+        assert!(
+            tree.contains("items/demo/2026/09/2026-09-01-hello.md"),
+            "{tree}"
+        );
+        assert!(!tree.contains(".tmpAbC123"), "{tree}");
+        assert!(
+            !wt.is_dirty().unwrap(),
+            "ignored files leave the tree clean"
+        );
     }
 }
