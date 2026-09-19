@@ -4,7 +4,7 @@
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read as _, Seek as _, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 
@@ -46,8 +46,12 @@ impl Guard {
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
-                let mut recorded = String::new();
-                let _ = file.read_to_string(&mut recorded);
+                // Windows locks are mandatory: the locked file cannot be read by another handle,
+                // so the holder's identity is also kept in a sidecar the lock does not cover.
+                let mut recorded = std::fs::read_to_string(record_path(path)).unwrap_or_default();
+                if recorded.trim().is_empty() {
+                    let _ = file.read_to_string(&mut recorded);
+                }
                 bail!("{}", conflict_message(&recorded, subject, target));
             }
             Err(TryLockError::Error(err)) => {
@@ -55,13 +59,23 @@ impl Guard {
             }
         }
         if !read_only {
+            let record = format!("{} {subject}", std::process::id());
             file.set_len(0)?;
             file.rewind()?;
-            write!(file, "{} {subject}", std::process::id())?;
+            write!(file, "{record}")?;
             file.flush()?;
+            std::fs::write(record_path(path), record)
+                .with_context(|| format!("recording the holder of {}", path.display()))?;
         }
         Ok(Some(Self { _file: file }))
     }
+}
+
+/// `aggr.lock.holder` beside `aggr.lock`.
+fn record_path(path: &Path) -> PathBuf {
+    let mut record = path.as_os_str().to_owned();
+    record.push(".holder");
+    PathBuf::from(record)
 }
 
 /// The error a newcomer sees. The holder recorded `<pid> <subject>`; an older holder wrote the
@@ -109,6 +123,7 @@ mod tests {
                 .is_none()
         );
         assert!(!temp.path().join("absent.lock").exists());
+        assert!(!temp.path().join("absent.lock.holder").exists());
     }
 
     #[test]
