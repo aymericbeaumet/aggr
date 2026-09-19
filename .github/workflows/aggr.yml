@@ -109,7 +109,7 @@ jobs:
           key: aggr-state-v1-${{ github.repository_id }}-${{ github.run_id }}
 
       - if: inputs.pages
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
