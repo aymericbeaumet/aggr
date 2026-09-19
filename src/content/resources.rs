@@ -1,5 +1,5 @@
 //! Leading resource links (code, paper, model, dataset) that the reader lifts out of the body,
-//! and the provider allow-list that decides which destinations qualify.
+//! and the shape rule that decides which destinations qualify.
 
 use std::collections::HashSet;
 
@@ -117,50 +117,25 @@ fn paragraph_resources(paragraph: scraper::ElementRef<'_>) -> Option<Vec<Resourc
     (resources.len() >= 2).then_some(resources)
 }
 
+/// An artifact has a page of its own: a nested path (`owner/repository`, `abs/2605.11887`,
+/// `records/123`), a query that names a record (`forum?id=…`), or a document file. Profile and
+/// section pages one segment deep (`github.com/alice`, `x.com/lab`) are people and places, not
+/// resources.
 fn resource_url(url: &Url) -> bool {
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
         || url.password().is_some()
+        || url.host_str().is_none()
     {
         return false;
     }
-    let Some(host) = url.host_str() else {
-        return false;
-    };
     let parts = url.path().trim_matches('/').split('/').collect::<Vec<_>>();
     if parts.iter().any(|part| part.is_empty()) {
         return false;
     }
-    match host.strip_prefix("www.").unwrap_or(host) {
-        "huggingface.co" => {
-            parts.len() >= 2 && !matches!(parts[0], "docs" | "blog" | "posts" | "organizations")
-        }
-        "modelscope.cn" | "modelscope.ai" => {
-            parts.len() >= 2
-                && matches!(parts[0], "collections" | "models" | "datasets" | "studios")
-        }
-        "github.com" | "gitlab.com" | "codeberg.org" => {
-            parts.len() >= 2
-                && !matches!(
-                    parts[0],
-                    "orgs" | "users" | "explore" | "topics" | "sponsors"
-                )
-                && !matches!(parts[1], "followers" | "following")
-        }
-        "arxiv.org" => parts.len() >= 2 && matches!(parts[0], "abs" | "pdf" | "html"),
-        "doi.org" => parts.len() >= 2 && parts[0].starts_with("10."),
-        "openreview.net" => {
-            parts == ["forum"]
-                && url
-                    .query_pairs()
-                    .any(|(key, value)| key == "id" && !value.is_empty())
-        }
-        "zenodo.org" => parts.len() == 2 && matches!(parts[0], "record" | "records"),
-        "kaggle.com" => parts.len() >= 3 && parts[0] == "datasets",
-        "pypi.org" => parts.len() >= 2 && parts[0] == "project",
-        "npmjs.com" => parts.len() >= 2 && parts[0] == "package",
-        _ => url.path().to_ascii_lowercase().ends_with(".pdf"),
-    }
+    parts.len() >= 2
+        || url.query().is_some_and(|query| !query.is_empty())
+        || url.path().to_ascii_lowercase().ends_with(".pdf")
 }
 
 #[cfg(test)]
@@ -269,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn resource_detection_preserves_prose_tocs_people_code_and_untrusted_links() {
+    fn resource_detection_preserves_prose_tocs_people_code_and_unsafe_links() {
         for markdown in [
             "[Alice](https://github.com/alice) [Bob](https://github.com/bob)",
             "[Introduction](#intro) [Methods](#methods)",
@@ -277,7 +252,6 @@ mod tests {
             "See [Code](https://github.com/lab/project) and [Paper](https://arxiv.org/abs/1234.5678).",
             "[Code](https://github.com/lab/project)",
             "[Code](https://github.com/lab/project) [Mirror](https://github.com/lab/project#readme)",
-            "[Code](https://evil.test/github.com/lab/project) [Paper](https://arxiv.org/abs/1234.5678)",
             "[Code](https://user:password@github.com/lab/project) [Paper](https://arxiv.org/abs/1234.5678)",
             "[Code](javascript:alert) [Paper](https://arxiv.org/abs/1234.5678)",
             "`[Code](https://github.com/lab/project)` [Paper](https://arxiv.org/abs/1234.5678)",

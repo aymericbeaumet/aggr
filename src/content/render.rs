@@ -388,6 +388,10 @@ pub fn render_markdown_with_images(markdown: &str, images: &[LocalImage]) -> Str
 }
 
 fn render_markdown_html(markdown: &str, plugins: &comrak::options::Plugins<'_>) -> String {
+    super::math::render_math_spans(&render_comrak_html(markdown, plugins))
+}
+
+fn render_comrak_html(markdown: &str, plugins: &comrak::options::Plugins<'_>) -> String {
     let options = markdown_options();
     if !markdown.contains("\\\n") && !markdown.contains("\\\r\n") {
         return comrak::markdown_to_html_with_plugins(markdown, &options, plugins);
@@ -427,6 +431,7 @@ fn markdown_options() -> comrak::Options<'static> {
     options.extension.autolink = true;
     options.extension.tasklist = true;
     options.extension.footnotes = true;
+    options.extension.math_dollars = true;
     options.render.r#unsafe = false;
     options.render.escape = true;
     options

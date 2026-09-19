@@ -306,10 +306,44 @@ fn attribute_value_range(tag: &str, wanted: &str) -> Option<std::ops::Range<usiz
     None
 }
 
-pub(super) fn has_class(tag: &str, class: &str) -> bool {
-    attribute_value(tag, "class").is_some_and(|classes| {
-        classes
-            .split_ascii_whitespace()
-            .any(|candidate| candidate == class)
-    })
+/// The first character of text in `html`, looking past any tags in front of it.
+fn first_text_char(html: &str) -> Option<char> {
+    let mut rest = html;
+    while let Some(after) = rest.strip_prefix('<') {
+        rest = &after[after.find('>')? + 1..];
+    }
+    rest.chars().next()
+}
+
+/// The last character of text in `html`, looking past any tags behind it.
+fn last_text_char(html: &str) -> Option<char> {
+    let mut rest = html;
+    while let Some(before) = rest.strip_suffix('>') {
+        rest = &before[..before.rfind('<')?];
+    }
+    rest.chars().next_back()
+}
+
+/// `true` when removing whatever sat between `before` and `after` would run two words together
+/// (`Bitwarden<svg/></a>or`): the page relied on the removed element for visual separation.
+pub(super) fn fuses_words(before: &str, after: &str) -> bool {
+    last_text_char(before).is_some_and(char::is_alphanumeric)
+        && first_text_char(after).is_some_and(char::is_alphanumeric)
+}
+
+/// Copy the closing tags that immediately follow `position` to `out`, then separate the words a
+/// removed element used to keep apart. Returns the position after the copied tags.
+pub(super) fn close_removed_element(html: &str, mut position: usize, out: &mut String) -> usize {
+    while html[position..].starts_with("</")
+        && let Some(tag) = parse_tag(&html[position..])
+        && tag.closing
+        && let Some(end) = tag.end
+    {
+        out.push_str(&html[position..position + end]);
+        position += end;
+    }
+    if fuses_words(out, &html[position..]) {
+        out.push(' ');
+    }
+    position
 }

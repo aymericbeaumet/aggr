@@ -117,7 +117,7 @@ pub(super) fn plan(
         Some(html) => content::to_markdown(html, base.as_ref()),
         None => raw.summary.clone().unwrap_or_default(),
     };
-    let body = content::strip_article_metadata(&body, published, &source.slug);
+    let body = content::strip_article_metadata(&body, &raw.title, published, &source.slug);
     let (html, truncated) = match &raw.content_html {
         Some(html) if options.html && source.html => {
             let (stored, truncated) = content::storage_html(html, options.html_max_bytes);

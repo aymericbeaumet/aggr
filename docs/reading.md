@@ -6,6 +6,12 @@ Search sits above the first feed item and filters in place. Choosing a category,
 fills the search field on the main feed; its URL can be shared. Static archives remain available
 without JavaScript.
 
+Formulas written as dollar-delimited TeX (arXiv abstracts, for example) are shown as readable text:
+common commands, Greek letters, relations, fractions, roots and scripts become Unicode at build
+time, without a formula engine. A formula using notation the translator does not know is shown as
+its TeX source in a code span instead of a partial translation, and dollar signs around ordinary
+prose stay prose.
+
 ## Search
 
 Combine full text with `source:`, `category:`, `tag:`, `date:`, `sort:`, quoted phrases, and
@@ -16,10 +22,11 @@ the field for syntax help. See [client development](client.md) for the search co
 
 Selecting text inside an article offers a **Share** action above the selection. The link it copies
 carries the selected word range in its fragment (`#selection=…`), so whoever opens it lands on the
-article with the same words selected. The fragment updates live while the selection changes and is
-removed when the selection is cleared. The toolbar answers your own gesture, so opening a shared
-link shows the passage selected without it. Nothing is sent anywhere: the range is resolved in the
-reader from the article's own text.
+article with the same words selected. Selecting is ephemeral: the address bar is never rewritten
+while you select, so a shared link you arrived through stays shareable as it is, and only the link
+the Share action copies describes your current selection. The toolbar answers your own gesture, so
+opening a shared link shows the passage selected without it. Nothing is sent anywhere: the range is
+resolved in the reader from the article's own text.
 
 ## Mobile
 

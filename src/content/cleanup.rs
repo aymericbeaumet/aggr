@@ -57,19 +57,23 @@ pub(super) fn protect_markdown_code(
 /// archives. Restrict standalone controls to document boundaries, never code or body paragraphs.
 pub fn strip_article_metadata(
     markdown: &str,
+    title: &str,
     published: Option<DateTime<Utc>>,
     source_slug: &str,
 ) -> String {
     let markdown = strip_boundary_controls(markdown);
-    let markdown = strip_leading_metadata(&markdown, published, source_slug);
+    let markdown = strip_leading_metadata(&markdown, title, published, source_slug);
     let markdown = strip_boundary_controls(&markdown);
+    let markdown = strip_separator_rows(&markdown);
+    let markdown = decorative_rules_to_breaks(&markdown);
     // Separators are presentation, not content: tidying them here rather than only at capture
     // means an archive written by an older version reads correctly too. A body with no rule in it
     // is left byte-for-byte alone, so nothing is rewritten for the sake of whitespace.
-    if markdown
-        .lines()
-        .any(|line| is_thematic_break(line, true) || line.trim_end().len() != line.len())
-    {
+    if markdown.lines().any(|line| {
+        is_thematic_break(line, true)
+            || line.trim_end().len() != line.len()
+            || line.trim_end().ends_with('\\')
+    }) {
         return protect_markdown_code(&markdown, tidy_markdown);
     }
     markdown
@@ -337,18 +341,27 @@ fn is_update_notice(text: &str) -> bool {
 enum LeadingMetadata {
     /// A publication date, a relative timestamp, or a compact name/date byline.
     Stamp,
+    /// A relative timestamp (`2 hours ago`): the page is newsroom chrome around the article.
+    Recent,
     /// The source's own name, promoted from an accessibility label.
     SourceName,
     /// A name or role line following one of the above.
     Byline,
+    /// The page's own heading repeating the item title, above the byline it introduces.
+    Title,
+    /// A category label or eyebrow above the opening: a lone short link, or a few words that
+    /// introduce the heading right after them.
+    Kicker,
 }
 
-/// Remove the metadata lines readability promoted to the front of the article: a publication date
-/// (including a short suffix such as `- Link Blog`), a relative timestamp, the source's own name,
-/// and the byline that follows them. A standalone pipe after a date is its orphaned separator.
-/// Normal prose containing a date remains intact, and a byline only goes with a stamp it follows.
+/// Remove the metadata lines readability promoted to the front of the article: a heading that
+/// repeats the item title, a publication date (including a short suffix such as `- Link Blog`), a
+/// relative timestamp, the source's own name, and the byline that follows them. A standalone pipe
+/// after a date is its orphaned separator. Normal prose containing a date remains intact, and a
+/// byline only goes with a title or stamp it follows.
 pub fn strip_leading_metadata(
     markdown: &str,
+    title: &str,
     published: Option<DateTime<Utc>>,
     source_slug: &str,
 ) -> String {
@@ -362,8 +375,12 @@ pub fn strip_leading_metadata(
         }
         let tail = tail.trim_start_matches('\n');
         let plain = html_to_text(&render_markdown(first));
-        let Some(kind) = leading_metadata(first, &plain, published, source_slug, tail, previous)
+        let Some(kind) =
+            leading_metadata(first, &plain, title, published, source_slug, tail, previous)
         else {
+            if let Some(without_stamp) = stamp_behind_lede(first, &plain, tail) {
+                return without_stamp;
+            }
             break;
         };
         if kind == LeadingMetadata::Byline {
@@ -374,7 +391,7 @@ pub fn strip_leading_metadata(
         }
         previous = Some(kind);
         rest = tail;
-        if kind == LeadingMetadata::Stamp {
+        if matches!(kind, LeadingMetadata::Stamp | LeadingMetadata::Recent) {
             // The separator that sat between the date and whatever followed it is now orphaned.
             if let Some((separator, after)) = rest.split_once("\n\n")
                 && is_lone_separator(separator)
@@ -389,16 +406,44 @@ pub fn strip_leading_metadata(
 fn leading_metadata(
     block: &str,
     plain: &str,
+    title: &str,
     published: Option<DateTime<Utc>>,
     source_slug: &str,
     tail: &str,
     previous: Option<LeadingMetadata>,
 ) -> Option<LeadingMetadata> {
+    if matches!(previous, None | Some(LeadingMetadata::Kicker))
+        && (is_title_heading(block, plain, title)
+            || (is_title_line(block, plain, title) && stamp_follows(tail)))
+    {
+        return Some(LeadingMetadata::Title);
+    }
+    if matches!(previous, None | Some(LeadingMetadata::Kicker)) && is_kicker(block, plain, tail) {
+        return Some(LeadingMetadata::Kicker);
+    }
+    // `Carlo Piovesan, Geertjan Wielenga` over `2026-09-18 | 9 min`: the authors line of a
+    // metadata row is the byline, whatever follows it.
+    if matches!(
+        previous,
+        None | Some(LeadingMetadata::Kicker | LeadingMetadata::Title)
+    ) && !block.contains("](")
+        && is_name_list(plain)
+        && stamp_follows(tail)
+    {
+        return Some(LeadingMetadata::Byline);
+    }
+    // `September 13, 2026 11 min read`, `11 min read`: a reading-time estimate only ever sits in
+    // the page's own metadata row, so whatever date it follows is metadata too.
+    if let Some(rest) = without_read_time(plain)
+        && (rest.is_empty() || date_prefixes(rest).any(|prefix| parse_date_only(prefix).is_some()))
+    {
+        return Some(LeadingMetadata::Stamp);
+    }
     if plain.chars().count() <= 80 && slug::slugify(plain.trim()) == source_slug {
         return Some(LeadingMetadata::SourceName);
     }
     if is_relative_timestamp(plain) {
-        return Some(LeadingMetadata::Stamp);
+        return Some(LeadingMetadata::Recent);
     }
     let dated = date_prefixes(plain)
         .filter_map(parse_date_only)
@@ -424,7 +469,270 @@ fn leading_metadata(
         return Some(LeadingMetadata::Stamp);
     }
     let after_byline = previous == Some(LeadingMetadata::Byline);
-    (previous.is_some() && is_byline_line(plain, after_byline)).then_some(LeadingMetadata::Byline)
+    let after_recent = previous == Some(LeadingMetadata::Recent);
+    (previous.is_some() && is_byline_line(plain, after_byline, after_recent))
+        .then_some(LeadingMetadata::Byline)
+}
+
+/// A kicker above the opening: the category link a publisher sets over its title (`Newsletter`,
+/// `Current Linguistics`), or the eyebrow a landing page puts right before its heading (`A live,
+/// local experiment`). Both are a few capitalised words with no sentence punctuation; prose that
+/// opens an article is longer, or ends a sentence, or does not introduce a heading.
+fn is_kicker(block: &str, plain: &str, tail: &str) -> bool {
+    let text = plain.trim();
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() || text.ends_with(['.', '!', '?', ':', ';', ',']) {
+        return false;
+    }
+    let block = block.trim();
+    let lone_link = block.starts_with('[')
+        && block.ends_with(')')
+        && block.matches("](").count() == 1
+        && !block[1..].contains('[');
+    if lone_link {
+        return words.len() <= 3
+            && words.iter().all(|word| {
+                word.chars().next().is_some_and(char::is_uppercase)
+                    && word
+                        .chars()
+                        .all(|ch| ch.is_alphabetic() || matches!(ch, '-' | '&' | '/' | '’' | '\''))
+            });
+    }
+    let heading_follows = tail
+        .trim_start()
+        .strip_prefix('#')
+        .is_some_and(|rest| rest.trim_start_matches('#').starts_with(' '));
+    heading_follows
+        && words.len() <= 6
+        && !block.contains("](")
+        && !block.starts_with('#')
+        && text.chars().next().is_some_and(char::is_uppercase)
+}
+
+/// The page's own `<h1>` (or a demoted heading) repeating the item title: the reader already
+/// shows the title above the body, so the heading is a duplicate. Case, curly quotes, trailing
+/// punctuation and a `Title:` label (arxiv.org) do not make it a different title.
+fn is_title_heading(block: &str, plain: &str, title: &str) -> bool {
+    let marks = block
+        .trim_start()
+        .bytes()
+        .take_while(|byte| *byte == b'#')
+        .count();
+    if !(1..=6).contains(&marks) || !block.trim_start()[marks..].starts_with(' ') {
+        return false;
+    }
+    let normalize = |text: &str| {
+        let text = text
+            .replace(['\u{2019}', '\u{2018}'], "'")
+            .replace(['\u{201c}', '\u{201d}'], "\"")
+            .to_lowercase();
+        let text = text
+            .trim()
+            .trim_end_matches(['.', ':', '!', '?', '\u{2026}']);
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let expected = normalize(title);
+    if expected.is_empty() {
+        return false;
+    }
+    let heading = normalize(plain);
+    same_title(&heading, &expected)
+        || heading
+            .strip_prefix("title:")
+            .is_some_and(|rest| same_title(rest.trim(), &expected))
+}
+
+/// The page's own title as a plain paragraph (a `<header>` that styles a `<p>` as the heading):
+/// the same duplicate as a heading, minus the marks.
+fn is_title_line(block: &str, plain: &str, title: &str) -> bool {
+    let block = block.trim_start();
+    if block.starts_with(['#', '-', '*', '>', '|', '`', '!', '['])
+        || block.starts_with(|ch: char| ch.is_ascii_digit())
+    {
+        return false;
+    }
+    let normalize = |text: &str| {
+        let text = text
+            .replace(['\u{2019}', '\u{2018}'], "'")
+            .replace(['\u{201c}', '\u{201d}'], "\"")
+            .to_lowercase();
+        let text = text
+            .trim()
+            .trim_end_matches(['.', ':', '!', '?', '\u{2026}']);
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let expected = normalize(title);
+    !expected.is_empty() && same_title(&normalize(plain), &expected)
+}
+
+/// Whether the block after a title paragraph is the page's date, reading time or timestamp: a
+/// title styled as a paragraph inside a `<header>` sits above those, while an article whose
+/// opening sentence repeats its title goes straight on with prose.
+fn stamp_follows(tail: &str) -> bool {
+    let next = tail.split("\n\n").next().unwrap_or_default();
+    if next.lines().count() != 1 {
+        return false;
+    }
+    let plain = html_to_text(&render_markdown(next));
+    is_relative_timestamp(&plain)
+        || without_read_time(&plain).is_some()
+        || date_prefixes(&plain).any(|prefix| parse_date_only(prefix).is_some())
+}
+
+/// Two normalised titles that name the same article. An aggregator (Hacker News) shortens words
+/// when it edits a title (`repositories` → `repos`), so a word that is a prefix of its partner,
+/// three characters or longer, still matches.
+fn same_title(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let (a, b): (Vec<&str>, Vec<&str>) = (
+        a.split_whitespace().collect(),
+        b.split_whitespace().collect(),
+    );
+    a.len() == b.len()
+        && !a.is_empty()
+        && a.iter().zip(&b).all(|(x, y)| {
+            x == y || (x.len().min(y.len()) >= 3 && (x.starts_with(y) || y.starts_with(x)))
+        })
+}
+
+/// `plain` without a trailing reading-time estimate (`11 min read`, `5-minute read`,
+/// `3 mins`), or `None` when it has none. What remains is trimmed of separators.
+fn without_read_time(plain: &str) -> Option<&str> {
+    let text = plain.trim().trim_end_matches('.');
+    let lower = text.to_ascii_lowercase();
+    let suffix = [
+        " min read",
+        " mins read",
+        " minute read",
+        " minutes read",
+        "-minute read",
+        " min",
+        " mins",
+    ]
+    .into_iter()
+    .find(|suffix| lower.ends_with(suffix))?;
+    let before = text[..text.len() - suffix.len()].trim_end();
+    let digits = before.rsplit([' ', '\u{a0}']).next().unwrap_or(before);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(
+        before[..before.len() - digits.len()]
+            .trim_end()
+            .trim_end_matches(['·', '•', '|', '-', '—', '–', ','])
+            .trim_end(),
+    )
+}
+
+/// A paragraph that is nothing but a row of separators (`/ / / /`) once the controls between them
+/// are gone: the tabs of an install box, buttons that Readability drops. Rules made of `*`, `-` or
+/// `_` are thematic breaks and stay, and a single stray glyph is the boundary rules' concern.
+/// `❄ ❄ ❄ ❄`, `✦ ✦ ✦`, `~ ~ ~`: one ornament repeated across a line is a section break the
+/// publisher drew by hand. Markdown syntax characters and single ornaments are not.
+fn is_decorative_rule(text: &str) -> bool {
+    let mut ornament = None;
+    let mut count = 0;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        if ch.is_alphanumeric() || "*-_#>`|\\[]()<+!.:,;\"'".contains(ch) {
+            return false;
+        }
+        match ornament {
+            None => ornament = Some(ch),
+            Some(first) if first != ch => return false,
+            Some(_) => {}
+        }
+        count += 1;
+    }
+    count >= 3
+}
+
+/// Replace hand-drawn ornament lines by a thematic break, which the reader styles as a rule.
+fn decorative_rules_to_breaks(markdown: &str) -> String {
+    if !markdown.lines().any(is_decorative_rule) {
+        return markdown.to_string();
+    }
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    let rules = root
+        .children()
+        .filter(|node| {
+            let position = node.data.borrow().sourcepos;
+            position.start.line == position.end.line
+                && boundary_paragraph_text(node).is_some_and(|(text, _)| is_decorative_rule(&text))
+        })
+        .map(|node| node.data.borrow().sourcepos.start.line)
+        .collect::<std::collections::BTreeSet<_>>();
+    if rules.is_empty() {
+        return markdown.to_string();
+    }
+    markdown
+        .split_inclusive('\n')
+        .enumerate()
+        .map(|(index, line)| {
+            if rules.contains(&(index + 1)) {
+                if line.ends_with('\n') {
+                    "* * *\n"
+                } else {
+                    "* * *"
+                }
+            } else {
+                line
+            }
+        })
+        .collect()
+}
+
+fn is_separator_row(text: &str) -> bool {
+    let mut glyphs = 0;
+    for ch in text.chars() {
+        match ch {
+            '/' | '|' | '\u{b7}' | '\u{2022}' | '\u{2014}' | '\u{2013}' => glyphs += 1,
+            ch if ch.is_whitespace() => {}
+            _ => return false,
+        }
+    }
+    glyphs >= 2
+}
+
+fn strip_separator_rows(markdown: &str) -> String {
+    if !markdown.lines().any(is_separator_row) {
+        return markdown.to_string();
+    }
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    let doomed = root
+        .children()
+        .filter(|node| {
+            let position = node.data.borrow().sourcepos;
+            position.start.line == position.end.line
+                && boundary_paragraph_text(node).is_some_and(|(text, _)| is_separator_row(&text))
+        })
+        .map(|node| node.data.borrow().sourcepos.start.line)
+        .collect::<std::collections::BTreeSet<_>>();
+    if doomed.is_empty() {
+        return markdown.to_string();
+    }
+    let mut out = String::with_capacity(markdown.len());
+    let mut skip_blank = false;
+    for (index, line) in markdown.split_inclusive('\n').enumerate() {
+        if doomed.contains(&(index + 1)) {
+            // The blank line that followed the row would otherwise double the one before it.
+            skip_blank = out.is_empty() || out.ends_with("\n\n");
+            continue;
+        }
+        if skip_blank && line.trim().is_empty() {
+            skip_blank = false;
+            continue;
+        }
+        skip_blank = false;
+        out.push_str(line);
+    }
+    out
 }
 
 /// A one- or two-character separator left over from a metadata row. Longer runs are rules.
@@ -458,10 +766,37 @@ fn is_relative_timestamp(text: &str) -> bool {
         )
 }
 
+/// One to four capitalised words: the shape of a person's name.
+fn name_like(value: &str) -> bool {
+    let words: Vec<&str> = value.split_whitespace().collect();
+    (1..=4).contains(&words.len())
+        && words.iter().all(|word| {
+            word.chars().next().is_some_and(char::is_uppercase)
+                && word
+                    .chars()
+                    .all(|ch| ch.is_alphabetic() || matches!(ch, '\'' | '’' | '-' | '.'))
+        })
+}
+
+/// `Carlo Piovesan, Geertjan Wielenga`, `Ann Lee and Bob Ray`: one to four names, each of at least
+/// two words, so a Title Case phrase (`Current Linguistics`) is not read as people.
+fn is_name_list(text: &str) -> bool {
+    let names: Vec<&str> = text
+        .split([',', '&'])
+        .flat_map(|part| part.split(" and "))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    (1..=4).contains(&names.len())
+        && names
+            .iter()
+            .all(|name| name.split_whitespace().count() >= 2 && name_like(name))
+}
+
 /// `By Amy Walker`, `Amy Walker and`, `Nick Beake, Europe correspondent`: a name that announces
 /// itself as a byline. A bare Title Case line is indistinguishable from a kicker, so a name with a
 /// role only counts while a byline is already being read.
-fn is_byline_line(text: &str, after_byline: bool) -> bool {
+fn is_byline_line(text: &str, after_byline: bool, after_recent: bool) -> bool {
     let text = text.trim();
     if text.is_empty()
         || text.chars().count() > 60
@@ -470,16 +805,6 @@ fn is_byline_line(text: &str, after_byline: bool) -> bool {
     {
         return false;
     }
-    let name_like = |value: &str| {
-        let words: Vec<&str> = value.split_whitespace().collect();
-        (1..=4).contains(&words.len())
-            && words.iter().all(|word| {
-                word.chars().next().is_some_and(char::is_uppercase)
-                    && word
-                        .chars()
-                        .all(|ch| ch.is_alphabetic() || matches!(ch, '\'' | '’' | '-' | '.'))
-            })
-    };
     if let Some(name) = text.strip_prefix("By ") {
         return name_like(name.split(',').next().unwrap_or(name));
     }
@@ -489,17 +814,42 @@ fn is_byline_line(text: &str, after_byline: bool) -> bool {
     {
         return name_like(name);
     }
-    after_byline
+    if after_byline
         && text.split_once(',').is_some_and(|(name, role)| {
             name_like(name) && (1..=5).contains(&role.split_whitespace().count())
         })
+    {
+        return true;
+    }
+    // Right behind a live timestamp (`2 hours ago` / `Jessica Rawnsley` on bbc.com) a bare
+    // two-to-four-word name is the contributor: that chrome belongs to a newsroom page. Under a
+    // plain date a Title Case line is as likely a kicker, so it stays.
+    after_recent && !text.contains(',') && text.split_whitespace().count() >= 2 && name_like(text)
 }
 
+/// `By Eric Lu 09.09.26`, `Aleksandar Filipovski, 2026-09-16`: an author's name with the item's
+/// own publication date beside it. Without the `By`, only a two-to-four-word capitalised name in
+/// front of the date counts, so a dateline (`London, 16 September 2026`) is left alone.
 fn matching_leading_byline(markdown: &str, plain: &str, published: NaiveDate) -> bool {
-    let Some((author, date)) = plain
-        .trim()
-        .strip_prefix("By ")
-        .and_then(|byline| byline.rsplit_once(' '))
+    let text = plain.trim();
+    let text = text.strip_prefix("By ").unwrap_or(text);
+    let matches_published = |date: &str| {
+        let date = date.trim();
+        ["%m.%d.%y", "%d.%m.%y"]
+            .iter()
+            .find_map(|format| NaiveDate::parse_from_str(date, format).ok())
+            .or_else(|| parse_date_only(date).map(|parsed| parsed.date))
+            .is_some_and(|date| {
+                date.signed_duration_since(published)
+                    .num_days()
+                    .unsigned_abs()
+                    <= 1
+            })
+    };
+    let Some((author, _)) = [", ", " - ", " | ", " — ", " – ", " · ", " "]
+        .iter()
+        .filter_map(|separator| text.rsplit_once(separator))
+        .find(|(_, date)| matches_published(date))
     else {
         return false;
     };
@@ -511,9 +861,6 @@ fn matching_leading_byline(markdown: &str, plain: &str, published: NaiveDate) ->
                 && name
                     .chars()
                     .all(|ch| ch.is_alphabetic() || matches!(ch, '\'' | '’' | '-' | '.'))
-        })
-        || !["%m.%d.%y", "%d.%m.%y"].iter().any(|format| {
-            NaiveDate::parse_from_str(date, format).is_ok_and(|date| date == published)
         })
     {
         return false;
@@ -538,6 +885,34 @@ fn matching_leading_byline(markdown: &str, plain: &str, published: NaiveDate) ->
         })
 }
 
+/// A publisher's date line that sits behind a one-line lede (`Looking back on the first year.`
+/// / `Posted 2026-09-15` / the article): the lede is prose to keep, the labelled date is not.
+/// Only a labelled date qualifies; a bare date behind prose stays.
+fn stamp_behind_lede(lede: &str, lede_text: &str, tail: &str) -> Option<String> {
+    if lede_text.chars().count() > 200 {
+        return None;
+    }
+    let (stamp, after) = tail
+        .split_once("\n\n")
+        .map(|(stamp, after)| (stamp, after.trim_start_matches('\n')))
+        .unwrap_or((tail.trim_end_matches('\n'), ""));
+    if stamp.lines().count() != 1 {
+        return None;
+    }
+    let plain = html_to_text(&render_markdown(stamp));
+    let labelled = date_prefixes(&plain)
+        .filter_map(parse_date_only)
+        .any(|candidate| candidate.labelled);
+    if !labelled {
+        return None;
+    }
+    Some(if after.is_empty() {
+        format!("{lede}\n")
+    } else {
+        format!("{lede}\n\n{after}")
+    })
+}
+
 fn date_prefixes(value: &str) -> impl Iterator<Item = &str> {
     std::iter::once(value.trim()).chain(
         [" - ", " | ", " — ", " – "]
@@ -549,12 +924,18 @@ fn date_prefixes(value: &str) -> impl Iterator<Item = &str> {
 /// Bylines that introduce the date on a metadata line. They name the article's own date, which a
 /// feed aggregating submissions (Hacker News, Lobsters) does not share, so a labelled line is
 /// dropped on its own evidence instead of being matched against the item's published date.
-const DATE_LABELS: [&str; 5] = [
-    "written on ",
-    "published on ",
-    "posted on ",
+/// Longer labels come first: `posted on ` must win over `posted ` or the date never parses.
+const DATE_LABELS: [&str; 10] = [
     "last updated on ",
+    "last updated ",
+    "written on ",
+    "written ",
+    "published on ",
+    "published ",
+    "posted on ",
+    "posted ",
     "updated on ",
+    "updated ",
 ];
 
 struct LeadingDate {
@@ -622,7 +1003,7 @@ pub(super) fn tidy_markdown(markdown: &str) -> String {
     let mut out = String::with_capacity(markdown.len());
     let mut blank_run = 0;
     let mut pending_break = false;
-    for line in markdown.lines().map(str::trim_end) {
+    for line in drop_dangling_breaks(markdown) {
         if line.is_empty() {
             blank_run += 1;
             if blank_run > 1 {
@@ -658,6 +1039,31 @@ pub(super) fn tidy_markdown(markdown: &str) -> String {
     }
 }
 
+/// A hard line break (`\\`) with nothing after it on the page (`<br>` closing a paragraph, or
+/// stacked `<br>`s between blocks) has no Markdown meaning and renders as a literal backslash.
+/// Drop the backslash that ends a block and the lines made only of backslashes; a break between
+/// two lines of one paragraph stays.
+fn drop_dangling_breaks(markdown: &str) -> Vec<&str> {
+    let lines: Vec<&str> = markdown.lines().map(str::trim_end).collect();
+    let mut out = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        let only_breaks =
+            !line.is_empty() && line.chars().all(|ch| ch == '\\' || ch.is_whitespace());
+        if only_breaks {
+            continue;
+        }
+        let block_ends = lines
+            .get(index + 1)
+            .is_none_or(|next| next.trim().is_empty());
+        if block_ends && line.ends_with('\\') && !line.ends_with("\\\\") {
+            out.push(line[..line.len() - 1].trim_end());
+        } else {
+            out.push(line);
+        }
+    }
+    out
+}
+
 /// A `---` run is only a thematic break when nothing above it could make it a setext heading.
 fn is_thematic_break(line: &str, starts_block: bool) -> bool {
     let line = line.trim();
@@ -680,7 +1086,7 @@ mod tests {
     fn boundary_update_notices_are_removed_but_prose_mentions_stay() {
         let body = "Opening paragraph.\n\nMore reporting follows here.\n\n*This article was updated on 08 September 2026.*\n";
         assert_eq!(
-            strip_article_metadata(body, None, "spectrum"),
+            strip_article_metadata(body, "", None, "spectrum"),
             "Opening paragraph.\n\nMore reporting follows here.\n"
         );
         for notice in [
@@ -691,7 +1097,7 @@ mod tests {
         ] {
             let body = format!("{notice}\n\nOpening paragraph.\n");
             assert_eq!(
-                strip_article_metadata(&body, None, "spectrum"),
+                strip_article_metadata(&body, "", None, "spectrum"),
                 "Opening paragraph.\n",
                 "{notice}"
             );
@@ -703,7 +1109,7 @@ mod tests {
             "Opening.\n\nUpdated thinking\n",
         ] {
             assert_eq!(
-                strip_article_metadata(body, None, "spectrum"),
+                strip_article_metadata(body, "", None, "spectrum"),
                 body,
                 "{body}"
             );
@@ -728,6 +1134,7 @@ mod tests {
             assert_eq!(
                 strip_article_metadata(
                     &format!("{marker}\n\nArticle body.\n\n{marker}\n"),
+                    "",
                     None,
                     "apple"
                 ),
@@ -740,7 +1147,7 @@ mod tests {
             "```text\nopens in new window\n```\n\nArticle body.\n",
             "Article body.\n\nopens in new window\n\nMore body.\n",
         ] {
-            assert_eq!(strip_article_metadata(prose, None, "apple"), prose);
+            assert_eq!(strip_article_metadata(prose, "", None, "apple"), prose);
         }
     }
 
@@ -771,7 +1178,7 @@ mod tests {
                     format!("{control}\n\nActual article.\n\n{control}\n"),
                 ] {
                     assert_eq!(
-                        strip_article_metadata(&body, None, source),
+                        strip_article_metadata(&body, "", None, source),
                         "Actual article.\n",
                         "{body}"
                     );
@@ -787,6 +1194,7 @@ mod tests {
         assert_eq!(
             strip_article_metadata(
                 &format!("Actual article.\n\n\\\n\n{footer}\n"),
+                "",
                 None,
                 "an-archive"
             ),
@@ -795,7 +1203,7 @@ mod tests {
         // Prose that merely carries several links keeps its sentence.
         let prose = "See [one](https://example.com/1), [two](https://example.com/2) and [three](https://example.com/3) for the details.";
         assert_eq!(
-            strip_article_metadata(&format!("Actual article.\n\n{prose}\n"), None, "a-blog"),
+            strip_article_metadata(&format!("Actual article.\n\n{prose}\n"), "", None, "a-blog"),
             format!("Actual article.\n\n{prose}\n")
         );
     }
@@ -817,7 +1225,11 @@ mod tests {
             "Comment 42\n",
             "[0 comments]: https://example.com/#comments\n",
         ] {
-            assert_eq!(strip_article_metadata(body, None, "feed"), body, "{body}");
+            assert_eq!(
+                strip_article_metadata(body, "", None, "feed"),
+                body,
+                "{body}"
+            );
         }
     }
 
@@ -829,10 +1241,10 @@ mod tests {
         let html = "<div><p>[<a href=\"https://example.com/#comments\">0 comments</a>]</p><p>September 06, 2026</p><p>Actual article.</p><p>[<a href=\"https://example.com/#comment-form\">0 comments</a>]</p></div>";
         let body = to_markdown(html, None);
         assert_eq!(
-            strip_article_metadata(&body, Some(published), "feed"),
+            strip_article_metadata(&body, "", Some(published), "feed"),
             "Actual article.\n"
         );
-        assert_eq!(strip_article_metadata("0 comments\n", None, "feed"), "");
+        assert_eq!(strip_article_metadata("0 comments\n", "", None, "feed"), "");
     }
 
     #[test]
@@ -845,7 +1257,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            strip_leading_metadata(&markdown, Some(published), "blog-google"),
+            strip_leading_metadata(&markdown, "", Some(published), "blog-google"),
             "The actual article.\n"
         );
 
@@ -857,12 +1269,13 @@ mod tests {
             "The expression a | b combines the values.\n",
         ] {
             assert_eq!(
-                strip_leading_metadata(body, Some(published), "blog-google"),
+                strip_leading_metadata(body, "", Some(published), "blog-google"),
                 body
             );
             assert_eq!(
                 strip_leading_metadata(
                     &format!("Sep 02, 2026\n\n{body}"),
+                    "",
                     Some(published),
                     "blog-google"
                 ),
@@ -878,6 +1291,7 @@ mod tests {
         assert_eq!(
             strip_leading_metadata(
                 "Sep 02, 2025\n\n|\n\nBody.\n",
+                "",
                 Some(published),
                 "blog-google"
             ),
@@ -885,12 +1299,13 @@ mod tests {
         );
         let unrelated_date = "Sep 02, 2025\n\nBody.\n";
         assert_eq!(
-            strip_leading_metadata(unrelated_date, Some(published), "blog-google"),
+            strip_leading_metadata(unrelated_date, "", Some(published), "blog-google"),
             unrelated_date
         );
         assert_eq!(
             strip_leading_metadata(
                 "Blog Google\n\n|\n\nBody.\n",
+                "",
                 Some(published),
                 "blog-google"
             ),
@@ -909,7 +1324,7 @@ mod tests {
             "[Advertisement](/ads)\n\n•\n\n",
         ] {
             assert_eq!(
-                strip_article_metadata(&format!("{prefix}{body}"), None, "hnrss-org-frontpage"),
+                strip_article_metadata(&format!("{prefix}{body}"), "", None, "hnrss-org-frontpage"),
                 body,
                 "{prefix}"
             );
@@ -925,8 +1340,91 @@ mod tests {
         ] {
             let markdown = format!("{prefix}{body}");
             assert_eq!(
-                strip_article_metadata(&markdown, None, "hnrss-org-frontpage"),
+                strip_article_metadata(&markdown, "", None, "hnrss-org-frontpage"),
                 markdown
+            );
+        }
+    }
+
+    #[test]
+    fn strips_a_heading_repeating_the_title_and_the_name_date_byline_below_it() {
+        use chrono::TimeZone as _;
+
+        // filipovski.net: `<h3>Backups aren't simple</h3><p><em><a href="/">Aleksandar
+        // Filipovski</a>, 2026-09-16</em></p>` above the article, whose feed title is Title Case.
+        let published = Utc.with_ymd_and_hms(2026, 9, 16, 20, 27, 16).unwrap();
+        let title = "Backups Aren't Simple";
+        let source = "hnrss-org-frontpage";
+        let body = "### Backups aren't simple\n\n*[Aleksandar Filipovski](https://filipovski.net/), 2026-09-16*\n\n**See also: John Salvatier\u{2019}s excellent blog**\n\n* * *\n\nI read a comment somewhere that stuck with me.\n";
+        let expected = "**See also: John Salvatier\u{2019}s excellent blog**\n\n* * *\n\nI read a comment somewhere that stuck with me.\n";
+        assert_eq!(
+            strip_article_metadata(body, title, Some(published), source),
+            expected
+        );
+        assert_eq!(
+            strip_article_metadata(expected, title, Some(published), source),
+            expected
+        );
+        // arxiv.org labels its heading: `<h1 class="title">Title:Breaking the 1.58-bit …</h1>`.
+        assert_eq!(
+            strip_article_metadata(
+                "## Title:Breaking the 1.58-bit Barrier for Ternary LLMs\n\n[View PDF](https://arxiv.org/pdf/2609.16338)\n",
+                "Breaking the 1.58-bit Barrier for Ternary LLMs",
+                None,
+                source
+            ),
+            "[View PDF](https://arxiv.org/pdf/2609.16338)\n"
+        );
+        // A different heading, a heading further down, a plain paragraph, a byline dated another
+        // day, a byline without a title or stamp before it, and a dateline all stay.
+        for (body, title) in [
+            ("### Backups aren't simple\n\nBody.\n", "Backups Are Hard"),
+            ("Lead.\n\n### Backups aren't simple\n\nBody.\n", title),
+            ("Backups aren't simple\n\nBody.\n", title),
+            (
+                "### Backups aren't simple\n\n*[Aleksandar Filipovski](https://filipovski.net/), 2026-09-01*\n\nBody.\n",
+                "Backups Are Hard",
+            ),
+            (
+                "### Backups aren't simple\n\nAleksandar Filipovski\n\nBody.\n",
+                "Backups Are Hard",
+            ),
+            ("London, 16 September 2026\n\nBody.\n", title),
+            ("### Backups aren't simple\n\nBody.\n", ""),
+        ] {
+            assert_eq!(
+                strip_article_metadata(body, title, Some(published), source),
+                body,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn separator_rows_left_by_dropped_controls_are_removed() {
+        // openspec.dev: `<button>npm</button><span>/</span><button>pnpm</button>…` — Readability
+        // drops the buttons and leaves their separators as a paragraph.
+        let body = "## Installation\n\n/ / / /\n\n## Compatibility\n\nClaude Code Codex\n";
+        assert_eq!(
+            strip_article_metadata(body, "", None, "blog"),
+            "## Installation\n\n## Compatibility\n\nClaude Code Codex\n"
+        );
+        assert_eq!(
+            strip_article_metadata("Lead.\n\n\u{b7} \u{b7}\n\nBody.\n", "", None, "blog"),
+            "Lead.\n\nBody.\n"
+        );
+        for body in [
+            "\u{b7}\n\nBody.\n",
+            "Lead.\n\n* * *\n\nBody.\n",
+            "Lead.\n\n---\n\nBody.\n",
+            "a / b\n\nBody.\n",
+            "```\n/ / / /\n```\n",
+            "|   |   |\n| - | - |\n| 1 | 2 |\n",
+        ] {
+            assert_eq!(
+                strip_article_metadata(body, "", None, "blog"),
+                body,
+                "{body}"
             );
         }
     }
@@ -943,11 +1441,11 @@ mod tests {
         assert!(markdown.starts_with("By Eric Lu 09.09.26\n\n"));
         let expected = "Over the past few weeks, the Cognition research team and I have been optimizing our job scheduler.\n";
         assert_eq!(
-            strip_article_metadata(&markdown, Some(published), "cognition-com-blog"),
+            strip_article_metadata(&markdown, "", Some(published), "cognition-com-blog"),
             expected
         );
         assert_eq!(
-            strip_article_metadata(expected, Some(published), "cognition-com-blog"),
+            strip_article_metadata(expected, "", Some(published), "cognition-com-blog"),
             expected
         );
 
@@ -963,12 +1461,12 @@ mod tests {
             "An opening.\n\nBy Eric Lu 09.09.26\n\nBody.\n",
         ] {
             assert_eq!(
-                strip_article_metadata(body, Some(published), "cognition-com-blog"),
+                strip_article_metadata(body, "", Some(published), "cognition-com-blog"),
                 body
             );
         }
         assert_eq!(
-            strip_article_metadata(&markdown, None, "cognition-com-blog"),
+            strip_article_metadata(&markdown, "", None, "cognition-com-blog"),
             markdown
         );
     }
@@ -980,24 +1478,26 @@ mod tests {
         let published = Utc.with_ymd_and_hms(2026, 9, 2, 14, 16, 42).unwrap();
         let body = "2nd September 2026\n\nAnthropic published the prompts.\n";
         assert_eq!(
-            strip_leading_metadata(body, Some(published), "anthropic"),
+            strip_leading_metadata(body, "", Some(published), "anthropic"),
             "Anthropic published the prompts.\n"
         );
         assert_eq!(
             strip_leading_metadata(
                 "[September 2, 2026](/archive)\n\nBody.\n",
+                "",
                 Some(published),
                 "blog"
             ),
             "Body.\n"
         );
         assert_eq!(
-            strip_leading_metadata("2nd September 2025\n\nBody.\n", Some(published), "blog"),
+            strip_leading_metadata("2nd September 2025\n\nBody.\n", "", Some(published), "blog"),
             "2nd September 2025\n\nBody.\n"
         );
         assert_eq!(
             strip_leading_metadata(
                 "We met on 2nd September 2026.\n\nBody.\n",
+                "",
                 Some(published),
                 "blog"
             ),
@@ -1006,22 +1506,253 @@ mod tests {
         assert_eq!(
             strip_leading_metadata(
                 "3rd September 2026 - Link Blog\n\nThe actual opening.\n",
+                "",
                 Some(Utc.with_ymd_and_hms(2026, 9, 3, 8, 0, 0).unwrap()),
                 "simon-willison"
             ),
             "The actual opening.\n"
         );
         assert_eq!(
-            strip_leading_metadata("OpenAI\n\nSafety starts here.\n", Some(published), "openai"),
+            strip_leading_metadata(
+                "OpenAI\n\nSafety starts here.\n",
+                "",
+                Some(published),
+                "openai"
+            ),
             "Safety starts here.\n"
         );
         assert_eq!(
             strip_leading_metadata(
                 "OpenAI builds systems.\n\nBody.\n",
+                "",
                 Some(published),
                 "openai"
             ),
             "OpenAI builds systems.\n\nBody.\n"
+        );
+    }
+
+    #[test]
+    fn a_title_paragraph_and_a_read_time_stamp_are_metadata() {
+        // hacktron.ai: a `<header>` with the title as a paragraph, then date and reading time.
+        // Hacker News shortened the title it submitted.
+        let title = "A heap overflow and SSO misconfiguration to compromise OpenAI internal repos";
+        let body = "A heap overflow and SSO misconfiguration to compromise OpenAI internal repositories\n\nSeptember 13, 2026 11 min read\n\n## Intro\n\nOn July 25 we chained two bugs.\n";
+        assert_eq!(
+            strip_leading_metadata(body, title, None, "hnrss"),
+            "## Intro\n\nOn July 25 we chained two bugs.\n"
+        );
+        assert_eq!(
+            strip_leading_metadata("11 min read\n\nBody.\n", "", None, "hnrss"),
+            "Body.\n"
+        );
+        assert_eq!(
+            strip_leading_metadata("Sep 13, 2026 · 5-minute read\n\nBody.\n", "", None, "hnrss"),
+            "Body.\n"
+        );
+        for body in [
+            // A different title, a sentence that merely starts with the title, prose with minutes,
+            // and the title as an opening line with prose right after it.
+            "A heap overflow in libheif\n\nBody.\n",
+            "A heap overflow and SSO misconfiguration to compromise OpenAI internal repositories\n\nBody.\n",
+            "A heap overflow and SSO misconfiguration to compromise OpenAI internal repos was found.\n\nBody.\n",
+            "It took 11 min to read\n\nBody.\n",
+            "September 13, 2026\n\nBody.\n",
+        ] {
+            assert_eq!(
+                strip_leading_metadata(body, title, None, "hnrss"),
+                body,
+                "{body}"
+            );
+        }
+        assert!(same_title(
+            "compromise openai internal repos",
+            "compromise openai internal repositories"
+        ));
+        assert!(!same_title(
+            "openai internal repos",
+            "openai internal report"
+        ));
+        assert!(!same_title("a b", "a b c"));
+        assert_eq!(
+            without_read_time("September 13, 2026 11 min read"),
+            Some("September 13, 2026")
+        );
+        assert_eq!(without_read_time("11 min read"), Some(""));
+        assert_eq!(
+            without_read_time("Read this in 11 min"),
+            Some("Read this in")
+        );
+        assert_eq!(without_read_time("a long read"), None);
+    }
+
+    #[test]
+    fn an_authors_line_above_the_date_row_is_the_byline() {
+        // duckdb.org: `<span class="author">` over `<span class="date"> | <span class="readingtime">`.
+        assert_eq!(
+            strip_leading_metadata(
+                "Carlo Piovesan, Geertjan Wielenga\n\n2026-09-18 | 9 min\n\n*TL;DR: it works.*\n",
+                "",
+                None,
+                "lobste-rs"
+            ),
+            "*TL;DR: it works.*\n"
+        );
+        for body in [
+            // A single word or a phrase is a kicker or prose, and a name without a stamp stays.
+            "Interpretability\n\n2026-09-18 | 9 min\n\nBody.\n",
+            "Carlo Piovesan\n\nThe post begins here.\n",
+        ] {
+            assert_eq!(
+                strip_leading_metadata(body, "", None, "lobste-rs"),
+                body,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangling_hard_breaks_are_dropped_and_real_ones_stay() {
+        // lwn.net: a <br> closes the last paragraph and two more follow the index table.
+        let body = "Better performance.\\\n\n| Index | Entries |\n| ----- | ------- |\n| a | b |\n\n\\\n \\\n";
+        assert_eq!(
+            strip_article_metadata(body, "", None, "lobste-rs"),
+            "Better performance.\n\n| Index | Entries |\n| ----- | ------- |\n| a | b |\n"
+        );
+        let poem = "Roses are red\\\nviolets are blue\n";
+        assert_eq!(strip_article_metadata(poem, "", None, "lobste-rs"), poem);
+        let literal = "Ends with a backslash \\\\\n";
+        assert_eq!(
+            strip_article_metadata(literal, "", None, "lobste-rs"),
+            literal
+        );
+    }
+
+    #[test]
+    fn category_labels_and_eyebrows_above_the_opening_are_metadata() {
+        // linguisticdiscovery.com: the tag link Ghost places over the title.
+        assert_eq!(
+            strip_leading_metadata(
+                "[Newsletter](https://example.com/tags/articles/)\n\nAround 1,000 Greek words remain.\n",
+                "",
+                None,
+                "hnrss"
+            ),
+            "Around 1,000 Greek words remain.\n"
+        );
+        // openjev.com: the eyebrow of a landing page's hero, then its heading.
+        assert_eq!(
+            strip_leading_metadata(
+                "A live, local experiment\n\n## Decision model in your browser.\n\nA local model reads probabilities.\n",
+                "",
+                None,
+                "hnrss"
+            ),
+            "## Decision model in your browser.\n\nA local model reads probabilities.\n"
+        );
+        for body in [
+            // A link that reads as a sentence, or with lowercase words, opens the article.
+            "[Read the PDF](https://example.com/paper.pdf)\n\nBody.\n",
+            "[Newsletter](https://example.com/tags/) and more\n\nBody.\n",
+            // Short prose before a heading still ends a sentence, or is not followed by one.
+            "Hello there.\n\n## Intro\n\nBody.\n",
+            "A live, local experiment\n\nBody follows without a heading.\n",
+        ] {
+            assert_eq!(
+                strip_leading_metadata(body, "", None, "hnrss"),
+                body,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_name_behind_the_timestamp_is_the_byline() {
+        // bbc.com: `<time>2 hours ago</time>` then the contributor's name in its own paragraph.
+        let body = "2 hours ago\n\nJessica Rawnsley\n\nCanada has welcomed the proposal.\n";
+        assert_eq!(
+            strip_leading_metadata(body, "", None, "hnrss"),
+            "Canada has welcomed the proposal.\n"
+        );
+        for body in [
+            // Without the live timestamp a capitalised line could be a kicker.
+            "Jessica Rawnsley\n\nCanada has welcomed the proposal.\n",
+            "17 September 2026\n\nJessica Rawnsley\n\nCanada has welcomed the proposal.\n",
+            // Prose, a dateline and a single word stay.
+            "2 hours ago\n\nA short opening sentence\n\nBody.\n",
+            "2 hours ago\n\nLondon, England\n\nBody.\n",
+            "2 hours ago\n\nAnalysis\n\nBody.\n",
+        ] {
+            let expected = body.trim_start_matches("2 hours ago\n\n");
+            assert_eq!(
+                strip_leading_metadata(body, "", None, "hnrss"),
+                expected,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn ornament_lines_become_thematic_breaks() {
+        // martinfowler.com draws section breaks as a row of snowflakes.
+        let body = "First section.\n\n ❄                ❄                ❄                ❄                ❄\n\nSecond section.\n\n✦ ✦ ✦\n\nThird.\n";
+        let cleaned = strip_article_metadata(body, "", None, "martinfowler-com");
+        assert!(
+            cleaned.contains("First section.\n\n* * *\n\nSecond section.\n\n* * *\n\nThird."),
+            "{cleaned}"
+        );
+        // Two ornaments, mixed ornaments, emphasis and list markers are not rules.
+        for body in [
+            "A.\n\n❄ ❄\n\nB.\n",
+            "A.\n\n❄ ✦ ❄\n\nB.\n",
+            "A.\n\n* * *\n\nB.\n",
+            "A.\n\n- one\n- two\n",
+        ] {
+            assert!(
+                !is_decorative_rule(body.lines().nth(2).unwrap_or("")),
+                "{body}"
+            );
+        }
+        assert!(is_decorative_rule("~ ~ ~ ~"));
+        assert!(!is_decorative_rule("!!!"));
+    }
+
+    #[test]
+    fn strips_a_labelled_date_behind_a_one_line_lede() {
+        use chrono::{TimeZone as _, Utc};
+
+        // servo.org: the description Readability keeps, then the page's own date line, then the
+        // article. Hacker News published the submission two days later.
+        let submitted = Utc.with_ymd_and_hms(2026, 9, 17, 8, 13, 54).unwrap();
+        let body = "Looking back on Servo's first donation-funded role.\n\nPosted 2026-09-15\n\nLast September, the project announced a role.\n";
+        assert_eq!(
+            strip_leading_metadata(body, "", Some(submitted), "hnrss"),
+            "Looking back on Servo's first donation-funded role.\n\nLast September, the project announced a role.\n"
+        );
+        // A stamp that closes the item and a heading lede work the same way.
+        assert_eq!(
+            strip_leading_metadata("## A lede\n\nPosted 2026-09-15\n", "", None, "hnrss"),
+            "## A lede\n"
+        );
+        // Prose that happens to sit after a lede stays, and so does a bare date behind prose:
+        // without a label it needs the item's own date, which the loop never reaches here.
+        for body in [
+            "A lede.\n\nPosted 2026-09-15 the draft finally made sense.\n\nBody.\n",
+            "A lede.\n\n2026-09-15\n\nBody.\n",
+            "A lede.\n\nPosted\n2026-09-15\n\nBody.\n",
+        ] {
+            assert_eq!(
+                strip_leading_metadata(body, "", Some(submitted), "hnrss"),
+                body
+            );
+        }
+        let long_lede = format!(
+            "{} lede.\n\nPosted 2026-09-15\n\nBody.\n",
+            "very ".repeat(60)
+        );
+        assert_eq!(
+            strip_leading_metadata(&long_lede, "", None, "hnrss"),
+            long_lede
         );
     }
 
@@ -1036,11 +1767,14 @@ mod tests {
             "Written on 7 September 2026",
             "*Published on 2026-09-07*",
             "Posted on Sep 7, 2026",
+            "Posted 2026-09-07",
+            "Published 7 September 2026",
             "Last updated on 7th September 2026",
         ] {
             assert_eq!(
                 strip_leading_metadata(
                     &format!("{byline}\n\nThe actual opening.\n"),
+                    "",
                     None,
                     "hnrss"
                 ),
@@ -1050,6 +1784,7 @@ mod tests {
             assert_eq!(
                 strip_leading_metadata(
                     &format!("{byline}\n\nThe actual opening.\n"),
+                    "",
                     Some(submitted),
                     "hnrss"
                 ),
@@ -1062,12 +1797,18 @@ mod tests {
             "Written on a rainy afternoon\n\nBody.\n",
             "Written on September 07, 2026 the draft finally made sense.\n\nBody.\n",
         ] {
-            assert_eq!(strip_leading_metadata(body, Some(submitted), "hnrss"), body);
+            assert_eq!(
+                strip_leading_metadata(body, "", Some(submitted), "hnrss"),
+                body
+            );
         }
         // A bare date still needs the item's own published date to back it up.
         let bare = "September 07, 2026\n\nBody.\n";
-        assert_eq!(strip_leading_metadata(bare, Some(submitted), "hnrss"), bare);
-        assert_eq!(strip_leading_metadata(bare, None, "hnrss"), bare);
+        assert_eq!(
+            strip_leading_metadata(bare, "", Some(submitted), "hnrss"),
+            bare
+        );
+        assert_eq!(strip_leading_metadata(bare, "", None, "hnrss"), bare);
     }
 
     #[test]
@@ -1090,7 +1831,7 @@ mod tests {
             ("Just now\n\nBy Amy Walker\n\nReal body.\n", "Real body.\n"),
         ] {
             assert_eq!(
-                strip_article_metadata(body, Some(published), "blog-google"),
+                strip_article_metadata(body, "", Some(published), "blog-google"),
                 expected,
                 "{body:?}"
             );
@@ -1114,7 +1855,7 @@ mod tests {
             // A sentence fragment under a date is prose.
             "Sep 15, 2026\n\nwe shipped something today\n\nReal body.\n",
         ] {
-            let kept = strip_article_metadata(body, Some(published), "blog-google");
+            let kept = strip_article_metadata(body, "", Some(published), "blog-google");
             let second = body.trim_start_matches('\n').split("\n\n").nth(1).unwrap();
             assert!(kept.contains(second), "{body:?} -> {kept:?}");
         }
@@ -1129,6 +1870,7 @@ mod tests {
         assert_eq!(
             strip_article_metadata(
                 "20260915\n\n## Chop up your books\n\nThis is my appeal.\n",
+                "",
                 Some(published),
                 "hnrss-org-frontpage"
             ),
@@ -1137,7 +1879,7 @@ mod tests {
         // An eight-digit number that is not this item's date stays where it is.
         let unrelated = "20190104\n\nThe build number above matters.\n";
         assert_eq!(
-            strip_article_metadata(unrelated, Some(published), "hnrss-org-frontpage"),
+            strip_article_metadata(unrelated, "", Some(published), "hnrss-org-frontpage"),
             unrelated
         );
     }
@@ -1146,11 +1888,16 @@ mod tests {
     fn stacked_separators_are_tidied_in_archives_written_before_the_rule() {
         // Capture-time tidying cannot reach a body already on the branch, so the build tidies too.
         assert_eq!(
-            strip_article_metadata("Lead.\n\n* * *\n\n* * *\n\nBody.\n\n* * *\n", None, "blog"),
+            strip_article_metadata(
+                "Lead.\n\n* * *\n\n* * *\n\nBody.\n\n* * *\n",
+                "",
+                None,
+                "blog"
+            ),
             "Lead.\n\n* * *\n\nBody.\n"
         );
         // A rule inside a code block is code.
         let fenced = "```\n* * *\n\n* * *\n```\n";
-        assert_eq!(strip_article_metadata(fenced, None, "blog"), fenced);
+        assert_eq!(strip_article_metadata(fenced, "", None, "blog"), fenced);
     }
 }

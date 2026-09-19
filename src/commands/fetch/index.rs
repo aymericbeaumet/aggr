@@ -14,7 +14,8 @@ pub(super) struct ExistingPaths {
     pub(super) podcasts: podcast::Archive,
     pub(super) images: BTreeMap<String, Vec<ArchivedImages>>,
     pub(super) recordings: BTreeMap<String, Vec<(String, RawItem)>>,
-    /// Items still carrying only feed content because the original page was unavailable.
+    /// Items still carrying only feed content because the original page was unavailable, and
+    /// captures that archived a script's loading placeholder instead of an article.
     pub(super) captures: BTreeMap<String, Vec<(String, RawItem)>>,
 }
 
@@ -59,10 +60,12 @@ pub(super) fn index_archive(
                 ));
         }
         // Binary links are final as feed content: heavy extraction never requests them.
-        if matches!(
-            item.front.content,
-            crate::model::ContentKind::Feed | crate::model::ContentKind::None
-        ) && item.front.replicated_at.is_none()
+        let wants_capture = match item.front.content {
+            crate::model::ContentKind::Feed | crate::model::ContentKind::None => true,
+            crate::model::ContentKind::Extracted => crate::content::is_placeholder_body(&item.body),
+        };
+        if wants_capture
+            && item.front.replicated_at.is_none()
             && url::Url::parse(&item.front.link).is_ok_and(|url| {
                 matches!(url.scheme(), "http" | "https") && !super::is_binary_link(&url)
             })
@@ -149,6 +152,46 @@ mod tests {
             .items
             .remove(source_slug)
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn placeholder_captures_are_retried_like_feed_only_items() {
+        let item = |content: ContentKind, body: &str| crate::model::Item {
+            path: format!("items/blog/2026/09/{}", body.len()),
+            front: FrontMatter {
+                title: "Post".into(),
+                link: format!("https://example.com/{}", body.len()),
+                source: "blog".into(),
+                content,
+                ..Default::default()
+            },
+            body: body.into(),
+        };
+        let (_, paths) = index_archive([
+            item(ContentKind::Extracted, "loading…\n"),
+            item(
+                ContentKind::Extracted,
+                "overview metrics about\n\nreconnecting…\n",
+            ),
+            item(
+                ContentKind::Extracted,
+                "A real article body that mentions loading… once.\n",
+            ),
+            item(ContentKind::Feed, "Feed summary.\n"),
+        ]);
+        let captures = paths.captures.get("blog").unwrap();
+        let bodies = captures
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bodies,
+            [
+                "items/blog/2026/09/11",
+                "items/blog/2026/09/40",
+                "items/blog/2026/09/14"
+            ]
+        );
     }
 
     #[test]

@@ -128,10 +128,7 @@ export function mountSelectionSharing(root: ParentNode, signal: AbortSignal) {
 
   function hide() {
     toolbar.hidden = true;
-    if (!token) return;
     token = null;
-    // Leaving a stale fragment behind would share the wrong words.
-    view!.history.replaceState(view!.history.state, "", shareURL());
   }
 
   function place(range: Range) {
@@ -162,10 +159,12 @@ export function mountSelectionSharing(root: ParentNode, signal: AbortSignal) {
     if (from === null || to === null || to <= from) return hide();
     const words = wordRange(index().words, from, to);
     if (!words) return hide();
+    // The selection is ephemeral and only the Share action publishes it. The address bar keeps
+    // whatever fragment the page arrived with: a reader who followed a shared link can pass that
+    // same link on, and reselecting never rewrites it.
     const next = encodeSelection(words[0], words[1]);
     if (next !== token) {
       token = next;
-      view!.history.replaceState(view!.history.state, "", shareURL());
       share.textContent = "Share";
     }
     place(range);
@@ -227,7 +226,6 @@ export function mountSelectionSharing(root: ParentNode, signal: AbortSignal) {
     const selection = doc.getSelection();
     selection?.removeAllRanges();
     selection?.addRange(selected);
-    // The fragment already describes this selection, so keep it instead of clearing it.
     token = shared;
     (from.node.parentElement ?? body!).scrollIntoView({ block: "center", behavior: "auto" });
   }

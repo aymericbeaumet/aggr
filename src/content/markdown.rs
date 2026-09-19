@@ -7,15 +7,18 @@ use url::Url;
 
 use super::cleanup::{is_accessibility_label, protect_markdown_code, tidy_markdown};
 use super::scan::{
-    BLOCK_ELEMENTS, attribute_value, comment_end, element_bounds, has_class, opening_element_count,
-    parse_tag, set_attribute, skip_html_whitespace,
+    BLOCK_ELEMENTS, attribute_value, close_removed_element, comment_end, element_bounds,
+    opening_element_count, parse_tag, set_attribute, skip_element, skip_html_whitespace,
 };
 use super::strip::{decode_entities, html_to_text, is_active_url, sanitize, strip_active_content};
 use super::{balanced_json_object, escape_html};
 
 /// Inline wrappers commonly used as CSS layout children. Readability keeps these elements but not
 /// the CSS `gap` or grid columns that visually separated directly adjacent siblings.
-const LAYOUT_INLINE_ELEMENTS: &[&str] = &["a", "label", "span", "time"];
+const LAYOUT_INLINE_ELEMENTS: &[&str] = &["a", "label", "span", "time", "small"];
+/// Text-level elements a layout wrapper can follow with no space of its own
+/// (`<strong>libheif</strong><span>Image decoder</span>` in a CSS-laid-out list).
+const TEXT_INLINE_ELEMENTS: &[&str] = &["strong", "b", "em", "i", "code"];
 
 const FOOTNOTE_REF_START: char = '\u{e000}';
 const FOOTNOTE_REF_END: char = '\u{e001}';
@@ -165,9 +168,17 @@ fn responsive_json_candidate(value: &str) -> Option<String> {
 pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
     let description = normalize_youtube_description(html, base);
     let normalized_images = normalize_image_sources(&description);
-    let passive = strip_active_content(&normalized_images);
-    let document = normalize_document_footnotes(&normalize_code_blocks(&normalize_code_tables(
-        &normalize_figure_captions(&strip_audio_players(&passive)),
+    let framed = link_embedded_frames(&normalized_images);
+    let passive = strip_active_content(&framed);
+    let passive = strip_inert_templates(&passive);
+    let passive = strip_site_chrome(&passive);
+    let passive = strip_invisible_characters(&passive);
+    let passive = unwrap_blank_emphasis(&passive);
+    let passive = normalize_table_breaks(&passive);
+    let passive = demote_captions_of_media_less_figures(&passive);
+    let (passive, formulas) = normalize_mathml(&passive);
+    let document = normalize_document_footnotes(&normalize_code_blocks(&unwrap_layout_tables(
+        &normalize_code_tables(&normalize_figure_captions(&strip_audio_players(&passive))),
     )));
     let normalized = normalize_extracted_controls(&document.html, document.footnotes);
     let clean = sanitize(&restore_inline_layout_boundaries(&normalized.html), base);
@@ -188,8 +199,422 @@ pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
     let markdown = protect_markdown_code(&markdown, |prose| {
         tidy_markdown(&repair_generated_markdown(prose))
     });
+    let markdown = restore_formulas(&markdown, &formulas);
     let markdown = restore_footnote_references(markdown, normalized.footnotes.len());
     append_footnotes(markdown, &normalized.footnotes, base, &converter)
+}
+
+/// Site chrome Readability lets through: `<nav>` elements (breadcrumbs, a site menu), a
+/// `<header>` that holds one, links with nothing to show (icon-only social links) and the
+/// close button of an overlay (`<a href="#!">×</a>`).
+fn strip_site_chrome(html: &str) -> String {
+    if !html.contains("<nav") && !html.contains("<header") && !html.contains("<a") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        let Some(tag) = parse_tag(&html[start..]) else {
+            out.push('<');
+            position = start + 1;
+            continue;
+        };
+        let Some(end) = tag.end else {
+            out.push_str(&html[start..]);
+            return out;
+        };
+        let name = tag.name.as_str();
+        let bounds = (!tag.closing && !tag.self_closing && matches!(name, "nav" | "header" | "a"))
+            .then(|| element_bounds(html, start, name))
+            .flatten();
+        let drop = match (name, bounds) {
+            ("nav", Some(_)) => true,
+            // A masthead: site navigation, or a short banner whose brand link points at the
+            // site's root. An article header (kicker, title, standfirst) links elsewhere or not
+            // at all, and is kept.
+            ("header", Some((inner, closing, _))) => {
+                let body = &html[inner..closing];
+                body.contains("<nav")
+                    || (has_root_link(body) && html_to_text(body).split_whitespace().count() <= 30)
+            }
+            ("a", Some((inner, closing, _))) => {
+                let body = &html[inner..closing];
+                let text = html_to_text(body);
+                let text = text.trim();
+                let media = ["<img", "<picture", "<video", "<audio", "<svg"]
+                    .iter()
+                    .any(|marker| body.contains(marker));
+                let href = attribute_value(&html[start..start + end], "href").unwrap_or_default();
+                (text.is_empty() && !media)
+                    || (href.starts_with('#')
+                        && ((text.chars().count() == 1
+                            && !text.chars().all(char::is_alphanumeric))
+                            // `Skip YouTube video embed.`: an accessibility skip link.
+                            || text.to_ascii_lowercase().starts_with("skip ")))
+            }
+            _ => false,
+        };
+        if drop {
+            position = bounds.map_or(start + end, |(_, _, after)| after);
+            continue;
+        }
+        out.push_str(&html[start..start + end]);
+        position = start + end;
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// An `<iframe>` cannot ship in a Markdown body, but what it showed can: the frame becomes a link
+/// to its source, titled as the page titled it. A video embed links to the video's own page, which
+/// the reader plays inline.
+fn link_embedded_frames(html: &str) -> String {
+    if !html.contains("<iframe") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find("<iframe").map(|at| position + at) {
+        out.push_str(&html[position..start]);
+        let Some(tag) = parse_tag(&html[start..]).filter(|tag| tag.name == "iframe") else {
+            out.push_str("<iframe");
+            position = start + 7;
+            continue;
+        };
+        let Some(tag_len) = tag.end else {
+            break;
+        };
+        let tag_html = &html[start..start + tag_len];
+        let end = element_bounds(html, start, "iframe").map_or(start + tag_len, |(.., end)| end);
+        let source = attribute_value(tag_html, "src")
+            .map(str::trim)
+            .and_then(|src| Url::parse(src).ok())
+            .filter(|url| matches!(url.scheme(), "http" | "https"));
+        if let Some(url) = source {
+            let url = crate::sources::youtube::video_id(&url)
+                .and_then(|id| Url::parse(&format!("https://www.youtube.com/watch?v={id}")).ok())
+                .unwrap_or(url);
+            let title = attribute_value(tag_html, "title")
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map_or_else(
+                    || url.host_str().unwrap_or("embedded content").to_string(),
+                    String::from,
+                );
+            out.push_str(&format!(
+                "<p><a href=\"{}\">{}</a></p>",
+                escape_html(url.as_str()),
+                escape_html(&title)
+            ));
+        }
+        position = end;
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// `true` when some link in `html` leads to the site's front page: the brand link of a masthead.
+fn has_root_link(html: &str) -> bool {
+    html.match_indices("<a").any(|(start, _)| {
+        parse_tag(&html[start..]).is_some_and(|tag| {
+            tag.name == "a"
+                && tag.end.is_some_and(|end| {
+                    attribute_value(&html[start..start + end], "href").is_some_and(is_root_href)
+                })
+        })
+    })
+}
+
+fn is_root_href(href: &str) -> bool {
+    let href = href.trim();
+    matches!(href, "/" | "./" | ".")
+        || Url::parse(href).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+        })
+}
+
+/// Zero-width joiners, spaces and word joiners carry no text, but they sit between a link and
+/// the punctuation that closes its emphasis and keep Markdown from recognising the pair.
+fn strip_invisible_characters(html: &str) -> String {
+    const INVISIBLE: [char; 5] = ['\u{200b}', '\u{200c}', '\u{200d}', '\u{2060}', '\u{feff}'];
+    if !html.contains(INVISIBLE) {
+        return html.to_string();
+    }
+    html.replace(INVISIBLE, "")
+}
+
+/// `<a>Ivan</a><em> </em>who`: emphasis around nothing but a space is dropped by the Markdown
+/// converter, and the space with it. The space is the content; keep it.
+fn unwrap_blank_emphasis(html: &str) -> String {
+    const EMPHASIS: [&str; 5] = ["em", "strong", "b", "i", "u"];
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        let blank = parse_tag(&html[start..])
+            .filter(|tag| !tag.closing && EMPHASIS.contains(&tag.name.as_str()))
+            .and_then(|tag| element_bounds(html, start, &tag.name))
+            .filter(|(inner, closing, _)| {
+                let content = &html[*inner..*closing];
+                !content.contains('<') && decode_entities(content).trim().is_empty()
+            });
+        match blank {
+            Some((inner, closing, end)) => {
+                if inner < closing {
+                    out.push(' ');
+                }
+                position = end;
+            }
+            None => {
+                out.push('<');
+                position = start + 1;
+            }
+        }
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// A line break inside a table cell (`Ternary Bonsai 2<br>27B`) has no Markdown form: the
+/// converter would write a backslash the table row cannot carry, so the break becomes a space.
+fn normalize_table_breaks(html: &str) -> String {
+    if !html.contains("<table") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..]
+        .find("<table")
+        .map(|offset| position + offset)
+    {
+        out.push_str(&html[position..start]);
+        let Some((_, _, end)) = element_bounds(html, start, "table") else {
+            out.push_str(&html[start..]);
+            return out;
+        };
+        let mut table = String::with_capacity(end - start);
+        let mut at = start;
+        while let Some(tag_start) = html[at..end].find('<').map(|offset| at + offset) {
+            table.push_str(&html[at..tag_start]);
+            match parse_tag(&html[tag_start..end]) {
+                Some(tag) if tag.name == "br" && !tag.closing => {
+                    table.push(' ');
+                    at = tag_start + tag.end.unwrap_or(1);
+                }
+                Some(tag) => {
+                    let length = tag.end.unwrap_or(1);
+                    table.push_str(&html[tag_start..tag_start + length]);
+                    at = tag_start + length;
+                }
+                None => {
+                    table.push('<');
+                    at = tag_start + 1;
+                }
+            }
+        }
+        table.push_str(&html[at..end]);
+        out.push_str(&table);
+        position = end;
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// A `<figure>` around a table, a list or a chart placeholder has no media for a caption to
+/// attach to, so its caption is written as an ordinary paragraph where it stands instead of the
+/// hard break that reunites a caption with its image.
+fn demote_captions_of_media_less_figures(html: &str) -> String {
+    if !html.contains("<figcaption") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..]
+        .find("<figure")
+        .map(|offset| position + offset)
+    {
+        out.push_str(&html[position..start]);
+        let Some((inner, closing, end)) = element_bounds(html, start, "figure") else {
+            out.push_str(&html[start..]);
+            return out;
+        };
+        let body = &html[inner..closing];
+        let media = [
+            "<img", "<picture", "<video", "<audio", "<svg", "<object", "<embed",
+        ]
+        .iter()
+        .any(|marker| body.contains(marker));
+        if media {
+            out.push_str(&html[start..end]);
+        } else {
+            out.push_str(&html[start..inner]);
+            out.push_str(
+                &body
+                    .replace("<figcaption", "<p")
+                    .replace("</figcaption>", "</p>"),
+            );
+            out.push_str(&html[closing..end]);
+        }
+        position = end;
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// `<template>` content is inert in a browser (KaTeX and annotated-code tooltips ship theirs
+/// that way), so it has no place in the reading text.
+fn strip_inert_templates(html: &str) -> String {
+    if !html.contains("<template") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        match parse_tag(&html[start..]) {
+            Some(tag) if !tag.closing && !tag.self_closing && tag.name == "template" => {
+                let Some(end) = tag.end else {
+                    return out;
+                };
+                position = skip_element(html, start + end, "template");
+            }
+            Some(tag) => {
+                let end = tag.end.unwrap_or(1);
+                out.push_str(&html[start..start + end]);
+                position = start + end;
+            }
+            None => {
+                out.push('<');
+                position = start + 1;
+            }
+        }
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// A formula the page rendered as MathML with its TeX source attached, as KaTeX and MathJax do.
+struct Formula {
+    tex: String,
+    display: bool,
+}
+
+/// Replace every `<math>` element by a placeholder for the TeX it annotates, so the formula
+/// survives Markdown conversion untouched and is written back as `$…$` or `$$…$$`, which the
+/// renderer already reads. A `<math>` without a TeX annotation is left to its text.
+fn normalize_mathml(html: &str) -> (String, Vec<Formula>) {
+    if !html.contains("<math") {
+        return (html.to_string(), Vec::new());
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut formulas = Vec::new();
+    let mut position = 0;
+    while let Some(start) = html[position..]
+        .find("<math")
+        .map(|offset| position + offset)
+    {
+        out.push_str(&html[position..start]);
+        let Some((opening_end, inner_end, end)) = element_bounds(html, start, "math") else {
+            out.push_str(&html[start..]);
+            return (out, formulas);
+        };
+        let opening = &html[start..opening_end];
+        let inner = &html[opening_end..inner_end];
+        match tex_annotation(inner) {
+            Some(tex) if !tex.trim().is_empty() => {
+                let display = attribute_value(opening, "display") == Some("block");
+                out.push_str(&formula_placeholder(formulas.len()));
+                formulas.push(Formula { tex, display });
+            }
+            _ => {
+                // No source to show: the MathML text (`a+b`) reads well enough on its own.
+                let text = html_to_text(inner)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                out.push_str(&escape_html(&text));
+            }
+        }
+        position = end;
+    }
+    out.push_str(&html[position..]);
+    (out, formulas)
+}
+
+fn tex_annotation(math: &str) -> Option<String> {
+    let mut position = 0;
+    while let Some(start) = math[position..]
+        .find("<annotation")
+        .map(|offset| position + offset)
+    {
+        let (opening_end, inner_end, end) = element_bounds(math, start, "annotation")?;
+        let opening = &math[start..opening_end];
+        if attribute_value(opening, "encoding").is_some_and(|encoding| encoding.contains("x-tex")) {
+            return Some(decode_entities(&math[opening_end..inner_end]));
+        }
+        position = end;
+    }
+    None
+}
+
+const FORMULA_OPEN: char = '\u{e000}';
+const FORMULA_CLOSE: char = '\u{e001}';
+
+/// Private-use characters around an index: text no conversion step touches.
+fn formula_placeholder(index: usize) -> String {
+    format!("{FORMULA_OPEN}{index}{FORMULA_CLOSE}")
+}
+
+fn restore_formulas(markdown: &str, formulas: &[Formula]) -> String {
+    if formulas.is_empty() {
+        return markdown.to_string();
+    }
+    let mut out = String::with_capacity(markdown.len());
+    let mut rest = markdown;
+    while let Some(start) = rest.find(FORMULA_OPEN) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + FORMULA_OPEN.len_utf8()..];
+        let Some(close) = after.find(FORMULA_CLOSE) else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let tail = &after[close + FORMULA_CLOSE.len_utf8()..];
+        match after[..close]
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| formulas.get(index))
+        {
+            Some(Formula { tex, display: true }) => {
+                if !(out.is_empty() || out.ends_with("\n\n")) {
+                    out.push_str(if out.ends_with('\n') { "\n" } else { "\n\n" });
+                }
+                out.push_str("$$\n");
+                out.push_str(tex.trim());
+                out.push_str("\n$$");
+                if !(tail.is_empty() || tail.starts_with("\n\n")) {
+                    out.push_str(if tail.starts_with('\n') { "\n" } else { "\n\n" });
+                }
+            }
+            Some(Formula {
+                tex,
+                display: false,
+            }) => {
+                out.push('$');
+                out.push_str(tex.trim());
+                out.push('$');
+            }
+            None => out.push_str(
+                &rest[start..start + FORMULA_OPEN.len_utf8() + close + FORMULA_CLOSE.len_utf8()],
+            ),
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// YouTube descriptions are plain text carried as paragraphs with line breaks, not Markdown.
@@ -410,6 +835,81 @@ fn normalize_code_tables(html: &str) -> String {
     out
 }
 
+/// A table used as page layout (one row of columns, or cells holding headings, lists and other
+/// blocks) is not data: rendered as a Markdown table it becomes one unreadable row. Its cells
+/// are unwrapped in order, nested layout tables included.
+fn unwrap_layout_tables(html: &str) -> String {
+    if !html.contains("<table") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        let layout = parse_tag(&html[start..])
+            .filter(|tag| !tag.closing && tag.name == "table")
+            .and_then(|_| element_bounds(html, start, "table"))
+            .filter(|(_, _, end)| is_layout_table(&html[start..*end]));
+        match layout {
+            Some((inner, closing, end)) => {
+                out.push_str(&layout_table_cells(&html[inner..closing]));
+                position = end;
+            }
+            None => {
+                out.push('<');
+                position = start + 1;
+            }
+        }
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+fn is_layout_table(table: &str) -> bool {
+    const BLOCKS: [&str; 11] = [
+        "<h1",
+        "<h2",
+        "<h3",
+        "<h4",
+        "<h5",
+        "<h6",
+        "<ul",
+        "<ol",
+        "<pre",
+        "<blockquote",
+        "<figure",
+    ];
+    !table.contains("<th")
+        && (opening_element_count(table, "tr") <= 1
+            || opening_element_count(table, "table") > 1
+            || BLOCKS.iter().any(|marker| table.contains(marker)))
+}
+
+fn layout_table_cells(inner: &str) -> String {
+    let mut out = String::with_capacity(inner.len());
+    let mut position = 0;
+    while let Some(start) = inner[position..]
+        .find("<td")
+        .map(|offset| position + offset)
+    {
+        let Some((cell_start, cell_end, end)) = parse_tag(&inner[start..])
+            .filter(|tag| !tag.closing && tag.name == "td")
+            .and_then(|_| element_bounds(inner, start, "td"))
+        else {
+            position = start + 3;
+            continue;
+        };
+        let content = unwrap_layout_tables(&inner[cell_start..cell_end]);
+        if !html_to_text(&content).trim().is_empty() || content.contains("<img") {
+            out.push_str("<div>");
+            out.push_str(&content);
+            out.push_str("</div>");
+        }
+        position = end;
+    }
+    out
+}
+
 /// The `<pre><code>` replacement for a table that is really a numbered listing, or `None` when the
 /// table carries data a reader needs to keep as a table.
 fn code_table(table: &str) -> Option<String> {
@@ -473,6 +973,9 @@ fn code_table(table: &str) -> Option<String> {
 /// Markdown tables need a header row, so a table that has none degrades into a run of loose
 /// paragraphs. Give it an empty one and the rows stay a table.
 fn headed_table(table: &str) -> Option<String> {
+    if is_layout_table(table) {
+        return None;
+    }
     let fragment = Html::parse_fragment(table);
     if fragment
         .select(&Selector::parse("th").ok()?)
@@ -513,7 +1016,7 @@ fn element_text(element: &scraper::ElementRef<'_>) -> String {
 /// hard line break after the image — portable Markdown reads correctly, and the reader's renderer
 /// puts the pair back together as a real `<figure>`.
 fn normalize_figure_captions(html: &str) -> String {
-    if !html.contains("<figcaption") {
+    if !html.contains("<figcaption") && !html.contains("<small") {
         return html.to_string();
     }
     let mut out = String::with_capacity(html.len());
@@ -521,14 +1024,23 @@ fn normalize_figure_captions(html: &str) -> String {
     while let Some(start) = html[position..].find('<').map(|at| position + at) {
         out.push_str(&html[position..start]);
         let caption = parse_tag(&html[start..])
-            .filter(|tag| !tag.closing && tag.name == "figcaption")
-            .and_then(|_| element_bounds(html, start, "figcaption"));
+            .filter(|tag| {
+                !tag.closing
+                    && (tag.name == "figcaption" || (tag.name == "small" && follows_media(&out)))
+            })
+            .and_then(|tag| element_bounds(html, start, &tag.name));
         match caption {
             Some((inner, closing, end))
                 if !html_to_text(&html[inner..closing]).trim().is_empty() =>
             {
+                let kept = out.trim_end().len();
+                out.truncate(kept);
                 out.push_str("<br>");
                 out.push_str(&html[inner..closing]);
+                // A credit in a second <small> right behind the caption needs its own space.
+                if html[end..].trim_start().starts_with("<small") {
+                    out.push(' ');
+                }
                 position = end;
             }
             _ => {
@@ -539,6 +1051,28 @@ fn normalize_figure_captions(html: &str) -> String {
     }
     out.push_str(&html[position..]);
     out
+}
+
+/// `<img …><small>Caption</small>`: small print right after an image in the same block is its
+/// caption. True when nothing but the image (and whitespace) precedes this point in the block.
+fn follows_media(out: &str) -> bool {
+    let block = out
+        .rfind(['<'])
+        .and_then(|_| {
+            [
+                "<p", "<div", "<figure", "<li", "<td", "<section", "<article",
+            ]
+            .iter()
+            .filter_map(|marker| out.rfind(marker))
+            .max()
+        })
+        .unwrap_or(0);
+    let block = &out[block..];
+    let Some(media) = block.rfind("<img").or_else(|| block.rfind("<picture")) else {
+        return false;
+    };
+    html_to_text(&block[..media]).trim().is_empty()
+        && html_to_text(&block[media..]).trim().is_empty()
 }
 
 /// Mailing-list archives wrap a whole message in one `<pre>`, navigation bar included. A first or
@@ -767,9 +1301,9 @@ fn endnotes_bounds(html: &str) -> Option<ElementRange> {
         let tag_html = &html[tag_start..tag_start + tag_len];
         if !tag.closing
             && matches!(tag.name.as_str(), "div" | "section" | "aside" | "ol")
-            && (has_class(tag_html, "footnotes")
-                || attribute_value(tag_html, "role") == Some("doc-endnotes"))
             && let Some((inner, closing, end)) = element_bounds(html, tag_start, &tag.name)
+            && (attribute_value(tag_html, "role") == Some("doc-endnotes")
+                || is_referenced_note_list(&html[..tag_start], &html[inner..closing]))
         {
             return Some(ElementRange {
                 start: tag_start,
@@ -780,6 +1314,20 @@ fn endnotes_bounds(html: &str) -> Option<ElementRange> {
         position = tag_start + tag_len;
     }
     None
+}
+
+/// A list is the document's endnotes when every item carries an id and each id is the target of a
+/// fragment link earlier in the document: the structure of footnotes, whatever the publisher's
+/// class names.
+fn is_referenced_note_list(before: &str, inner: &str) -> bool {
+    if !inner.contains("<li") {
+        return false;
+    }
+    let notes = endnote_items(inner);
+    !notes.is_empty()
+        && notes.iter().all(|(id, _)| {
+            before.contains(&format!("href=\"#{id}\"")) || before.contains(&format!("href='#{id}'"))
+        })
 }
 
 /// `(anchor id, note HTML)` for each list item in the endnotes container, in document order.
@@ -832,12 +1380,13 @@ fn strip_backreferences(note: &str) -> String {
             break;
         };
         let tag_html = &note[tag_start..tag_start + tag_len];
-        let backreference = !tag.closing
+        if !tag.closing
             && tag.name == "a"
-            && (has_class(tag_html, "footnote-backref")
-                || attribute_value(tag_html, "role") == Some("doc-backlink"))
-            && attribute_value(tag_html, "href").is_some_and(|href| href.starts_with('#'));
-        if backreference && let Some((.., end)) = element_bounds(note, tag_start, "a") {
+            && attribute_value(tag_html, "href").is_some_and(|href| href.starts_with('#'))
+            && let Some((inner, closing, end)) = element_bounds(note, tag_start, "a")
+            && (attribute_value(tag_html, "role") == Some("doc-backlink")
+                || is_return_glyph(&html_to_text(&note[inner..closing])))
+        {
             position = end;
             continue;
         }
@@ -846,6 +1395,12 @@ fn strip_backreferences(note: &str) -> String {
     }
     out.push_str(&note[position..]);
     out
+}
+
+/// The text of a back-reference is a symbol (`↩`, `↑`, `^`), never a word or a number.
+fn is_return_glyph(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty() && text.chars().count() <= 2 && !text.chars().any(char::is_alphanumeric)
 }
 
 /// `(note index, end offset)` when the element at `start` is a reference into `notes`. A wrapping
@@ -928,7 +1483,8 @@ fn normalize_extracted_controls(html: &str, mut footnotes: Vec<String>) -> Norma
             && let Some(closing_length) = closing.end
             && is_accessibility_label(&decode_entities(&html[tag_end..tag_end + length]))
         {
-            position = tag_end + length + closing_length;
+            position =
+                close_removed_element(html, tag_end + length + closing_length, &mut normalized);
             continue;
         }
 
@@ -947,14 +1503,14 @@ fn normalize_extracted_controls(html: &str, mut footnotes: Vec<String>) -> Norma
                 continue;
             }
             if let Some((_, inner_end, end)) = element_bounds(html, tag_start, "label")
-                && is_expand_control(tag_html, &html[tag_end..inner_end])
+                && is_expand_control(html, tag_html, &html[tag_end..inner_end])
             {
                 position = end;
                 continue;
             }
         }
 
-        if !tag.closing && tag.name == "input" && is_hidden_expand_input(tag_html) {
+        if !tag.closing && tag.name == "input" && is_hidden_expand_input(html, tag_html) {
             position = tag_end;
             continue;
         }
@@ -986,8 +1542,9 @@ struct SidenoteMatch<'a> {
     content: &'a str,
 }
 
-/// Pair a numbered sidenote label with its matching span in the same containing block. The span
-/// may follow intervening main prose because CSS can move it into the margin independently of its
+/// Pair a sidenote label with its note in the same containing block: a text-less `<label>` whose
+/// `data-n` the note span repeats, or that toggles the checkbox in front of the span. The span may
+/// follow intervening main prose because CSS can move it into the margin independently of its
 /// source position.
 fn sidenote_at(html: &str, label_start: usize) -> Option<SidenoteMatch<'_>> {
     let label = parse_tag(&html[label_start..])?;
@@ -995,9 +1552,6 @@ fn sidenote_at(html: &str, label_start: usize) -> Option<SidenoteMatch<'_>> {
     let label_html = &html[label_start..label_end];
     let target = attribute_value(label_html, "for")?;
     let number = attribute_value(label_html, "data-n");
-    if !target.starts_with("fn-") && !has_class(label_html, "sidenote-number") {
-        return None;
-    }
 
     let (_, label_inner_end, after_label) = element_bounds(html, label_start, "label")?;
     if !html_to_text(&html[label_end..label_inner_end])
@@ -1009,6 +1563,7 @@ fn sidenote_at(html: &str, label_start: usize) -> Option<SidenoteMatch<'_>> {
 
     let mut reference_end = after_label;
     let mut next = skip_html_whitespace(html, reference_end);
+    let mut toggled = false;
     if html[next..].starts_with('<')
         && let Some(input) = parse_tag(&html[next..])
         && !input.closing
@@ -1016,13 +1571,16 @@ fn sidenote_at(html: &str, label_start: usize) -> Option<SidenoteMatch<'_>> {
     {
         let input_end = next + input.end?;
         let input_html = &html[next..input_end];
-        let belongs_to_note = attribute_value(input_html, "id") == Some(target)
-            || has_class(input_html, "margin-toggle");
-        if !belongs_to_note {
+        if !is_state_toggle(input_html) || attribute_value(input_html, "id") != Some(target) {
             return None;
         }
+        toggled = true;
         reference_end = input_end;
         next = skip_html_whitespace(html, input_end);
+    }
+    // The pairing needs evidence: a number shared with the note, or the checkbox that reveals it.
+    if number.is_none() && !toggled {
+        return None;
     }
 
     let (span_start, content_start, content_end, span_end) =
@@ -1040,6 +1598,7 @@ fn find_sidenote_span(
     mut position: usize,
     number: Option<&str>,
 ) -> Option<(usize, usize, usize, usize)> {
+    let start = position;
     while let Some(tag_start) = html[position..].find('<').map(|offset| position + offset) {
         let tag = parse_tag(&html[tag_start..])?;
         let tag_end = tag_start + tag.end?;
@@ -1047,7 +1606,8 @@ fn find_sidenote_span(
         if !tag.closing && tag.name == "span" {
             let matches = match number {
                 Some(number) => attribute_value(tag_html, "data-n") == Some(number),
-                None => has_class(tag_html, "sidenote"),
+                // Without a number the note is the element the toggle reveals: the next one.
+                None => tag_start == start,
             };
             if matches {
                 let (content_start, content_end, span_end) =
@@ -1064,19 +1624,61 @@ fn find_sidenote_span(
     None
 }
 
-fn is_expand_control(tag: &str, inner: &str) -> bool {
-    if has_class(tag, "ex-more") {
-        return true;
-    }
-    attribute_value(tag, "for").is_some_and(|target| target.ends_with("-more"))
-        && opening_element_count(inner, "span") >= 2
+/// A checkbox or radio button with no `name` submits nothing: it exists to hold CSS state (a
+/// "show more" fold, a margin-note toggle), so it and the label that flips it are controls, not
+/// content.
+fn is_state_toggle(tag: &str) -> bool {
+    attribute_value(tag, "type").is_some_and(|value| {
+        value.eq_ignore_ascii_case("checkbox") || value.eq_ignore_ascii_case("radio")
+    }) && attribute_value(tag, "name").is_none_or(str::is_empty)
 }
 
-fn is_hidden_expand_input(tag: &str) -> bool {
-    has_class(tag, "ex-toggle")
-        || (attribute_value(tag, "type")
-            .is_some_and(|value| value.eq_ignore_ascii_case("checkbox"))
-            && attribute_value(tag, "id").is_some_and(|id| id.ends_with("-more")))
+/// Every `<input>` in `html` whose id is `id`.
+fn inputs_with_id<'a>(html: &'a str, id: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+    html.match_indices("<input").filter_map(move |(start, _)| {
+        let tag = parse_tag(&html[start..])?;
+        let tag_html = &html[start..start + tag.end?];
+        (tag.name == "input" && attribute_value(tag_html, "id") == Some(id)).then_some(tag_html)
+    })
+}
+
+/// A `<label>` that flips a state toggle. Its text is the control's caption (often one span per
+/// state), which the complete content it reveals makes redundant.
+fn is_expand_control(html: &str, tag: &str, inner: &str) -> bool {
+    let Some(target) = attribute_value(tag, "for") else {
+        return false;
+    };
+    if target.is_empty() || !inputs_with_id(html, target).any(is_state_toggle) {
+        return false;
+    }
+    // A control may nest its own toggle; a form field nested in a label is content.
+    let nested_field = inner.match_indices("<input").any(|(start, _)| {
+        parse_tag(&inner[start..])
+            .and_then(|tag| tag.end.map(|end| &inner[start..start + end]))
+            .is_none_or(|tag| !is_state_toggle(tag))
+    });
+    if nested_field {
+        return false;
+    }
+    opening_element_count(inner, "span") >= 2 || html_to_text(inner).split_whitespace().count() <= 4
+}
+
+/// The state toggle itself, when some label in the document flips it.
+fn is_hidden_expand_input(html: &str, tag: &str) -> bool {
+    if !is_state_toggle(tag) {
+        return false;
+    }
+    let Some(id) = attribute_value(tag, "id").filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    html.match_indices("<label").any(|(start, _)| {
+        parse_tag(&html[start..]).is_some_and(|label| {
+            label.name == "label"
+                && label.end.is_some_and(|end| {
+                    attribute_value(&html[start..start + end], "for") == Some(id)
+                })
+        })
+    })
 }
 
 fn append_footnotes(
@@ -1148,7 +1750,10 @@ fn restore_inline_layout_boundaries(html: &str) -> String {
         out.push_str(&html[tag_start..after_tag]);
         position = after_tag;
 
-        if !tag.closing || !LAYOUT_INLINE_ELEMENTS.contains(&tag.name.as_str()) {
+        if !tag.closing
+            || !(LAYOUT_INLINE_ELEMENTS.contains(&tag.name.as_str())
+                || TEXT_INLINE_ELEMENTS.contains(&tag.name.as_str()))
+        {
             continue;
         }
         let Some(next) = parse_tag(&html[position..]) else {
@@ -1221,6 +1826,193 @@ fn repair_generated_markdown(markdown: &str) -> String {
 mod tests {
     use super::*;
     use crate::content::render_markdown;
+
+    #[test]
+    fn site_chrome_close_buttons_and_empty_links_are_dropped() {
+        // bend-lang.com: Readability keeps the site header, its icon links and an overlay.
+        let html = concat!(
+            "<header><span><a href=\"https://bend-lang.com\">~/bend</a></span><nav><a href=\"https://github.com/bendlang/bend\" title=\"github\"></a><a href=\"https://hub.bend-lang.com\">hub</a></nav></header>",
+            "<div id=\"get\"><a href=\"#!\"></a><div><p><a href=\"#!\" title=\"close\">×</a></p><h3><span>1.</span>Install</h3></div></div>",
+            "<nav aria-label=\"breadcrumb\"><ol><li><a href=\"/\"></a></li><li><a href=\"/blog\">Blog</a></li></ol></nav>",
+            "<p>Real text with <a href=\"https://example.com/\"><img src=\"https://example.com/i.png\" alt=\"\"></a> an image link and <a href=\"#top\">a real anchor</a>.</p>",
+        );
+        let markdown = to_markdown(html, None);
+        assert!(markdown.starts_with("### 1.Install"), "{markdown}");
+        assert!(
+            !markdown.contains("bend") && !markdown.contains("×") && !markdown.contains("Blog"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("![](https://example.com/i.png)")
+                && markdown.contains("[a real anchor](#top)"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn mastheads_are_dropped_and_removed_icons_never_fuse_words() {
+        // openjev.com: a brand link, tagline and switch in a <header> with no heading of its own.
+        let html = concat!(
+            "<header><a href=\"https://openjev.com/\">NOT JEV</a><p><span>Can we run it in your browser?</span>",
+            "<label for=\"ui-mode\"><b>Unsloppify site</b></label></p></header>",
+            "<header><a href=\"https://example.com/tags/articles/\">Newsletter</a><p>Kept: a header that holds prose.</p></header>",
+            "<p>Managers like <a href=\"https://bitwarden.com/\"><span>Bitwarden<span class=\"sr-only\"> (opens in a new tab)</span></span><svg aria-hidden=\"true\"><use href=\"#i\"></use></svg></a>or ",
+            "<a href=\"https://keepassxc.org/\">KeePassXC<svg></svg></a>per key, <a href=\"https://x.test/\">API</a>s and <a href=\"https://y.test/\">GitHub<svg></svg></a>'s.</p>",
+        );
+        let markdown = to_markdown(html, None);
+        assert!(
+            !markdown.contains("NOT JEV") && !markdown.contains("Unsloppify"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("Kept: a header that holds prose."),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains(
+                "[Bitwarden](https://bitwarden.com/) or [KeePassXC](https://keepassxc.org/) per key"
+            ),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("[API](https://x.test/)s and [GitHub](https://y.test/)'s."),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn embedded_frames_link_to_their_source_and_skip_links_are_dropped() {
+        // ericwbailey.website: a YouTube embed with its skip link.
+        let html = concat!(
+            "<p>A good video:</p><p><a href=\"#skip\">Skip YouTube video embed.</a></p>",
+            "<div><iframe width=\"560\" src=\"https://www.youtube-nocookie.com/embed/9_upvxCAUzM?si=abc\" title=\"Kevin on CSS-Tricks\" allowfullscreen></iframe></div>",
+            "<iframe src=\"https://example.com/widget\"></iframe>",
+            "<p>After.</p>",
+        );
+        assert_eq!(
+            to_markdown(html, None),
+            concat!(
+                "A good video:\n\n",
+                "[Kevin on CSS-Tricks](https://www.youtube.com/watch?v=9_upvxCAUzM)\n\n",
+                "[example.com](https://example.com/widget)\n\n",
+                "After.\n",
+            )
+        );
+    }
+
+    #[test]
+    fn small_print_after_an_image_is_its_caption() {
+        // spectrum.ieee.org: caption and credit in <small> elements inside the image paragraph.
+        let html = r#"<p><img src="https://example.com/rack.jpg" alt="A rack"> <small>Pods include 2,048 chips.</small><small>OpenAI</small></p><p>Prose with <small>fine print</small> stays.</p>"#;
+        assert_eq!(
+            to_markdown(html, None),
+            "![A rack](https://example.com/rack.jpg)\\\nPods include 2,048 chips. OpenAI\n\nProse with fine print stays.\n"
+        );
+    }
+
+    #[test]
+    fn blank_emphasis_keeps_its_space() {
+        // blog.cloudflare.com: `<a>Ivan</a><em> </em>who found`.
+        let html = r#"<p>Filed by <a href="https://example.com/ivan">Ivan</a><em> </em>who found: <em>a leak</em>.</p>"#;
+        assert_eq!(
+            to_markdown(html, None),
+            "Filed by [Ivan](https://example.com/ivan) who found: *a leak*.\n"
+        );
+    }
+
+    #[test]
+    fn layout_tables_unwrap_into_their_cells_and_data_tables_stay() {
+        // sdcc.sourceforge.net: the whole page is one table row of columns.
+        let html = "<table><tbody><tr><td> </td><td><h2>What is SDCC?</h2><p>A compiler.</p><ul><li>sdas</li></ul><table><tr><td>Nested</td></tr></table></td></tr></tbody></table>";
+        assert_eq!(
+            to_markdown(html, None),
+            "## What is SDCC?\n\nA compiler.\n\n- sdas\n\nNested\n"
+        );
+        for table in [
+            "<table><tr><th>a</th><th>b</th></tr><tr><td>1</td><td>2</td></tr></table>",
+            "<table><tr><td>x</td><td>1</td></tr><tr><td>y</td><td>2</td></tr></table>",
+        ] {
+            let markdown = to_markdown(table, None);
+            assert!(markdown.starts_with('|'), "{markdown}");
+        }
+    }
+
+    #[test]
+    fn table_cells_keep_line_breaks_as_spaces() {
+        let html = "<table><thead><tr><th>Capability</th><th>Ternary Bonsai 2<br>27B</th></tr></thead><tbody><tr><td>Coding</td><td>81.58</td></tr></tbody></table>";
+        let markdown = to_markdown(html, None);
+        assert!(markdown.contains("| Ternary Bonsai 2 27B |"), "{markdown}");
+        assert!(!markdown.contains('\\'), "{markdown}");
+    }
+
+    #[test]
+    fn invisible_joiners_never_break_emphasis() {
+        // prismml.com: a zero-width joiner after the emphasised full stop that closes a caption.
+        let html = "<blockquote>\u{200d}<strong><em>Figure I:</em></strong> <em>Results are in the </em><a href=\"https://example.com/paper.pdf\"><em>whitepaper</em></a><em>.</em>\u{200d}</blockquote>";
+        let markdown = to_markdown(html, None);
+        assert!(!markdown.contains('\u{200d}'), "{markdown}");
+        let rendered = render_markdown(&markdown);
+        assert!(
+            rendered.contains("<em>whitepaper</em></a><em>.</em>"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains('*'), "{rendered}");
+    }
+
+    #[test]
+    fn captions_of_figures_without_media_are_plain_paragraphs() {
+        // hacktron.ai captions a list; openai.com captions a chart table.
+        let html = concat!(
+            "<figure><figcaption>Exploit chain</figcaption><ol><li><strong>libheif</strong><span>Image decoder</span></li><li><strong>Debian</strong><span>Missing backport</span></li></ol></figure>",
+            "<figure><table><tr><th>Model</th><th>Score</th></tr><tr><td>A</td><td>1</td></tr></table><figcaption>Performance across settings.</figcaption></figure>",
+            "<figure><img src=\"https://example.com/i.png\" alt=\"\"><figcaption>An image caption</figcaption></figure>",
+        );
+        let markdown = to_markdown(html, None);
+        assert!(
+            markdown.contains(
+                "Exploit chain\n\n1. **libheif** Image decoder\n2. **Debian** Missing backport"
+            ),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("| A     | 1     |\n\nPerformance across settings."),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("![](https://example.com/i.png)\\\nAn image caption"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("\n\\\n"), "{markdown}");
+    }
+
+    #[test]
+    fn mathml_keeps_its_tex_and_templates_stay_inert() {
+        // rohanbansal.com: KaTeX MathML in list items and as display blocks, with tooltips in
+        // `<template>` elements beside annotated code.
+        let html = concat!(
+            "<p>Assume the following cardinalities:</p><ol>",
+            "<li><span><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mi>c</mi><mi>n</mi><mo>=</mo><mn>100</mn><mtext>k</mtext></mrow><annotation encoding=\"application/x-tex\">cn = 100\\text{k}</annotation></semantics></math></span></li>",
+            "<li><span><math><semantics><mrow><mi>t</mi></mrow><annotation encoding=\"application/x-tex\">t = 1\\text{m}</annotation></semantics></math></span> (assuming 20%)</li>",
+            "</ol><p>Joined:</p>",
+            "<span><math display=\"block\"><semantics><mrow><mi>x</mi></mrow><annotation encoding=\"application/x-tex\">(cn \\bowtie mc) = 2\\text{m}</annotation></semantics></math></span>",
+            "<p>Then <math><mrow><mi>a</mi><mo>+</mo><mi>b</mi></mrow></math> without a source.</p>",
+            "<pre><code>SELECT 1</code></pre><template>The hint block explains the comment.</template><p>After.</p>",
+        );
+        let markdown = to_markdown(html, None);
+        assert!(
+            markdown.contains("1. $cn = 100\\text{k}$\n2. $t = 1\\text{m}$ (assuming 20%)"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains(
+                "Joined:\n\n$$\n(cn \\bowtie mc) = 2\\text{m}\n$$\n\nThen a+b without a source."
+            ),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("hint block"), "{markdown}");
+        assert!(markdown.contains("SELECT 1"));
+        assert!(!markdown.contains('\u{e000}'));
+    }
 
     fn base() -> Url {
         Url::parse("https://example.com/blog/post/").unwrap()

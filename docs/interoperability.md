@@ -125,7 +125,10 @@ ordinary response and article cache; challenge pages are not successful article 
 This is an HTTP transport fallback implemented in Rust, with BoringSSL linked into the binary.
 It does not run Python, a browser, JavaScript challenges, or an external proxy service, and does
 not import browser cookies or obtain challenge cookies. Sites requiring interactive verification
-can still refuse the request. Failed article extraction retains the available RSS/feed content.
+can still refuse the request. Failed article extraction retains the available RSS/feed content,
+as does a page whose server HTML is only a script's loading message (`loading…`, `reconnecting…`,
+"enable JavaScript") outside its header, navigation and footer: aggr never runs the scripts that
+would fill it, so the placeholder is not an article.
 
 Readability receives explicit image-and-caption figure structure as article content before its
 boilerplate filters run. This preserves charts whose IDs happen to contain words such as `replies`;
@@ -141,8 +144,9 @@ table with the chart title and its caption, so the figures stay readable and sea
 chart itself is not reproduced. Rows and columns are bounded.
 
 An item that only kept feed content because the original page was unavailable (a Cloudflare
-challenge, an outage, or a rate limit at capture time) is retried on later runs: at most eight per
-source per run, once a day per page, giving up after seven attempts. A successful retry rewrites
+challenge, an outage, or a rate limit at capture time), or whose archived body is such a loading
+placeholder, is retried on later runs: at most eight per source per run, once a day per page,
+giving up after seven attempts. A successful retry rewrites
 the body, retained HTML, and media while keeping the item's path, dates, labels, and authors.
 Explicit refresh still forces a new capture regardless of this schedule.
 

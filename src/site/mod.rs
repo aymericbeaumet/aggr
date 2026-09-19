@@ -432,8 +432,12 @@ pub fn build(
     let status = store.status()?;
     let (mut all_items, duplicate_redirects) = visible_archive(store.items()?, sources);
     for item in &mut all_items {
-        item.body =
-            content::strip_article_metadata(&item.body, item.front.published, &item.front.source);
+        item.body = content::strip_article_metadata(
+            &item.body,
+            &item.front.title,
+            item.front.published,
+            &item.front.source,
+        );
         item.body = crate::threads::clean_archived_thread(&item.body, &item.front.link);
     }
     all_items.sort_by(|a, b| {

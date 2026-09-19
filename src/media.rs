@@ -61,30 +61,32 @@ pub struct Candidate {
     pub alt: Option<String>,
 }
 
-/// Status badges remain readable body images, but are not article artwork.
+/// Status badges remain readable body images, but are not article artwork. Badge services name
+/// themselves: the host or a path segment carries `badge`, `badgen` or `shields`. An image proxy
+/// that hex-encodes the origin in its last path segment is unwrapped one level.
 pub fn is_status_badge(source: &str) -> bool {
+    fn labelled(value: &str) -> bool {
+        value
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .any(|token| matches!(token, "badge" | "badges" | "badgen" | "shield" | "shields"))
+    }
     fn matches(source: &str, allow_proxy: bool) -> bool {
         let Ok(url) = Url::parse(source) else {
             return false;
         };
-        let host = url.host_str().unwrap_or_default();
-        let path = url.path();
-        match host {
-            "github.com" => {
-                path.ends_with("/badge.svg")
-                    && (path.contains("/actions/") || path.contains("/workflows/"))
-            }
-            "img.shields.io" | "shields.io" | "badgen.net" | "badge.fury.io" => true,
-            "repology.org" => path.starts_with("/badge/"),
-            "camo.githubusercontent.com" if allow_proxy => path
+        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        let path = url.path().to_ascii_lowercase();
+        if labelled(&host) || path.split('/').any(labelled) {
+            return true;
+        }
+        allow_proxy
+            && path
                 .rsplit('/')
                 .next()
-                .filter(|value| value.len() <= 8192)
+                .filter(|value| value.len() <= 8192 && value.len() % 2 == 0)
                 .and_then(|value| hex::decode(value).ok())
                 .and_then(|value| String::from_utf8(value).ok())
-                .is_some_and(|value| matches(&value, false)),
-            _ => false,
-        }
+                .is_some_and(|value| value.starts_with("http") && matches(&value, false))
     }
     matches(source, true)
 }
@@ -596,8 +598,8 @@ fn archived_image_request_url(url: &Url, html: &str, base: &Url) -> Option<Url> 
                 let Some(full) = safe_image_url(candidate.url, base) else {
                     continue;
                 };
-                if full.host_str() != Some("substackcdn.com")
-                    || !full.path().starts_with("/image/fetch/")
+                // The `/image/fetch/<transforms>/<encoded origin>` layout of fetch-style CDNs.
+                if !full.path().contains("/image/fetch/")
                     || !candidate
                         .url
                         .split(',')
@@ -1613,8 +1615,9 @@ mod tests {
             hex::encode("https://repology.org/badge/vertical-allrepos/bzip3.svg")
         )));
         for source in [
-            "https://example.com/badge.svg",
+            "https://example.com/logo.svg",
             "https://github.com/user/project/raw/main/diagram.svg",
+            "https://example.com/gallery/badgers-in-spring.jpg",
             "https://camo.githubusercontent.com/hash/invalid",
         ] {
             assert!(!is_status_badge(source));

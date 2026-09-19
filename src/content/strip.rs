@@ -8,7 +8,8 @@ use scraper::Html;
 use url::Url;
 
 use super::scan::{
-    BLOCK_ELEMENTS, RAW_TEXT_ELEMENTS, comment_end, is_name_byte, parse_tag, skip_element,
+    BLOCK_ELEMENTS, RAW_TEXT_ELEMENTS, close_removed_element, comment_end, is_name_byte, parse_tag,
+    skip_element,
 };
 
 /// Elements whose content is executable, styled, or embedded: dropped whole.
@@ -70,6 +71,10 @@ pub(super) fn strip_active_content(raw: &str) -> String {
             } else {
                 skip_element(raw, after_tag, &tag.name)
             };
+            // An icon between two words (`Bitwarden<svg/></a>or`) was their visual separator.
+            if !tag.closing && matches!(tag.name.as_str(), "svg" | "iframe" | "object" | "embed") {
+                i = close_removed_element(raw, i, &mut out);
+            }
             continue;
         }
         out.push_str(&without_active_attributes(&rest[..end]));

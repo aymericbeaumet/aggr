@@ -8,7 +8,7 @@ use super::*;
 use crate::model::FrontMatter;
 use crate::store::NewItem;
 
-pub(super) fn source() -> Source {
+pub(crate) fn source() -> Source {
     Source {
         slug: "blog".into(),
         name: None,
@@ -727,6 +727,116 @@ async fn heavy_downloads_the_article_while_light_keeps_feed_content() {
     assert_eq!(kind, ContentKind::Feed);
     assert_eq!(unchanged.content_html, raw.content_html);
     not_modified.assert_calls_async(1).await;
+}
+
+#[tokio::test]
+async fn heavy_reads_a_script_shell_article_from_its_module() {
+    // z.ai: an empty `<div id="root">` and one module script holding the compiled MDX post.
+    let server = MockServer::start_async().await;
+    let shell = r#"<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta property="og:title" content="How GLM Built Its Own Inference Infrastructure"><script type="module" crossorigin src="/blog/assets/glm-built-its-inference-infrastructure-qEyLd6aI.js"></script><link rel="modulepreload" crossorigin href="/blog/assets/src-GO5ZQO2t.js"><link rel="modulepreload" href="https://cdn.other/vendor.js"></head><body><div id="root"></div></body></html>"#;
+    server
+        .mock_async(|when, then| {
+            when.method(GET)
+                .path("/blog/glm-built-its-inference-infrastructure");
+            then.status(200)
+                .header("content-type", "text/html")
+                .body(shell);
+        })
+        .await;
+    let module = r#"import{_ as e,d as t,f as n,i as r,l as i,r as a,t as o,u as s}from"./src-GO5ZQO2t.js";var c=t(),l=e(n(),1),u=i();function d(e){let t={p:`p`,...e.components};return(0,u.jsxs)(u.Fragment,{children:[(0,u.jsx)(t.p,{children:`As we develop GLM, the model sometimes exhibits capabilities that surprise us, and even unsettle us.`}),`
+`,(0,u.jsx)(t.p,{children:`In October 2025, we began researching how to strengthen its cybersecurity capabilities. Our reasoning at the time was straightforward: cybersecurity is a natural extension of coding.`}),`
+`,(0,u.jsx)(t.h1,{children:`Driving Infra Agent Optimization of Inference Systems with Dense Feedback`}),`
+`,(0,u.jsx)(t.p,{children:`Taking a model from its first successful run on new hardware to a high-performance production launch is a long journey of tuning, profiling, and rewriting the parts that turn out to be slow.`}),`
+`,(0,u.jsxs)(t.p,{children:[`The numerical accuracy fixes have been merged upstream. See `,(0,u.jsx)(t.a,{href:`https://github.com/fla-org/flash-linear-attention/pull/1180`,children:`PR #1180`}),` for details.`]}),`
+`,(0,u.jsx)(t.p,{children:`Of course, we have not yet reached recursive self-improvement. Choosing objectives, setting boundaries, and assessing risk remain human responsibilities for a long time to come.`})]})}(0,c.createRoot)(document.getElementById(`root`)).render((0,u.jsx)(l.StrictMode,{children:(0,u.jsx)(a,{title:`Toward Recursive Self-Improvement`,children:(0,u.jsx)(r,{en:d,components:o})})}));"#;
+    let entry = server
+        .mock_async(|when, then| {
+            when.method(GET)
+                .path("/blog/assets/glm-built-its-inference-infrastructure-qEyLd6aI.js");
+            then.status(200)
+                .header("content-type", "text/javascript")
+                .body(module);
+        })
+        .await;
+    let preload = server
+        .mock_async(|when, then| {
+            when.method(GET).path("/blog/assets/src-GO5ZQO2t.js");
+            then.status(200)
+                .header("content-type", "text/javascript")
+                .body("export const d=()=>1;");
+        })
+        .await;
+    let raw = RawItem {
+        title: "GLM Built Its Own Inference Infrastructure".into(),
+        link: server.url("/blog/glm-built-its-inference-infrastructure"),
+        content_html: Some("<p>Article URL: https://z.ai/blog/x Points: 141</p>".into()),
+        ..Default::default()
+    };
+    let client = http::Client::new(&crate::config::FetchConfig {
+        retries: 0,
+        ..Default::default()
+    })
+    .unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let failures = ArticleFailures::default();
+    let (heavy, kind) = heavy_content(&raw, &source(), &client, cache.path(), &failures).await;
+    assert_eq!(kind, ContentKind::Extracted, "{:?}", heavy.content_html);
+    let html = heavy.content_html.unwrap();
+    assert!(html.contains("As we develop GLM"), "{html}");
+    assert!(html.contains("Driving Infra Agent Optimization"), "{html}");
+    assert!(html.contains("href=\"https://github.com/fla-org/flash-linear-attention/pull/1180\""));
+    assert!(!html.contains("StrictMode") && !html.contains("Toward Recursive"));
+    entry.assert_calls_async(1).await;
+    preload.assert_calls_async(1).await;
+    assert!(!failures.blocked(&url::Url::parse(&raw.link).unwrap()));
+    // The extraction is cached against the shell: a second pass fetches no module.
+    let (again, kind) = heavy_content(&raw, &source(), &client, cache.path(), &failures).await;
+    assert_eq!(kind, ContentKind::Extracted);
+    assert!(again.content_html.unwrap().contains("As we develop GLM"));
+    entry.assert_calls_async(1).await;
+}
+
+#[tokio::test]
+async fn heavy_keeps_the_entry_when_the_readable_region_is_not_the_item() {
+    // A short release note whose page also carries a long sidebar: Readability prefers the
+    // sidebar, the feed summary is the note.
+    let server = MockServer::start_async().await;
+    let promo = "<p>Sponsor me for ten dollars a month and get a curated email digest of the month's most important developments in this field.</p>".repeat(6);
+    let body = format!(
+        r#"<html><head><title>datasette 0.65.5</title></head><body><div id="primary"><div class="beat"><span>Release</span> <span>datasette 0.65.5</span> <span>An open source multi-tool for exploring and publishing data</span><div class="beat-note"><p>Security fix for an issue where a trailing newline in a requested table name could bypass table permissions and expose private rows, reported by someone in GHSA-h547-rmjf-5m2m.</p></div></div></div><div id="secondary"><div class="metabox"><p>This is a beat by the author, posted on 16th September 2026.</p><section><h3>Monthly briefing</h3>{promo}</section></div></div></body></html>"#
+    );
+    server
+        .mock_async(|when, then| {
+            when.method(GET).path("/2026/Sep/16/datasette-2/");
+            then.status(200)
+                .header("content-type", "text/html")
+                .body(body);
+        })
+        .await;
+    let raw = RawItem {
+        title: "datasette 0.65.5".into(),
+        link: server.url("/2026/Sep/16/datasette-2/"),
+        summary: Some("Release: datasette 0.65.5 Security fix for an issue where a trailing newline in a requested table name could bypass table permissions and expose private rows, reported by someone in GHSA-h547-rmjf-5m2m. Tags: security, datasette".into()),
+        ..Default::default()
+    };
+    let client = http::Client::new(&crate::config::FetchConfig {
+        retries: 0,
+        ..Default::default()
+    })
+    .unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let failures = ArticleFailures::default();
+    let (kept, kind) = heavy_content(&raw, &source(), &client, cache.path(), &failures).await;
+    assert_eq!(kind, ContentKind::None, "{:?}", kept.content_html);
+    assert_eq!(kept.content_html, None);
+    assert!(!failures.blocked(&url::Url::parse(&raw.link).unwrap()));
+    let planned = super::plan::plan(&kept, &source(), &options(), kind);
+    assert!(
+        planned.body.starts_with("Release: datasette 0.65.5"),
+        "{}",
+        planned.body
+    );
+    assert!(!planned.body.contains("Monthly briefing"));
 }
 
 #[tokio::test]

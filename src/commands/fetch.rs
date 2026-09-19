@@ -10,7 +10,7 @@ mod podcast;
 mod recording;
 mod repair;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod transaction;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -886,6 +886,69 @@ fn analyze_page(
     }
 }
 
+/// The article a script shell ships in one of its own modules: fetched as text, never run, and
+/// read back into HTML that then goes through the ordinary extraction and storage pipeline.
+async fn article_from_modules(
+    modules: &[url::Url],
+    raw: &RawItem,
+    source: &Source,
+    client: &http::Client,
+    final_url: &url::Url,
+) -> Result<content::ExtractedArticle> {
+    let slug = final_url
+        .path_segments()
+        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
+        .unwrap_or_default()
+        .to_string();
+    let mut best: Option<String> = None;
+    for module in modules {
+        let headers = http::source_headers(source, module);
+        let body = match client
+            .get(http::Request {
+                url: module,
+                headers,
+                etag: None,
+                last_modified: None,
+            })
+            .await
+        {
+            Ok(http::Response::Ok(body)) => body,
+            Ok(http::Response::NotModified) => continue,
+            Err(error) => {
+                log::debug!("{}: module {module} unavailable: {error:#}", source.slug);
+                continue;
+            }
+        };
+        let script = body
+            .content_type
+            .as_deref()
+            .is_none_or(|kind| kind.contains("javascript") || kind.contains("ecmascript"))
+            || module.path().ends_with(".js")
+            || module.path().ends_with(".mjs");
+        if !script {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&body.bytes);
+        if let Some(html) = content::article_from_module(&text, &slug)
+            && best
+                .as_ref()
+                .is_none_or(|current| current.len() < html.len())
+        {
+            best = Some(html);
+        }
+    }
+    let html = best.context("no module script carries the article")?;
+    log::info!(
+        "{}: read the article for {final_url} from the page's own script module",
+        source.slug
+    );
+    let document = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{}</title></head><body><article>{html}</article></body></html>",
+        content::escape_html(&raw.title)
+    );
+    content::extract_article_async(document, final_url.clone()).await
+}
+
 async fn heavy_content(
     raw: &RawItem,
     source: &Source,
@@ -928,6 +991,21 @@ async fn heavy_content(
             }
         };
     }
+    if let Some(id) = sources::qwen::post_id(&url) {
+        // The post page is a script shell; the article API the Qwen source reads lists it.
+        match sources::qwen::article(&url, &id, source, client).await {
+            Ok(Some(post)) => {
+                let mut enriched = raw.clone();
+                enriched.content_html = post.content_html;
+                if source.previews || source.images {
+                    enriched.preview_candidates = post.preview_candidates;
+                }
+                return (enriched, ContentKind::Extracted);
+            }
+            Ok(None) => log::debug!("{}: Qwen article API does not list {id}", source.slug),
+            Err(error) => log::debug!("{}: Qwen article API unavailable: {error:#}", source.slug),
+        }
+    }
     let mut preview_candidates = raw.preview_candidates.clone();
     let mut page_candidates = preview::HtmlCandidateGroups::default();
     let mut interactive = false;
@@ -940,7 +1018,7 @@ async fn heavy_content(
                 thread_link = crate::threads::canonical_x_url(&url);
                 preview_candidates.clear();
                 page_candidates = preview::html_candidate_groups(&expanded.html, &url);
-                return Ok(expanded);
+                return Ok(Some(expanded));
             }
             Ok(None) => {}
             Err(error) => log::debug!(
@@ -1017,7 +1095,7 @@ async fn heavy_content(
             )
             .await
             {
-                Ok(Some(expanded)) => return Ok(expanded),
+                Ok(Some(expanded)) => return Ok(Some(expanded)),
                 Ok(None) => {}
                 Err(err) => log::debug!(
                     "{}: ActivityPub thread expansion failed for {}: {err:#}",
@@ -1027,25 +1105,81 @@ async fn heavy_content(
             }
         }
         let page = analysis.page;
-        let extraction_key = response.extraction_key();
-        if let Some(extracted) = cache.extracted(&extraction_key, &response.final_url)? {
-            return Ok(extracted);
-        }
-        let extracted = if sources::youtube::is_video_url(&url) {
-            sources::youtube::extract(&page, &url, raw.content_html.as_deref(), client).await
-        } else {
-            content::extract_article_async(page, response.final_url.clone()).await?
+        let video = sources::youtube::is_video_url(&url);
+        // Sentences of the feed entry the page repeats, taken before the page is consumed. An
+        // entry with only a summary counts too: that summary becomes the body when no page
+        // content is kept, which is exactly the outcome the check protects.
+        let feed_entry = raw.content_html.as_deref().or(raw.summary.as_deref());
+        let feed_on_page = match feed_entry {
+            Some(feed) if !video => content::feed_content_on_page(feed, &page),
+            _ => Vec::new(),
         };
-        if !sources::youtube::is_video_url(&url)
-            || extracted.html != raw.content_html.as_deref().unwrap_or_default()
+        let extraction_key = response.extraction_key();
+        // A page that is only a script shell keeps its article in its own module scripts.
+        let modules = if !video && content::is_script_shell(&page) {
+            content::module_scripts(&page, &response.final_url)
+        } else {
+            Vec::new()
+        };
+        let extracted = match cache.extracted(&extraction_key, &response.final_url)? {
+            Some(extracted) => extracted,
+            None => {
+                let extracted = if video {
+                    sources::youtube::extract(&page, &url, raw.content_html.as_deref(), client)
+                        .await
+                } else {
+                    match content::extract_article_async(page, response.final_url.clone()).await {
+                        Ok(extracted) => extracted,
+                        Err(error) if !modules.is_empty() => {
+                            article_from_modules(&modules, raw, source, client, &response.final_url)
+                                .await
+                                .with_context(|| format!("{error:#}"))?
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                if !video || extracted.html != raw.content_html.as_deref().unwrap_or_default() {
+                    cache.store_extracted(&extraction_key, &response.final_url, &extracted)?;
+                }
+                extracted
+            }
+        };
+        if let Some(feed) = feed_entry
+            && content::extraction_misses_feed_content(&extracted.html, feed, &feed_on_page)
         {
-            cache.store_extracted(&extraction_key, &response.final_url, &extracted)?;
+            log::debug!(
+                "{}: the readable region of {} is not the entry the feed carries; keeping feed content",
+                source.slug,
+                response.final_url
+            );
+            return Ok(None);
         }
-        Ok(extracted)
+        Ok(Some(extracted))
     }
     .await;
     match result {
-        Ok(extracted) => {
+        // The page was fetched but its readable region is not the item: the feed entry (its
+        // content, or its summary when that is all it has) is the article, and the page still
+        // supplies what it knows about media and duration.
+        Ok(None) => {
+            let mut enriched = raw.clone();
+            if let Some(seconds) = duration {
+                enriched
+                    .extra
+                    .insert("duration_seconds".into(), seconds.into());
+            }
+            if interactive {
+                enriched
+                    .extra
+                    .insert(crate::site::interactive::METADATA_KEY.into(), true.into());
+            }
+            if source.previews || source.images {
+                enriched.preview_candidates =
+                    preview::ordered_article_candidates(&preview_candidates, page_candidates, None);
+            }
+            (enriched, fallback)
+        }
+        Ok(Some(extracted)) => {
             let mut enriched = raw.clone();
             if let Some(link) = thread_link {
                 enriched.link = link.to_string();

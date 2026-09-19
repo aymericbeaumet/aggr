@@ -52,6 +52,7 @@ pub(super) fn reprocess_stored_bodies(
         let base = url::Url::parse(&existing.front.link).ok();
         let body = content::strip_article_metadata(
             &content::to_markdown(&html, base.as_ref()),
+            &existing.front.title,
             existing.front.published,
             &source.slug,
         );
@@ -499,20 +500,46 @@ pub(super) async fn repair_feed_captures(
             (path, enriched, kind)
         })
         .buffer_unordered(context.options.article_concurrency);
-    let mut upgraded = 0;
+    let mut rewritten = 0;
     while let Some((path, mut raw, kind)) = pending.next().await {
+        let existing = context.store.read_item(&path)?;
+        if existing.front.source != source.slug {
+            continue;
+        }
+        let placeholder = existing.front.content == ContentKind::Extracted
+            && content::is_placeholder_body(&existing.body);
         if kind != ContentKind::Extracted || raw.content_html.is_none() {
+            retries.failed(&raw.link);
+            if placeholder && raw.summary.is_some() {
+                // The page is still a script shell. Its feed summary reads better than the
+                // archived "loading…", so the item returns to feed content until a retry succeeds.
+                let (raw, mut planned) =
+                    prepare_item(raw, source, context.options, ContentKind::Feed).await?;
+                use_existing_path(&mut planned, &path)?;
+                planned.front.preview = existing.front.preview.clone();
+                planned.front.images = existing.front.images.clone();
+                planned.front = upgrade_front(existing.front, planned.front);
+                if let Some(transaction) = transaction.as_deref_mut() {
+                    transaction.track_item(&planned, &raw)?;
+                }
+                let link = raw.link.clone();
+                persist_item(context.store, context.options, planned, raw).await?;
+                log::info!(
+                    "{}: {} had archived a loading placeholder; keeping its feed summary until the page is available",
+                    source.slug,
+                    link
+                );
+                rewritten += 1;
+                continue;
+            }
             log::debug!(
                 "{}: original page still unavailable for {}; keeping feed content",
                 source.slug,
                 raw.link
             );
-            retries.failed(&raw.link);
             continue;
         }
-        let existing = context.store.read_item(&path)?;
-        if existing.front.source != source.slug || existing.front.content == ContentKind::Extracted
-        {
+        if existing.front.content == ContentKind::Extracted && !placeholder {
             continue;
         }
         if source.images
@@ -567,9 +594,9 @@ pub(super) async fn repair_feed_captures(
             source.slug,
             link
         );
-        upgraded += 1;
+        rewritten += 1;
     }
-    Ok(upgraded)
+    Ok(rewritten)
 }
 
 pub(super) fn reconcile_duration(
@@ -663,6 +690,131 @@ mod tests {
     use std::fs;
     use tokio::sync::OnceCell;
     use url::Url;
+
+    #[tokio::test]
+    async fn archived_loading_placeholders_fall_back_to_the_summary_and_upgrade_later() {
+        crate::http::install_crypto_provider();
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.path("/feed");
+                then.status(304);
+            })
+            .await;
+        // harnesstax.github.io: the server HTML only says `loading…` until js/post.js runs.
+        let shell = server
+            .mock_async(|when, then| {
+                when.path("/post");
+                then.status(200)
+                    .header("content-type", "text/html; charset=utf-8")
+                    .body(
+                        r#"<html><head><meta charset="utf-8"><title>HarnessTax</title></head><body><header></header><div id="tab-blog"><div id="blog-root" aria-busy="true"><p class="loading">loading…</p></div></div></body></html>"#,
+                    );
+            })
+            .await;
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(root.path()));
+        let first_seen = "2026-09-17T08:11:04Z".parse().unwrap();
+        let front = FrontMatter {
+            title: "HarnessTax".into(),
+            source: "blog".into(),
+            link: server.url("/post"),
+            first_seen,
+            summary: Some("Article URL: https://harnesstax.github.io/ Points: 111".into()),
+            content: ContentKind::Extracted,
+            html: Some("harnesstax.html".into()),
+            ..Default::default()
+        };
+        store
+            .write_item(NewItem {
+                dir: "items/blog",
+                stem: "harnesstax",
+                front: &front,
+                body: "loading…\n",
+                html: Some("<div id=\"tab-blog\"><p>loading…</p></div>"),
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let configured = Source {
+            previews: false,
+            engine: Engine::Feed {
+                url: Url::parse(&server.url("/feed")).unwrap(),
+            },
+            ..source()
+        };
+        let client = http::Client::new(&crate::config::FetchConfig {
+            retries: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let run = || {
+            let store = &store;
+            let configured = &configured;
+            let client = &client;
+            let root = root.path();
+            let cache = cache.path();
+            async move {
+                let (_, archive) = index_archive(store.items().unwrap());
+                let test_options = Options {
+                    existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+                    ..options()
+                };
+                fetch_one(
+                    configured,
+                    FetchOneContext {
+                        store,
+                        store_root: root,
+                        client,
+                        cache_dir: cache,
+                        options: &test_options,
+                        article_failures: &ArticleFailures::default(),
+                        state_policy: StatePolicy::DevCache,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        };
+        // Still a shell: the summary replaces the placeholder and the retry is remembered.
+        run().await;
+        shell.assert_calls_async(1).await;
+        let fallen_back = store.read_item("items/blog/harnesstax").unwrap();
+        assert_eq!(fallen_back.front.content, ContentKind::Feed);
+        assert_eq!(
+            fallen_back.body,
+            "Article URL: https://harnesstax.github.io/ Points: 111"
+        );
+        assert_eq!(fallen_back.front.html, None);
+        assert_eq!(fallen_back.front.first_seen, first_seen);
+        let marker = CaptureRetries::new(cache.path()).path(&server.url("/post"));
+        assert!(marker.exists());
+        // A day later the page renders on the server: the article is captured in place.
+        shell.delete_async().await;
+        server.mock_async(|when, then| {
+            when.path("/post");
+            then.status(200).header("content-type", "text/html").body(
+                "<html><head><title>HarnessTax</title></head><body><article><h1>HarnessTax</h1><p>We evaluate twenty-one model and harness pairs spanning seven models and three harnesses on two benchmarks.</p><p>A second paragraph keeps the extraction meaningful and well above the readability thresholds used for short pages.</p></article></body></html>",
+            );
+        }).await;
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        run().await;
+        let upgraded = store.read_item("items/blog/harnesstax").unwrap();
+        assert_eq!(upgraded.front.content, ContentKind::Extracted);
+        assert!(
+            upgraded.body.contains("twenty-one model and harness pairs"),
+            "{}",
+            upgraded.body
+        );
+        assert!(!marker.exists());
+    }
 
     #[tokio::test]
     async fn feed_only_captures_are_retried_daily_and_upgraded_once_the_page_is_available() {
