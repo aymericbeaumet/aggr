@@ -92,7 +92,7 @@
     <img src="{{ item.article_preview.url | url_for }}" srcset="{{ item.article_preview.srcset | srcset_for }}" sizes="(max-width: 48rem) 100vw, 48rem" width="{{ item.article_preview.width }}" height="{{ item.article_preview.height }}" alt="{{ item.article_preview.alt or '' }}" decoding="async" fetchpriority="high">
   </figure>
   {% endif %}
-  <div class="body e-content">{{ item.body_html | rebase | safe }}</div>
+  <div class="body e-content{% if item.has_margin_notes %} has-margin-notes{% endif %}">{{ item.body_html | rebase | safe }}</div>
   {% if item.next_article or item.recommended_articles %}
   <footer class="article-footer">
     {% if item.next_article %}

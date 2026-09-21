@@ -1334,6 +1334,7 @@ mod tests {
             next_article: None,
             recommended_articles: Vec::new(),
             body_html: Some("<p>Clean &amp; <strong>complete</strong></p>".into()),
+            has_margin_notes: false,
         }
     }
 

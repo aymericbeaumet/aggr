@@ -244,6 +244,11 @@ pub fn anchor_headings(html: &str, article_url: Option<&Url>) -> String {
             out.push_str(&open);
         }
         out.push_str(inner);
+        // A real link, so following it updates the fragment and scrolls without JavaScript. The
+        // heading text itself stays unlinked; only this marker is interactive.
+        out.push_str(&format!(
+            "<a class=\"heading-anchor\" href=\"#{unique}\" aria-label=\"Link to this section\">#</a>"
+        ));
         out.push_str(&closing);
         position = start + open_end + inner_len + closing.len();
     }
@@ -891,8 +896,298 @@ fn text_excerpt(text: &str, max_chars: usize) -> String {
     out
 }
 
+/// The rendered body of every same-page footnote, keyed by its `id`.
+fn footnote_definitions(html: &str) -> std::collections::BTreeMap<String, String> {
+    let mut notes = std::collections::BTreeMap::new();
+    let Some(section) = html.find("<section class=\"footnotes\"") else {
+        return notes;
+    };
+    let end = html[section..]
+        .find("</section>")
+        .map(|offset| section + offset)
+        .unwrap_or(html.len());
+    let list = &html[section..end];
+    let mut position = 0;
+    while let Some(offset) = list[position..].find("<li id=\"") {
+        let start = position + offset;
+        let Some(open_end) = list[start..].find('>').map(|index| start + index + 1) else {
+            break;
+        };
+        let Some(id) = attribute_value(&list[start..open_end], "id").map(str::to_string) else {
+            position = open_end;
+            continue;
+        };
+        let Some(close) = list[open_end..].find("</li>").map(|index| open_end + index) else {
+            break;
+        };
+        notes.insert(id, list[open_end..close].trim().to_string());
+        position = close + "</li>".len();
+    }
+    notes
+}
+
+/// Strip the back-reference link and every `id` from a cloned footnote body: the copy must not
+/// duplicate fragment targets that already exist in the footnote list.
+fn clean_margin_note(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut position = 0;
+    while let Some(offset) = body[position..].find("<a ") {
+        let start = position + offset;
+        let Some(open_end) = body[start..].find('>').map(|index| start + index + 1) else {
+            break;
+        };
+        if !body[start..open_end].contains("data-footnote-backref") {
+            out.push_str(&body[position..open_end]);
+            position = open_end;
+            continue;
+        }
+        let Some(close) = body[open_end..]
+            .find("</a>")
+            .map(|index| open_end + index + "</a>".len())
+        else {
+            break;
+        };
+        out.push_str(body[position..start].trim_end_matches(['\u{a0}', ' ']));
+        position = close;
+    }
+    out.push_str(&body[position..]);
+
+    // Remove `id` attributes so the copy introduces no duplicate fragment targets.
+    let mut cleaned = String::with_capacity(out.len());
+    let mut position = 0;
+    while let Some(offset) = out[position..].find('<') {
+        let start = position + offset;
+        let Some(open_end) = out[start..].find('>').map(|index| start + index + 1) else {
+            break;
+        };
+        let tag = &out[start..open_end];
+        cleaned.push_str(&out[position..start]);
+        if attribute_value(tag, "id").is_some() {
+            cleaned.push_str(&set_attribute(tag, "id", "").replace(" id=\"\"", ""));
+        } else {
+            cleaned.push_str(tag);
+        }
+        position = open_end;
+    }
+    cleaned.push_str(&out[position..]);
+    cleaned
+}
+
+/// Copy each same-page footnote into an `<aside>` beside its reference, so a wide viewport can
+/// show margin notes with CSS alone. The `.footnotes` list stays in the document for narrow
+/// viewports, for printing and for readers that follow the link; the stylesheet shows exactly one
+/// of the two. Returns the rewritten HTML and whether any note was placed.
+pub fn margin_notes(html: &str) -> (String, bool) {
+    const REFERENCE: &str = "<sup class=\"footnote-ref\">";
+    if !html.contains(REFERENCE) {
+        return (html.to_string(), false);
+    }
+    let definitions = footnote_definitions(html);
+    if definitions.is_empty() {
+        return (html.to_string(), false);
+    }
+
+    let mut out = String::with_capacity(html.len() * 2);
+    let mut position = 0;
+    let mut placed = 0usize;
+    while let Some(offset) = html[position..].find(REFERENCE) {
+        let start = position + offset;
+        let Some(end) = html[start..]
+            .find("</sup>")
+            .map(|index| start + index + "</sup>".len())
+        else {
+            break;
+        };
+        let sup = &html[start..end];
+        out.push_str(&html[position..end]);
+        position = end;
+
+        // `sup` wraps the reference anchor; attribute lookups need that inner tag.
+        let anchor = sup
+            .find("<a ")
+            .and_then(|start| {
+                sup[start..]
+                    .find('>')
+                    .map(|end| &sup[start..start + end + 1])
+            })
+            .filter(|tag| tag.contains("data-footnote-ref"));
+        let Some(anchor) = anchor else {
+            continue;
+        };
+        let target = attribute_value(anchor, "href")
+            .and_then(|href| href.strip_prefix('#'))
+            .map(str::to_string);
+        let (Some(target), Some(reference)) = (target, attribute_value(anchor, "id")) else {
+            continue;
+        };
+        let Some(body) = definitions.get(&target) else {
+            continue;
+        };
+        let number = html_to_text(sup);
+        let number = number.trim();
+        let note_id = format!("{reference}-note");
+        let marker = format!("<span class=\"margin-note-number\">{number}. </span>");
+        let body = clean_margin_note(body);
+        let body = match body.strip_prefix("<p>") {
+            Some(rest) => format!("<p>{marker}{rest}"),
+            None => format!("{marker}{body}"),
+        };
+        out.push_str(&format!(
+            "<aside class=\"margin-note footnote-margin-note\" role=\"note\" aria-label=\"Note {number}\" id=\"{note_id}\">{body}</aside>"
+        ));
+        placed += 1;
+    }
+    out.push_str(&html[position..]);
+
+    if placed == 0 {
+        return (html.to_string(), false);
+    }
+    // Point each reference at its copy for assistive technology.
+    let mut described = String::with_capacity(out.len());
+    let mut position = 0;
+    while let Some(offset) = out[position..].find("<a href=\"#fn-") {
+        let start = position + offset;
+        let Some(open_end) = out[start..].find('>').map(|index| start + index + 1) else {
+            break;
+        };
+        let tag = &out[start..open_end];
+        described.push_str(&out[position..start]);
+        match attribute_value(tag, "id").filter(|_| tag.contains("data-footnote-ref")) {
+            Some(reference) => {
+                let note_id = format!("{reference}-note");
+                described.push_str(&set_attribute(tag, "aria-describedby", &note_id));
+            }
+            None => described.push_str(tag),
+        }
+        position = open_end;
+    }
+    described.push_str(&out[position..]);
+    (described, true)
+}
+
+/// Mark every absolute link in the reader body as leaving the site. The body only ever contains
+/// publisher links, so this needs no knowledge of the site's own base path, and doing it here means
+/// the behaviour survives with JavaScript disabled.
+pub fn external_body_links(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() + 64);
+    let mut position = 0;
+    while let Some(offset) = html[position..].find("<a ") {
+        let start = position + offset;
+        let Some(open_end) = html[start..].find('>').map(|index| start + index + 1) else {
+            break;
+        };
+        let tag = &html[start..open_end];
+        out.push_str(&html[position..start]);
+        position = open_end;
+
+        let absolute = attribute_value(tag, "href").is_some_and(|href| {
+            let href = href.trim().to_ascii_lowercase();
+            href.starts_with("http://") || href.starts_with("https://")
+        });
+        if !absolute {
+            out.push_str(tag);
+            continue;
+        }
+        let tag = set_attribute(tag, "target", "_blank");
+        let mut tag = set_attribute(&tag, "rel", "external noopener noreferrer");
+        // Announce the new tab, the way a sighted reader infers it from the arrow marker.
+        if attribute_value(&tag, "aria-label").is_none()
+            && let Some(close) = html[position..].find("</a>").map(|index| position + index)
+        {
+            let label = html_to_text(&html[position..close]);
+            let label = label.trim();
+            if !label.is_empty() {
+                tag = set_attribute(&tag, "aria-label", &format!("{label}, opens in a new tab"));
+            }
+        }
+        out.push_str(&tag);
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn body_links_leaving_the_site_open_in_a_new_tab() {
+        let html = external_body_links(
+            "<p>See <a href=\"https://example.org/paper\">the paper</a> and <a href=\"#fn-1\">note</a>.</p>",
+        );
+        assert!(html.contains(
+            "<a href=\"https://example.org/paper\" target=\"_blank\" rel=\"external noopener noreferrer\" aria-label=\"the paper, opens in a new tab\">"
+        ));
+        // Same-page fragments are not external and keep their plain form.
+        assert!(html.contains("<a href=\"#fn-1\">note</a>"));
+    }
+
+    #[test]
+    fn external_body_links_keep_a_publisher_label_and_survive_empty_text() {
+        let labelled = external_body_links(
+            "<p><a href=\"https://example.org\" aria-label=\"Publisher label\">x</a></p>",
+        );
+        assert!(labelled.contains("aria-label=\"Publisher label\""));
+        assert_eq!(labelled.matches("aria-label").count(), 1);
+
+        let imageonly = external_body_links(
+            "<p><a href=\"https://example.org\"><img src=\"a.png\" alt=\"\"></a></p>",
+        );
+        assert!(imageonly.contains("rel=\"external noopener noreferrer\""));
+        assert!(!imageonly.contains("aria-label"));
+    }
+
+    #[test]
+    fn margin_notes_copy_each_footnote_beside_its_reference() {
+        let mut options = comrak::Options::default();
+        options.extension.footnotes = true;
+        let rendered = comrak::markdown_to_html(
+            "Text[^a] and more[^b].\n\n[^a]: First note.\n\n[^b]: Second note.\n",
+            &options,
+        );
+        let (html, placed) = margin_notes(&rendered);
+        assert!(placed);
+
+        // One aside per reference, carrying the reference number and the note text.
+        assert_eq!(
+            html.matches("class=\"margin-note footnote-margin-note\"")
+                .count(),
+            2
+        );
+        assert!(html.contains(
+            "<aside class=\"margin-note footnote-margin-note\" role=\"note\" aria-label=\"Note 1\" id=\"fnref-a-note\"><p><span class=\"margin-note-number\">1. </span>First note.</p></aside>"
+        ));
+        assert!(html.contains("<span class=\"margin-note-number\">2. </span>Second note."));
+
+        // The copy must not duplicate fragment targets or repeat the back-reference control.
+        let copies: String = html
+            .match_indices("<aside")
+            .filter_map(|(start, _)| {
+                let body = &html[start..];
+                body.find("</aside>").map(|end| &body[..end])
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!copies.contains("footnote-backref"), "{copies}");
+        assert_eq!(copies.matches("id=").count(), 2, "{copies}");
+
+        // References point at their copy, and the original list survives for narrow viewports.
+        assert!(html.contains("aria-describedby=\"fnref-a-note\""));
+        assert!(html.contains("<section class=\"footnotes\""));
+        assert!(html.contains("<li id=\"fn-a\">"));
+    }
+
+    #[test]
+    fn margin_notes_leave_documents_without_usable_footnotes_alone() {
+        for html in [
+            "<p>No footnotes here.</p>",
+            // A reference with no matching definition must not invent one.
+            "<p>Text<sup class=\"footnote-ref\"><a href=\"#fn-x\" id=\"fnref-x\" data-footnote-ref>1</a></sup></p>",
+        ] {
+            let (out, placed) = margin_notes(html);
+            assert!(!placed, "{html}");
+            assert_eq!(out, html);
+        }
+    }
+
     use super::*;
     use crate::content::to_markdown;
 
@@ -1009,7 +1304,7 @@ mod tests {
         let anchored = anchor_headings(html, Some(&article));
         assert_eq!(
             anchored,
-            "<h2 id=\"how-did-this-happen\">How did this happen?</h2><p>Text</p><h3 id=\"cost\">Cost <em>estimates</em></h3><h2 id=\"cost-estimates\">Cost estimates</h2><h2 id=\"cost-estimates-2\">Cost estimates</h2><h2 id=\"external-paper\"><a href=\"https://example.com/paper\">External paper</a></h2><h2 id=\"see-partial-link\">See <a href=\"#x\">partial</a> link</h2><h4 id=\"keep\">Kept id</h4><h2 id=\"section\"></h2>"
+            "<h2 id=\"how-did-this-happen\">How did this happen?<a class=\"heading-anchor\" href=\"#how-did-this-happen\" aria-label=\"Link to this section\">#</a></h2><p>Text</p><h3 id=\"cost\">Cost <em>estimates</em><a class=\"heading-anchor\" href=\"#cost\" aria-label=\"Link to this section\">#</a></h3><h2 id=\"cost-estimates\">Cost estimates<a class=\"heading-anchor\" href=\"#cost-estimates\" aria-label=\"Link to this section\">#</a></h2><h2 id=\"cost-estimates-2\">Cost estimates<a class=\"heading-anchor\" href=\"#cost-estimates-2\" aria-label=\"Link to this section\">#</a></h2><h2 id=\"external-paper\"><a href=\"https://example.com/paper\">External paper</a><a class=\"heading-anchor\" href=\"#external-paper\" aria-label=\"Link to this section\">#</a></h2><h2 id=\"see-partial-link\">See <a href=\"#x\">partial</a> link<a class=\"heading-anchor\" href=\"#see-partial-link\" aria-label=\"Link to this section\">#</a></h2><h4 id=\"keep\">Kept id<a class=\"heading-anchor\" href=\"#keep\" aria-label=\"Link to this section\">#</a></h4><h2 id=\"section\"><a class=\"heading-anchor\" href=\"#section\" aria-label=\"Link to this section\">#</a></h2>"
         );
         assert_eq!(
             anchor_headings("<p>no headings</p><hr>", None),
@@ -1026,7 +1321,7 @@ mod tests {
                 "<h1>Title again</h1><h2>Next</h2><h1 id=\"x\">Kept</h1><h3>Deep</h3>",
                 None
             ),
-            "<h1 id=\"title-again\" aria-level=\"2\">Title again</h1><h2 id=\"next\">Next</h2><h1 id=\"x\" aria-level=\"2\">Kept</h1><h3 id=\"deep\">Deep</h3>"
+            "<h1 id=\"title-again\" aria-level=\"2\">Title again<a class=\"heading-anchor\" href=\"#title-again\" aria-label=\"Link to this section\">#</a></h1><h2 id=\"next\">Next<a class=\"heading-anchor\" href=\"#next\" aria-label=\"Link to this section\">#</a></h2><h1 id=\"x\" aria-level=\"2\">Kept<a class=\"heading-anchor\" href=\"#x\" aria-label=\"Link to this section\">#</a></h1><h3 id=\"deep\">Deep<a class=\"heading-anchor\" href=\"#deep\" aria-label=\"Link to this section\">#</a></h3>"
         );
     }
 

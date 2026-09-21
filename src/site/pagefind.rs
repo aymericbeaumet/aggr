@@ -461,6 +461,7 @@ mod tests {
             next_article: None,
             recommended_articles: Vec::new(),
             body_html: None,
+            has_margin_notes: false,
         }
     }
 

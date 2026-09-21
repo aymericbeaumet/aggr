@@ -615,9 +615,9 @@ body[data-kind="item"] .main {
 .body :is(h1, h2, h3, h4, h5, h6) { line-height: 1.3; margin: 1.75em 0 0.6em; text-wrap: pretty; break-after: avoid; }
 /* Headings are anchors, not links: a hover marker sits in the margin without moving the title. */
 .body :is(h1, h2, h3, h4, h5, h6)[id] { position: relative; cursor: pointer; }
-.body :is(h1, h2, h3, h4, h5, h6)[id]::before { content: "#"; position: absolute; right: 100%; top: 0; margin-right: 0.3em; color: var(--muted); font-weight: 400; opacity: 0; pointer-events: none; }
-.body :is(h1, h2, h3, h4, h5, h6)[id]:hover::before { opacity: 1; }
-.body :is(h1, h2, h3, h4, h5, h6)[id]:target::before { opacity: 1; color: var(--accent-strong); }
+.body .heading-anchor { position: absolute; right: 100%; top: 0; margin-right: 0.3em; color: var(--muted); font-weight: 400; text-decoration: none; opacity: 0; }
+.body :is(h1, h2, h3, h4, h5, h6):hover > .heading-anchor, .body .heading-anchor:focus-visible { opacity: 1; }
+.body :is(h1, h2, h3, h4, h5, h6)[id]:target > .heading-anchor { opacity: 1; color: var(--accent-strong); }
 .body .article-figure { margin: 1.5em 0; }
 .body .article-figure > .article-picture { margin-block: 0; }
 .body figcaption { margin-top: 0.6em; color: var(--muted); font-size: 0.85em; font-style: italic; line-height: 1.5; text-align: center; text-wrap: pretty; }

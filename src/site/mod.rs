@@ -934,13 +934,16 @@ fn build_once(
             .get(&item.path)
             .map(Vec::as_slice)
             .unwrap_or_default();
-        ctx.body_html = Some(content::embed_body_videos(
-            &content::anchor_headings(
-                &prepared_markdown.reader_html_with_images(local_images, &dimensions),
-                article_url.as_ref(),
-            ),
-            local_images,
-        ));
+        let (body_html, has_margin_notes) =
+            content::margin_notes(&content::external_body_links(&content::embed_body_videos(
+                &content::anchor_headings(
+                    &prepared_markdown.reader_html_with_images(local_images, &dimensions),
+                    article_url.as_ref(),
+                ),
+                local_images,
+            )));
+        ctx.body_html = Some(body_html);
+        ctx.has_margin_notes = has_margin_notes;
         let dir = out.join(&ctx.url);
         let representation = out.join(ctx.url.trim_end_matches('/'));
         write(
@@ -2893,10 +2896,19 @@ category = "Science"
             page.contains("data-video-embed=\"https://www.youtube-nocookie.com/embed/abcDEF12345?"),
             "{page}"
         );
+        // A link inside prose stays a link, and like every body link out of the site it opens
+        // in a new tab without needing JavaScript.
+        let inline_link = page
+            .split_once("href=\"https://youtu.be/inline1234\"")
+            .map(|(before, _)| before.rsplit("<a ").next().unwrap_or_default().to_string())
+            .unwrap_or_default();
+        assert!(inline_link.contains("target=\"_blank\""), "{page}");
         assert!(
-            page.contains(
-                "href=\"https://youtu.be/inline1234\">https://youtu.be/inline1234</a> inline."
-            ),
+            inline_link.contains("rel=\"external noopener noreferrer\""),
+            "{page}"
+        );
+        assert!(
+            page.contains(">https://youtu.be/inline1234</a> inline."),
             "{page}"
         );
         assert!(!page.contains("<iframe"), "{page}");

@@ -261,6 +261,8 @@ pub struct ItemCtx {
     /// Rendered Markdown; only filled on the item's own page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_html: Option<String>,
+    /// Whether `body_html` carries footnote copies for the wide-viewport margin column.
+    pub has_margin_notes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -738,6 +740,7 @@ impl ItemCtx {
             next_article: None,
             recommended_articles: Vec::new(),
             body_html: None,
+            has_margin_notes: false,
         };
         context.metadata = super::display::Metadata::from(&context);
         context

@@ -501,7 +501,14 @@ mod tests {
         let config = Config::parse("[site.preferences]\noffline_items=7\n").unwrap();
         let values = config.site.preferences.browser_defaults().unwrap();
         assert!(values.get("offline-items").is_none());
-        assert!(config.site.preferences.schema().bootstrap.get("offline-items").is_none());
+        assert!(
+            !config
+                .site
+                .preferences
+                .schema()
+                .bootstrap
+                .contains_key("offline-items")
+        );
     }
 
     #[test]
@@ -573,7 +580,8 @@ mod tests {
 
     #[test]
     fn site_defaults_flow_into_both_schema_views() {
-        let config = Config::parse("[site.preferences]\ntheme='dark'\nfeed_page_size=25\n").unwrap();
+        let config =
+            Config::parse("[site.preferences]\ntheme='dark'\nfeed_page_size=25\n").unwrap();
         let schema = config.site.preferences.schema();
         assert_eq!(schema.bootstrap["theme"].initial, "dark");
         assert_eq!(schema.bootstrap["feed-page-size"].initial, "25");

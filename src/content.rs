@@ -38,7 +38,8 @@ pub use module::{article_from_module, is_script_shell, module_scripts};
 pub use render::reading_metrics;
 pub use render::{
     LocalImage, LocalImageVariant, PreparedMarkdown, anchor_headings, embed_body_videos, excerpt,
-    image_dimensions, rebase_site_paths, rebase_site_url, rebase_srcset, render_markdown,
+    external_body_links, image_dimensions, margin_notes, rebase_site_paths, rebase_site_url,
+    rebase_srcset, render_markdown,
 };
 pub use resources::ResourceLink;
 pub use strip::{html_to_text, sanitize, storage_html};
