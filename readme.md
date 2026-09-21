@@ -100,8 +100,9 @@ See [the measurements and hosting limits](docs/benchmarks.md) before choosing yo
 [Hosting](docs/hosting.md) · [Themes](docs/themes.md) · [Git model](docs/git-model.md) ·
 [Interoperability](docs/interoperability.md) · [Performance](docs/performance.md)
 
-Rust generates the site; Svelte and TypeScript power the browser. Published binaries need no Node
-runtime. See [contributing](CONTRIBUTING.md) and [client development](docs/client.md).
+Rust generates the site; the browser client is hand-written HTML, CSS and JavaScript with no build
+step and no dependencies. See [contributing](CONTRIBUTING.md) and
+[client development](docs/client.md).
 
 ## License
 

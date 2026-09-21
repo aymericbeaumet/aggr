@@ -54,10 +54,11 @@ paragraph; plain-text and reStructuredText exports also list their destinations 
 Stored Markdown and publisher metadata remain unchanged. Custom item templates should
 render `item.resources` alongside `item.body_html`, escaping labels and URLs normally.
 
-The default theme explicitly opts into browser components using `data-preferences-root`,
-`data-shortcut-help-root`, `data-connection-root`, and `data-audio-component`. These regions become
-owned by Svelte after loading. Custom templates must provide these markers;
-the default components exclusively own those regions. Site generation requires no JavaScript runtime. See [client ownership](client.md#component-and-service-ownership).
+The reader's controls are rendered markup, not mount points: the keyboard-help `<dialog>`, the
+search shell, the preferences form and the podcast player all ship complete in the HTML, and the
+client only wires them up. A custom template that keeps `data-audio-component`, `data-search-root`
+and the documented control markers keeps their behaviour; one that drops them simply gets the
+static version. Site generation requires no JavaScript runtime. See [client development](client.md).
 
 Article contexts also expose `item.word_count` and `item.reading_minutes`. Both are derived from
 the visible Unicode text at build time, with reading time rounded up at 225 words per minute; an
@@ -193,7 +194,7 @@ When extending the default script, keep these relationships intact:
   `facet_url` filter to open the main feed with a quoted search qualifier. Static archives remain at
   `sources/<slug>/`, `categories/<slug>/`, and `tags/<slug>/`; `/browse/` combines the directories. See [client development and search](client.md) for syntax and ownership.
 - Article lists use `.rows .row`, with a `[data-row-open]` title link. `.is-selected` identifies the
-  remembered keyboard cursor. Keep `_item.html` and the Svelte search result component aligned.
+  remembered keyboard cursor. Keep `_item.html` aligned with the rows `search.js` builds.
 - List pagination exposes `data-page-previous` and `data-page-next`. The home feed's
   `data-feed-pager` also carries its generated page size, total, and static edge routes. The
   default script may divide one generated page into smaller `?feed-page=N` views; every row must
@@ -215,8 +216,8 @@ precedence, and resetting preferences returns to the site's defaults. See
 
 Root datasets cover theme (including sepia), text size, reading width, typeface, line and paragraph
 spacing, optional paragraph indentation (off by default), alignment, letter and word spacing,
-density, thumbnails, and motion. Feed page size, dates, shortcuts, `scroll-amount` (1–100 lines),
-and `offline-items` (0–1000 articles) also use the shared schema. Reading settings affect prose,
+density, thumbnails, and motion. Feed page size, dates, shortcuts and `scroll-amount` (1–100 lines)
+also use the shared schema. Reading settings affect prose,
 not browser zoom or navigation. System reduced motion always wins. These controls follow familiar
 reader features documented by [Apple Books](https://support.apple.com/en-ca/guide/books/ibks8923126d/mac).
 
@@ -249,10 +250,9 @@ programmatic main focus with `data-navigation-focus`, suppressing only the large
 outline after a page change. Ordinary links, form controls, and the skip link must remain usable
 with a keyboard.
 
-Navigation replaces content without a document transition. Swup starts with pristine initial
-HTML, before enhancement adds binding markers. Page requests share in-flight work; speculative
-fetches are bounded, canceled when unrelated to navigation, and promoted when they become the
-navigation target. Search display data is precomputed and hex-encoded because Pagefind indexes
+Navigation is ordinary multi-page navigation. A `speculationrules` document rule lets the browser
+prefetch likely destinations on its own budget, and `@view-transition` animates the change where
+the browser supports it. Search display data is precomputed and hex-encoded because Pagefind indexes
 even zero-weight metadata values; decoding it for display must not leak implementation keys into
 search matches.
 
@@ -287,8 +287,8 @@ links are hidden at that width. Keep the bar outside the page replacement contai
 
 ## Metadata and scrolling
 
-`_metadata.html` supplies the feed and item metadata; search uses the same field order in
-the Svelte search result component. Feed rows, search results, and article headers all begin their metadata with a
+`_metadata.html` supplies the feed and item metadata; search results use the same field order.
+Feed rows, search results, and article headers all begin their metadata with a
 publisher source link followed by optional italic `via` and separate feed links. `via` and commas
 remain outside the links. `item.publisher_source` identifies the publisher; `item.source` retains the
 stored origin, and `item.source_memberships` contains deduplicated `{ slug, query_value, name, display }` memberships.

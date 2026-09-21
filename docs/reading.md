@@ -52,7 +52,6 @@ paragraph_indent = false
 font_family = "serif"
 line_spacing = "relaxed"
 scroll_amount = 10 # lines, capped at half the viewport
-offline_items = 50 # newest pages/images + full archive search index; 0 disables downloads
 ```
 
 See [`config.default.toml`](../config.default.toml) for every setting.

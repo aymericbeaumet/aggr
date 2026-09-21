@@ -370,21 +370,25 @@ async fn svelte_components_preserve_reader_lifecycles() -> Result<()> {
                 emulate(&client, "Emulation.setDeviceMetricsOverride", json!({"width":if mobile {390}else{1280},"height":844,"deviceScaleFactor":1,"mobile":mobile})).await?;
                 client.goto(&fixture.base).await?;
                 wait_booted_with(&client, "document.querySelector('.search-command')").await?;
-                client.execute("window.swup.navigate(arguments[0])", vec![json!(format!("{}preferences/", fixture.base))]).await?;
-                wait_for(&client, "!window.swup.navigating && document.querySelector('#theme-mode')").await?;
-                let report = client
-                    .execute_async(
-                        include_str!("../fixtures/component_lifecycle_checks.js"),
-                        vec![json!(fixture.base)],
+                // Preferences survives an ordinary navigation: its controls are server-rendered
+                // and the reader's saved values are applied before paint.
+                client.goto(&format!("{}preferences/", fixture.base)).await?;
+                wait_booted_with(&client, "document.querySelector('#theme')").await?;
+                let controls: serde_json::Value = client
+                    .execute(
+                        "return {count: document.querySelectorAll('[data-preference]').length, \
+                         theme: document.querySelector('#theme').value, \
+                         applied: document.documentElement.dataset.theme};",
+                        vec![],
                     )
                     .await?;
                 anyhow::ensure!(
-                    report.get("error").is_none(),
-                    "component lifecycle ({base_path}): {report}"
+                    controls["count"] == 17,
+                    "every setting renders a control ({base_path}): {controls}"
                 );
                 anyhow::ensure!(
-                    report["cycles"] == 3,
-                    "all navigation cycles completed: {report}"
+                    controls["theme"] == controls["applied"],
+                    "the form shows the value the document is using: {controls}"
                 );
                 client.goto(&format!("{}items/example/2026-09-01-story-36/", fixture.base)).await?;
                 wait_for(&client, "!!document.querySelector('.native-audio.is-enhanced')").await?;

@@ -20,10 +20,10 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   handlers and `data:`/`javascript:` URLs before storage; ammonia sanitizes before display;
   comrak renders with raw HTML off. Never serve stored HTML unsanitized.
 - No data leaves the user's repository except the fetches they configured.
-- The CLI and static generator are Rust; the reader uses Svelte and TypeScript built with Vite.
-  Site generation stays entirely Rust: never execute JavaScript/SSR or invoke a frontend compiler
-  from the CLI or Cargo build. Compile Svelte only for browser assets during frontend development;
-  embed committed, self-contained bundles so running or building aggr never requires Node. Async Rust
+- The CLI and static generator are Rust; the reader is hand-written HTML, CSS and JavaScript with
+  no build step and no dependencies. Site generation stays entirely Rust: never execute
+  JavaScript/SSR or invoke a frontend compiler from the CLI or Cargo build. Never reintroduce a
+  frontend toolchain, a framework, or a vendored browser library. Async Rust
   work uses tokio (`JoinSet` + `Semaphore`); git is shelled out. Normal HTTP uses rustls with
   ring, installed via `http::install_crypto_provider()` before any client (tests too). The bounded
   challenge fallback uses wreq/BoringSSL; both transports share request and preservation limits.
@@ -67,7 +67,7 @@ src/commands/check.rs                     probe every source once; non-zero when
 src/commands/clean.rs                     provably disposable targets only
 src/commands/init.rs                      aggr.toml and the optional GitHub workflow
 src/commands/lock.rs                      non-blocking advisory lock (.aggr/aggr.lock, dev.lock)
-src/commands/server.rs, server/client.rs  the dev HTTP server and its Vite passthrough
+src/commands/server.rs                    the dev HTTP server and its reload stream
 src/config.rs, config/                    aggr.toml types, imports and collections, ${ENV}, BCP 47 tags, preferences, validation
 src/git.rs                                worktree/orphan bootstrap, commit with trailers, push+rebase, refs
 src/http.rs, http/transport.rs            reqwest client (UA, timeouts, size cap, conditional GET, retries) + wreq challenge fallback
@@ -96,8 +96,9 @@ src/site/outputs.rs                       feeds, OPML, discovery documents, site
 src/site/pagefind.rs                      the search index and its cache key
 src/site/parallel.rs                      ordered map over at most 8 scoped workers; AGGR_BUILD_WORKERS
 src/site/{related,display,document,interactive,item_type,native_media,video}.rs  navigation and presentation contexts
-themes/default/                           embedded theme (templates/, static/ with the committed client bundle)
-web/                                      Svelte/TypeScript client; web/src/reader/ holds the tested reader modules
+themes/default/                           embedded theme: templates/ plus static/ with the hand-written client
+themes/default/static/{app,search,media,bootstrap}.js  the whole client: core, lazy search, lazy media, pre-paint
+types/aggr.d.ts, jsconfig.json            editor-only type checking for the client; nothing to install
 tests/cli.rs                              end-to-end: bare origin + clone + httpmock + the real binary
 tests/clean.rs, local_sources.rs          cleanup and local-file source scenarios
 tests/support/                            shared integration helpers: git and environment isolation
@@ -110,8 +111,7 @@ docs/*.md                                 the user-facing reference the readme l
 ## Commands
 
 ```sh
-make check                                   # Rust checks and frontend type/tests; npm ci --prefix web first
-make client-build                            # rebuild committed embedded client assets after frontend edits
+make check                                   # fmt, clippy and the full test suite
 cargo test --test cli                        # end-to-end only
 make run ARGS="dev --port 3000"              # dogfood examples/aggr.toml
 cargo run -- sync --dry-run -vv              # fetch without writing, with debug logs
@@ -130,8 +130,6 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   new mock for the same path.
 - minijinja: `trim_blocks`/`lstrip_blocks` are on, autoescape follows the `.html` extension, and
   the custom formatter escapes `& < > " '` only.
-- `themes/default/static/swup.js` is the vendored Swup 4 UMD build; keep `swup.LICENSE` beside it
-  and keep navigation progressively functional without JavaScript.
 - A normal source URL is intentionally enough: keep HTML heuristics internal and remember the
   discovered feed endpoint. `type = "html"` and site-specific selectors are not public config.
   A listing URL names a section, so probe conventional endpoints relative to it with or without a
@@ -245,17 +243,21 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   selection, vertical scroll, pinch zoom, controls, horizontal scrollers, and browser edge gestures.
   Never apply `touch-action: pan-y` to an ancestor containing horizontal scrollers.
   Share keyboard/swipe article destinations; a missing neighbor returns to the main feed.
-- Keep application and content versions separate. Feed changes update lists automatically, even
-  while a release refresh is pending; only binary or effective template/static changes offer an
-  app refresh. Verify background polling without synthetic navigation/reconnect events.
-- Develop the client in `web/`; rebuild its committed assets instead of editing compiled `app.js`
-  or `client.css`. Svelte owns explicit interactive roots; Swup owns navigation and history.
-  Await page-scope disposal before content replacement, then recheck ownership after every await.
-  Keep persistent controls outside the page scope. Support only the current Svelte mount contract;
-  do not add legacy DOM adapters, old config aliases, or obsolete asset routes.
-  Keep the real Swup instance separate from window named properties such as `<main id="swup">`.
-  Svelte owns search dates/selection; static DOM helpers must not rewrite component-bound nodes.
-  Keep generated HTML usable without JavaScript.
+- The client is four hand-written files edited in place: `bootstrap.js` (pre-paint preferences and
+  dates, the only render-blocking script), `app.js` (every page), and `search.js` and `media.js`,
+  imported on demand. Each opens with `// @ts-check`; `types/aggr.d.ts` declares the contracts they
+  share with the templates. Never add a bundler, a framework, an npm dependency, or a vendored
+  browser library, and never import across files by anything but a `url_for`-resolved URL from
+  `window.AGGR.assets`: hashed asset names are not rewritten inside file contents.
+- Reach for the platform before JavaScript: speculation rules and ordinary navigation, view
+  transitions, scroll-driven animations, `<dialog>` with invoker commands, stretched links, CSS
+  counters. Wrap anything not universally supported in `@supports` or a feature check that degrades
+  to plain HTML. Generated HTML must stay usable with JavaScript disabled.
+- A prerendered page runs before anyone sees it: gate session storage, history writes and worker
+  registration behind `document.prerendering`.
+- Preferences live in one typed table in `src/config/preferences.rs`, which produces both the
+  browser validation rules and the rendered form. Never redeclare a setting in a template or a
+  script.
 - Documents carry no `<base>` element. `url_for` and `facet_url` resolve from the page being
   rendered; `site_path` keeps the root-relative form for data attributes the client resolves
   against its known root, and `item.body_html | rebase` points body media at the page. Fragment

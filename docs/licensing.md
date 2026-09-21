@@ -33,11 +33,10 @@ and earlier releases, remain available under their original MIT terms. This chan
 does not revoke those permissions or prevent someone from commercially using an
 earlier MIT version. Check the license shipped with the exact revision you use.
 
-Dependencies and vendored assets retain their own licenses. The client bundle's
-project terms, contribution terms, and third-party notices are in
-[`themes/default/static/client.LICENSE`](../themes/default/static/client.LICENSE);
-Swup and the bundled font also have adjacent license files. `cargo deny check`
-checks Rust dependency licenses against [deny.toml](../deny.toml).
+Dependencies and vendored assets retain their own licenses. The browser client is
+first-party with no third-party code; the bundled font keeps its adjacent license
+file. `cargo deny check` checks Rust dependency licenses against
+[deny.toml](../deny.toml).
 
 The software license does not give you rights to fetched articles or images, or
 license your own content to the project. See [hosting](hosting.md) before publishing

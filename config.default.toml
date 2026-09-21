@@ -36,7 +36,8 @@ build_max_bytes = 1000000000
 media_full_quality_days = 30
 # Output directory of `aggr build`.
 out = "_site"
-# In a secure context, emit install metadata and cache a bounded offline reading set.
+# In a secure context, emit install metadata and register the service worker that keeps
+# pages you have read available offline.
 pwa = true
 
 # Initial reader settings. Every preference and its default is documented here.
@@ -59,9 +60,8 @@ feed_page_size = 50 # 10, 25, 50
 motion = "auto" # auto, off
 single_key_shortcuts = true
 scroll_amount = 10 # 1–100 lines for d/u, capped at half the available viewport
-# Recent-article download count; 0 disables automatic downloads, maximum 1000.
-# Positive values also save the complete archive search index; only the newest N
-# article pages and retained images are available to read offline.
+# Retired: the reader caches the pages it opens instead of downloading an archive. Still accepted
+# so existing configurations keep parsing, but it no longer reaches the browser.
 offline_items = 30
 
 # Optional public identity for Schema.org metadata. `type` is "person" or "organization".

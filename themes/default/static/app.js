@@ -886,6 +886,10 @@ function boot() {
     if (!document.hidden) dates.render();
   });
   window.addEventListener("pagehide", () => selection.save());
+
+  // One readiness signal, for styles that only apply once enhancement is in place and for the
+  // browser contract suite.
+  document.documentElement.dataset.aggrReady = "true";
 }
 
 // A prerendered page runs before anyone has seen it: writing session state or history there would

@@ -160,18 +160,16 @@ and warm versus cold caches determine the result.
 
 ## Reader startup and search
 
-The production reader remains a precompiled Svelte/TypeScript bundle embedded in the Rust binary.
-Normal Cargo builds and deployed sites require no Node runtime. Vite handles frontend development
-without rebuilding Rust; the complete static HTML remains the first paint and no-JavaScript fallback.
+The reader is four hand-written files embedded in the Rust binary, with no build step. Only the
+small pre-paint bootstrap blocks rendering; the core module is deferred, and search and media are
+fetched on demand. The complete static HTML remains the first paint and the no-JavaScript fallback.
 
-Search completion uses `search-catalog.json` (version, base, document count, and facets), avoiding the
-much larger offline manifest's file/digest list. Pagefind initialization and filter files wait until
-an actual query needs them. The full manifest remains authoritative for verified offline storage;
-the worker derives an offline catalogue from its last complete manifest. See [client development](client.md) for search and cache ownership.
+Search completion uses `search-catalog.json` (version, base, document count, and facets). Pagefind's
+runtime and its filter files wait until an actual query needs them, so a reader who never searches
+downloads none of it. See [client development](client.md) for the search contract.
 
-Idle route warming uses one request slot; hover, focus, or touch intent can immediately use a
-second. Actual navigation cancels unrelated speculative requests and reuses a destination already
-in flight. Search result images stay under Svelte ownership without a second static enhancement scan.
+Prefetching is the browser's: a `speculationrules` document rule with moderate eagerness, which
+lets the browser spend its own budget and cancel work the reader moved away from.
 
 ## Measuring changes
 

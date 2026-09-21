@@ -592,15 +592,20 @@ pub(crate) async fn wait_for(client: &Client, expression: &str) -> Result<()> {
     }
 }
 
-/// The client is booted once Swup owns navigation; most page contracts start there.
+/// The client marks the document ready once its enhancements are installed; most page contracts
+/// start there. The page itself is usable well before this.
 pub(crate) async fn wait_booted(client: &Client) -> Result<()> {
-    wait_for(client, "typeof window.swup?.navigate === 'function'").await
+    wait_for(
+        client,
+        "document.documentElement.dataset.aggrReady === 'true'",
+    )
+    .await
 }
 
 pub(crate) async fn wait_booted_with(client: &Client, extra: &str) -> Result<()> {
     wait_for(
         client,
-        &format!("typeof window.swup?.navigate === 'function' && ({extra})"),
+        &format!("document.documentElement.dataset.aggrReady === 'true' && ({extra})"),
     )
     .await
 }
