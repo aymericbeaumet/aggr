@@ -712,13 +712,13 @@ mod tests {
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
         assert!(base.contains("<script id=\"aggr-preferences\" type=\"application/json\">"));
+        // The rules come from the typed table in src/config/preferences.rs; nothing redeclares them.
+        assert!(base.contains("site.preference_schema.bootstrap | json"));
         assert!(base.contains("<script src=\"{{ 'assets/bootstrap.js' | url_for }}\"></script>"));
         let bootstrap = DefaultTheme::get("static/bootstrap.js").unwrap();
-        assert!(
-            std::str::from_utf8(bootstrap.data.as_ref())
-                .unwrap()
-                .contains("AGGRPreferences")
-        );
+        let bootstrap = std::str::from_utf8(bootstrap.data.as_ref()).unwrap();
+        assert!(bootstrap.contains("AGGRPreferences"));
+        assert!(!bootstrap.contains("attribute: \"textSize\""));
         assert!(!base.contains("aggr:reading-history"));
 
         let index_file = DefaultTheme::get("templates/index.html").unwrap();

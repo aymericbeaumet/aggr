@@ -17,7 +17,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="{{ site.title }}">
 {% endif %}
-<script id="aggr-preferences" type="application/json">{{ site.preferences | json }}</script>
+<script id="aggr-preferences" type="application/json">{{ site.preference_schema.bootstrap | json }}</script>
 <script src="{{ 'assets/bootstrap.js' | url_for }}"></script>
 <meta name="aggr:network" content="{{ site.network_url }}">
 <meta name="aggr:instance" content="{{ 'aggr.json' | url_for }}">

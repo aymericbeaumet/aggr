@@ -432,6 +432,7 @@ fn build_once(
     let discussion_shortcuts = context::discussion_shortcuts(&config.networks);
     let mut site = SiteCtx {
         preferences: config.site.preferences.browser_defaults()?,
+        preference_schema: config.site.preferences.schema(),
         title: config.site.title.clone(),
         description,
         identity: config

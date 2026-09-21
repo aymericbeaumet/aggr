@@ -35,6 +35,8 @@ pub struct SiteCtx {
     pub pwa: bool,
     /// Typed initial browser settings, keyed with the same names as preference exports.
     pub preferences: serde_json::Value,
+    /// Validation rules and grouped form fields, both derived from the typed settings table.
+    pub preference_schema: crate::config::preferences::PreferenceSchema,
     /// Browser-facing GitHub page for the source config when the build commit is known.
     pub config_page_url: Option<String>,
     /// Raw source config URL used by machine-readable discovery metadata.
@@ -1015,6 +1017,7 @@ mod tests {
             instance_type_url: "",
             pwa: false,
             preferences: serde_json::json!({}),
+            preference_schema: crate::config::preferences::ReaderPreferences::default().schema(),
             config_page_url: None,
             config_url: None,
             has_categories: false,

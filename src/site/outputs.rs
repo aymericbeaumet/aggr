@@ -1221,6 +1221,7 @@ mod tests {
             instance_type_url: AGGR_INSTANCE_TYPE,
             pwa: true,
             preferences: serde_json::json!({}),
+            preference_schema: crate::config::preferences::ReaderPreferences::default().schema(),
             config_page_url: None,
             config_url: None,
             has_categories: true,
