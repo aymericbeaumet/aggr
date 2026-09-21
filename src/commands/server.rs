@@ -20,7 +20,6 @@ use crate::git::Worktree;
 
 const DEV_KEY_FILE: &str = ".aggr-dev-key";
 
-
 type SiteFiles = BTreeMap<String, Arc<Vec<u8>>>;
 
 #[derive(Clone)]

@@ -33,7 +33,7 @@ pub use module::{article_from_module, is_script_shell, module_scripts};
 pub use render::reading_metrics;
 pub use render::{
     LocalImage, LocalImageVariant, PreparedMarkdown, anchor_headings, embed_body_videos, excerpt,
-    image_dimensions, render_markdown,
+    external_body_links, image_dimensions, margin_notes, render_markdown,
 };
 pub use resources::ResourceLink;
 pub use strip::{html_to_text, sanitize, storage_html};
