@@ -9,7 +9,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use anyhow::{Context as _, Result, bail};
 use serde::Serialize;
 
-use super::context::{ItemCtx, PreviewCtx};
+use super::context::PreviewCtx;
 use crate::content;
 use crate::model::Item;
 use crate::store::Store;
@@ -17,19 +17,11 @@ use crate::store::Store;
 /// Output paths published by this build and the content hash each file was named after.
 pub(super) type Published = BTreeMap<String, String>;
 
-/// Everything the service worker fetches at install, as site paths under `base`: shells, list
-/// indexes, the assets needed to render them, the Pagefind bundle, and newest offline items.
-pub(super) fn precache_paths(
-    base: &str,
-    lists: impl IntoIterator<Item = String>,
-    assets: &[String],
-    item_urls: impl IntoIterator<Item = String>,
-    offline_items: usize,
-) -> Vec<String> {
-    const SHELLS: [&str; 11] = [
+/// Everything the service worker fetches at install, as site paths under `base`: the shell pages
+/// and the assets needed to render them. Articles are cached as the reader opens them.
+pub(super) fn precache_paths(base: &str, assets: &[String]) -> Vec<String> {
+    const SHELLS: [&str; 9] = [
         "",
-        "aggr.json",
-        "updates.json",
         "browse/",
         "categories/",
         "sources/",
@@ -43,7 +35,6 @@ pub(super) fn precache_paths(
     SHELLS
         .iter()
         .map(|path| path.to_string())
-        .chain(lists)
         .chain(
             assets
                 .iter()
@@ -56,7 +47,6 @@ pub(super) fn precache_paths(
                 })
                 .map(|name| format!("assets/{name}")),
         )
-        .chain(item_urls.into_iter().take(offline_items))
         .map(|path| format!("{base}{path}"))
         .filter(|path| seen.insert(path.clone()))
         .collect()
@@ -121,64 +111,6 @@ fn precache_entry(root: &Path, url: String, published: &Published) -> Result<Pre
         revision,
         required,
     })
-}
-
-#[derive(Serialize)]
-pub(super) struct OfflineArticle {
-    url: String,
-    title: String,
-    resources: Vec<PrecacheEntry>,
-}
-
-pub(super) fn offline_catalog(
-    out: &Path,
-    items: &[ItemCtx],
-    images: &BTreeMap<String, Vec<content::LocalImage>>,
-    published: &Published,
-) -> Result<Vec<OfflineArticle>> {
-    let mut revisions = BTreeMap::<String, PrecacheEntry>::new();
-    items
-        .iter()
-        .filter(|item| {
-            item.document
-                .as_ref()
-                .is_none_or(|document| document.local_url.is_some())
-        })
-        .take(1000)
-        .map(|item| {
-            let mut paths = BTreeSet::from([item.url.clone()]);
-            if let Some(url) = item
-                .document
-                .as_ref()
-                .and_then(|document| document.local_url.as_ref())
-            {
-                paths.insert(url.split('#').next().unwrap_or(url).to_string());
-            }
-            if let Some(preview) = &item.preview {
-                paths.insert(preview.url.clone());
-            }
-            for image in images.get(&item.path).into_iter().flatten() {
-                paths.insert(image.original.clone());
-                paths.extend(image.variants.iter().map(|variant| variant.url.clone()));
-            }
-            let resources = paths
-                .into_iter()
-                .map(|path| {
-                    if let Some(entry) = revisions.get(&path) {
-                        return Ok(entry.clone());
-                    }
-                    let entry = precache_entry(out, path.clone(), published)?;
-                    revisions.insert(path, entry.clone());
-                    Ok(entry)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Ok(OfflineArticle {
-                url: item.url.clone(),
-                title: item.title.clone(),
-                resources,
-            })
-        })
-        .collect()
 }
 
 /// Everything the media phase reads and decodes for one item. Gathering runs on worker threads;
@@ -544,31 +476,21 @@ mod tests {
     }
 
     #[test]
-    fn precache_lists_shells_lists_assets_and_the_newest_items() {
+    fn precache_lists_the_shell_and_the_assets_that_render_it() {
         let paths = precache_paths(
             "/repo/",
-            ["sources/a/".to_string(), "sources/a/".to_string()],
-            &["style.css".to_string()],
-            ["items/a/1/".to_string(), "items/a/2/".to_string()],
-            1,
+            &["style.css".to_string(), "photo.webp".to_string()],
         );
         assert_eq!(paths[0], "/repo/");
-        assert!(paths.contains(&"/repo/aggr.json".to_string()));
         assert!(paths.contains(&"/repo/offline.html".to_string()));
         assert!(paths.contains(&"/repo/browse/".to_string()));
         assert!(paths.contains(&"/repo/preferences/".to_string()));
-        assert!(!paths.contains(&"/repo/settings/".to_string()));
-        assert!(paths.contains(&"/repo/sources/a/".to_string()));
+        assert!(paths.contains(&"/repo/manifest.webmanifest".to_string()));
         assert!(paths.contains(&"/repo/assets/style.css".to_string()));
-        assert!(paths.contains(&"/repo/items/a/1/".to_string()));
-        assert!(!paths.contains(&"/repo/items/a/2/".to_string()));
-        assert_eq!(
-            paths
-                .iter()
-                .filter(|path| *path == "/repo/sources/a/")
-                .count(),
-            1
-        );
+        // Articles and their media are cached when the reader opens them, not ahead of time.
+        assert!(!paths.iter().any(|path| path.starts_with("/repo/items/")));
+        assert!(!paths.contains(&"/repo/assets/photo.webp".to_string()));
+        assert_eq!(paths.len(), paths.iter().collect::<BTreeSet<_>>().len());
     }
 
     #[test]

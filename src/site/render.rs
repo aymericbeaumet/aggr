@@ -375,10 +375,6 @@ mod tests {
     /// as a whole, because the name is assembled from data at build or run time.
     const GENERATED_CLASSES: &[(&str, &str)] = &[
         (
-            "swup-enabled",
-            "the vendored themes/default/static/swup.js adds it to <html> when it takes over navigation",
-        ),
-        (
             "syntax-comment",
             "syntect ClassStyle::SpacedPrefixed { prefix: \"syntax-\" } in content_highlight.rs",
         ),
@@ -502,11 +498,11 @@ mod tests {
         let declared = declared_classes(&css);
         assert!(declared.contains("row") && declared.contains("table-scroll"));
         assert!(!declared.contains("5rem") && !declared.contains("body p"));
-        // This file's own assertions must not vouch for a class.
-        let corpus = ["themes/default/templates", "web/src", "src"]
+        // This file's own assertions must not vouch for a class, and neither may the stylesheet.
+        let corpus = ["themes/default/templates", "themes/default/static", "src"]
             .iter()
             .flat_map(|dir| read_tree(&repository_path(dir)))
-            .filter(|(name, _)| name != "site/render.rs")
+            .filter(|(name, _)| name != "site/render.rs" && !name.ends_with(".css"))
             .map(|(_, text)| text)
             .collect::<Vec<_>>();
         let unused = declared
@@ -546,20 +542,6 @@ mod tests {
         let css = std::str::from_utf8(file.data.as_ref()).unwrap();
         assert!(css.contains("overscroll-behavior-y: auto"));
         assert!(!css.contains("overscroll-behavior-y: none"));
-    }
-
-    #[test]
-    fn embedded_theme_implements_touch_pull_to_refresh() {
-        let base_file = DefaultTheme::get("templates/base.html").unwrap();
-        let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
-        assert!(base.contains("id=\"pull-refresh\""));
-        assert!(base.contains("id=\"pull-refresh-label\""));
-
-        let css_file = DefaultTheme::get("static/style.css").unwrap();
-        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
-        assert!(css.contains("--pull-distance"));
-        assert!(css.contains("html[data-pull-state=\"pulling\"]"));
-        assert!(css.contains("html[data-pull-state=\"armed\"]"));
     }
 
     #[test]
@@ -663,19 +645,22 @@ mod tests {
         assert!(css.contains("var(--image-placeholder, var(--code))"));
         assert!(css.contains("inline-size: min(100%, var(--image-width, 100%))"));
         assert!(css.contains("aspect-ratio: var(--image-ratio)"));
-        assert!(css.contains(".article-picture.is-loading.is-loaded .progressive-image"));
-
+        // Content-addressed media is safe to serve from the cache without revalidating.
         let worker_file = DefaultTheme::get("templates/sw.js").unwrap();
         let worker = std::str::from_utf8(worker_file.data.as_ref()).unwrap();
-        assert!(worker.contains("BASE + \"assets/images/\""));
-        assert!(worker.contains("cacheFirst(request, IMAGES, IMAGE_MAX"));
+        assert!(worker.contains("(images|previews)"));
+        assert!(worker.contains("assetResponse(request, ASSETS, ASSET_LIMIT)"));
     }
 
     #[test]
-    fn embedded_worker_versions_runtime_search_indexes() {
+    fn embedded_worker_serves_versioned_search_resources_from_the_cache() {
         let worker_file = DefaultTheme::get("templates/sw.js").unwrap();
         let worker = std::str::from_utf8(worker_file.data.as_ref()).unwrap();
-        assert!(worker.contains("var SEARCH = SEARCH_PREFIX + VERSION"));
+        // The index lives under an immutable version, so it never needs revalidating.
+        assert!(worker.contains("pagefind\\/[0-9a-f]{64}\\/"));
+        // Nothing is downloaded ahead of the reader: no archive, no index prefetch.
+        assert!(!worker.contains("OFFLINE_CATALOG"));
+        assert!(!worker.contains("search-manifest.json"));
     }
 
     #[test]
@@ -696,18 +681,22 @@ mod tests {
     fn embedded_theme_exposes_progressive_refresh_and_update_controls() {
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
-        assert!(base.contains("data-connection-root"));
-        assert!(base.contains("data-shortcut-help-root"));
+        // The shortcut dialog ships as markup; nothing waits for a component to mount.
+        assert!(base.contains("<dialog id=\"shortcut-help\""));
+        assert!(!base.contains("data-connection-root"));
+        assert!(!base.contains("data-shortcut-help-root"));
 
         let preferences_file = DefaultTheme::get("templates/preferences.html").unwrap();
         let preferences = std::str::from_utf8(preferences_file.data.as_ref()).unwrap();
         assert!(!preferences.contains("id=\"install-app\""));
         assert!(!preferences.contains("preferences-config"));
         assert!(!preferences.contains(">aggr.toml <span aria-hidden=\"true\">↗</span></a>"));
-        assert!(preferences.contains("data-preferences-root"));
         assert!(preferences.contains("<noscript>"));
-        assert!(!preferences.contains("<input"));
-        assert!(!preferences.contains("<select"));
+        // Every control is rendered from the typed schema, not built in the browser.
+        assert!(preferences.contains("site.preference_schema.groups"));
+        assert!(preferences.contains("<select"));
+        assert!(preferences.contains("data-preference="));
+        assert!(!preferences.contains("data-preferences-root"));
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();

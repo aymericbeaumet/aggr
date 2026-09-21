@@ -1,9 +1,56 @@
 {% extends "base.html" %}
 {% block content %}
+{% macro help(id, label, explanation) %}<details class="preference-help"><summary aria-label="{{ label }}" title="{{ explanation }}">?</summary><span id="{{ id }}" class="preference-help-text">{{ explanation }}</span></details>{% endmacro %}
 <section class="page preferences" aria-labelledby="page-title">
   <header class="page-header"><h1 id="page-title">{{ page.title }}</h1><p class="preferences-intro muted">Make yourself comfortable. Changes save automatically in this browser.</p></header>
-  <div class="page-body preferences-body" data-preferences-root>
-    <noscript><p>Preferences need JavaScript. Articles and navigation work without it.</p></noscript>
+  <div class="page-body preferences-body">
+    <noscript><p>Preferences need JavaScript to be saved. Articles and navigation work without it.</p></noscript>
+    {# Every control comes from the typed table in src/config/preferences.rs. #}
+    {% for group in site.preference_schema.groups %}
+    <section class="preferences-group" aria-labelledby="{{ group.id }}-heading">
+      <h2 id="{{ group.id }}-heading">{{ group.title }}</h2>
+      {% for field in group.fields %}
+      {% if field.control == 'select' %}
+      <label class="setting" for="{{ field.key }}">
+        <strong>{{ field.label }}</strong>
+        <select id="{{ field.key }}" data-preference="{{ field.key }}">
+          {% for option in field.options %}<option value="{{ option.value }}"{% if option.value == field.value %} selected{% endif %}>{{ option.label }}</option>{% endfor %}
+        </select>
+      </label>
+      {% elif field.control == 'checkbox' %}
+      <label class="setting" for="{{ field.key }}">
+        <strong>{{ field.label }}</strong>
+        <input id="{{ field.key }}" data-preference="{{ field.key }}" type="checkbox"{% if field.value %} checked{% endif %}>
+      </label>
+      {% else %}
+      <div class="setting">
+        <div class="setting-label"><label for="{{ field.key }}">{{ field.label }}</label>{% if field.help %}{{ help(field.key ~ '-help', 'About ' ~ (field.label | lower), field.help) }}{% endif %}</div>
+        <input id="{{ field.key }}" data-preference="{{ field.key }}" type="number" required min="{{ field.min }}" max="{{ field.max }}" step="1"{% if field.help %} aria-describedby="{{ field.key }}-help"{% endif %} value="{{ field.value }}">
+      </div>
+      {% endif %}
+      {% endfor %}
+      {% if group.id == 'keyboard' %}
+      <p class="setting"><button class="text-button" type="button" id="show-shortcuts" command="show-modal" commandfor="shortcut-help" aria-haspopup="dialog">Show keyboard shortcuts</button></p>
+      {% endif %}
+    </section>
+    {% endfor %}
+    <section id="preferences-import" class="preferences-group preferences-import" aria-labelledby="preferences-import-heading" hidden>
+      <h2 id="preferences-import-heading">Review imported preferences</h2>
+      <ul id="preferences-import-summary"></ul>
+      <div class="preference-actions"><button data-preferences-action="apply" type="button">Apply preferences</button><button data-preferences-action="cancel" type="button">Cancel</button></div>
+    </section>
+    <section class="preferences-group preferences-transfer" aria-labelledby="preferences-transfer-heading">
+      <div class="preferences-group-heading"><h2 id="preferences-transfer-heading">Transfer preferences</h2>{{ help('preferences-transfer-help', 'About transferring preferences', 'Use the same settings on another device. Links and files contain only the options above, never reading history.') }}</div>
+      <div class="preference-actions">
+        <button id="share-state" data-preferences-action="share" type="button" hidden>Share</button>
+        <button id="copy-state" data-preferences-action="copy" type="button">Copy link</button>
+        <button data-preferences-action="save" type="button">Save file</button>
+        <button data-preferences-action="import" type="button">Import file</button>
+      </div>
+      <div class="preference-actions preferences-reset"><button class="text-button" data-preferences-action="reset" type="button">Reset to defaults</button><span id="preferences-status" class="muted" role="status" aria-live="polite"></span></div>
+      <input id="preferences-link" type="url" aria-label="Preferences link" readonly hidden>
+      <input id="preferences-file" type="file" accept="application/json,.json" hidden>
+    </section>
   </div>
 </section>
 {% endblock %}

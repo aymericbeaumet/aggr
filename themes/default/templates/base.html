@@ -55,7 +55,6 @@
 {% else %}<meta name="twitter:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | site_path }}"><meta name="twitter:image:alt" content="{{ site.title }} app icon">{% endif %}
 {% endif %}
 <link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
-<link rel="stylesheet" href="{{ 'assets/client.css' | url_for }}">
 <noscript><style>.progressive-image,.preview-image,.article-lead img{color:inherit}</style></noscript>
 {% if page.feed_path is not none %}{% set feed_path = page.feed_path %}{% set feed_title = page.feed_title or site.title %}
 <link rel="alternate" type="application/atom+xml" title="{{ feed_title }}" href="{{ (feed_path ~ 'atom.xml') | url_for }}">
@@ -69,16 +68,27 @@
 {% if site.pwa %}
 <link rel="manifest" href="{{ 'manifest.webmanifest' | url_for }}">
 {% endif %}
-<script>window.AGGR = {base: {{ page.root | json }}, kind: {{ page.kind | json }}, pwa: {{ site.pwa | json }}, appVersion: {{ build.app_version | json }}, contentVersion: {{ build.content_version | json }}, hasCategories: {{ site.has_categories | json }}, discussions: {{ site.discussions | json }}, entries: {{ site.entry_shortcuts | json }}};</script>
+<script>window.AGGR = {base: {{ page.root | json }}, kind: {{ page.kind | json }}, pwa: {{ site.pwa | json }}, discussions: {{ site.discussions | json }}, entries: {{ site.entry_shortcuts | json }}, assets: {search: {{ ('assets/search.js' | url_for) | json }}, media: {{ ('assets/media.js' | url_for) | json }}}};</script>
+<script type="speculationrules">
+{
+  "prefetch": [{
+    "where": {"and": [
+      {"href_matches": "/*"},
+      {"not": {"selector_matches": "[target], [download], [rel~=external], .u-bookmark-of, .discussion, .config-link, .footer a"}}
+    ]},
+    "eagerness": "moderate"
+  }],
+  "prerender": [{
+    "where": {"selector_matches": ".rows .row [data-row-open], .article-more-link, [data-site-navigation] a[data-route]"},
+    "eagerness": "moderate"
+  }]
+}
+</script>
 {% if schema %}<script type="application/ld+json">{{ schema | json }}</script>{% endif %}
 {% block head %}{% endblock %}
 </head>
 <body data-kind="{{ page.kind }}">
-<div id="pull-refresh" class="pull-refresh" role="status" aria-live="polite" aria-atomic="true" aria-hidden="true" data-nosnippet>
-  <span class="pull-refresh-icon" aria-hidden="true">↓</span>
-  <span id="pull-refresh-label">Pull to refresh</span>
-</div>
-<a class="skip-link" href="#swup">skip to content</a>
+<a class="skip-link" href="#content">skip to content</a>
 <header class="top" data-nosnippet>
   <nav class="nav" data-site-navigation aria-label="Site navigation">
     <a class="brand" data-route="" rel="home" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/favicon-32.png' | url_for }}" alt="" width="20" height="20"><span class="brand-title">{{ site.title | lower }}</span></a>
@@ -106,16 +116,69 @@
   </a>
   {% endfor %}
 </nav>
-<div data-connection-root></div>
-<span id="aggr-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></span>
-<div data-shortcut-help-root></div>
-<main id="swup" class="main{% if page.paginator %} h-feed{% endif %}" tabindex="-1">
-<span id="aggr-page" data-root="{{ page.root }}" data-kind="{{ page.kind }}" data-app-version="{{ build.app_version }}" data-content-version="{{ build.content_version }}" hidden></span>
+{% macro key_pair(first, second, separator='+') %}<span class="key-pair"><kbd>{{ first }}</kbd><small>{{ separator }}</small><kbd>{{ second }}</kbd></span>{% endmacro %}
+<dialog id="shortcut-help" class="shortcut-help" aria-labelledby="shortcut-help-title" aria-keyshortcuts="?" data-nosnippet>
+  <form method="dialog">
+    <header class="shortcut-help-head">
+      <h2 id="shortcut-help-title" tabindex="-1">Keyboard shortcuts</h2>
+      <button class="shortcut-close" value="close" aria-label="Close keyboard shortcuts">×</button>
+    </header>
+    <div class="shortcut-groups">
+      <section aria-labelledby="shortcut-scrolling">
+        <h3 id="shortcut-scrolling">Scrolling</h3>
+        <dl class="shortcut-list">
+          <div><dt class="key-alternatives"><kbd>d</kbd><small>or</small>{{ key_pair('Ctrl', 'd') }}</dt><dd>Scroll down</dd></div>
+          <div><dt class="key-alternatives"><kbd>u</kbd><small>or</small>{{ key_pair('Ctrl', 'u') }}</dt><dd>Scroll up</dd></div>
+          <div><dt>{{ key_pair('Ctrl', 'e') }}</dt><dd>One line down</dd></div>
+          <div><dt>{{ key_pair('Ctrl', 'y') }}</dt><dd>One line up</dd></div>
+          <div><dt>{{ key_pair('g', 'g', 'then') }}</dt><dd>Top of article</dd></div>
+          <div><dt><kbd>G</kbd></dt><dd>Bottom of article</dd></div>
+        </dl>
+      </section>
+      <section aria-labelledby="shortcut-articles">
+        <h3 id="shortcut-articles">Articles</h3>
+        <dl class="shortcut-list">
+          <div><dt><kbd>j</kbd></dt><dd>Older article</dd></div>
+          <div><dt><kbd>k</kbd></dt><dd>Newer article</dd></div>
+          <div><dt><kbd>O</kbd></dt><dd>Open original</dd></div>
+          {% for discussion in site.discussions %}{% if discussion.shortcut %}<div><dt><kbd>{{ discussion.shortcut }}</kbd></dt><dd>Open {{ discussion.name }} discussion / search</dd></div>{% endif %}{% endfor %}
+        </dl>
+      </section>
+      <section aria-labelledby="shortcut-lists">
+        <h3 id="shortcut-lists">Lists</h3>
+        <dl class="shortcut-list">
+          <div><dt><kbd>j</kbd></dt><dd>Next item</dd></div>
+          <div><dt><kbd>k</kbd></dt><dd>Previous item</dd></div>
+          <div><dt>{{ key_pair('g', 'g', 'then') }}</dt><dd>First item</dd></div>
+          <div><dt><kbd>G</kbd></dt><dd>Last item</dd></div>
+          <div><dt class="key-alternatives"><kbd>o</kbd><small>or</small><kbd>Enter</kbd></dt><dd>Open selected item</dd></div>
+        </dl>
+      </section>
+      <section aria-labelledby="shortcut-navigation">
+        <h3 id="shortcut-navigation">Go to</h3>
+        <dl class="shortcut-list">
+          <div><dt class="key-alternatives">{{ key_pair('g', 'f', 'then') }}<small>or</small>{{ key_pair('g', 'i', 'then') }}</dt><dd>Feed</dd></div>
+          <div><dt>{{ key_pair('g', '1–9', 'then') }}</dt><dd>Open feed entry</dd></div>
+          <div><dt>{{ key_pair('g', 'l', 'then') }}</dt><dd>Browse</dd></div>
+          <div><dt>{{ key_pair('g', 'p', 'then') }}</dt><dd>Preferences</dd></div>
+        </dl>
+      </section>
+      <section aria-labelledby="shortcut-anywhere">
+        <h3 id="shortcut-anywhere">Search and help</h3>
+        <dl class="shortcut-list">
+          <div><dt class="key-alternatives">{{ key_pair('⌘', 'k') }}<small>or</small>{{ key_pair('Ctrl', 'k') }}</dt><dd>Global search</dd></div>
+          <div><dt><kbd>?</kbd></dt><dd>Show this help</dd></div>
+          <div><dt><kbd>Esc</kbd></dt><dd>Close this help</dd></div>
+        </dl>
+      </section>
+    </div>
+  </form>
+</dialog>
+<main id="content" class="main{% if page.paginator %} h-feed{% endif %}" tabindex="-1">
 {% if page.paginator %}<data class="p-name" value="{{ page.title }}" hidden></data>{% endif %}
 {% block content %}{% endblock %}
 </main>
 <footer class="footer" data-nosnippet><a href="https://github.com/aymericbeaumet/aggr" target="_blank" rel="noopener noreferrer">built with aggr</a></footer>
-<script src="{{ 'assets/swup.js' | url_for }}" defer></script>
-<script src="{{ 'assets/app.js' | url_for }}" defer></script>
+<script type="module" src="{{ 'assets/app.js' | url_for }}"></script>
 </body>
 </html>

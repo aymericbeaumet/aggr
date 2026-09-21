@@ -495,8 +495,9 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
         master
     );
     assert!(page.contains(&master_asset), "{page}");
+    // Media is content-addressed and cached when the reader opens the article, not at install.
     assert!(
-        std::fs::read_to_string(repo.clone.join("_site/sw.js"))
+        !std::fs::read_to_string(repo.clone.join("_site/sw.js"))
             .unwrap()
             .contains(&master_asset)
     );
@@ -1491,12 +1492,17 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(!index.contains("<base "), "{index}");
     assert!(index.contains("target=\"_blank\""), "{index}");
     assert!(!index.contains("built <time"));
-    assert!(index.contains("id=\"swup\""));
+    assert!(index.contains("id=\"content\""));
     assert!(
-        index.find("<header class=\"top\"").unwrap() < index.find("<main id=\"swup\"").unwrap(),
-        "the persistent menubar must stay outside Swup's replacement container"
+        index.find("<header class=\"top\"").unwrap() < index.find("<main id=\"content\"").unwrap(),
+        "the persistent menubar must come before the page's main content"
     );
-    assert!(index.contains("assets/swup-"));
+    // Navigation is the browser's again: no vendored library, one hand-written module.
+    assert!(!index.contains("assets/swup-"));
+    assert!(
+        index.contains("<script type=\"module\" src=\"./assets/app-"),
+        "{index}"
+    );
     assert!(!index.contains("config@"));
     assert!(!index.contains("data@"));
     assert!(!index.contains("starred"));
@@ -1613,10 +1619,10 @@ fn build_renders_the_site_and_release_needs_a_url() {
     let tag = std::fs::read_to_string(site.join("tags/example/index.html")).unwrap();
     let tag = tag.replace("\r\n", "\n");
     assert!(tag.contains("<h1>\n      #example\n"), "{tag}");
-    let search_manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(site.join("search-manifest.json")).unwrap()).unwrap();
+    let search_catalogue: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("search-catalog.json")).unwrap()).unwrap();
     assert!(
-        search_manifest["facets"]["tag"]
+        search_catalogue["facets"]["tag"]
             .as_array()
             .unwrap()
             .iter()
@@ -1627,9 +1633,10 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(index.contains("rel=\"manifest\""), "{index}");
     let sw = std::fs::read_to_string(site.join("sw.js")).unwrap();
     assert!(sw.contains("\"assets/style-"), "{sw}");
-    assert!(sw.contains("\"assets/swup-"), "{sw}");
+    assert!(sw.contains("\"assets/app-"), "{sw}");
+    // Articles are cached as the reader opens them, so none is listed at install time.
     assert!(
-        sw.contains("\"items/demo/2026-09-01-hello-there/\""),
+        !sw.contains("\"items/demo/2026-09-01-hello-there/\""),
         "{sw}"
     );
     assert!(site.join("manifest.webmanifest").exists());

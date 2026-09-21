@@ -119,33 +119,6 @@ body {
   color: var(--fg);
   font: 16px/1.5 var(--font);
 }
-.pull-refresh {
-  position: fixed;
-  z-index: 1;
-  top: max(0.35rem, env(safe-area-inset-top));
-  left: 50%;
-  min-height: 2rem;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  color: var(--nav-fg);
-  font-size: 0.8rem;
-  font-weight: 650;
-  white-space: nowrap;
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(-50%, -130%) scale(0.96);
-  transition: opacity 140ms ease, transform 180ms ease;
-}
-.pull-refresh-icon { font-size: 1.05rem; line-height: 1; transition: transform 160ms ease; }
-html[data-pull-state="pulling"] .pull-refresh,
-html[data-pull-state="armed"] .pull-refresh,
-html[data-pull-state="refreshing"] .pull-refresh {
-  opacity: 1;
-  transform: translate(-50%, 0) scale(1);
-}
-html[data-pull-state="armed"] .pull-refresh-icon { transform: rotate(180deg); }
-html[data-pull-state="refreshing"] .pull-refresh-icon { animation: pull-refresh-spin 700ms linear infinite; }
 html[data-pull-state="pulling"] .top,
 html[data-pull-state="pulling"] .main,
 html[data-pull-state="armed"] .top,
@@ -160,38 +133,8 @@ html[data-pull-state="settling"] .main {
   transform: translateY(var(--pull-distance, 0));
   transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
 }
-@keyframes pull-refresh-spin { to { transform: rotate(360deg); } }
 [hidden] { display: none !important; }
 ::selection { background: color-mix(in srgb, var(--warm) 32%, transparent); color: var(--fg); }
-
-/* Selecting article text offers one action: a link that reselects the same words for whoever
-   opens it. It follows the selection and never covers it. */
-.selection-share {
-  position: absolute;
-  z-index: 3;
-  display: flex;
-  padding: 0.2rem;
-  border-radius: 0.5rem;
-  background: var(--nav-bg);
-  box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
-}
-.selection-share[hidden] { display: none; }
-.selection-share-action {
-  min-height: 2rem;
-  padding: 0 0.85rem;
-  border: 0;
-  border-radius: 0.35rem;
-  background: none;
-  color: var(--nav-fg);
-  font: inherit;
-  font-size: 0.8rem;
-  line-height: 2rem;
-  cursor: pointer;
-}
-.selection-share-action:is(:hover, :focus-visible) { background: rgb(255 255 255 / 0.14); }
-@media (prefers-reduced-motion: no-preference) {
-  .selection-share { transition: opacity 0.12s ease; }
-}
 a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 a, button, input, select { -webkit-tap-highlight-color: color-mix(in srgb, var(--accent) 22%, transparent); }
@@ -291,55 +234,6 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .browse-entry-meta { display: flex; flex-wrap: wrap; column-gap: 0.4em; color: var(--muted); }
 .browse-entry-meta > span + span::before { content: "·"; margin-right: 0.4em; }
 .browse-entry-error { margin-top: 0.2rem; }
-
-.connection-status {
-  position: fixed;
-  z-index: 4;
-  left: max(0.75rem, env(safe-area-inset-left));
-  right: max(0.75rem, env(safe-area-inset-right));
-  bottom: max(0.75rem, env(safe-area-inset-bottom));
-  width: auto;
-  max-width: 40rem;
-  margin-inline: auto;
-  min-height: var(--tap-target);
-  padding: 0.35rem 0.75rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.75rem;
-  color: var(--fg);
-  background: color-mix(in srgb, var(--warm) 15%, var(--panel));
-  border: 1px solid var(--control-border);
-  border-radius: 6px;
-  box-shadow: 0 0.35rem 1.25rem rgb(0 0 0 / 0.25);
-  font-size: 0.875rem;
-}
-.connection-status button { min-height: var(--tap-target); padding: 0 0.75rem; color: var(--fg); background: var(--panel); border: 1px solid var(--control-border); border-radius: 4px; font: inherit; cursor: pointer; }
-.connection-status.is-update {
-  left: auto;
-  width: max-content;
-  max-width: calc(100vw - max(0.75rem, env(safe-area-inset-left)) - max(0.75rem, env(safe-area-inset-right)));
-  min-height: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  box-shadow: none;
-}
-.connection-status #pwa-refresh {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  min-height: 44px;
-  min-width: 0;
-  max-width: 100%;
-  padding: 0.5rem 1rem;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--warm) 18%, var(--panel));
-  box-shadow: 0 0.2rem 0.8rem rgb(0 0 0 / 0.18);
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-.connection-status #pwa-refresh:hover { background: color-mix(in srgb, var(--warm) 30%, var(--panel)); }
 
 /* keyboard help */
 .shortcut-help {
@@ -454,8 +348,12 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
   z-index: -1;
   transition: background-color 5s ease-out;
 }
-html.swup-enabled .row:has([data-row-open]), html.swup-enabled .article-more-card { cursor: pointer; }
-html.swup-enabled :is(.row, .article-more-card):where(:hover):not(:has(a:not(.title):hover, button:hover, input:hover, select:hover, textarea:hover, label:hover, summary:hover, [role="button"]:hover, [role="link"]:hover, [contenteditable]:hover)) .title { text-decoration: underline; }
+.row:has([data-row-open]), .article-more-card { cursor: pointer; }
+:is(.row, .article-more-card):where(:hover):not(:has(a:not(.title):hover, button:hover, input:hover, select:hover, textarea:hover, label:hover, summary:hover, [role="button"]:hover, [role="link"]:hover, [contenteditable]:hover)) .title { text-decoration: underline; }
+/* The whole row opens its article: one stretched link, with native modifier and middle clicks. */
+.row:has([data-row-open]) { position: relative; }
+.row [data-row-open]::after, .article-more-card .article-more-link::after { content: ""; position: absolute; inset: 0; z-index: 0; }
+.row :is(.meta, .preview-media), .row a:not(.title), .article-more-card .meta { position: relative; z-index: 1; }
 .row.is-selected .title,
 .row.is-selected .title:hover,
 .row.is-selected .title:focus-visible { text-decoration: none; }
@@ -690,9 +588,6 @@ body[data-kind="item"] .main {
 .interactive-reader { margin: 0 0 1.5rem; }
 .interactive-frame { position: relative; width: 100%; height: clamp(24rem, 70svh, 48rem); overflow: hidden; background: var(--code); border: 1px solid var(--faint); border-radius: .4rem; }
 .interactive-frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
-.interactive-preview { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .5rem; padding: 1rem; text-align: center; }
-.interactive-preview[hidden] { display: none; }
-.interactive-preview small { color: var(--muted); font-size: .8rem; }
 .article-more-link.title { margin-bottom: .3rem; font-size: var(--row-title-size); line-height: 1.3; }
 .sha { font-family: var(--mono); }
 
@@ -716,7 +611,6 @@ body[data-kind="item"] .main {
 .setting small { max-width: 34rem; margin-top: 0.15rem; color: var(--muted); font-size: 0.875rem; font-weight: 400; }
 .setting-label, .preferences-group-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; min-width: 0; }
 .setting-label > label { font-weight: 500; }
-.shortcut-setting a { display: inline-flex; align-items: center; min-height: var(--tap-target); text-decoration: underline; text-underline-offset: 0.2em; }
 .preference-help { display: inline-block; font-weight: 400; }
 .preference-help summary { display: grid; place-items: center; width: 1.5rem; height: 1.5rem; border: 1px solid var(--control-border); border-radius: 50%; color: var(--muted); font-size: 0.8rem; line-height: 1; cursor: help; list-style: none; }
 .preference-help summary::-webkit-details-marker { display: none; }
@@ -789,8 +683,6 @@ body[data-kind="item"] .main {
   .nav .brand { min-width: 0; }
   .brand-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .nav .config-link { white-space: nowrap; }
-  .connection-status { bottom: calc(var(--bottom-nav-offset) + 0.75rem); }
-  .connection-status.is-update { left: max(0.75rem, env(safe-area-inset-left)); }
   .article-more { grid-template-columns: 1fr; }
   .shortcut-groups { grid-template-columns: max-content minmax(0, 1fr); }
   .shortcut-groups section:nth-child(odd) dd { padding-right: 0; }
@@ -1009,7 +901,7 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
 .search-control small { flex: none; color: var(--muted); }
 .search-control .search-query-help { position: absolute; z-index: 21; bottom: calc(100% + .4rem); inset-inline-start: 0; box-sizing: border-box; max-width: min(38rem, 100%); padding: .5rem .65rem; border: 1px solid var(--faint); border-radius: .35rem; color: var(--muted); background: var(--bg); box-shadow: 0 3px 12px #0002; font-size: .75rem; line-height: 1.5; }
 .search-control .search-query-help[hidden] { display: none; }
-.search-error, .search-offline { font-size: .85rem; margin: .4rem 0; }
+.search-error { font-size: .85rem; margin: .4rem 0; }
 .search-error { color: var(--warm); }
 .meta .source-resolved { color: var(--warm); }
 @media (max-width: 40rem) {
@@ -1062,7 +954,7 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   .feed-search input[type="search"] { font-size: 1rem; }
   .row .rank { display: none; }
   .row-heading { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }
-  html .row .row-copy > :is(.meta, .excerpt, .search-excerpt, .search-saved-status) { padding-left: 0; }
+  html .row .row-copy > :is(.meta, .excerpt, .search-excerpt) { padding-left: 0; }
   .row { --mobile-preview-size: 3rem; min-height: var(--tap-target); padding-block: max(var(--row-padding), 0.625rem); }
   html[data-density="comfortable"] .row { --mobile-preview-size: 3.5rem; }
   html .row .row-content { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 0.25rem 0.625rem; min-height: 0; }
@@ -1071,7 +963,7 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   .row .row-heading { grid-column: 1; grid-row: 1; }
   .row .row-heading .title { min-height: 0; padding: 0; line-height: 1.35; }
   .row .preview-media { grid-column: 2; grid-row: 1; width: var(--mobile-preview-size); height: var(--mobile-preview-size); }
-  .row .row-copy > :is(.meta, .excerpt, .search-excerpt, .search-saved-status) { grid-column: 1 / -1; }
+  .row .row-copy > :is(.meta, .excerpt, .search-excerpt) { grid-column: 1 / -1; }
   .row .meta { grid-row: 2; gap: 0 0.65em; font-size: 0.8125rem; line-height: 1.35; }
   .row .meta > *, .row .meta .domain, .row .meta .domain a { min-height: 1.5rem; }
   .row .meta > .meta-field:has(> .domain) { flex-basis: 100%; font-size: 0.875rem; }
@@ -1100,3 +992,72 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   .mobile-tabs a:active, .mobile-tabs a[data-pressed] { background: Highlight; color: HighlightText; }
 }
 @media print { .mobile-tabs { display: none; } }
+
+/* ---------------------------------------------------------------- platform behaviour */
+
+/* Cross-document navigation animates itself; motion preferences still win. */
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-motion="off"]) { view-transition-name: none; }
+  html:not([data-motion="off"]) .top { view-transition-name: top-nav; }
+  html:not([data-motion="off"]) .mobile-tabs { view-transition-name: mobile-tabs; }
+}
+html[data-motion="off"]::view-transition-group(*),
+html[data-motion="off"]::view-transition-old(*),
+html[data-motion="off"]::view-transition-new(*) { animation: none; }
+
+/* Reading progress and the folding article header follow the scroll position directly, with no
+   script and no per-frame work. Browsers without scroll timelines simply do not fold. */
+@property --header-progress {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+
+@supports (animation-timeline: scroll(root)) {
+  @media (prefers-reduced-motion: no-preference) {
+    html:not([data-motion="off"]) body[data-kind="item"] .itemhead-progress {
+      animation: aggr-reading-progress linear both;
+      animation-timeline: scroll(root block);
+    }
+  }
+  body[data-kind="item"] .itemhead {
+    animation: aggr-header-fold linear both;
+    animation-timeline: scroll(root block);
+    animation-range: 0 10rem;
+  }
+  /* The title interpolates its size instead of being measured, and the tags collapse with the
+     grid-rows idiom so they leave the accessibility tree as they disappear. */
+  body[data-kind="item"] .itemhead h1 { height: auto; font-size: calc(clamp(1.65rem, 4vw, 2.25rem) * (1 - 0.4 * var(--header-progress, 0))); }
+  body[data-kind="item"] .item-tags { height: auto; display: grid; grid-template-rows: calc(1 - var(--header-progress, 0)) fr; }
+  body[data-kind="item"] .item-tags-inner { min-height: 0; overflow: hidden; }
+}
+
+@keyframes aggr-reading-progress {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@keyframes aggr-header-fold {
+  to { --header-progress: 1; }
+}
+
+/* ---------------------------------------------------------------- search results */
+
+/* Ranks are numbered by the stylesheet, so the result list needs no per-row arithmetic. */
+.rows.search-results { counter-reset: rank var(--rank-offset, 0); }
+.rows.search-results .row { counter-increment: rank; }
+.rows.search-results .rank::before { content: counter(rank) "."; }
+
+/* A live query hides the static feed it replaces. */
+body[data-searching] [data-static-feed] { display: none; }
+
+/* The syntax reminder is a mouse affordance; touch and keyboard never open it. */
+.search-query-help { display: none; }
+@media (hover: hover) and (pointer: fine) {
+  .search-control:hover .search-query-help { display: block; }
+}
+
+.search-completions[hidden], .search-error[hidden], .search-clear[hidden] { display: none; }
+
+/* ---------------------------------------------------------------- interactive originals */
+
+.interactive-viewer { display: block; width: 100%; height: 100%; border: 0; }

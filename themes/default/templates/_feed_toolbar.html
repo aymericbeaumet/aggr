@@ -1,9 +1,32 @@
+{# The complete search shell is rendered here; search.js only fills it in. Without JavaScript the
+   form still submits to ?q=, which lands on this feed. #}
 <div class="feed-toolbar" data-nosnippet>
   <div data-search-root{% if page.kind == 'source' and source %} data-scope-kind="source" data-scope-value="{{ source.slug }}"{% elif page.kind in ['category', 'tag'] and category %} data-scope-kind="{{ page.kind }}" data-scope-value="{{ category.slug }}"{% endif %}>
-    <form class="feed-search" id="search-form" action="{{ '' | url_for }}" method="get" role="search">
-      <label class="sr-only" for="q">Search articles</label>
-      <input id="q" type="search" name="q" value="{% if page.kind == 'source' and source %}source:{{ source.slug }} {% elif page.kind in ['category', 'tag'] and category %}{{ page.kind }}:{{ category.slug }} {% endif %}" placeholder="Search articles, sources, categories…" autocomplete="off" spellcheck="false" data-page-search aria-keyshortcuts="Meta+K Control+K">
-    </form>
+    <div class="search-control" role="group" aria-label="Search controls">
+      <div class="search-command">
+        <form class="feed-search" id="search-form" action="{{ '' | url_for }}" method="get" role="search">
+          <label class="sr-only" for="q">Search articles</label>
+          <div class="search-input-line">
+            <input id="q" type="search" name="q" value="{% if page.kind == 'source' and source %}source:{{ source.slug }} {% elif page.kind in ['category', 'tag'] and category %}{{ page.kind }}:{{ category.slug }} {% endif %}" placeholder="Search articles, sources, categories…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-describedby="search-query-help" data-page-search aria-keyshortcuts="Meta+K Control+K">
+            <button type="button" class="search-clear" aria-label="Clear search" hidden>×</button>
+          </div>
+        </form>
+        <ul id="search-completions" class="search-completions" role="listbox" aria-label="Search suggestions" hidden></ul>
+      </div>
+      <div id="search-query-help" class="search-query-help" role="tooltip">
+        <span>Use <code>source:</code>, <code>category:</code>, <code>tag:</code>, <code>type:</code>, <code>date:</code>, <code>sort:</code>, <code>"exact phrases"</code> or <code>-exclude</code>.</span>
+      </div>
+    </div>
+    <p class="search-error" role="alert" hidden></p>
   </div>
 </div>
-<div data-search-results data-nosnippet></div>
+<div data-search-results data-nosnippet>
+  <p id="search-status" role="status" aria-live="polite" hidden></p>
+  <ol id="list" class="rows search-results" role="list" aria-busy="false" hidden></ol>
+  <p id="empty" hidden>No articles match this search. Try fewer filters or different words.</p>
+  <nav class="pager search-pager" aria-label="Search results pages" hidden>
+    <span class="pager-side"><a data-search-page-previous href="#" hidden>newer</a></span>
+    <span data-search-page-status></span>
+    <span class="pager-side"><a data-search-page-next href="#" hidden>older</a></span>
+  </nav>
+</div>

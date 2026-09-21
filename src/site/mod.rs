@@ -319,12 +319,7 @@ struct SwCtx<'a> {
     site: &'a SiteCtx,
     build: &'a BuildCtx,
     version: String,
-    app_version: &'a str,
-    content_version: &'a str,
     precache: Vec<assets::PrecacheEntry>,
-    offline_catalog: Vec<assets::OfflineArticle>,
-    offline_count: usize,
-    search_manifest: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1086,7 +1081,7 @@ fn build_once(
     let assets = renderer.write_static(out)?;
     phase("feeds and static assets");
 
-    let search_manifest = pagefind::build_cached(
+    pagefind::build_cached(
         out,
         &search_documents,
         &site.language,
@@ -1118,29 +1113,13 @@ fn build_once(
                 ))?
                 .as_bytes(),
         )?;
-        let scoped_lists = source_ctxs
-            .iter()
-            .map(|s| s.page.clone())
-            .chain(categories.iter().map(|c| c.page.clone()))
-            .chain(tags.iter().map(|tag| tag.page.clone()))
-            .take(config.site.preferences.offline_items.clamp(32, 256));
-        let lists = ["browse/".to_string()].into_iter().chain(scoped_lists);
-        let paths = assets::precache_paths("", lists, &assets, std::iter::empty(), 0);
+        // Only the shell: the reader caches the pages it actually opens.
+        let paths = assets::precache_paths("", &assets);
         let mut sw_ctx = SwCtx {
             site: &site,
             build: &build_ctx,
             version: cache_version(&build_ctx),
-            app_version: &build_ctx.app_version,
-            content_version: &build_ctx.content_version,
             precache: assets::precache_entries(out, paths, &written_assets)?,
-            offline_catalog: assets::offline_catalog(
-                out,
-                &archive_items,
-                &article_images,
-                &written_assets,
-            )?,
-            offline_count: config.site.preferences.offline_items.min(1000),
-            search_manifest: serde_json::json!({"version": search_manifest.version, "base": search_manifest.base}),
         };
         // Include the rendered worker and every resource revision so an installation never
         // deletes a live precache when only the theme or worker implementation changed.
@@ -1678,29 +1657,22 @@ mod tests {
             .collect()
     }
 
-    /// `url` → `revision` for every resource in the worker's offline catalog.
-    fn offline_catalog_revisions(worker: &str) -> BTreeMap<String, String> {
-        let statements = worker.replace("\r\n", "\n");
-        let catalog: serde_json::Value = serde_json::from_str(
-            statements
-                .split("var OFFLINE_CATALOG = ")
-                .nth(1)
-                .unwrap()
-                .split(";\n")
-                .next()
-                .unwrap(),
-        )
-        .unwrap();
-        catalog
-            .as_array()
-            .unwrap()
+    /// `path` → content hash for every content-addressed media file this build published.
+    fn published_media(out: &Path) -> BTreeMap<String, String> {
+        ["assets/images", "assets/previews", "assets/documents"]
             .iter()
-            .flat_map(|article| article["resources"].as_array().unwrap())
+            .flat_map(|dir| walkdir::WalkDir::new(out.join(dir)))
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
             .map(|entry| {
-                (
-                    entry["url"].as_str().unwrap().to_string(),
-                    entry["revision"].as_str().unwrap().to_string(),
-                )
+                let relative = entry
+                    .path()
+                    .strip_prefix(out)
+                    .expect("under the output root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let digest = crate::model::sha1_hex(std::fs::read(entry.path()).unwrap());
+                (relative, digest)
             })
             .collect()
     }
@@ -1942,9 +1914,7 @@ mod tests {
         .unwrap();
         assert!(compressed.master_bytes.len() < images[0].master_bytes.len());
         assert!(build_info.out.join(master(&compressed)).is_file());
-        let full_catalog = offline_catalog_revisions(
-            &std::fs::read_to_string(build_info.out.join("sw.js")).unwrap(),
-        );
+        let full_catalog = published_media(&build_info.out);
         assert!(
             full_catalog
                 .keys()
@@ -1996,17 +1966,11 @@ mod tests {
                 "omitted images retain publisher URLs"
             );
         }
-        let catalog = offline_catalog_revisions(
-            &std::fs::read_to_string(build_info.out.join("sw.js")).unwrap(),
-        );
-        for path in catalog.keys() {
-            let local = build_info.out.join(path);
-            let local = if path.ends_with('/') {
-                local.join("index.html")
-            } else {
-                local
-            };
-            assert!(local.is_file(), "missing offline resource {path}");
+        for path in published_media(&build_info.out).keys() {
+            assert!(
+                build_info.out.join(path).is_file(),
+                "missing published resource {path}"
+            );
         }
         assert_eq!(output_digests(&dir.path().join("data")), archive_before);
     }
@@ -2160,7 +2124,7 @@ url = "https://duckdb.org/news.xml"
                 .all(|link| !link.text().collect::<String>().contains("via"))
         );
         let manifest: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(out.join("search-manifest.json")).unwrap())
+            serde_json::from_slice(&std::fs::read(out.join("search-catalog.json")).unwrap())
                 .unwrap();
         assert_eq!(manifest["docs"], 2);
         let facets = manifest["facets"]["source"].as_array().unwrap();
@@ -3125,10 +3089,9 @@ category = "Science"
             !assets::precache_entries(&out, vec![path.clone()], &BTreeMap::new()).unwrap()[0]
                 .required
         );
+        // Media is content-addressed and cached on first view, not listed at install time.
         let worker = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        assert!(worker.contains(&path));
-        // The catalog takes the revision from the publish map; it must still be the file's hash.
-        assert_eq!(offline_catalog_revisions(&worker)[&path], hash);
+        assert!(!worker.contains(&path));
         assert_eq!(
             hash,
             crate::model::sha1_hex(std::fs::read(out.join(&path)).unwrap())
@@ -3289,15 +3252,16 @@ category = "Science"
         assert!(json["content_html"].as_str().unwrap().contains(source));
         assert!(!json["content_html"].as_str().unwrap().contains(&master));
 
-        let worker = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        assert!(worker.contains(&master), "{worker}");
+        // Every rendition is published under its own content hash and cached when first shown.
+        let published = published_media(&out);
+        assert!(published.contains_key(&master), "{published:?}");
         for rendition in &asset.renditions {
             assert!(
-                worker.contains(&format!("assets/images/{}.webp", rendition.hash)),
-                "{worker}"
+                published.contains_key(&format!("assets/images/{}.webp", rendition.hash)),
+                "{published:?}"
             );
         }
-        let revisions = offline_catalog_revisions(&worker);
+        let revisions = published_media(&out);
         for path in std::iter::once(master.clone()).chain(
             asset
                 .renditions
@@ -3484,53 +3448,31 @@ category = "Science"
             "the multi-megabyte source icon is not precached"
         );
         assert!(sw.contains("navigationPreload.enable"));
-        assert!(sw.contains("x-requested-with"));
-        assert!(sw.contains("function firstCached(request, choices, index)"));
-        assert!(!sw.contains("caches.match("));
-        assert!(sw.contains("var REQUIRED_URLS ="));
-        assert!(sw.contains("var REVISIONS = CACHE_NAMESPACE + \"revisions-\" + VERSION"));
-        assert!(sw.contains("if (!response || !response.ok)"));
-        assert!(sw.contains("migratePrecacheAssets"));
-        assert!(sw.contains("var ASSETS = CACHE_NAMESPACE + \"assets\""));
-        assert!(sw.contains("feed|aggr|linkset"), "{sw}");
+        // Pages are network-first with a cached fallback; content-addressed assets are not.
+        assert!(sw.contains("function pageResponse(request)"));
+        assert!(sw.contains("function assetResponse(request, name, limit)"));
+        assert!(sw.contains("var OFFLINE = SCOPE + \"offline.html\""));
+        // Nothing is downloaded ahead of the reader any more.
+        assert!(!sw.contains("OFFLINE_CATALOG"));
+        assert!(!sw.contains("OFFLINE_COUNT"));
+        assert!(!sw.contains("search-manifest.json"));
         assert!(sw.contains("\"offline.html\""));
         assert!(sw.contains("\"browse/\""));
-        assert!(sw.contains("\"sources/blog.example/\""));
-        let statements = sw.replace("\r\n", "\n");
-        let catalog: serde_json::Value = serde_json::from_str(
-            statements
-                .split("var OFFLINE_CATALOG = ")
-                .nth(1)
-                .unwrap()
-                .split(";\n")
-                .next()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(catalog.as_array().unwrap().len(), 3);
-        assert_eq!(catalog[0]["url"], "items/blog/2026-09-03-post-2/");
-        assert!(sw.contains("var OFFLINE_COUNT = 2;"));
-        assert!(
-            catalog[0]["resources"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["url"] == catalog[0]["url"])
-        );
+        // Article pages are cached when opened, not listed at install time.
+        assert!(!sw.contains("\"items/"), "{sw}");
 
         let offline = std::fs::read_to_string(out.join("offline.html")).unwrap();
-        assert!(offline.contains("id=\"offline-articles\""));
-        assert!(offline.contains("id=\"offline-download-status\""));
+        assert!(!offline.contains("id=\"offline-articles\""));
         assert!(offline.contains("<link rel=\"manifest\" href=\"/repo/manifest.webmanifest\">"));
         assert!(offline.contains("pwa: true"));
         assert!(offline.contains("href=\"/repo/browse/\""), "{offline}");
-        assert!(offline.contains("data-root=\"/repo/\""), "{offline}");
+        assert!(offline.contains("base: \"/repo/\""), "{offline}");
         assert!(!offline.contains("<base "), "{offline}");
         assert!(!offline.contains("rel=\"canonical\""));
         assert!(!offline.contains("application/ld+json"));
         let not_found = std::fs::read_to_string(out.join("404.html")).unwrap();
         assert!(not_found.contains("href=\"/repo/browse/\""), "{not_found}");
-        assert!(not_found.contains("data-root=\"/repo/\""), "{not_found}");
+        assert!(not_found.contains("base: \"/repo/\""), "{not_found}");
         assert!(!not_found.contains("<base "), "{not_found}");
         assert!(!not_found.contains("rel=\"canonical\""));
         assert!(!not_found.contains("property=\"og:url\""));
@@ -4031,7 +3973,7 @@ same_as = ["https://social.example/@ada"]
             let inventory = std::fs::read_to_string(out.join("llms.txt")).unwrap();
             assert_eq!(inventory.contains("[Sitemap]"), indexable);
             for path in [
-                "search-manifest.json",
+                "search-catalog.json",
                 "opensearch.xml",
                 "linkset.json",
                 "atom.xml",
@@ -4040,7 +3982,7 @@ same_as = ["https://social.example/@ada"]
                 assert!(out.join(path).is_file(), "{path}");
             }
             let search: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(out.join("search-manifest.json")).unwrap())
+                serde_json::from_slice(&std::fs::read(out.join("search-catalog.json")).unwrap())
                     .unwrap();
             assert_eq!(search["docs"], 1, "local search retains the article");
         }
@@ -4124,10 +4066,14 @@ same_as = ["https://social.example/@ada"]
         let interactive =
             std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
         assert!(
-            interactive.contains("data-interactive-embed=\"https://blog.example/0\""),
+            interactive
+                .contains("<iframe class=\"interactive-viewer\" src=\"https://blog.example/0\""),
             "{interactive}"
         );
-        assert!(!interactive.contains("<iframe"));
+        assert!(
+            interactive.contains("sandbox=\"allow-scripts\" referrerpolicy=\"no-referrer\""),
+            "{interactive}"
+        );
         assert!(
             interactive
                 .contains(">Open original <span aria-hidden=\"true\">↗</span></a></figcaption>"),
@@ -4188,10 +4134,7 @@ same_as = ["https://social.example/@ada"]
             std::fs::read(build_info.out.join(&local)).unwrap(),
             asset.bytes
         );
-        let catalog = offline_catalog_revisions(
-            &std::fs::read_to_string(build_info.out.join("sw.js")).unwrap(),
-        );
-        assert_eq!(catalog.get(&local), Some(&hash));
+        assert_eq!(published_media(&build_info.out).get(&local), Some(&hash));
         let markdown =
             std::fs::read_to_string(build_info.out.join("items/blog/2026-09-01-post-0.md"))
                 .unwrap();
@@ -4202,12 +4145,7 @@ same_as = ["https://social.example/@ada"]
         assert!(!build_info.out.join(&local).exists());
         let page = std::fs::read_to_string(build_info.out.join(page_path)).unwrap();
         assert!(page.contains("data=\"http://publisher.invalid/paper.pdf#page=2\""));
-        assert!(
-            offline_catalog_revisions(
-                &std::fs::read_to_string(build_info.out.join("sw.js")).unwrap()
-            )
-            .is_empty()
-        );
+        assert!(published_media(&build_info.out).is_empty());
         assert_eq!(
             store
                 .read_document(&store.items().unwrap()[0])
@@ -4581,8 +4519,8 @@ same_as = ["https://social.example/@ada"]
         );
         let stub_source = std::fs::read_to_string(out.join("sw.js")).unwrap();
         assert!(
-            stub_source.contains("sources\\.opml"),
-            "the worker treats the list as mutable"
+            !stub_source.contains("sources.opml"),
+            "only content-addressed URLs are cached first; the list needs no special case"
         );
     }
 }
