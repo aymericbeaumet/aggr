@@ -3,7 +3,7 @@
 mod import_formats;
 mod import_graph;
 pub(crate) mod language;
-mod preferences;
+pub mod preferences;
 pub(crate) mod repository_url;
 mod source_entries;
 

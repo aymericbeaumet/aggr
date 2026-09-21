@@ -644,8 +644,9 @@ mod tests {
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
         assert!(base.contains("window.AGGRPreferences"));
         assert!(base.contains("Object.prototype.hasOwnProperty.call(schema, key)"));
-        assert!(base.contains("values: [true, false]"));
-        assert!(base.contains("\"feed-page-size\": { initial: \"50\""));
+        // The bootstrap renders the typed Rust table instead of redeclaring the settings.
+        assert!(base.contains("site.preference_schema.bootstrap | json"));
+        assert!(!base.contains("attribute: \"textSize\""));
         assert!(!base.contains("aggr:reading-history"));
 
         let index_file = DefaultTheme::get("templates/index.html").unwrap();

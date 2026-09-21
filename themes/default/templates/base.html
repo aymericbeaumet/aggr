@@ -20,35 +20,14 @@
 {% endif %}
 <script id="aggr-preferences">
 window.AGGRPreferences = (function () {
-  var schema = {
-    theme: { initial: "auto", values: ["auto", "light", "dark", "sepia"], attribute: "theme" },
-    "date-format": { initial: "relative", values: ["relative", "iso", "local", "local-time"], attribute: "dateFormat" },
-    "text-size": { initial: "default", values: ["default", "large", "largest"], attribute: "textSize" },
-    "reading-width": { initial: "standard", values: ["narrow", "standard", "wide"], attribute: "readingWidth" },
-    "font-family": { initial: "sans", values: ["sans", "serif", "mono"], attribute: "fontFamily" },
-    "line-spacing": { initial: "standard", values: ["compact", "standard", "relaxed"], attribute: "lineSpacing" },
-    "paragraph-spacing": { initial: "standard", values: ["compact", "standard", "relaxed"], attribute: "paragraphSpacing" },
-    "paragraph-indent": { initial: false, values: [false, true], attribute: "paragraphIndent" },
-    "text-align": { initial: "left", values: ["left", "justify"], attribute: "textAlign" },
-    "letter-spacing": { initial: "normal", values: ["normal", "wide"], attribute: "letterSpacing" },
-    "word-spacing": { initial: "normal", values: ["normal", "wide"], attribute: "wordSpacing" },
-    "scroll-amount": { initial: 10, min: 1, max: 100 },
-    "offline-items": { initial: 30, min: 0, max: 1000 },
-    density: { initial: "compact", values: ["compact", "comfortable"], attribute: "density" },
-    thumbnails: { initial: "show", values: ["show", "hide"], attribute: "thumbnails" },
-    "feed-page-size": { initial: "50", values: ["10", "25", "50"] },
-    motion: { initial: "auto", values: ["auto", "off"], attribute: "motion" },
-    "single-key-shortcuts": { initial: true, values: [true, false] }
-  };
+  // Rules come from the typed table in src/config/preferences.rs, with this site's defaults
+  // already applied to each `initial`. Never redeclare settings here.
+  var schema = {{ site.preference_schema.bootstrap | json }};
   function valid(key, value) {
     if (!Object.prototype.hasOwnProperty.call(schema, key)) return false;
     var rule = schema[key];
     return rule.values ? rule.values.indexOf(value) !== -1 : Number.isInteger(value) && value >= rule.min && value <= rule.max;
   }
-  var defaults = {{ site.preferences | json }};
-  Object.keys(defaults || {}).forEach(function (key) {
-    if (valid(key, defaults[key])) schema[key].initial = defaults[key];
-  });
   function storedValue(key, value) {
     if (typeof schema[key].initial === "boolean") return value === "true" ? true : value === "false" ? false : null;
     if (typeof schema[key].initial === "number") return typeof value === "string" && /^\d+$/.test(value) ? Number(value) : null;
@@ -77,11 +56,14 @@ window.AGGRPreferences = (function () {
     });
     return state;
   }
+  function apply(values) {
+    Object.keys(schema).forEach(function (key) {
+      if (schema[key].attribute) document.documentElement.dataset[schema[key].attribute] = values[key];
+    });
+  }
   var values = read();
-  Object.keys(schema).forEach(function (key) {
-    if (schema[key].attribute) document.documentElement.dataset[schema[key].attribute] = values[key];
-  });
-  return { schema: schema, values: values, read: read, validate: validate, valid: valid };
+  apply(values);
+  return { schema: schema, values: values, read: read, validate: validate, valid: valid, apply: apply };
 })();
 </script>
 {% include "_dates.html" %}
