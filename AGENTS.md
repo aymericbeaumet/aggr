@@ -197,7 +197,9 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   stored source IDs to publisher IDs. Canonical articles carry deduplicated publisher/feed
   memberships and stay unique globally. Visible publisher and `via` labels use the source's canonical
   name: its hostname alone, plus the account path only on the platform hosts listed in
-  `src/platform.rs`, where one domain is shared between unrelated publishers. A derived source slug
+  `src/platform.rs`, where one domain is shared between unrelated publishers. `src/platform.rs` is
+  the only place that knows host aliases, account path shapes, or which hosts use opaque
+  identifiers; never re-derive any of that elsewhere. A derived source slug
   is that same canonical name, disambiguated by the differing feed path when two sources collide. Exact source IDs win manual alias collisions. See [client development](docs/client.md).
   Public source IDs and filter values use normalized hostnames only; group same-host subscriptions
   while preserving their archived IDs, article paths, and individual OPML endpoints. Display names

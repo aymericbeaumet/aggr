@@ -483,12 +483,7 @@ fn publisher_url(link: &str) -> String {
 }
 
 pub(super) fn source_host(url: &url::Url) -> &str {
-    let host = url.host_str().unwrap_or_default().trim_end_matches('.');
-    match host.strip_prefix("www.").unwrap_or(host) {
-        "youtu.be" | "m.youtube.com" => "youtube.com",
-        "twitter.com" => "x.com",
-        host => host,
-    }
+    crate::platform::host(url).unwrap_or_default()
 }
 
 pub(super) fn profile_url(value: &str) -> Option<url::Url> {
@@ -499,13 +494,7 @@ pub(super) fn profile_url(value: &str) -> Option<url::Url> {
     let mut path = url.path().trim_end_matches('/').to_string();
     if source_host(&url) == "youtube.com" {
         if path == "/feeds/videos.xml" {
-            path = url
-                .query_pairs()
-                .find_map(|(key, value)| match key.as_ref() {
-                    "channel_id" => Some(format!("/channel/{value}")),
-                    "user" => Some(format!("/user/{value}")),
-                    _ => None,
-                })?;
+            path = crate::platform::youtube_channel(&url)?;
         } else if !(path.starts_with("/@")
             || path.starts_with("/channel/")
             || path.starts_with("/user/")
@@ -545,31 +534,27 @@ pub(super) fn profile_url(value: &str) -> Option<url::Url> {
 
 /// How a source reads: its domain, plus the account path only where one host is shared between
 /// publishers. See [`crate::platform`] for which hosts those are.
+/// How a source reads: its domain, plus the account path only where one host is shared between
+/// publishers. See [`crate::platform`] for which hosts those are.
 fn url_label(url: &url::Url) -> String {
     crate::platform::canonical_name(url).unwrap_or_else(|| source_host(url).to_string())
 }
 
+/// A catalogue names its publishers with identifiers nobody reads, so show the publisher's own
+/// title in that slot instead. This is a label, not a destination: links keep their real URL.
 fn source_profile_label(url: &url::Url, title: &str) -> String {
-    let host = source_host(url);
-    let path = url.path();
-    let provider = match host {
-        "open.spotify.com" | "spotify.com" if path.starts_with("/show/") => "spotify.com",
-        "podcasts.apple.com" if path.contains("/podcast/") => "podcasts.apple.com",
-        "pca.st" | "pocketcasts.com" | "play.pocketcasts.com" => "pocketcasts.com",
-        "overcast.fm" if path.starts_with("/itunes") => "overcast.fm",
-        "castbox.fm" if path.contains("/channel/") => "castbox.fm",
-        _ => return url_label(url),
-    };
-    let name = slug::slugify(title.split(['|', ':']).next().unwrap_or(title));
-    if name.is_empty() || title.contains("://") || title == host {
+    if !crate::platform::opaque(url) {
         return url_label(url);
     }
-    // This is a publisher label, not a synthesized destination: links keep their real URL.
+    let name = slug::slugify(title.split(['|', ':']).next().unwrap_or(title));
+    if name.is_empty() || title.contains("://") || title == source_host(url) {
+        return url_label(url);
+    }
     let port = url
         .port()
         .map(|port| format!(":{port}"))
         .unwrap_or_default();
-    format!("{provider}{port}/{name}")
+    format!("{}{port}/{name}", source_host(url))
 }
 
 pub fn profile_label(value: &str) -> String {

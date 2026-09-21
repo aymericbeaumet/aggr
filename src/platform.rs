@@ -10,24 +10,58 @@
 
 use url::Url;
 
-/// A platform host and the path segments that introduce an account on it. An empty prefix list
-/// means the first path segment is itself the account.
-const PLATFORMS: &[(&str, &[&str])] = &[
-    ("bsky.app", &["profile"]),
-    ("codeberg.org", &[]),
-    ("github.com", &[]),
-    ("gitlab.com", &[]),
-    ("medium.com", &[]),
-    ("reddit.com", &["r", "user"]),
-    ("soundcloud.com", &[]),
-    ("twitch.tv", &[]),
-    ("vimeo.com", &[]),
-    ("x.com", &[]),
-    ("youtube.com", &["channel", "user", "c"]),
+/// A host shared between publishers, and how to find the account on it.
+struct Platform {
+    host: &'static str,
+    /// Path segments that introduce an account; empty means the first segment is the account.
+    prefixes: &'static [&'static str],
+    /// Whether the account path is an opaque identifier. Those read better as the publisher's own
+    /// name, which [`opaque`] lets the display layer substitute.
+    opaque: bool,
+}
+
+const fn platform(host: &'static str, prefixes: &'static [&'static str]) -> Platform {
+    Platform {
+        host,
+        prefixes,
+        opaque: false,
+    }
+}
+
+/// A directory whose paths are catalogue identifiers rather than names anyone would read.
+const fn catalogue(host: &'static str) -> Platform {
+    Platform {
+        host,
+        prefixes: &[],
+        opaque: true,
+    }
+}
+
+const PLATFORMS: &[Platform] = &[
+    platform("bsky.app", &["profile"]),
+    platform("codeberg.org", &[]),
+    platform("github.com", &[]),
+    platform("gitlab.com", &[]),
+    platform("medium.com", &[]),
+    platform("reddit.com", &["r", "user"]),
+    platform("soundcloud.com", &[]),
+    platform("twitch.tv", &[]),
+    platform("vimeo.com", &[]),
+    platform("x.com", &[]),
+    platform("youtube.com", &["channel", "user", "c"]),
+    catalogue("castbox.fm"),
+    catalogue("overcast.fm"),
+    catalogue("pocketcasts.com"),
+    catalogue("podcasts.apple.com"),
+    catalogue("spotify.com"),
 ];
 
+fn platform_of(host: &str) -> Option<&'static Platform> {
+    PLATFORMS.iter().find(|platform| platform.host == host)
+}
+
 /// The host as aggr names it: no trailing dot, no `www.`, and the platform's own domain rather
-/// than one of its short or mobile aliases.
+/// than one of its short, mobile or regional aliases.
 pub fn host(url: &Url) -> Option<&str> {
     if !matches!(url.scheme(), "http" | "https") {
         return None;
@@ -39,6 +73,8 @@ pub fn host(url: &Url) -> Option<&str> {
         "old.reddit.com" | "np.reddit.com" => "reddit.com",
         "player.vimeo.com" => "vimeo.com",
         "m.twitch.tv" => "twitch.tv",
+        "open.spotify.com" => "spotify.com",
+        "pca.st" | "play.pocketcasts.com" => "pocketcasts.com",
         host => host,
     })
 }
@@ -71,18 +107,27 @@ pub fn account_path(url: &Url) -> Option<String> {
         return Some((*first).to_string());
     }
 
-    let host = host(url)?;
-    let prefixes = PLATFORMS
-        .iter()
-        .find(|(platform, _)| *platform == host)
-        .map(|(_, prefixes)| *prefixes)?;
-    if prefixes.is_empty() {
+    let platform = platform_of(host(url)?)?;
+    // A catalogue path is one opaque identifier however many segments it takes, and the locale
+    // or section in front of it is part of reaching that entry.
+    if platform.opaque {
+        return Some(segments.join("/"));
+    }
+    if platform.prefixes.is_empty() {
         return Some((*first).to_string());
     }
-    if prefixes.contains(first) {
+    if platform.prefixes.contains(first) {
         return Some(segments.get(..2)?.join("/"));
     }
     None
+}
+
+/// Whether this host names its publishers with identifiers rather than readable names, so a
+/// display label does better to show the publisher's own title.
+pub fn opaque(url: &Url) -> bool {
+    host(url)
+        .and_then(platform_of)
+        .is_some_and(|platform| platform.opaque)
 }
 
 /// The canonical name of whoever published `url`: the host, plus the account path when the host
@@ -94,6 +139,20 @@ pub fn canonical_name(url: &Url) -> Option<String> {
         Some(account) => format!("{authority}/{account}"),
         None => authority,
     })
+}
+
+/// The channel a YouTube feed endpoint describes. Feed URLs state the transport; this is the
+/// publisher behind it.
+pub fn youtube_channel(url: &Url) -> Option<String> {
+    if host(url)? != "youtube.com" || url.path().trim_end_matches('/') != "/feeds/videos.xml" {
+        return None;
+    }
+    url.query_pairs()
+        .find_map(|(key, value)| match key.as_ref() {
+            "channel_id" => Some(format!("/channel/{value}")),
+            "user" => Some(format!("/user/{value}")),
+            _ => None,
+        })
 }
 
 #[cfg(test)]
@@ -162,6 +221,60 @@ mod tests {
         ] {
             assert_eq!(name(url), expected, "{url}");
         }
+    }
+
+    #[test]
+    fn a_catalogue_keeps_its_whole_identifier_under_the_provider_domain() {
+        for (url, expected) in [
+            (
+                "https://open.spotify.com/show/1sz1nhohqbpxbznlponfoz",
+                "spotify.com/show/1sz1nhohqbpxbznlponfoz",
+            ),
+            (
+                "https://podcasts.apple.com/us/podcast/some-show/id1234567",
+                "podcasts.apple.com/us/podcast/some-show/id1234567",
+            ),
+            ("https://pca.st/abc123", "pocketcasts.com/abc123"),
+            (
+                "https://play.pocketcasts.com/podcasts/xyz",
+                "pocketcasts.com/podcasts/xyz",
+            ),
+            (
+                "https://overcast.fm/itunes123/a-show",
+                "overcast.fm/itunes123/a-show",
+            ),
+            ("https://castbox.fm/channel/id42", "castbox.fm/channel/id42"),
+        ] {
+            assert_eq!(name(url), expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn only_catalogue_hosts_ask_for_a_readable_name_instead_of_their_path() {
+        let opaque = |value: &str| super::opaque(&Url::parse(value).unwrap());
+        assert!(opaque("https://open.spotify.com/show/abc"));
+        assert!(opaque("https://podcasts.apple.com/us/podcast/x/id1"));
+        // A channel path already reads as a name, and an ordinary site has none to replace.
+        assert!(!opaque("https://www.youtube.com/@SomeChannel"));
+        assert!(!opaque("https://example.com/blog"));
+    }
+
+    #[test]
+    fn a_youtube_feed_endpoint_resolves_to_the_channel_behind_it() {
+        let channel = |value: &str| youtube_channel(&Url::parse(value).unwrap());
+        assert_eq!(
+            channel("https://www.youtube.com/feeds/videos.xml?channel_id=UC123").as_deref(),
+            Some("/channel/UC123")
+        );
+        assert_eq!(
+            channel("https://www.youtube.com/feeds/videos.xml?user=alice").as_deref(),
+            Some("/user/alice")
+        );
+        assert_eq!(channel("https://www.youtube.com/@SomeChannel"), None);
+        assert_eq!(
+            channel("https://example.com/feeds/videos.xml?channel_id=UC1"),
+            None
+        );
     }
 
     #[test]

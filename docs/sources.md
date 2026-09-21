@@ -60,13 +60,20 @@ url = "https://www.example.com/blog/feed.xml"   # -> sources/example-com/
 
 Some hosts carry thousands of unrelated publishers, so there the account's path is part of who is
 publishing and stays in the name. That list lives in `src/platform.rs` and covers YouTube, X,
-GitHub, GitLab, Codeberg, Reddit, Medium, Bluesky, Twitch, Vimeo and SoundCloud, plus the `@handle`
-convention on any host.
+GitHub, GitLab, Codeberg, Reddit, Medium, Bluesky, Twitch, Vimeo and SoundCloud, the podcast
+catalogues (Spotify, Apple Podcasts, Pocket Casts, Overcast, Castbox), and the `@handle` convention
+on any host. Each platform is named by its own domain, so a short, mobile or regional alias resolves
+to it: `youtu.be` and `m.youtube.com` are `youtube.com`, `open.spotify.com` is `spotify.com`, and
+`pca.st` is `pocketcasts.com`.
 
 ```toml
 [[sources]]
 url = "https://www.youtube.com/@SomeChannel"    # -> sources/youtube-com-somechannel/
+url = "https://open.spotify.com/show/abc123"    # -> sources/spotify-com-show-abc123/
 ```
+
+A catalogue names its shows with identifiers nobody reads, so the reader sees the show's own title
+in that slot (`spotify.com/underscore`) while the identity underneath stays the real path.
 
 Two feeds from one publisher arrive at the same name, so the path that differs is added to tell
 them apart (`example-com` and `example-com-notes`). Set `slug` yourself when you want a specific

@@ -49,8 +49,11 @@ impl ItemType {
             }
             _ => false,
         };
-        if (url.host_str() == Some("open.spotify.com") && episode)
-            || (url.host_str() == Some("podcasts.apple.com")
+        // One host normalizer for the whole codebase, so an alias like `spotify.com` is
+        // recognised the same way `open.spotify.com` is.
+        let host = crate::platform::host(&url);
+        if (host == Some("spotify.com") && episode)
+            || (host == Some("podcasts.apple.com")
                 && parts.contains(&"podcast")
                 && parts.iter().any(|part| {
                     part.strip_prefix("id").is_some_and(|id| {
