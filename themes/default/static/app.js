@@ -255,12 +255,13 @@ const selection = (() => {
       const row = (wanted && all.find((entry) => link(entry)?.href === wanted)) || all[0];
       for (const entry of all) entry.classList.toggle("is-selected", entry === row);
     },
-    move(direction) {
+    /** `focus: false` walks the list while the keyboard stays where it is, e.g. in the search field. */
+    move(direction, focus = true) {
       const all = rows();
       if (!all.length) return false;
       const current = all.findIndex((row) => row.classList.contains("is-selected"));
       const next = current === -1 ? 0 : Math.min(all.length - 1, Math.max(0, current + direction));
-      return select(all[next], true, true);
+      return select(all[next], focus, true);
     },
     selected: () => rows().find((row) => row.classList.contains("is-selected")) || null,
   };
@@ -545,6 +546,23 @@ function installShortcutHelp() {
 
 /* ------------------------------------------------------------------ search field */
 
+/**
+ * Whether the search field sits entirely between the sticky header and the bottom bar. Moving the
+ * page when the reader can already see the field would cost them their place for nothing.
+ */
+function searchFieldVisible(field) {
+  const box = field.getBoundingClientRect();
+  const header = $(".top")?.getBoundingClientRect().bottom ?? 0;
+  const tabs = $(".mobile-tabs")?.getBoundingClientRect();
+  const floor = tabs && tabs.height > 0 ? tabs.top : window.innerHeight;
+  return box.top >= header && box.bottom <= floor;
+}
+
+/** Bring the search field into view, but only when it is not already there. */
+function revealSearchField(field) {
+  if (!searchFieldVisible(field)) window.scrollTo({ top: 0, behavior: "instant" });
+}
+
 /** Focus the shared search field, coming home first when the current page has none. */
 function focusSearch() {
   const field = /** @type {HTMLInputElement | null} */ ($("#q"));
@@ -553,7 +571,9 @@ function focusSearch() {
     return;
   }
   loadSearch();
-  field.focus();
+  // Focus first without moving, then decide: the field's own box is what we measure.
+  field.focus({ preventScroll: true });
+  revealSearchField(field);
   field.select();
 }
 
@@ -570,6 +590,16 @@ function loadSearch() {
 function installSearchIntent() {
   const toolbar = $(".feed-toolbar");
   if (!toolbar) return;
+  const field = /** @type {HTMLInputElement | null} */ ($("#q"));
+  if (field) {
+    for (const name of ["click", "focus"])
+      field.addEventListener(name, () => revealSearchField(field));
+    // Any sign of typing loads the engine, not just pointer or focus intent: a keystroke that
+    // arrives before the module would otherwise be dropped. search.js runs whatever it finds in
+    // the field once it mounts.
+    for (const name of ["keydown", "input"])
+      field.addEventListener(name, () => loadSearch(), { capture: true });
+  }
   for (const name of ["pointerover", "focusin", "touchstart"])
     toolbar.addEventListener(name, () => loadSearch(), { once: true, passive: true });
   const url = new URL(location.href);

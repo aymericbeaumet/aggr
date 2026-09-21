@@ -360,7 +360,10 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
         .await?;
         assert_eq!(
             client
-                .execute("return new URL(document.getElementById('aggr-page').dataset.root,location.href).href", vec![])
+                .execute(
+                    "return new URL(window.AGGR.base,location.href).href",
+                    vec![]
+                )
                 .await?,
             fixture.base,
             "the persistent document base must keep every mobile route site-relative"
@@ -524,7 +527,7 @@ async fn mobile_tabs_and_instant_cached_navigation() -> Result<()> {
                 let animationStarts=0;const durations=[];
                 const off=window.swup.hooks.on('animation:in:start',()=>animationStarts++);
                 for(const route of ['browse/','preferences/','']){
-                  const url=new URL(route,new URL(document.getElementById('aggr-page').dataset.root,location.href));
+                  const url=new URL(route,new URL(window.AGGR.base,location.href));
                   await until(()=>!window.swup.navigating&&window.swup.cache.has(url.pathname));
                   const started=performance.now();
                   document.querySelector(`.mobile-tabs a[data-route="${route}"]`).click();
@@ -705,7 +708,7 @@ async fn mobile_physical_taps_navigate_once_without_delay_or_reload() -> Result<
     let result=async {
         phone_session(&client).await?;
         client.goto(&fixture.base).await?;
-        wait_booted_with(&client,"!!window.swup && window.swup.cache.has(new URL('browse/',new URL(document.getElementById('aggr-page').dataset.root,location.href)).pathname) && window.swup.cache.has(new URL('preferences/',new URL(document.getElementById('aggr-page').dataset.root,location.href)).pathname)").await?;
+        wait_booted_with(&client,"!!window.swup && window.swup.cache.has(new URL('browse/',new URL(window.AGGR.base,location.href)).pathname) && window.swup.cache.has(new URL('preferences/',new URL(window.AGGR.base,location.href)).pathname)").await?;
         client.execute(r#"
           window.__mobileTouchProbe={visits:[],released:0,initialHistory:history.length};
           document.addEventListener('pointerup',()=>__mobileTouchProbe.released=performance.now(),true);
@@ -719,7 +722,7 @@ async fn mobile_physical_taps_navigate_once_without_delay_or_reload() -> Result<
             let pressed=client.execute("const tab=document.querySelector(arguments[0]);return {background:getComputedStyle(tab).backgroundColor,transition:getComputedStyle(tab).transitionDuration}",vec![json!(selector)]).await?;
             anyhow::ensure!(pressed["background"]!=rest && pressed["transition"]=="0s","touch contact gives immediate visible feedback: {pressed}; resting {rest}");
             touch(&client,"touchEnd",None).await?;
-            wait_for(&client,&format!("!window.swup.navigating && location.pathname===new URL('{route}',new URL(document.getElementById('aggr-page').dataset.root,location.href)).pathname && document.querySelector('.mobile-tabs [aria-current]')?.dataset.route==='{route}'")).await?;
+            wait_for(&client,&format!("!window.swup.navigating && location.pathname===new URL('{route}',new URL(window.AGGR.base,location.href)).pathname && document.querySelector('.mobile-tabs [aria-current]')?.dataset.route==='{route}'")).await?;
             let state=client.execute(r#"
               const probe=window.__mobileTouchProbe,tab=document.querySelector('.mobile-tabs [aria-current]');
               return {visits:probe?.visits,history:history.length-(probe?.initialHistory||0),active:document.querySelectorAll('.mobile-tabs [aria-current]').length,
@@ -793,8 +796,8 @@ async fn mobile_article_swipes_follow_neighbors_and_preserve_scroll_and_controls
         let start=format!("{}items/example/2026-09-01-story-29/",fixture.base);
         client.goto(&start).await?;
         wait_booted_with(&client,"document.querySelector('article.item')?.dataset.nextUrl && document.querySelector('article.item')?.dataset.previousUrl").await?;
-        let neighbors=client.execute("const article=document.querySelector('article.item');window.__swipeSentinel=true;return {next:new URL(article.dataset.nextUrl,new URL(document.getElementById('aggr-page').dataset.root,location.href)).href,previous:new URL(article.dataset.previousUrl,new URL(document.getElementById('aggr-page').dataset.root,location.href)).href}",vec![]).await?;
-        wait_for(&client,"window.swup.cache.has(new URL(document.querySelector('article.item').dataset.nextUrl,new URL(document.getElementById('aggr-page').dataset.root,location.href)).pathname)").await?;
+        let neighbors=client.execute("const article=document.querySelector('article.item');window.__swipeSentinel=true;return {next:new URL(article.dataset.nextUrl,new URL(window.AGGR.base,location.href)).href,previous:new URL(article.dataset.previousUrl,new URL(window.AGGR.base,location.href)).href}",vec![]).await?;
+        wait_for(&client,"window.swup.cache.has(new URL(document.querySelector('article.item').dataset.nextUrl,new URL(window.AGGR.base,location.href)).pathname)").await?;
         client.execute("document.querySelector('.body p').scrollIntoView({block:'center'})",vec![]).await?;
         let (_,y)=touch_point(&client,".body p").await?;
         swipe(&client,(300.0,y),(85.0,y+5.0)).await?;

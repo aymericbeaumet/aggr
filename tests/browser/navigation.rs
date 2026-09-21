@@ -97,7 +97,7 @@ async fn prefetch_and_video_contracts(client: &Client, fixture: &Fixture) -> Res
     "#, vec![]).await?, true, "the initial page must be cached before event-binding markers are added");
     let shared_fetch = client.execute_async(r#"
       const done = arguments[arguments.length-1];
-      const target = new URL('browse/?prefetch-contract=1',new URL(document.getElementById('aggr-page').dataset.root,location.href));
+      const target = new URL('browse/?prefetch-contract=1',new URL(window.AGGR.base,location.href));
       Promise.all([window.swup.fetchPage(target.href), window.swup.fetchPage(target.pathname+target.search)]).then(pages => {
         done({requests:performance.getEntriesByName(target.href).length, sameHtml:pages[0].html===pages[1].html});
       }).catch(error => done({error:String(error)}));
@@ -110,13 +110,13 @@ async fn prefetch_and_video_contracts(client: &Client, fixture: &Fixture) -> Res
     client.execute(r#"
       const state = {
         originalFetch:window.fetch, home:location.href,
-        destination:new URL('browse/?prefetch-cancellation=destination',new URL(document.getElementById('aggr-page').dataset.root,location.href)).href,
-        unrelated:new URL('preferences/?prefetch-cancellation=unrelated',new URL(document.getElementById('aggr-page').dataset.root,location.href)).href,
+        destination:new URL('browse/?prefetch-cancellation=destination',new URL(window.AGGR.base,location.href)).href,
+        unrelated:new URL('preferences/?prefetch-cancellation=unrelated',new URL(window.AGGR.base,location.href)).href,
         requests:{}, aborted:[], release:{}, settled:{}
       };
       window.prefetchCancellationContract = state;
       window.fetch = function(input, options) {
-        const url = new URL(typeof input === 'string' ? input : input.url, new URL(document.getElementById('aggr-page').dataset.root,location.href));
+        const url = new URL(typeof input === 'string' ? input : input.url, new URL(window.AGGR.base,location.href));
         const key = url.searchParams.get('prefetch-cancellation');
         if (!key) return state.originalFetch.call(window,input,options);
         state.requests[key] = (state.requests[key] || 0) + 1;
@@ -296,7 +296,7 @@ async fn prefetch_reserves_capacity_for_pointer_intent() -> Result<()> {
           const original=window.fetch;
           window.fetch=function(input,options){
             if(options?.priority!=='low')return original.call(this,input,options);
-            const url=new URL(typeof input==='string'?input:input.url,new URL(document.getElementById('aggr-page').dataset.root,location.href)).href;
+            const url=new URL(typeof input==='string'?input:input.url,new URL(window.AGGR.base,location.href)).href;
             window.prefetchProbe.started.push(url);
             return new Promise(resolve=>window.prefetchProbe.release.push(resolve)).then(()=>original.call(this,input,options));
           };

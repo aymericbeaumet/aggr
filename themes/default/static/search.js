@@ -884,7 +884,12 @@ export function mount(options) {
 
   function closeMenu() {
     menuOpen = false;
-    if (listbox) listbox.hidden = true;
+    if (listbox) {
+      listbox.hidden = true;
+      // Drop the options too: a hidden list still answers queries and reads to assistive
+      // technology, so a stale suggestion would outlive the keystroke that produced it.
+      listbox.replaceChildren();
+    }
     input.setAttribute("aria-expanded", "false");
     input.removeAttribute("aria-activedescendant");
   }
@@ -928,15 +933,74 @@ export function mount(options) {
     input.setAttribute("aria-activedescendant", "search-completion-" + highlighted);
   }
 
-  function suggest() {
-    if (!listbox) return;
+  /** Counts for the facet being completed, scoped to the query's other clauses. */
+  let context = null;
+  let contextGeneration = 0;
+
+  /** The facet qualifier under the cursor, and the query with that token taken out. */
+  function editedFacet() {
+    const cursor = input.selectionStart ?? input.value.length;
+    const { start, end, value } = completionToken(input.value, cursor);
+    const field = value.match(/^(source|category|tag|type):/i)?.[1]?.toLowerCase();
+    if (!field) return null;
+    return { field, rest: (input.value.slice(0, start) + input.value.slice(end)).trim() };
+  }
+
+  /**
+   * Offer only the values that would actually narrow the current search, with the number of
+   * articles each would leave. An older context must never replace a newer one.
+   */
+  async function refineContext() {
+    const edited = editedFacet();
+    // With nothing else in the query the catalogue's own counts are already the contextual ones.
+    if (!edited || !edited.rest) {
+      contextGeneration++;
+      if (context) {
+        context = null;
+        renderSuggestions();
+      }
+      return;
+    }
+    if (context && context.field === edited.field && context.rest === edited.rest) return;
+    const generation = ++contextGeneration;
     try {
-      suggestions = complete(input.value, input.selectionStart ?? input.value.length, catalogueFacets);
+      const values = await engine.counts(parseQuery(edited.rest || ""), edited.field);
+      if (generation !== contextGeneration) return;
+      context = { ...edited, values };
+      renderSuggestions();
+    } catch {
+      /* the whole-archive vocabulary is still a useful answer */
+    }
+  }
+
+  function renderSuggestions() {
+    if (!listbox) return;
+    const facets =
+      context && catalogueFacets
+        ? { ...catalogueFacets, [context.field]: context.values }
+        : catalogueFacets;
+    try {
+      suggestions = complete(
+        input.value,
+        input.selectionStart ?? input.value.length,
+        facets,
+        Date.now(),
+        catalogueFacets,
+      );
     } catch {
       suggestions = [];
     }
     highlighted = 0;
     renderMenu();
+  }
+
+  function suggest() {
+    if (!listbox) return;
+    // A facet cannot be completed without the vocabulary. Fetch it once and come back rather
+    // than leaving the reader with an empty menu for a qualifier that does have values.
+    if (!catalogueFacets) void loadFacets().then((manifest) => manifest && suggest());
+    renderSuggestions();
+    void refineContext();
   }
 
   function choose(suggestion) {
@@ -1141,8 +1205,8 @@ export function mount(options) {
         renderMenu();
         return;
       }
-      // Without suggestions the arrows walk the results.
-      if (options.selection?.move(event.key === "ArrowDown" ? 1 : -1)) {
+      // Without suggestions the arrows walk the results, and the keyboard stays in the field.
+      if (options.selection?.move(event.key === "ArrowDown" ? 1 : -1, false)) {
         event.preventDefault();
         event.stopPropagation();
       }
@@ -1152,7 +1216,10 @@ export function mount(options) {
       event.preventDefault();
       event.stopPropagation();
       closeMenu();
-      schedule(0);
+      // With no suggestion to accept, Enter opens the result the cursor is on.
+      const link = options.selection?.link(options.selection.selected());
+      if (link) link.click();
+      else schedule(0);
     }
   });
 
@@ -1200,4 +1267,10 @@ export function mount(options) {
   // This module is fetched on the first sign of interest, so the reader may already have typed
   // by the time it arrives. A shared `?q=` link lands here too.
   if (active()) void run();
+  // If they are still in the field, show them the suggestions for what they have typed rather
+  // than waiting for another keystroke.
+  if (document.activeElement === input) {
+    menuOpen = true;
+    suggest();
+  }
 }

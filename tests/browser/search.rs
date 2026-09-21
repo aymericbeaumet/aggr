@@ -42,10 +42,7 @@ async fn search_keyboard_contracts(client: &Client, fixture: &Fixture) -> Result
     .await?;
     assert_eq!(
         client
-            .execute(
-                "return new URL(history.state.url,location.href).href===location.href",
-                vec![]
-            )
+            .execute("return new URL(location.href).href===location.href", vec![])
             .await?,
         true,
         "canonical search must keep Swup's history URL aligned with the address bar"
@@ -192,7 +189,7 @@ async fn search_articles_only_appear_as_results() -> Result<()> {
         client.find(Locator::Css(".nav-primary [data-feed-action]")).await?.click().await?;
         wait_for(&client,"!new URL(location.href).searchParams.has('q') && !document.querySelector('[data-static-feed]').hidden").await?;
         client.find(Locator::Css(".brand")).await?.click().await?;
-        anyhow::ensure!(client.execute("return document.activeElement.id!=='q' && scrollY===0 && !document.querySelector('.search-completions')",vec![]).await?==true,"site title returns to the feed top without focusing search");
+        anyhow::ensure!(client.execute("return document.activeElement.id!=='q' && scrollY===0 && !document.querySelector('.search-completions:not([hidden])')",vec![]).await?==true,"site title returns to the feed top without focusing search");
         Ok(())
     }.await;
     report_failure(&client, "search-articles-only", &result).await;
@@ -208,7 +205,7 @@ async fn search_preview_errors_keep_geometry_and_readable_fallbacks() -> Result<
     let result = async {
         client.goto(&format!("{}?q=source:publisher.invalid", fixture.base)).await?;
         wait_for(&client, "!!document.querySelector('.search-results .preview-image')?.naturalWidth").await?;
-        let before = client.execute("const image=document.querySelector('.search-results .preview-image');window.previewImage=image;window.previewSource=image.src;const r=image.parentElement.getBoundingClientRect();image.src=new URL('missing-preview.png',new URL(document.getElementById('aggr-page').dataset.root,location.href)).href;return {width:r.width,height:r.height}", vec![]).await?;
+        let before = client.execute("const image=document.querySelector('.search-results .preview-image');window.previewImage=image;window.previewSource=image.src;const r=image.parentElement.getBoundingClientRect();image.src=new URL('missing-preview.png',new URL(window.AGGR.base,location.href)).href;return {width:r.width,height:r.height}", vec![]).await?;
         wait_for(&client,"window.previewImage.parentElement.classList.contains('is-error')").await?;
         let failed=client.execute("const image=window.previewImage,r=image.parentElement.getBoundingClientRect();return {width:r.width,height:r.height,color:getComputedStyle(image).color,alt:image.alt}",vec![]).await?;
         anyhow::ensure!(before["width"]==failed["width"] && before["height"]==failed["height"] && failed["color"]!="rgba(0, 0, 0, 0)" && failed["alt"].as_str().is_some_and(|alt|!alt.is_empty()),"search image failures preserve space and readable alt text: {failed}");
@@ -317,7 +314,7 @@ async fn search_focus_scrolls_only_when_obscured() -> Result<()> {
             emulate(&client,"Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":point["x"],"y":point["y"],"button":"left","clickCount":1})).await?;
             wait_for(&client,"scrollY===0 && document.activeElement.id==='q'").await?;
             escape_search(&client).await?;
-            anyhow::ensure!(client.execute("return document.activeElement.id!=='q' && !document.querySelector('.search-completions')",vec![]).await?==true,"Escape closes suggestions, then blurs search");
+            anyhow::ensure!(client.execute("return document.activeElement.id!=='q' && !document.querySelector('.search-completions:not([hidden])')",vec![]).await?==true,"Escape closes suggestions, then blurs search");
         }
         Ok(())
     }.await;
@@ -364,7 +361,7 @@ async fn rich_search_and_complete_offline_index() -> Result<()> {
             "published search manifest: {}",
             json!({"version":published["version"],"docs":published["docs"]})
         );
-        eprintln!("browser search manifest: {}", client.execute_async("const done=arguments[arguments.length-1];fetch(new URL('search-manifest.json',new URL(document.getElementById('aggr-page').dataset.root,location.href)),{cache:'no-store'}).then(r=>r.json()).then(m=>done({version:m.version,docs:m.docs})).catch(e=>done(String(e)))",vec![]).await.unwrap_or(Value::Null));
+        eprintln!("browser search manifest: {}", client.execute_async("const done=arguments[arguments.length-1];fetch(new URL('search-manifest.json',new URL(window.AGGR.base,location.href)),{cache:'no-store'}).then(r=>r.json()).then(m=>done({version:m.version,docs:m.docs})).catch(e=>done(String(e)))",vec![]).await.unwrap_or(Value::Null));
     }
     let _ = set_offline(&client, false).await;
     finish(client, result).await

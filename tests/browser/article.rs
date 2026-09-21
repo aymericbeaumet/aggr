@@ -881,7 +881,7 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
         .execute(
             r#"
       const article = document.querySelector('article.item');
-      return {current:location.pathname,older:new URL(article.dataset.nextUrl,new URL(document.getElementById('aggr-page').dataset.root,location.href)).pathname};
+      return {current:location.pathname,older:new URL(article.dataset.nextUrl,new URL(window.AGGR.base,location.href)).pathname};
     "#,
             vec![],
         )
@@ -933,7 +933,7 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
     assert_eq!(
         client
             .execute(
-                "return new URL(document.querySelector('article.item').dataset.previousUrl,new URL(document.getElementById('aggr-page').dataset.root,location.href)).pathname",
+                "return new URL(document.querySelector('article.item').dataset.previousUrl,new URL(window.AGGR.base,location.href)).pathname",
                 vec![]
             )
             .await?,
