@@ -271,6 +271,11 @@ pre code { background: none; padding: 0; }
 .brand-title { text-transform: lowercase; }
 .brand-icon { display: block; width: 1em; height: 1em; object-fit: contain; object-position: center; align-self: center; flex: 0 0 auto; }
 .nav .config-link { padding-right: 0; }
+/* The arrow glyph has almost no left bearing, so a plain space between it and the label reads as
+   none. Give every external marker explicit room instead. */
+.config-link > span[aria-hidden="true"],
+.article-resources a > span[aria-hidden="true"],
+.interactive-reader figcaption a > span[aria-hidden="true"] { margin-inline-start: 0.2em; }
 .nav a:focus-visible { background: color-mix(in srgb, var(--nav-fg) 16%, var(--nav-bg)); text-decoration: underline; }
 html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .browse-intro { max-width: 65ch; margin: 0.45rem 0 0; line-height: 1.5; }
