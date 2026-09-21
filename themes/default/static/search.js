@@ -684,14 +684,27 @@ function createEngine(base) {
       const bundle = new URL(manifest.base, base);
       if (bundle.origin !== new URL(base).origin) throw new Error("search index is off-origin");
       const module = await import(new URL("pagefind.js", bundle).href);
-      return module.createInstance({
+      const instance = module.createInstance({
         basePath: bundle.pathname,
         baseUrl: new URL(base).pathname,
         excerptLength: 28,
-        ranking: { termFrequency: 0.65, termSimilarity: 1, pageLength: 0.35, termSaturation: 0.8 },
-        // Display data carries weight zero so it cannot influence ranking.
-        metaWeights: { title: 12, source: 2, date: 0, aggr_display: 0 },
+        ranking: {
+          termFrequency: 0.65,
+          termSimilarity: 1,
+          pageLength: 0.35,
+          termSaturation: 0.8,
+          // Display data carries weight zero so it cannot influence ranking.
+          metaWeights: { title: 12, source: 2, date: 0, aggr_display: 0 },
+        },
       });
+      // An instance cannot answer anything until it has loaded its entry table.
+      try {
+        await instance.init();
+      } catch (error) {
+        await instance.destroy?.().catch(() => {});
+        throw error;
+      }
+      return instance;
     })().catch((error) => {
       api = undefined;
       throw error;
@@ -996,14 +1009,23 @@ export function mount(options) {
       status.textContent = "Searching…";
     }
 
+    /** Keep an explanation on screen without leaving results from an earlier query below it. */
+    const explain = (message) => {
+      showError(message);
+      if (list) {
+        list.hidden = true;
+        list.replaceChildren();
+      }
+      if (status) status.hidden = true;
+      if (empty) empty.hidden = true;
+      if (pager) pager.hidden = true;
+    };
+
     let query;
     try {
       query = parseQuery(input.value);
     } catch (failure) {
-      showError(failure instanceof Error ? failure.message : "This search could not be read.");
-      if (list) list.hidden = true;
-      if (status) status.hidden = true;
-      if (pager) pager.hidden = true;
+      explain(failure instanceof Error ? failure.message : "This search could not be read.");
       return;
     }
     showError("");
@@ -1016,13 +1038,13 @@ export function mount(options) {
       syncLocation();
     } catch (failure) {
       if (token !== generation) return;
-      showError(
+      // A query the reader can fix reads as advice; anything else is a fault worth reporting.
+      if (!(failure instanceof QueryError)) console.error("aggr: search", failure);
+      explain(
         failure instanceof QueryError
           ? failure.message
           : "Search is unavailable right now. Try again in a moment.",
       );
-      if (list) list.hidden = true;
-      if (status) status.hidden = true;
     }
   }
 
@@ -1174,6 +1196,8 @@ export function mount(options) {
   if (url.searchParams.has("q")) {
     input.value = url.searchParams.get("q") || "";
     page = Number(url.searchParams.get("search-page")) || 1;
-    void run();
   }
+  // This module is fetched on the first sign of interest, so the reader may already have typed
+  // by the time it arrives. A shared `?q=` link lands here too.
+  if (active()) void run();
 }

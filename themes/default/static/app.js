@@ -179,7 +179,7 @@ const dates = (() => {
     );
   }
 
-  return { render, format };
+  return { render, format, text };
 })();
 
 /** Recolour rows as their articles age, in the bands the stylesheet paints. */
@@ -492,10 +492,9 @@ function installKeyboard() {
       if (KIND === "item") {
         const article = $("article.item");
         const url = direction === 1 ? article?.dataset.nextUrl : article?.dataset.previousUrl;
-        if (url) {
-          event.preventDefault();
-          location.assign(new URL(url, BASE).href);
-        }
+        event.preventDefault();
+        // Stepping past either end of the archive returns to the feed rather than stopping dead.
+        location.assign(new URL(url || "", BASE).href);
         return;
       }
       if (selection.move(direction)) event.preventDefault();
@@ -828,6 +827,9 @@ function installPreferences() {
 
   const share = $("#share-state");
   if (share) share.hidden = typeof navigator.share !== "function";
+  // The controls ship disabled so they cannot take a value nothing would save.
+  const controls = /** @type {HTMLFieldSetElement | null} */ ($("#preferences-controls"));
+  if (controls) controls.disabled = false;
   syncControls();
   refreshThemeColor();
   importFragment();

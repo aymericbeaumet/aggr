@@ -1061,3 +1061,8 @@ body[data-searching] [data-static-feed] { display: none; }
 /* ---------------------------------------------------------------- interactive originals */
 
 .interactive-viewer { display: block; width: 100%; height: 100%; border: 0; }
+
+/* The preference controls are grouped only so they can be disabled until the script that saves
+   them is running; the grouping itself should be invisible. */
+.preferences-controls { min-width: 0; margin: 0; padding: 0; border: 0; }
+.preferences-controls:disabled { opacity: 0.6; }
