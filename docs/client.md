@@ -12,6 +12,9 @@ Frontend source lives in `web/`. Install its locked dependencies with `npm ci --
 `make client-check` runs type checks and tests; `make client-build` writes the committed
 `themes/default/static/app.js` and `client.css`. Rebuild these files after source changes. CI
 rebuilds and compares them, while normal Cargo builds embed the existing files without invoking npm.
+Run `make check` for all Rust and frontend checks and preview with
+`cargo run -- dev --config examples/aggr.toml`. See [contributing](../CONTRIBUTING.md) for
+contribution terms.
 
 For immediate frontend feedback, run `make client-dev`, then run the reader with:
 
@@ -27,6 +30,20 @@ edits update through HMR; changes to document-level reader services reload the p
 The production bundle is self-contained, with one separate component stylesheet. Keep imported
 images and internal runtime chunks out of the bundle: Rust hashes and renames static files without
 rewriting references inside their contents. Pagefind is a separate, versioned runtime loaded by URL.
+
+## Browser regression tests
+
+The browser suite uses a local ChromeDriver and a temporary, pinned article archive:
+
+```sh
+chromedriver --port=9515 --allowed-ips=127.0.0.1
+# In another terminal:
+AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser -- --ignored
+```
+
+Set `AGGR_CHROME_BINARY` if Chrome is outside its usual location and `AGGR_BROWSER_TIMEOUT_SECS`
+(default 45) when a loaded machine needs longer waits. CI installs matching browser and driver
+versions; failure screenshots and logs are saved under `target/browser-artifacts/`.
 
 ## Component and service ownership
 
@@ -79,16 +96,25 @@ clearing it first so a repeated message is announced again.
 
 ## Ownership and navigation
 
+Touch tabs show feedback on contact and activate on release, suppressing the following compatibility
+click. They retain ordinary links for keyboard, mouse, and JavaScript-free navigation. Article prose
+supports a left swipe to the next older article and a right swipe to the previous newer one.
+Swiping or using `j`/`k` past either end returns to the main feed; a single article returns in either
+direction. Gestures yield to vertical scrolling, pinch zoom, text selection, links, media, and horizontally scrolling code/tables;
+the viewport edges remain available for browser navigation. Page disposal removes gesture listeners.
+
 The shared header contains `feed | browse | preferences`, with `aggr.toml` on the right and
 regular-weight, full-opacity labels and an underline for the selected section. Article pages select
 no section: feed is current only on the feed itself. At widths up to
-40rem, only the brand and aggr.toml remain at the top. A persistent four-tab bar provides feed,
-search, browse, and preferences at the viewport bottom. Browse groups categories, sources, and tags;
-Search focuses the shared field and preserves its query. Mobile feed rows omit numbers and use the
+40rem, only the brand and aggr.toml remain at the top. A persistent three-tab bar provides feed,
+browse, and preferences at the viewport bottom. Browse groups categories, sources, and tags.
+The feed search field stays pinned below the measured header on desktop and mobile; its results
+remain outside the sticky wrapper so they scroll normally. `/` focuses the field and preserves its
+query. Feed stays selected during search. Mobile feed rows omit numbers and use the
 full available width. Mobile metadata follows the title and uses the full row width; search
 excerpts show at most two lines below it. Pagination stays on one line with plain text controls
-and 44px touch targets. The bar's background reaches the screen
-edge; the home-indicator inset is applied once inside the bar. Content clearance uses its measured
+and 44px touch targets. The fixed wrapper reaches the screen edge; an inset rounded surface groups the three tabs, with a filled selected tab and aligned icon
+and label rows. The home-indicator inset is applied once inside the bar. Content clearance uses its measured
 height plus 12px, with a matching CSS fallback before JavaScript. The software keyboard hides the
 bar without moving article content. Tapping the current tab dismisses an editor and returns to the
 top without opening search or starting another navigation. Pressed feedback changes only the surface
@@ -162,13 +188,22 @@ full text. The parser is `web/src/search/query.ts`.
 
 Unqualified words search the indexed title and full text. Quoted phrases match together; a leading
 minus excludes a word, phrase, or facet. `category:`, `source:`, `tag:`, and `type:` accept stable
-identifiers or unique matching labels. Completion inserts a quoted readable label when it differs
-from the identifier; labels equivalent to the identifier retain its spelling. Duplicate labels or
-labels colliding with another identifier use the stable identifier, shown in the suggestion for
-disambiguation. Exact identifiers take precedence; ambiguous labels produce an explanation instead
-of silently including several sources. Initial shared queries also replace eligible internal IDs
-with readable labels after the manifest loads, unless the user has already edited the query.
-Source means the configured or retained feed, including aggregator feeds. Repeated positive values
+identifiers or unique matching labels. Source links, completion, and canonicalized queries always
+use the hostname identifier, for example `source:"hnrss.org"`; friendly source names are presentation
+labels in source directories and optional manual aliases. Publisher and `via` labels beneath article
+titles use the same canonical hostname, never subscription paths. Other facets can insert readable unique labels. Duplicate labels
+or labels colliding with another identifier retain their stable identifiers; exact identifiers win,
+and ambiguous manual aliases produce an explanation.
+Source includes both the publisher and every configured or retained feed that supplied the article.
+A canonical article has denormalized source memberships: it appears once globally and once in each
+matching hostname collection. Publisher and feed IDs both use the lowercase/punycode hostname,
+excluding trailing dots, conventional `www.`, paths, and ports. Other subdomains remain distinct;
+provider aliases do not merge actual domains. All subscriptions or accounts on one host aggregate
+into one source filter, and publisher/feed memberships collapse when their hosts match. Feed hosts
+come from configured URLs or persisted endpoint/site metadata, never archived slugs. An origin with
+no trusted HTTP(S) metadata contributes no guessed membership; a known article publisher still does.
+Archived source IDs, article paths, original URLs, and discussion provenance remain unchanged.
+Repeated positive values
 within a facet mean any of those values; different facets combine with AND. Exclusions remove matches.
 Content types are `article`, `podcast`, `video`, `audio`, `image`, and `document`; they describe the
 primary content, not incidental images embedded in an article.
@@ -254,4 +289,3 @@ Custom templates must provide the documented Svelte roots and preference bootstr
 imports require `{ "version": 1, "preferences": { ... } }`; shared links carry this envelope in
 `#aggr-state=`. Versionless payloads, prefixed import keys, and query-string preference imports are
 rejected. Stored Markdown is authoritative; builds do not replay historical renderers to repair it.
-

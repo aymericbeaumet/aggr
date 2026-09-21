@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use minijinja::{Environment, Error, ErrorKind, Value};
+use minijinja::{Environment, Error, ErrorKind, State, Value};
 use rust_embed::RustEmbed;
 use serde::Serialize;
 
@@ -137,21 +137,42 @@ impl Renderer {
         });
 
         let assets = asset_map(&layers)?;
-        let filter_assets = assets.clone();
         // Paths are ours (slugified ASCII), so `/` must not come out as `&#x2f;`.
-        env.add_filter("url_for", move |path: String| {
-            let path = path.trim_start_matches('/');
-            let resolved = path
-                .strip_prefix("assets/")
-                .and_then(|name| filter_assets.get(name))
-                .map(|asset| format!("assets/{}", asset.output))
-                .unwrap_or_else(|| path.to_string());
-            Value::from_safe_string(resolved)
+        // `url_for` is what the browser resolves: it walks up from the page being rendered, so
+        // the output works at `/`, under a nested mount, or from a file, and no `<base>` element is
+        // needed. `site_path` is the same location relative to the site root, for data attributes
+        // the client resolves itself and for joining onto `site.base_url`.
+        let filter_assets = assets.clone();
+        env.add_filter("url_for", move |state: &State, path: String| {
+            if !is_site_reference(&path) {
+                // Absolute or remote: escaped like any other value.
+                return Value::from(path);
+            }
+            let path = site_path(&filter_assets, &path);
+            let root = page_root(state);
+            Value::from_safe_string(if path.is_empty() {
+                root
+            } else {
+                crate::content::rebase_site_url(&path, &root)
+            })
+        });
+        env.add_filter("srcset_for", |state: &State, srcset: String| {
+            Value::from(crate::content::rebase_srcset(&srcset, &page_root(state)))
+        });
+        let filter_assets = assets.clone();
+        env.add_filter("site_path", move |path: String| {
+            Value::from_safe_string(site_path(&filter_assets, &path))
+        });
+        env.add_filter("rebase", |state: &State, html: Value| {
+            let html = html.as_str().unwrap_or_default();
+            Value::from_safe_string(crate::content::rebase_site_paths(html, &page_root(state)))
         });
         env.add_filter("domain", super::context::domain_of);
         env.add_filter("profile", super::context::profile_label);
         env.add_filter("slug", |value: String| slug::slugify(value));
-        env.add_filter("facet_url", facet_url);
+        env.add_filter("facet_url", |state: &State, value: String, kind: String| {
+            format!("{}{}", page_root(state), facet_url(value, kind))
+        });
         env.add_filter("date", date_filter);
         env.add_filter("excerpt", |text: String, max: Option<usize>| {
             crate::content::excerpt(&text, max.unwrap_or(200))
@@ -271,13 +292,48 @@ fn html_formatter(
     }
 }
 
+/// The prefix that takes a site-relative path from the page being rendered to the site root:
+/// `page.root` while a page renders, nothing for fragments rendered without one.
+fn page_root(state: &State) -> String {
+    state
+        .lookup("page")
+        .and_then(|page| page.get_attr("root").ok())
+        .and_then(|root| root.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// Whether `url_for` should treat a value as a site path: anything without a scheme. A leading
+/// `/` is tolerated as a site path for older templates; fragments and queries pass through.
+fn is_site_reference(value: &str) -> bool {
+    !value.split_once(':').is_some_and(|(scheme, _)| {
+        scheme
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
+}
+
+/// A site-relative path with content-hashed asset names substituted.
+fn site_path(assets: &BTreeMap<String, Asset>, path: &str) -> String {
+    let path = path.trim_start_matches('/');
+    let path = path.strip_prefix("./").unwrap_or(path);
+    path.strip_prefix("assets/")
+        .and_then(|name| assets.get(name))
+        .map(|asset| format!("assets/{}", asset.output))
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// The root feed filtered to one facet value, relative to the site root.
 fn facet_url(value: String, kind: String) -> String {
     let quoted = serde_json::to_string(&value).unwrap_or_default();
     let query = format!("{kind}:{quoted}");
     let encoded = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("q", &query)
         .finish();
-    format!("./?{encoded}")
+    format!("?{encoded}")
 }
 
 /// `{{ value | date }}` → `2026-09-02`; `{{ value | date("%d %b %Y") }}` for custom formats.
@@ -522,8 +578,10 @@ mod tests {
         let mut expected = crate::cache::ci_cached_paths();
         expected.sort();
 
-        let mut restore = None;
-        let mut save = None;
+        let mut restores = Vec::new();
+        let mut saves = Vec::new();
+        let mut restored_paths = Vec::new();
+        let mut saved_paths = Vec::new();
         let mut build = None;
         for (index, step) in steps.iter().enumerate() {
             let uses = step["uses"].as_str().unwrap_or_default();
@@ -551,22 +609,33 @@ mod tests {
             {
                 continue;
             }
-            let mut paths = path
+            let paths = path
                 .lines()
                 .map(str::trim)
                 .filter(|line| !line.is_empty())
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            paths.sort();
-            assert_eq!(paths, expected, "{uses} disagrees with cache::Namespace");
             if uses.starts_with("actions/cache/restore@") {
-                assert!(restore.replace(index).is_none(), "one restore step");
+                restores.push(index);
+                restored_paths.extend(paths);
             } else {
-                assert!(save.replace(index).is_none(), "one save step");
+                saves.push(index);
+                saved_paths.extend(paths);
             }
         }
-        let (restore, build, save) = (restore.unwrap(), build.unwrap(), save.unwrap());
-        assert!(restore < build && build < save, "restore, build, then save");
+        restored_paths.sort();
+        saved_paths.sort();
+        assert_eq!(
+            restored_paths, expected,
+            "restore all derived namespaces exactly once"
+        );
+        assert_eq!(
+            saved_paths, expected,
+            "save all derived namespaces exactly once"
+        );
+        let build = build.unwrap();
+        assert!(restores.iter().all(|index| *index < build));
+        assert!(saves.iter().all(|index| *index > build));
     }
 
     #[test]
@@ -642,10 +711,14 @@ mod tests {
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
-        assert!(base.contains("window.AGGRPreferences"));
-        assert!(base.contains("Object.prototype.hasOwnProperty.call(schema, key)"));
-        assert!(base.contains("values: [true, false]"));
-        assert!(base.contains("\"feed-page-size\": { initial: \"50\""));
+        assert!(base.contains("<script id=\"aggr-preferences\" type=\"application/json\">"));
+        assert!(base.contains("<script src=\"{{ 'assets/bootstrap.js' | url_for }}\"></script>"));
+        let bootstrap = DefaultTheme::get("static/bootstrap.js").unwrap();
+        assert!(
+            std::str::from_utf8(bootstrap.data.as_ref())
+                .unwrap()
+                .contains("AGGRPreferences")
+        );
         assert!(!base.contains("aggr:reading-history"));
 
         let index_file = DefaultTheme::get("templates/index.html").unwrap();
@@ -828,7 +901,7 @@ mod tests {
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
         assert!(base.contains("data-route=\"browse/\""));
         assert!(base.contains(">browse</"));
-        assert!(base.contains("data-search-action"));
+        assert!(!base.contains("data-search-action"));
         assert!(base.contains("aria-label=\"Site navigation\""));
         assert!(!base.contains("id=\"site-menu\""));
     }
@@ -871,7 +944,7 @@ mod tests {
         assert!(css.contains(".itemhead::before"));
         assert!(css.contains(".nav .brand {"));
         assert!(css.contains("margin-inline-start: 0;"));
-        assert!(css.contains("margin-inline: -0.75rem"));
+        assert!(css.contains("margin-inline: calc(-1 * var(--row-bleed))"));
 
         let item_file = DefaultTheme::get("templates/_metadata.html").unwrap();
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
@@ -928,6 +1001,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out, "sources/ a.b 2026-09-02  2026");
+        let out = renderer
+            .render_str_for_test(
+                "{{ 'sources/' | url_for }} {{ '' | url_for }} {{ 'https://example.com/x?a=1&b=2' | url_for }} \
+                 {{ '#top' | url_for }} {{ 'assets/images/a.png 1x, https://cdn.example/b,c.png 2x' | srcset_for }} \
+                 {{ 'rust' | facet_url('tag') }} {{ '<img src=\"assets/x.png\"><a href=\"#n\">n</a>' | rebase }}",
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            "sources/  https://example.com/x?a=1&b=2 #top assets/images/a.png 1x, https://cdn.example/b,c.png 2x ?q=tag%3A%22rust%22 <img src=\"assets/x.png\"><a href=\"#n\">n</a>"
+        );
+        let out = renderer
+            .env
+            .render_str(
+                "{{ 'sources/' | url_for }} {{ '' | url_for }} {{ 'https://example.com/x' | url_for }} \
+                 {{ 'assets/images/a.png 1x, https://cdn.example/b.png 2x' | srcset_for }} {{ 'rust' | facet_url('tag') }} \
+                 {{ '<img src=\"assets/x.png\"><a href=\"#n\">n</a>' | rebase }}",
+                minijinja::context! { page => minijinja::context! { root => "../../" } },
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            "../../sources/ ../../ https://example.com/x ../../assets/images/a.png 1x, https://cdn.example/b.png 2x ../../?q=tag%3A%22rust%22 <img src=\"../../assets/x.png\"><a href=\"#n\">n</a>"
+        );
     }
 
     #[test]

@@ -147,7 +147,7 @@ impl<'a> Pages<'a> {
                 title: title.to_string(),
                 document_title: document_title(&site.title, title, kind, page_number),
                 description: page_description(site, title, kind, page_number),
-                indexable: true,
+                indexable: site.indexing,
                 path: pager.path.clone(),
                 root: relative_root(&pager.path),
                 canonical_url: site.absolute(&pager.path),
@@ -204,7 +204,7 @@ impl<'a> Pages<'a> {
                 || page_description(site, title, kind, page_number),
                 |item| item_description(site, item),
             ),
-            indexable: !matches!(kind, "preferences" | "404" | "offline"),
+            indexable: site.indexing && !matches!(kind, "preferences" | "404" | "offline"),
             path: path.to_string(),
             // These documents may be served for an arbitrarily deep failed navigation. An
             // explicit scoped root keeps every asset and menu link inside the installed app.
@@ -722,6 +722,7 @@ mod tests {
                 og_locale: context::og_locale("en-GB"),
                 base_path: "/".into(),
                 base_url: base_url.map(str::to_string),
+                indexing: true,
                 repository: None,
                 data_branch: "aggr".into(),
                 network_url: outputs::AGGR_NETWORK,

@@ -60,6 +60,7 @@ dependencies = [
  "thumbhash",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
+ "unicode-normalization",
  "unicode-segmentation",
  "url",
  "walkdir",

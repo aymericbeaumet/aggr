@@ -9,7 +9,7 @@ use url::Url;
 
 use super::markdown::normalize_image_sources;
 use super::resources::{ResourceLink, leading_resources};
-use super::scan::{attribute_value, parse_tag, set_attribute};
+use super::scan::{attribute_value, element_bounds, parse_tag, set_attribute, skip_element};
 use super::strip::{decode_entities, html_to_text, sanitize};
 use super::{escape_html, highlight};
 
@@ -113,7 +113,9 @@ impl PreparedMarkdown {
     pub fn new(markdown: &str) -> Self {
         let mut plugins = comrak::options::Plugins::default();
         plugins.render.codefence_syntax_highlighter = Some(&CodeHighlighter);
-        let html = add_link_navigation_attributes(&render_markdown_html(markdown, &plugins));
+        let html = add_link_navigation_attributes(&superscript_citations(&render_markdown_html(
+            markdown, &plugins,
+        )));
         let (resources, resource_range) = leading_resources(&html)
             .map(|(resources, range)| (resources, Some(range)))
             .unwrap_or_default();
@@ -693,6 +695,45 @@ fn write_code_tag(
     output.write_char('>')
 }
 
+/// Archived publisher references can retain their original destinations without local endnotes.
+fn superscript_citations(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        let Some(tag) = parse_tag(&html[start..]) else {
+            out.push('<');
+            position = start + 1;
+            continue;
+        };
+        let Some(length) = tag.end else {
+            position = start;
+            break;
+        };
+        let after = start + length;
+        if !tag.closing && matches!(tag.name.as_str(), "pre" | "code" | "sup") {
+            position = skip_element(html, after, &tag.name);
+            out.push_str(&html[start..position]);
+            continue;
+        }
+        if !tag.closing
+            && tag.name == "a"
+            && super::markdown::is_numbered_citation(html, start)
+            && let Some((_, _, end)) = element_bounds(html, start, "a")
+        {
+            out.push_str("<sup class=\"citation-ref\">");
+            out.push_str(&html[start..end]);
+            out.push_str("</sup>");
+            position = end;
+        } else {
+            out.push_str(&html[start..after]);
+            position = after;
+        }
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
 /// Article links open separately, while fragment links such as footnote references and backrefs
 /// must navigate within the current document.
 fn add_link_navigation_attributes(html: &str) -> String {
@@ -712,6 +753,123 @@ fn add_link_navigation_attributes(html: &str) -> String {
     }
     out.push_str(remaining);
     out
+}
+
+/// Point the site-relative URLs of a rendered body (`src="assets/…"`, `srcset`, `poster`, `href`)
+/// at the page that embeds it, by prefixing `root` (`../../../` for an article page, `/repo/` for a
+/// fallback document). Fragments, query-only, root-relative and absolute references are untouched,
+/// so footnote links keep pointing into the current document and remote media stays remote.
+pub fn rebase_site_paths(html: &str, root: &str) -> String {
+    const ATTRIBUTES: [&str; 4] = ["src", "srcset", "poster", "href"];
+    let mut out = String::with_capacity(html.len() + 64);
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        let Some(tag) = parse_tag(&html[start..]) else {
+            out.push('<');
+            position = start + 1;
+            continue;
+        };
+        let Some(length) = tag.end else {
+            position = start;
+            break;
+        };
+        let raw = &html[start..start + length];
+        if tag.closing || !ATTRIBUTES.iter().any(|name| raw.contains(name)) {
+            out.push_str(raw);
+        } else {
+            out.push_str(&rebase_tag_attributes(raw, root, &ATTRIBUTES));
+        }
+        position = start + length;
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// Rewrite the listed double-quoted attributes inside one opening tag.
+fn rebase_tag_attributes(tag: &str, root: &str, attributes: &[&str]) -> String {
+    let mut out = String::with_capacity(tag.len() + 32);
+    let mut position = 0;
+    while position < tag.len() {
+        let next = attributes
+            .iter()
+            .filter_map(|name| {
+                tag[position..]
+                    .find(&format!(" {name}=\""))
+                    .map(|offset| (position + offset, *name))
+            })
+            .min_by_key(|(at, _)| *at);
+        let Some((at, name)) = next else {
+            break;
+        };
+        let value_start = at + name.len() + 3;
+        let Some(value_len) = tag[value_start..].find('"') else {
+            break;
+        };
+        let value = &tag[value_start..value_start + value_len];
+        out.push_str(&tag[position..value_start]);
+        if name == "srcset" {
+            out.push_str(&rebase_srcset(value, root));
+        } else {
+            out.push_str(&rebase_site_url(value, root));
+        }
+        position = value_start + value_len;
+    }
+    out.push_str(&tag[position..]);
+    out
+}
+
+/// `url` prefixed with `root` when it is a site-relative path; other references are returned as
+/// they are.
+pub fn rebase_site_url(url: &str, root: &str) -> String {
+    if is_site_relative(url) {
+        format!("{root}{url}")
+    } else {
+        url.to_string()
+    }
+}
+
+/// Every site-relative candidate of a `srcset` prefixed with `root`. Candidates are URLs (no
+/// whitespace) followed by an optional descriptor, separated by commas.
+pub fn rebase_srcset(srcset: &str, root: &str) -> String {
+    let mut candidates = Vec::new();
+    let mut rest = srcset.trim();
+    while !rest.is_empty() {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',');
+        if rest.is_empty() {
+            break;
+        }
+        let url_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let url = rest[..url_end].trim_end_matches(',');
+        rest = &rest[url_end..];
+        let descriptor_end = rest.find(',').unwrap_or(rest.len());
+        let descriptor = rest[..descriptor_end].trim();
+        rest = &rest[descriptor_end..];
+        let rebased = rebase_site_url(url, root);
+        candidates.push(if descriptor.is_empty() {
+            rebased
+        } else {
+            format!("{rebased} {descriptor}")
+        });
+    }
+    candidates.join(", ")
+}
+
+/// A path meant to be joined onto the site root: not a fragment, a query, an absolute path or a
+/// URL with a scheme (`https:`, `data:`, `mailto:`).
+fn is_site_relative(url: &str) -> bool {
+    if url.is_empty() || url.starts_with(['#', '/', '?']) {
+        return false;
+    }
+    !url.split_once(':').is_some_and(|(scheme, _)| {
+        scheme
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
 }
 
 /// First `max_chars` chars of the Markdown's plain text, cut on a word boundary with `…`.
@@ -737,6 +895,49 @@ fn text_excerpt(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::content::to_markdown;
+
+    #[test]
+    fn archived_numbered_citations_render_as_superscripts_without_changing_links() {
+        // The Snowden article retains external bracketed references instead of local endnotes.
+        let markdown = r"Documents.[\[4\]](https://libroot.org/post#n4)[\[5\]](https://libroot.org/post#n5)[\[1\]](#n1)";
+        let rendered = render_markdown(markdown);
+        let document = Html::parse_fragment(&rendered);
+        let references = document
+            .select(&Selector::parse("sup.citation-ref > a").unwrap())
+            .map(|node| {
+                (
+                    node.inner_html(),
+                    node.value().attr("href").unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            references,
+            vec![
+                ("[4]".into(), "https://libroot.org/post#n4".into()),
+                ("[5]".into(), "https://libroot.org/post#n5".into()),
+                ("[1]".into(), "#n1".into()),
+            ]
+        );
+        assert!(!rendered.contains("<br"), "{rendered}");
+        assert!(rendered.contains("</sup><sup"), "{rendered}");
+    }
+
+    #[test]
+    fn citation_styling_preserves_native_footnotes_code_and_ordinary_links() {
+        let markdown = "Native[^1], [1](https://example.org/page), [\\[2\\]](https://example.org/page), [chapter](#chapter).\n\n`[3](#n3)`\n\n```html\n<a href=\"#n4\">[4]</a>\n```\n\n[^1]: Real note.\n";
+        let rendered = render_markdown(markdown);
+        let document = Html::parse_fragment(&rendered);
+        assert_eq!(
+            document
+                .select(&Selector::parse("sup.footnote-ref").unwrap())
+                .count(),
+            1
+        );
+        assert!(!rendered.contains("citation-ref"), "{rendered}");
+        assert!(rendered.contains("[3](#n3)"), "{rendered}");
+        assert!(rendered.contains("href=\"#chapter\""), "{rendered}");
+    }
 
     #[test]
     fn standalone_video_links_become_inline_facades() {
@@ -1288,6 +1489,41 @@ mod tests {
         assert_eq!(
             excerpt("# Head\n\n[link](https://x.y) and `code`\n", 100),
             "Head link and code"
+        );
+    }
+
+    #[test]
+    fn rebase_site_paths_prefixes_only_site_relative_references() {
+        let html = concat!(
+            "<p>Note<sup class=\"footnote-ref\"><a href=\"#fn-1\" id=\"fnref-1\">1</a></sup> ",
+            "<a href=\"https://example.com/a\">a</a> <a href=\"/root\">r</a> <a href=\"?q=1\">q</a> ",
+            "<a href=\"mailto:x@example.com\">m</a> <code>src=\"assets/not-an-attribute\"</code></p>",
+            "<picture><source srcset=\"assets/images/a.webp 640w, https://cdn.example/b,c.webp 1200w,assets/images/d.webp 2x\">",
+            "<img src=\"assets/images/a.png\" srcset=\"assets/images/a.png\" alt=\"x\"></picture>",
+            "<video poster=\"assets/images/p.jpg\" src=\"data:video/mp4;base64,AAAA\"></video>",
+            "<a href=\"assets/docs/paper.pdf\">pdf</a>"
+        );
+        let rebased = rebase_site_paths(html, "../../../");
+        assert_eq!(
+            rebased,
+            concat!(
+                "<p>Note<sup class=\"footnote-ref\"><a href=\"#fn-1\" id=\"fnref-1\">1</a></sup> ",
+                "<a href=\"https://example.com/a\">a</a> <a href=\"/root\">r</a> <a href=\"?q=1\">q</a> ",
+                "<a href=\"mailto:x@example.com\">m</a> <code>src=\"assets/not-an-attribute\"</code></p>",
+                "<picture><source srcset=\"../../../assets/images/a.webp 640w, https://cdn.example/b,c.webp 1200w, ../../../assets/images/d.webp 2x\">",
+                "<img src=\"../../../assets/images/a.png\" srcset=\"../../../assets/images/a.png\" alt=\"x\"></picture>",
+                "<video poster=\"../../../assets/images/p.jpg\" src=\"data:video/mp4;base64,AAAA\"></video>",
+                "<a href=\"../../../assets/docs/paper.pdf\">pdf</a>"
+            )
+        );
+        assert_eq!(rebase_site_paths(html, "./"), rebase_site_paths(html, "./"));
+        assert_eq!(
+            rebase_site_paths("<img src=\"assets/x.png\">", "/repo/"),
+            "<img src=\"/repo/assets/x.png\">"
+        );
+        assert_eq!(
+            rebase_site_paths("plain <b>text</b> with src=\"assets/x\"", "../"),
+            "plain <b>text</b> with src=\"assets/x\""
         );
     }
 }

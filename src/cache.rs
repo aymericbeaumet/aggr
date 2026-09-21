@@ -14,7 +14,7 @@ use url::Url;
 
 const BUILD_NAMESPACE: &str = "build-v1";
 const DEV_NAMESPACE: &str = "dev-v1";
-const RENDER_KEY_FILE: &str = ".aggr-build-key";
+pub(crate) const RENDER_KEY_FILE: &str = ".aggr-build-key";
 
 /// Every directory aggr creates under a build or dev cache root. The reusable workflow persists
 /// the derived-state subset between runners, so a namespace's name is an on-disk contract: rename
@@ -32,6 +32,8 @@ pub enum Namespace {
     Pagefind,
     /// Validation receipts for retained images, keyed by every input byte.
     ValidatedImages,
+    /// Checksummed deployment image projections; full-quality masters remain in the archive.
+    DeploymentMedia,
     /// Backoff markers for image downloads that failed, per media implementation generation.
     ImageFailures,
     /// Backoff markers for feed-only captures awaiting their original page.
@@ -45,12 +47,13 @@ pub enum Namespace {
 impl Namespace {
     /// Test-only: unit tests pin the reusable workflow's cache list to this registry.
     #[cfg(test)]
-    pub const ALL: [Namespace; 9] = [
+    pub const ALL: [Namespace; 10] = [
         Namespace::Articles,
         Namespace::Render,
         Namespace::Discussions,
         Namespace::Pagefind,
         Namespace::ValidatedImages,
+        Namespace::DeploymentMedia,
         Namespace::ImageFailures,
         Namespace::CaptureRetries,
         Namespace::RecordingDuration,
@@ -64,6 +67,7 @@ impl Namespace {
             Namespace::Discussions => "discussions-v1",
             Namespace::Pagefind => "pagefind-v1",
             Namespace::ValidatedImages => "validated-images-v2",
+            Namespace::DeploymentMedia => "deployment-media-v1",
             Namespace::ImageFailures => "image-failures-v1",
             Namespace::CaptureRetries => "capture-retries-v1",
             Namespace::RecordingDuration => "recording-duration-v1",
@@ -96,7 +100,7 @@ pub fn ci_cached_paths() -> Vec<String> {
 }
 
 /// Bump when article extraction semantics change. Raw responses remain reusable across bumps.
-const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-9";
+const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-14";
 const MAX_ARTICLE_METADATA_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_ARTICLE_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXTRACTED_ARTICLE_BYTES: usize = 16 * 1024 * 1024;
@@ -235,10 +239,13 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("source-graph", "config/import_graph.rs"),
         source!("defaults", "../config.default.toml"),
         source!("content", "content.rs"),
+        source!("content-access", "content/access.rs"),
+        source!("content-aggregator", "content/aggregator.rs"),
         source!("content-cleanup", "content/cleanup.rs"),
         source!("content-extract", "content/extract.rs"),
         source!("content-markdown", "content/markdown.rs"),
         source!("content-module", "content/module.rs"),
+        source!("content-normalize", "content/normalize.rs"),
         source!("content-math", "content/math.rs"),
         source!("content-render", "content/render.rs"),
         source!("content-resources", "content/resources.rs"),
@@ -259,13 +266,17 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("store", "store/mod.rs"),
         source!("frontmatter", "store/frontmatter.rs"),
         source!("site", "site/mod.rs"),
+        source!("source-index", "site/source_index.rs"),
         source!("assets", "site/assets.rs"),
+        source!("budget", "site/budget.rs"),
+        source!("compressed-media", "site/compressed_media.rs"),
         source!("page", "site/page.rs"),
         source!("directory", "site/directory.rs"),
         source!("output-dir", "site/output_dir.rs"),
         source!("context", "site/context.rs"),
         source!("display", "site/display.rs"),
         source!("document", "site/document.rs"),
+        source!("document-storage", "document.rs"),
         source!("interactive", "site/interactive.rs"),
         source!("native-media", "site/native_media.rs"),
         source!("item-type", "site/item_type.rs"),
@@ -276,6 +287,8 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("render", "site/render.rs"),
         source!("video", "site/video.rs"),
         source!("threads", "threads.rs"),
+        source!("thread-embeds", "threads/embeds.rs"),
+        source!("thread-x", "threads/x.rs"),
     ]
 }
 
@@ -304,8 +317,6 @@ const RENDER_INDEPENDENT_SOURCES: &[&str] = &[
     // is listed above; its `duration.rs` submodule serves ingestion-only duration and caption
     // probes.
     "sources/",
-    // X thread expansion runs during capture; the expanded body is stored in the data branch.
-    "threads/x.rs",
     // Retention plans remove files from the checkout in sync; the build sees the resulting tree.
     "store/retention.rs",
 ];
@@ -551,6 +562,29 @@ impl ArticleCache {
         Self {
             root: Namespace::Articles.dir(cache_root),
         }
+    }
+
+    pub(crate) fn archive_retry_ready(&self, url: &Url, now: i64) -> Result<bool> {
+        let path = self
+            .root
+            .join("archive-retries")
+            .join(crate::model::sha1_hex(url.as_str()));
+        let Some(bytes) = read_bounded_regular(&path, 32)? else {
+            return Ok(true);
+        };
+        let attempted = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok());
+        Ok(attempted
+            .is_none_or(|attempted| now < attempted || now.saturating_sub(attempted) >= 86_400))
+    }
+
+    pub(crate) fn record_archive_failure(&self, url: &Url, now: i64) -> Result<()> {
+        let path = self
+            .root
+            .join("archive-retries")
+            .join(crate::model::sha1_hex(url.as_str()));
+        write(&path, now.to_string().as_bytes())
     }
 
     pub fn load(&self, url: &Url, headers: &[(String, String)]) -> Result<Option<ArticleResponse>> {
@@ -977,6 +1011,7 @@ mod tests {
                 &crate::content::ExtractedArticle {
                     html: "<article>clean</article>".into(),
                     image: None,
+                    labels: Vec::new(),
                 },
             )
             .unwrap();
@@ -1086,6 +1121,7 @@ mod tests {
         let extracted = crate::content::ExtractedArticle {
             html: "<p>article</p>".into(),
             image: None,
+            labels: Vec::new(),
         };
         cache
             .store_extracted(&response.extraction_key(), &url, &extracted)
@@ -1497,6 +1533,7 @@ mod tests {
                 &crate::content::ExtractedArticle {
                     html: String::from_utf8_lossy(body).into_owned(),
                     image: None,
+                    labels: Vec::new(),
                 },
             )
             .unwrap();

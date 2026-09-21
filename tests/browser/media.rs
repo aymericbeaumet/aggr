@@ -8,9 +8,38 @@ use fantoccini::Client;
 use serde_json::{Value, json};
 
 use crate::harness::{
-    Fixture, browser_client_with_load_strategy, emulate, finish, fixture_pdf, git, report_failure,
-    wait_booted, wait_for,
+    Fixture, browser_client_with_load_strategy, browser_client_with_preferences, emulate, finish,
+    fixture_pdf, git, report_failure, wait_booted, wait_for,
 };
+
+#[tokio::test]
+#[ignore = "requires a local Chrome WebDriver"]
+async fn pdf_fallback_is_actionable_without_a_native_viewer_or_javascript() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fixture = Fixture::with_pwa(false)?;
+    let client = browser_client_with_preferences(
+        "normal",
+        json!({"plugins.always_open_pdf_externally": true}),
+    )
+    .await?;
+    let result = async {
+        for scripts_blocked in [true, false] {
+            fixture.scripts_blocked.store(scripts_blocked, Ordering::Relaxed);
+            client.goto(&format!("{}items/example/2026-09-01-story-41/?scripts={scripts_blocked}", fixture.base)).await?;
+            wait_for(&client, "!!document.querySelector('.document-fallback a')").await?;
+            anyhow::ensure!(client.execute("return navigator.pdfViewerEnabled", vec![]).await? == false, "fixture disables the real browser PDF viewer");
+            let fallback = client.find(fantoccini::Locator::Css(".document-fallback a")).await?;
+            anyhow::ensure!(fallback.is_displayed().await?, "native object reveals the actionable fallback when no viewer is available");
+            anyhow::ensure!(fallback.attr("href").await?.as_deref() == Some(format!("{}document.pdf", fixture.base).as_str()), "fallback retains the original document URL");
+            let geometry = client.execute("const frame=document.querySelector('.document-frame'),caption=document.querySelector('.document-reader figcaption'),style=getComputedStyle(caption);return {height:frame.getBoundingClientRect().height,centered:style.textAlign==='center',italic:style.fontStyle==='italic',fallback:document.querySelector('.document-fallback').textContent,booted:typeof window.Swup==='function'}", vec![]).await?;
+            anyhow::ensure!(geometry["height"].as_f64().unwrap_or_default() >= 384.0 && geometry["centered"] == true && geometry["italic"] == true, "failed documents preserve viewer geometry and caption styling: {geometry}");
+            if scripts_blocked { anyhow::ensure!(geometry["booted"] == false, "fallback works before application scripts load"); }
+        }
+        Ok(())
+    }.await;
+    report_failure(&client, "pdf-fallback", &result).await;
+    finish(client, result).await
+}
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
@@ -289,8 +318,8 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                 client.execute(r#"
                   window.mediaEvents=0;
                   window.documentEvents=0;
-                  document.querySelector('.document-viewer')?.addEventListener('load',()=>window.documentEvents++);
-                  document.querySelectorAll('embed,iframe,video,audio,img').forEach(media=>{
+                  ['load','error'].forEach(type=>document.querySelector('.document-viewer')?.addEventListener(type,()=>window.documentEvents++));
+                  document.querySelectorAll('object,iframe,video,audio,img').forEach(media=>{
                     ['load','error','loadedmetadata'].forEach(type=>media.addEventListener(type,()=>window.mediaEvents++));
                   });
                 "#, vec![]).await?;

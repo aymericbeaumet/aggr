@@ -125,19 +125,34 @@ async fn contextual_source_completion_and_item_types() -> Result<()> {
     let result = async {
         client.goto(&fixture.base).await?;
         wait_for(&client, "!!document.querySelector('.search-input-line')").await?;
-        for (query, label, count) in [
-            ("category:engineering source:", "Example", 45),
-            ("category:news source:", "Underscore_", 1),
-            ("type:podcast source:", "Underscore_", 1),
+        let local_publisher = url::Url::parse(&fixture.base)?;
+        let local_publisher = local_publisher.host_str().unwrap().to_string();
+        for (query, label, expected) in [
+            ("category:engineering source:", "Example", json!({
+                "Example": "source · 45", local_publisher: "source · 1",
+                "twitch.tv": "source · 1", "vimeo.com": "source · 1", "youtube.com": "source · 1",
+            })),
+            ("category:news source:", "Underscore_", json!({"Underscore_": "source · 1"})),
+            ("type:podcast source:", "Underscore_", json!({"Underscore_": "source · 1"})),
         ] {
             client.execute("const q=document.querySelector('#q');q.focus();q.value=arguments[0];q.setSelectionRange(q.value.length,q.value.length);q.dispatchEvent(new Event('input',{bubbles:true}))",vec![json!(query)]).await?;
-            wait_for(&client,&format!("document.querySelectorAll('.search-completion').length===1 && document.querySelector('.completion-label')?.textContent==={}",json!(label))).await?;
-            anyhow::ensure!(client.execute("return document.querySelector('.search-completion small').textContent",vec![]).await?==format!("source · {count}"),"source counts reflect the other active clauses");
+            wait_for(&client,&format!("[...document.querySelectorAll('.completion-label')].some(label=>label.textContent==={})",json!(label))).await?;
+            let completions = client.execute("return Object.fromEntries([...document.querySelectorAll('.search-completion')].map(entry=>[entry.querySelector('.completion-label').textContent,entry.querySelector('small').textContent]))",vec![]).await?;
+            anyhow::ensure!(completions == expected, "{query}: publisher and feed counts reflect the other active clauses: {completions}, expected {expected}");
         }
+        client.execute("const q=document.querySelector('#q');q.value='type:podcast source:under';q.setSelectionRange(q.value.length,q.value.length);q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
+        wait_for(&client,"document.querySelectorAll('.search-completion').length===1 && document.querySelector('.completion-label')?.textContent==='Underscore_'").await?;
         key(&client,"Enter").await?;
-        wait_for(&client,"document.querySelector('#q').value.includes('source:\"Underscore_\"') && !document.querySelector('.search-completions') && document.querySelector('#search-status')?.textContent==='1 article'").await?;
+        wait_for(&client,"document.querySelector('#q').value.includes('source:\"open.spotify.com\"') && !document.querySelector('.search-completions') && document.querySelector('#search-status')?.textContent==='1 article'").await?;
         anyhow::ensure!(client.execute("return document.querySelector('.search-results .title').textContent",vec![]).await?=="A podcast episode","Enter selects the named show");
-        anyhow::ensure!(client.execute("return document.querySelector('.search-results .source-resolved').textContent",vec![]).await?=="spotify.com/underscore","podcast metadata uses a readable profile label");
+        anyhow::ensure!(client.execute("return document.querySelector('.search-results .source-resolved').textContent",vec![]).await?=="open.spotify.com","podcast publisher metadata uses its canonical hostname");
+        anyhow::ensure!(client.execute("return document.querySelectorAll('.search-results .source-feed').length",vec![]).await?==0,"same-host podcast publisher and feed share one source membership");
+        search_query(&client,"source:youtube.com",1).await?;
+        let publisher_hit = client.execute("return document.querySelector('.search-results .title').href",vec![]).await?;
+        anyhow::ensure!(client.execute("return [...document.querySelectorAll('.search-results .domain a')].map(link=>link.textContent)",vec![]).await?==json!(["youtube.com", "publisher.invalid"]),"publisher and originating feed both have source links");
+        search_query(&client,"source:publisher.invalid source:youtube.com",45).await?;
+        search_query(&client,"source:publisher.invalid type:video",3).await?;
+        anyhow::ensure!(client.execute("return [...document.querySelectorAll('.search-results .title')].filter(link=>link.href===arguments[0]).length",vec![publisher_hit]).await?==1,"feed search contains the same canonical publisher article once");
         search_query(&client,"type:document",1).await?;
         anyhow::ensure!(client.execute("return document.querySelector('.search-results .u-bookmark-of').href.endsWith('document.pdf')",vec![]).await?==true,"PDFs are searchable as documents");
         Ok(())
@@ -191,9 +206,9 @@ async fn search_preview_errors_keep_geometry_and_readable_fallbacks() -> Result<
     let fixture = Fixture::with_pwa(false)?;
     let client = browser_client().await?;
     let result = async {
-        client.goto(&format!("{}?q=source:example", fixture.base)).await?;
+        client.goto(&format!("{}?q=source:publisher.invalid", fixture.base)).await?;
         wait_for(&client, "!!document.querySelector('.search-results .preview-image')?.naturalWidth").await?;
-        let before = client.execute("const image=document.querySelector('.search-results .preview-image');window.previewImage=image;window.previewSource=image.src;const r=image.parentElement.getBoundingClientRect();image.src=new URL('missing-preview.png',document.baseURI).href;return {width:r.width,height:r.height}", vec![]).await?;
+        let before = client.execute("const image=document.querySelector('.search-results .preview-image');window.previewImage=image;window.previewSource=image.src;const r=image.parentElement.getBoundingClientRect();image.src=new URL('missing-preview.png',new URL(document.getElementById('aggr-page').dataset.root,location.href)).href;return {width:r.width,height:r.height}", vec![]).await?;
         wait_for(&client,"window.previewImage.parentElement.classList.contains('is-error')").await?;
         let failed=client.execute("const image=window.previewImage,r=image.parentElement.getBoundingClientRect();return {width:r.width,height:r.height,color:getComputedStyle(image).color,alt:image.alt}",vec![]).await?;
         anyhow::ensure!(before["width"]==failed["width"] && before["height"]==failed["height"] && failed["color"]!="rgba(0, 0, 0, 0)" && failed["alt"].as_str().is_some_and(|alt|!alt.is_empty()),"search image failures preserve space and readable alt text: {failed}");
@@ -256,8 +271,9 @@ async fn search_control_mount_and_delayed_facets() -> Result<()> {
         client.execute("window.releaseSearchManifest()",vec![]).await?;
         wait_for(&client,"[...document.querySelectorAll('.search-completion')].some(row=>row.textContent.toLowerCase().includes('example'))").await?;
         key(&client,"\u{e015}").await?;
+        key(&client,"\u{e013}").await?;
         key(&client,"Tab").await?;
-        wait_for(&client,"document.querySelector('#q').value.trim()==='source:example' && !document.querySelector('.search-completions')").await?;
+        wait_for(&client,"document.querySelector('#q').value.trim()==='source:\"publisher.invalid\"' && !document.querySelector('.search-completions')").await?;
         wait_for(&client,"document.querySelector('.search-results .row')").await?;
         Ok(())
     }.await;
@@ -348,7 +364,7 @@ async fn rich_search_and_complete_offline_index() -> Result<()> {
             "published search manifest: {}",
             json!({"version":published["version"],"docs":published["docs"]})
         );
-        eprintln!("browser search manifest: {}", client.execute_async("const done=arguments[arguments.length-1];fetch(new URL('search-manifest.json',document.baseURI),{cache:'no-store'}).then(r=>r.json()).then(m=>done({version:m.version,docs:m.docs})).catch(e=>done(String(e)))",vec![]).await.unwrap_or(Value::Null));
+        eprintln!("browser search manifest: {}", client.execute_async("const done=arguments[arguments.length-1];fetch(new URL('search-manifest.json',new URL(document.getElementById('aggr-page').dataset.root,location.href)),{cache:'no-store'}).then(r=>r.json()).then(m=>done({version:m.version,docs:m.docs})).catch(e=>done(String(e)))",vec![]).await.unwrap_or(Value::Null));
     }
     let _ = set_offline(&client, false).await;
     finish(client, result).await
@@ -475,11 +491,11 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
 
     search_query(
         client,
-        "source:example category:engineering tag:rust date:>=2026-09-02",
+        "source:publisher.invalid category:engineering tag:rust date:>=2026-09-02",
         22,
     )
     .await?;
-    search_query(client, "comfortably \"current page\" -\"rare exclusion\" source:example category:engineering tag:reading", 43).await?;
+    search_query(client, "comfortably \"current page\" -\"rare exclusion\" source:publisher.invalid category:engineering tag:reading", 43).await?;
     anyhow::ensure!(
         client
             .execute(
@@ -516,7 +532,7 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         .await?
         .send_keys("\u{e015}\u{e007}")
         .await?;
-    wait_for(client,"document.querySelector('#q').value.includes('source:example') && document.querySelector('#q').value.includes('tag:rust')").await?;
+    wait_for(client,"document.querySelector('#q').value.includes('source:\"publisher.invalid\"') && document.querySelector('#q').value.includes('tag:rust')").await?;
     anyhow::ensure!(
         client
             .execute("return document.activeElement?.id", vec![])
@@ -617,7 +633,7 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
     wait_for(client,"!document.querySelector('.search-completions') && document.querySelector('#q').getAttribute('aria-expanded')==='false'").await?;
 
     for (directory, scope) in [
-        ("sources/example/", "source:example"),
+        ("sources/publisher.invalid/", "source:publisher.invalid"),
         ("categories/engineering/", "category:engineering"),
         ("tags/rust/", "tag:rust"),
     ] {
@@ -654,7 +670,7 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
             "sources/",
             "Sources",
             "Sources are the feeds and sites you follow.",
-            "source:example",
+            "source:publisher.invalid",
         ),
         (
             "tags/",
@@ -681,11 +697,16 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
                 .is_some_and(|text| text.contains(introduction)),
             "{directory} explains its own organizing concept"
         );
-        canonical_facet_click(client, ".browse-entry-link", qualifier).await?;
+        let link = if directory == "sources/" {
+            ".browse-entry-link[href*=\"source%3A%22publisher.invalid%22\"]"
+        } else {
+            ".browse-entry-link"
+        };
+        canonical_facet_click(client, link, qualifier, 45).await?;
     }
-    for (selector, qualifier) in [
-        (".row .meta .domain", "source:example"),
-        (".row .meta .category a", "category:engineering"),
+    for (selector, qualifier, count) in [
+        (".row .meta .domain > a", "source:publisher.invalid", 45),
+        (".row .meta .category a", "category:engineering", 45),
     ] {
         client.goto(&fixture.base).await?;
         wait_for(
@@ -693,7 +714,7 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
             &format!("document.querySelector({})", json!(selector)),
         )
         .await?;
-        canonical_facet_click(client, selector, qualifier).await?;
+        canonical_facet_click(client, selector, qualifier, count).await?;
     }
     client
         .goto(&format!(
@@ -702,12 +723,19 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         ))
         .await?;
     wait_for(client, "document.querySelector('.item-tags .tag')").await?;
-    canonical_facet_click(client, ".item-tags .tag", "tag:reading").await?;
-    canonical_facet_click(client, ".search-results .meta .domain", "source:example").await?;
+    canonical_facet_click(client, ".item-tags .tag", "tag:reading", 45).await?;
+    canonical_facet_click(
+        client,
+        ".search-results .meta .domain > a",
+        "source:publisher.invalid",
+        45,
+    )
+    .await?;
     canonical_facet_click(
         client,
         ".search-results .meta .category a",
         "category:engineering",
+        45,
     )
     .await?;
 
@@ -871,7 +899,12 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
     Ok(())
 }
 
-async fn canonical_facet_click(client: &Client, selector: &str, qualifier: &str) -> Result<()> {
+async fn canonical_facet_click(
+    client: &Client,
+    selector: &str,
+    qualifier: &str,
+    count: usize,
+) -> Result<()> {
     let (kind, value) = qualifier
         .split_once(':')
         .context("fixture facet qualifier")?;
@@ -891,6 +924,6 @@ async fn canonical_facet_click(client: &Client, selector: &str, qualifier: &str)
         "facet href must be a copyable canonical feed query: {url}"
     );
     client.find(Locator::Css(selector)).await?.click().await?;
-    wait_for(client, &format!("location.pathname==='/reader/' && new URL(location.href).searchParams.get('q')==={} && document.querySelector('#q')?.value==={} && document.querySelector('#search-status')?.textContent==='45 articles'",json!(qualifier),json!(qualifier))).await?;
+    wait_for(client, &format!("location.pathname==='/reader/' && new URL(location.href).searchParams.get('q')==={} && document.querySelector('#q')?.value==={} && document.querySelector('#search-status')?.textContent==='{count} articles'",json!(qualifier),json!(qualifier))).await?;
     Ok(())
 }

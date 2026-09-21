@@ -1,14 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { readableQuery, resolveFacet } from './facets';
+import aliasCases from '../../../tests/fixtures/source-filter-aliases.json';
 
 describe('readable initial facet queries', () => {
-  const facets = {source:[{value:'spotify-show-123',label:'Underscore_',count:12},{value:'example',label:'Example',count:4}], category:[],tag:[],'published-day':[]};
-  it('replaces backing IDs without altering text, exclusions, or equivalent IDs', () => {
-    expect(readableQuery('rust -source:spotify-show-123 source:"example"',facets)).toBe('rust -source:"Underscore_" source:"example"');
-    expect(readableQuery('source:"Underscore_"',facets)).toBe('source:"Underscore_"');
+  const facets = {source:[{value:'hnrss.org',label:'Hacker News: Front Page',count:12},{value:'example',label:'Example',count:4}], category:[],tag:[],'published-day':[]};
+  it('keeps source hosts canonical without altering text, exclusions, or display names', () => {
+    expect(readableQuery('rust -source:hnrss.org source:"example"',facets)).toBe('rust -source:hnrss.org source:"example"');
+    expect(readableQuery('source:"Hacker News: Front Page"',facets)).toBe('source:"hnrss.org"');
   });
   it('keeps duplicate-label IDs and tolerates incomplete initial queries', () => {
-    expect(readableQuery('source:spotify-show-123',{...facets,source:[...facets.source,{value:'other-show',label:'Underscore_',count:2}]})).toBe('source:spotify-show-123');
+    expect(readableQuery('source:hnrss.org',{...facets,source:[...facets.source,{value:'other-show',label:'Hacker News: Front Page',count:2}]})).toBe('source:hnrss.org');
     expect(readableQuery('source:',facets)).toBe('source:');
   });
   it('normalizes Unicode aliases but preserves exact identifier precedence across catalogue replacements', () => {
@@ -20,4 +21,17 @@ describe('readable initial facet queries', () => {
     expect(resolveFacet('news',replacement,'source').value).toBe('news');
     expect(resolveFacet('news',initial,'source').value).toBe('fullwidth');
   });
+});
+
+describe('source filters retain canonical identifiers despite presentation aliases', () => {
+  for (const { name, facets } of aliasCases) {
+    it(name, () => {
+      for (const facet of facets) {
+        const query = readableQuery('source:' + JSON.stringify(facet.value), {source: facets, category: [], tag: [], 'published-day': []});
+        expect(query).toBe('source:' + JSON.stringify(facet.expected));
+        const value = facet.expected;
+        expect(resolveFacet(value, facets, 'source').value).toBe(facet.value);
+      }
+    });
+  }
 });

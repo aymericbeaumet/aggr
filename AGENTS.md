@@ -29,6 +29,16 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   challenge fallback uses wreq/BoringSSL; both transports share request and preservation limits.
 - `config.default.toml` is the source of truth for defaults and must stay in sync with
   `config.rs` (it is embedded and parsed by a test).
+- `aggr init` embeds `examples/starter.toml`: keep that small, explicit starter distinct from
+  the full defaults. Retention bounds the current tree, never accumulated Git history.
+- Search-engine indexing is opt-in with `[site] indexing = true` in release builds; development
+  and previews remain noindex. Preserve local search and instance discovery regardless.
+- Build budgets preserve all article text and leave archived media untouched. Admit complete media
+  families newest first, measure the complete output, and fail if text and required assets cannot
+  fit. Include publication cache markers and recheck restored output. Cache compressed publication
+  copies separately from sync state; see `docs/build-budget.md`.
+- aggr is source-available under PolyForm Perimeter 1.0.1; prior MIT releases stay MIT.
+  Preserve third-party notices and follow `CONTRIBUTING.md` for incoming contribution rights.
 - `VERSION` and `Cargo.toml` `version` must agree; releases are tags `vX.Y.Z`. The stable reusable
   workflow (`@v1`) selects the greatest published binary in its major channel at run time; binary
   releases do not move the workflow tag. Distribute binaries through GitHub Releases and mise
@@ -172,9 +182,26 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   Script-drawn charts with inline data become tables; feed-only captures are retried with a daily,
   bounded backoff and upgraded in place when the original page becomes available. Bump the extraction-cache version when extraction semantics change;
   missing content already absent from stored HTML requires a fresh extraction.
+  Notes the prose cites by number are content however link-dense they are; sibling note blocks
+  with ids (not only `<li>` lists) become Markdown footnotes, and an unreferenced or empty note
+  leaves its reference an ordinary link. A page whose files are line tables (GitHub gists) is
+  archived as those files, never as the discussion under them.
+  Reject positively identified subscription offers as article bodies. Public archive recovery requires
+  matching original URL, title, and readable content; keep requests bounded and backed off. Preserve
+  original provenance, reject archive lookup pages as snapshots, and show an honest fallback on failure.
+  Capture code-language hints before Readability strips classes; preserve explicit plain text and
+  legacy inline code. Decode publisher email-protection payloads into escaped text, never markup.
   Publisher-feed reconciliation enriches media in place and records canonical dedupe aliases; keep article paths
   and hand-edited content, reject ambiguous matches, and leave repeats unchanged.
-- Derive publisher/profile identity from configured or persisted source metadata, never from slugs.
+- Canonical publisher IDs are normalized article hostnames: lowercase/punycode, without trailing dots
+  or conventional `www.`, paths, ports, or cross-domain provider aliases. Preserve other subdomains.
+  Preserve configured/persisted feed identities and profile names as provenance; never migrate
+  stored source IDs to publisher IDs. Canonical articles carry deduplicated publisher/feed
+  memberships and stay unique globally. Visible publisher and `via` labels use canonical hostnames,
+  without subscription paths or profile names. Exact source IDs win manual alias collisions. See [client development](docs/client.md).
+  Public source IDs and filter values use normalized hostnames only; group same-host subscriptions
+  while preserving their archived IDs, article paths, and individual OPML endpoints. Display names
+  must never replace hostnames in generated queries.
   Keep upstream or configured labels distinct from categories; do not invent tags for unlabelled items.
   Model, code, and paper buttons are resource links, not topic tags; retain their destinations when
   separating them from the reader body and keep them in portable exports.
@@ -213,6 +240,11 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - Keep mobile navigation fixed to the viewport bottom. Apply the safe-area inset once inside the
   bar and derive content clearance from its measured height; never stack extra safe-area spacers.
   Skip navigation animations and bound intent/idle prefetch; uncached navigation remains progressive.
+  Keep feed search pinned below the measured header, with results outside the sticky wrapper.
+  Touch tabs activate once on release with immediate contact feedback. Article swipes must yield to
+  selection, vertical scroll, pinch zoom, controls, horizontal scrollers, and browser edge gestures.
+  Never apply `touch-action: pan-y` to an ancestor containing horizontal scrollers.
+  Share keyboard/swipe article destinations; a missing neighbor returns to the main feed.
 - Keep application and content versions separate. Feed changes update lists automatically, even
   while a release refresh is pending; only binary or effective template/static changes offer an
   app refresh. Verify background polling without synthetic navigation/reconnect events.
@@ -224,6 +256,10 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   Keep the real Swup instance separate from window named properties such as `<main id="swup">`.
   Svelte owns search dates/selection; static DOM helpers must not rewrite component-bound nodes.
   Keep generated HTML usable without JavaScript.
+- Documents carry no `<base>` element. `url_for` and `facet_url` resolve from the page being
+  rendered; `site_path` keeps the root-relative form for data attributes the client resolves
+  against its known root, and `item.body_html | rebase` points body media at the page. Fragment
+  links such as footnotes must stay `#id` so they navigate within the current document.
 - Apply every search clause before counting or pagination. Bind runtime, chunks, and completion
   vocabulary to one index version. Offline search is ready only after its complete manifest is
   cached; index fragments never establish article/media readiness.
@@ -234,6 +270,11 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - Keep reading and supported media inside aggr whenever practical, with accessible original-link
   fallbacks when a provider or browser prevents embedding. Activating a provider facade plays at
   once: ask the player directly instead of trusting an `autoplay` parameter.
+- Keep PDFs as bounded, validated item companions; preserve them across refresh and replication.
+  Admit same-origin document URLs through the media budget and include retained copies in offline
+  resources. Serve `application/pdf`, including in dev previews. Preserve the publisher fallback
+  and portable caption links; see
+  [PDF preservation](docs/interoperability.md#pdf-preservation).
 - A shared selection addresses words, not DOM offsets, so the link survives a rebuild. Keep the
   range in the fragment, update it live while the selection changes, and clear it when it empties.
   The toolbar answers the reader's own gesture, never a restored selection, and scrolling with a

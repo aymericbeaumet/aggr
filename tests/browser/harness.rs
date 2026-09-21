@@ -727,12 +727,20 @@ pub(crate) async fn browser_client() -> Result<Client> {
 }
 
 pub(crate) async fn browser_client_with_load_strategy(strategy: &str) -> Result<Client> {
+    browser_client_with_preferences(strategy, json!({})).await
+}
+
+pub(crate) async fn browser_client_with_preferences(
+    strategy: &str,
+    preferences: Value,
+) -> Result<Client> {
     let driver = std::env::var("AGGR_WEBDRIVER_URL")
         .context("set AGGR_WEBDRIVER_URL to the local driver")?;
     let mut capabilities = serde_json::Map::new();
     capabilities.insert("browserName".into(), json!("chrome"));
     capabilities.insert("pageLoadStrategy".into(), json!(strategy));
     let mut chrome = json!({"args":["--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-search-engine-choice-screen"]});
+    chrome["prefs"] = preferences;
     if let Ok(binary) = std::env::var("AGGR_CHROME_BINARY") {
         chrome["binary"] = json!(binary);
     }

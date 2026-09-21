@@ -10,7 +10,7 @@
 all-features = true
 
 [licenses]
-# aggr is MIT. This list is exhaustive: a crate whose license expression cannot be satisfied by
+# Dependency licenses are exhaustive: a crate whose license expression cannot be satisfied by
 # it fails the check. That is what keeps GPL-3.0 out (the older stable wreq-util release is
 # GPL-3.0; the pinned prereleases are Apache-2.0, see docs/interoperability.md) — cargo-deny has no separate
 # deny list any more, so do not "fix" a bump by adding a copyleft license here.
@@ -31,7 +31,15 @@ allow = [
 # stringmetrics (dev, via httpmock) declares no SPDX expression, only an Apache-2.0 LICENSE file;
 # the default threshold recognises it without a clarification.
 confidence-threshold = 0.8
-exceptions = []
+exceptions = [
+  # aggr's own license does not relax the policy for dependencies.
+  { crate = "aggr", allow = ["LicenseRef-PolyForm-Perimeter-1.0.1"] },
+]
+
+[[licenses.clarify]]
+crate = "aggr"
+expression = "LicenseRef-PolyForm-Perimeter-1.0.1"
+license-files = [{ path = "LICENSE", hash = 0x2f476537 }]
 
 [licenses.private]
 ignore = false

@@ -1,7 +1,7 @@
 # The reader
 
 The header links to **browse** (categories, sources, and tags), **preferences**, and `aggr.toml`.
-On mobile, feed, search, browse, and preferences sit in the bottom tab bar; feed numbers are hidden.
+On mobile, feed, browse, and preferences sit in the bottom tab bar; feed numbers are hidden.
 Search sits above the first feed item and filters in place. Choosing a category, source, or tag
 fills the search field on the main feed; its URL can be shared. Static archives remain available
 without JavaScript.
@@ -30,9 +30,14 @@ resolved in the reader from the article's own text.
 
 ## Mobile
 
-Feed, search, browse, and preferences sit in a compact bottom tab bar above the home indicator.
-The current tab is marked by colour, links read by colour rather than an underline, and taps do
+Feed, browse, and preferences sit in a compact bottom tab bar above the home indicator.
+The feed search field stays pinned below the header while its results scroll.
+The current tab has a rounded selected background. Links read by colour rather than an underline, and taps do
 not flash the platform's default highlight.
+
+Swipe left on article prose to open the next older article, or right for the previous newer one.
+Moving past either end returns to the main feed. Links, media, code, and text selection keep their
+own gestures.
 
 ## Preferences
 
@@ -71,12 +76,12 @@ separately.
 
 | Keys | Action |
 |---|---|
-| `Cmd+K` / `Ctrl+K` | Focus global search. |
+| `Cmd+K` / `Ctrl+K`, or `/` | Focus global search. |
 | `↑` / `↓`, then `Enter` in search | With suggestions open, choose and accept one; otherwise move the result cursor and open the selected result. `Escape` closes suggestions, then removes focus. |
 | `j` / `k` in article lists | Select the next / previous item; the first press selects the first item. |
 | `gg` / `G` | Select the first / last visible feed item; scroll to the top / bottom on article pages. |
 | `o` / `Enter` in article lists | Open the selected item. |
-| `j` / `k` in articles | Open the older / newer article. At either end, the key is a no-op. |
+| `j` / `k` in articles | Open the older / newer article. Moving past either end returns to the feed. |
 | `O` | Open the original for the selected feed item or current article. |
 | Uppercase network key | Open the selected/current item's matched discussion, or search that enabled network for its original URL. Built-ins use `H`, `R`, and `X`. |
 | `u` / `d` in articles | Scroll up / down. |

@@ -12,6 +12,7 @@ use crate::model::{RawItem, dedupe_keys, normalize_link};
 pub(super) struct ExistingPaths {
     pub(super) items: BTreeMap<String, BTreeMap<String, String>>,
     pub(super) podcasts: podcast::Archive,
+    pub(super) documents: BTreeMap<String, Vec<String>>,
     pub(super) images: BTreeMap<String, Vec<ArchivedImages>>,
     pub(super) recordings: BTreeMap<String, Vec<(String, RawItem)>>,
     /// Items still carrying only feed content because the original page was unavailable, and
@@ -32,6 +33,15 @@ pub(super) fn index_archive(
     let mut links = HashSet::new();
     let mut paths = ExistingPaths::default();
     for item in items {
+        if item.front.replicated_at.is_none()
+            && super::documents::url(&item.front.link, &item.front.extra).is_some()
+        {
+            paths
+                .documents
+                .entry(item.front.source.clone())
+                .or_default()
+                .push(item.path.clone());
+        }
         let audio = item
             .front
             .extra
@@ -60,9 +70,13 @@ pub(super) fn index_archive(
                 ));
         }
         // Binary links are final as feed content: heavy extraction never requests them.
+        let subscription_wall = url::Url::parse(&item.front.link)
+            .is_ok_and(|url| crate::content::is_subscription_wall(&item.body, &url));
         let wants_capture = match item.front.content {
             crate::model::ContentKind::Feed | crate::model::ContentKind::None => true,
-            crate::model::ContentKind::Extracted => crate::content::is_placeholder_body(&item.body),
+            crate::model::ContentKind::Extracted => {
+                crate::content::is_placeholder_body(&item.body) || subscription_wall
+            }
         };
         if wants_capture
             && item.front.replicated_at.is_none()
@@ -85,7 +99,13 @@ pub(super) fn index_archive(
                         authors: item.front.authors.clone(),
                         labels: item.front.labels.clone(),
                         summary: item.front.summary.clone(),
-                        extra: item.front.extra.clone(),
+                        extra: {
+                            let mut extra = item.front.extra.clone();
+                            if subscription_wall {
+                                extra.insert("subscription_required".into(), true.into());
+                            }
+                            extra
+                        },
                         ..Default::default()
                     },
                 ));
@@ -195,6 +215,28 @@ mod tests {
     }
 
     #[test]
+    fn subscription_offers_are_eligible_for_bounded_capture_repair() {
+        let gated = crate::model::Item {
+            path: "items/feed/2026/09/gated".into(),
+            front: FrontMatter { title: "Article".into(), link: "https://www.ft.com/content/123".into(), source: "feed".into(), content: ContentKind::Extracted, ..Default::default() },
+            body: "Save 50% on Standard Digital\n\nExplore more offers. Premium Digital. Complete digital access. Full range of subscriptions.".into(),
+        };
+        let mut readable = gated.clone();
+        readable.path = "items/feed/2026/09/readable".into();
+        readable.body = format!(
+            "An actual article about subscriptions.\n\n{}",
+            readable.body
+        );
+        let (_, paths) = index_archive([gated, readable]);
+        assert_eq!(paths.captures["feed"].len(), 1);
+        assert_eq!(paths.captures["feed"][0].0, "items/feed/2026/09/gated");
+        assert_eq!(
+            paths.captures["feed"][0].1.extra["subscription_required"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
     fn archive_index_scans_items_once_and_keeps_metadata_paths_per_source() {
         let visited = std::cell::Cell::new(0);
         let items = ["first", "second"].map(|source| crate::model::Item {
@@ -224,6 +266,34 @@ mod tests {
                     .all(|path| path == &format!("items/{source}/story"))
             );
         }
+    }
+
+    #[test]
+    fn nondefault_ports_reindex_retained_links_without_merging_endpoints() {
+        let items = [8080, 9090].map(|port| crate::model::Item {
+            path: format!("items/blog/retained-{port}"),
+            front: FrontMatter {
+                source: "blog".into(),
+                link: format!("http://www.example.com:{port}/story/?utm_source=old"),
+                ..Default::default()
+            },
+            body: String::new(),
+        });
+        let (links, paths) = index_archive(items);
+        assert_eq!(links.len(), 2);
+        let indexed = &paths.items["blog"];
+        for port in [8080, 9090] {
+            let raw = RawItem {
+                link: format!("http://example.com:{port}/story#new"),
+                ..Default::default()
+            };
+            assert!(links.contains(&normalize_link(&raw.link)));
+            let keys = dedupe_keys(&raw);
+            assert_eq!(keys.len(), 1);
+            assert_eq!(indexed[&keys[0]], format!("items/blog/retained-{port}"));
+        }
+        assert!(!links.contains("https://example.com/story"));
+        assert!(!links.contains("http://example.com:7070/story"));
     }
 
     #[test]

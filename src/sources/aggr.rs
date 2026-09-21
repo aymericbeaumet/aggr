@@ -221,13 +221,15 @@ pub(crate) async fn hydrate_companions(mut raw: RawItem) -> RawItem {
             _ => None,
         };
         let images = store.read_image_assets(&item)?;
-        Ok((preview, images))
+        let document = store.read_document(&item)?;
+        Ok((preview, images, document))
     })
     .await;
     match loaded {
-        Ok(Ok((preview, images))) => {
+        Ok(Ok((preview, images, document))) => {
             raw.preview = preview;
             raw.images = images;
+            raw.document = document;
         }
         Ok(Err(error)) => {
             log::debug!("ignoring unavailable mirrored media for {item_path}: {error:#}");
@@ -276,6 +278,7 @@ pub fn convert(item: &Item, html: Option<String>, via: &str) -> RawItem {
         preview_candidates: Vec::new(),
         preview: None,
         images: Vec::new(),
+        document: None,
         extra,
     }
 }
@@ -313,6 +316,51 @@ mod tests {
     use super::*;
     use crate::model::FrontMatter;
     use chrono::{TimeZone, Utc};
+
+    #[tokio::test]
+    async fn mirror_hydrates_document_from_upstream_bytes_and_ignores_corrupt_companions() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path());
+        let document = crate::document::Asset {
+            source_url: "https://publisher.invalid/paper.pdf".into(),
+            bytes: b"%PDF-1.7\nretained paper".to_vec(),
+        };
+        store
+            .write_item_with_document(
+                crate::store::NewItem {
+                    dir: "items/upstream",
+                    stem: "paper",
+                    front: &FrontMatter::default(),
+                    body: "Abstract",
+                    html: None,
+                    preview: None,
+                    images: &[],
+                },
+                Some(&document),
+            )
+            .unwrap();
+        let stored = store.read_item("items/upstream/paper").unwrap();
+        let make_raw = || {
+            let mut raw = convert(&stored, None, "https://example.com/upstream");
+            attach_companion_locator(&mut raw, directory.path(), &stored.path).unwrap();
+            raw
+        };
+        assert_eq!(
+            hydrate_companions(make_raw()).await.document,
+            Some(document.clone())
+        );
+        std::fs::write(
+            directory
+                .path()
+                .join("items/upstream")
+                .join(document.metadata("paper").file),
+            b"corrupt",
+        )
+        .unwrap();
+        let fallback = hydrate_companions(make_raw()).await;
+        assert!(fallback.document.is_none());
+        assert!(fallback.content_html.unwrap().contains("Abstract"));
+    }
 
     fn item() -> Item {
         Item {

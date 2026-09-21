@@ -56,7 +56,7 @@
       <section aria-labelledby="shortcut-anywhere">
         <h3 id="shortcut-anywhere">Search and help</h3>
         <dl class="shortcut-list">
-          <div><dt class="key-alternatives">{@render keyPair('⌘', 'k')}<small>or</small>{@render keyPair('Ctrl', 'k')}</dt><dd>Global search</dd></div>
+          <div><dt class="key-alternatives"><kbd>/</kbd><small>or</small>{@render keyPair('⌘', 'k')}<small>or</small>{@render keyPair('Ctrl', 'k')}</dt><dd>Global search</dd></div>
           <div><dt><kbd>?</kbd></dt><dd>Show this help</dd></div>
           <div><dt><kbd>Esc</kbd></dt><dd>Close this help</dd></div>
         </dl>

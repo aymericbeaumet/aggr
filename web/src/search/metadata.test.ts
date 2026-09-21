@@ -25,6 +25,7 @@ describe('shared reader metadata', () => {
       source_slug: 'publisher', source_display: 'publisher<&>', source_title: 'Publisher "quoted"',
       date: '2026-09-09T10:00:00Z', updated: '2026-09-09T11:00:00Z',
       is_aggregated: true, feed_display: 'feed.test/news',
+      feed_sources: [{ slug: 'feed', name: 'The Feed', display: 'feed.test/news' }],
       category: { slug: 'rust', name: 'rust & friends' },
       word_count: 1, reading_minutes: 1, points: 0,
       consumption: { action: 'read', minutes: 1, words: 1 },
@@ -33,7 +34,15 @@ describe('shared reader metadata', () => {
     });
     expect(rendered).toMatch(/publisher&lt;&amp;(?:>|&gt;)/);
     expect(rendered).toContain('Publisher &quot;quoted&quot;');
-    expect(rendered.replace(/<!--.*?-->/g, '')).toContain('</span> <em>via feed.test/news');
+    expect(rendered.replace(/<!--.*?-->/g, '')).toContain('</span></a> <em>via <a');
+    expect(rendered).toContain('source%3A%22publisher%22');
+    expect(rendered).toContain('source%3A%22feed%22');
+    expect(rendered).toContain('title="The Feed">feed.test/news</a>');
+    const identity = rendered.match(/<span class="domain">([\s\S]*?)<\/em>/)?.[1] || '';
+    expect(identity.match(/<a /g)).toHaveLength(2);
+    for (const anchor of identity.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/g)) {
+      expect(anchor[1]).not.toContain('via');
+    }
     expect(rendered).toContain('rust &amp; friends');
     expect(rendered).toContain('title="1 word"');
     expect(rendered).toContain('0 points');
@@ -42,6 +51,19 @@ describe('shared reader metadata', () => {
     expect(rendered).toContain('a=1&amp;b=2');
     expect(rendered).not.toContain(' · ');
     expect(rendered).toContain('data-date-updated="2026-09-09T11:00:00Z"');
+  });
+
+  it('uses precomputed readable source queries without changing their backing IDs', () => {
+    const rendered = html({
+      source_slug: 'maharship.com', source_query: 'maharship.com',
+      source_display: 'maharship.com', source_title: 'maharship.com',
+      feed_sources: [{ slug: 'hn-feed', query_value: 'Hacker "News" \\ feed', name: 'Hacker News', display: 'hnrss.org' }],
+    });
+    const queries = [...rendered.matchAll(/href="([^" ]+)"/g)]
+      .map(match => new URL(match[1].replaceAll('&amp;', '&')).searchParams.get('q')).filter(Boolean);
+    expect(queries).toEqual(['source:"maharship.com"', 'source:"Hacker \\"News\\" \\\\ feed"']);
+    const ambiguous = html({ source_slug: 'publisher-one', source_query: 'publisher-one', source_display: 'Same name' });
+    expect(ambiguous).toContain('source%3A%22publisher-one%22');
   });
 
   it('omits absent counts, unchanged update dates and optional fields', () => {

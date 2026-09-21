@@ -8,6 +8,8 @@
 //! [`math`] dollar-delimited TeX as readable text, [`render`] Markdown to reader HTML and
 //! [`resources`] the leading resource-link detection.
 
+mod access;
+mod aggregator;
 mod cleanup;
 mod extract;
 #[path = "content_highlight.rs"]
@@ -15,12 +17,15 @@ mod highlight;
 mod markdown;
 mod math;
 mod module;
+mod normalize;
 mod render;
 mod resources;
 mod scan;
 mod strip;
 
-pub use cleanup::strip_article_metadata;
+pub use access::{archive_lookup_url, is_subscription_wall, normalize_subscription_metadata};
+pub use aggregator::normalize_aggregator_metadata;
+pub use cleanup::normalize_article_body;
 pub(crate) use extract::balanced_json_object;
 pub use extract::{
     ExtractedArticle, extract_article_async, extraction_misses_feed_content, feed_content_on_page,
@@ -33,7 +38,7 @@ pub use module::{article_from_module, is_script_shell, module_scripts};
 pub use render::reading_metrics;
 pub use render::{
     LocalImage, LocalImageVariant, PreparedMarkdown, anchor_headings, embed_body_videos, excerpt,
-    image_dimensions, render_markdown,
+    image_dimensions, rebase_site_paths, rebase_site_url, rebase_srcset, render_markdown,
 };
 pub use resources::ResourceLink;
 pub use strip::{html_to_text, sanitize, storage_html};

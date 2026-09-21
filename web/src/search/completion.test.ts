@@ -2,16 +2,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { complete, acceptCompletion, completionHighlight, completionMenu, isCompletingFacet, selectedCompletion, stableCompletions } from './completion';
 import type { SearchCatalog } from './types';
 
-const facets = { source: [{ value: 'rust-blog', label: 'The Rust Blog', count: 23 }], category: [{ value: 'web-development', label: 'Web Development', count: 9 }], tag: [], 'published-day': [] } satisfies SearchCatalog['facets'];
+const facets = { source: [{ value: 'blog.rust-lang.org', label: 'The Rust Blog', count: 23 }], category: [{ value: 'web-development', label: 'Web Development', count: 9 }], tag: [], 'published-day': [] } satisfies SearchCatalog['facets'];
 describe('cursor completion', () => {
-  it('inserts readable unique aliases while retaining stable option identities', () => {
+  it('inserts canonical source hosts while retaining presentation labels', () => {
     const suggestions = complete('source:rust', 11, facets);
-    expect(suggestions[0]).toMatchObject({ id: 'source:rust-blog', label: 'The Rust Blog', insert: 'source:"The Rust Blog"', count: 23 });
+    expect(suggestions[0]).toMatchObject({ id: 'source:blog.rust-lang.org', label: 'The Rust Blog', insert: 'source:"blog.rust-lang.org"', count: 23 });
   });
   it('replaces only the token at the cursor, preserving exclusions and later clauses', () => {
     const query = '-source:rust tag:code';
     const suggestion = complete(query, 12, facets)[0];
-    expect(acceptCompletion(query, suggestion)).toEqual({ query: '-source:"The Rust Blog" tag:code', cursor: 23 });
+    expect(acceptCompletion(query, suggestion)).toEqual({ query: '-source:"blog.rust-lang.org" tag:code', cursor: 28 });
   });
   it('completes an unfinished quoted facet and leaves punctuation outside untouched', () => {
     const query = 'category:"Web Dev';
@@ -28,7 +28,7 @@ describe('cursor completion', () => {
       const catalog = { ...facets, [kind]: values };
       expect(complete(`${kind}:`, kind.length + 1, catalog)).toHaveLength(30);
       const query = `${kind}:"Label 2`;
-      expect(complete(query, query.length, catalog).map(item => item.insert).sort()).toEqual([2,20,21,22,23,24,25,26,27,28,29].map(index => `${kind}:"Label ${index}"`).sort());
+      expect(complete(query, query.length, catalog).map(item => item.insert).sort()).toEqual([2,20,21,22,23,24,25,26,27,28,29].map(index => `${kind}:"${kind === 'source' ? `value-${index}` : `Label ${index}`}"`).sort());
     }
   });
   it('never aliases ambiguous labels or labels that are another stable identifier', () => {
@@ -38,9 +38,9 @@ describe('cursor completion', () => {
       { value: 'Underscore_', label: 'Other show', count: 1 }
     ] };
     const candidates = complete('source:un', 9, catalog);
-    expect(candidates.map(item => item.insert)).toEqual(['source:spotify-show', 'source:youtube-channel', 'source:"Other show"']);
+    expect(candidates.map(item => item.insert)).toEqual(['source:"spotify-show"', 'source:"youtube-channel"', 'source:"Underscore_"']);
     expect(candidates[0].detail).toContain('spotify-show');
-    expect(complete('source:un', 9, { ...catalog, source: [catalog.source[0]] }, Date.now(), catalog)[0].insert).toBe('source:spotify-show');
+    expect(complete('source:un', 9, { ...catalog, source: [catalog.source[0]] }, Date.now(), catalog)[0].insert).toBe('source:"spotify-show"');
   });
   it('completes and suppresses type values exactly like other facets', () => {
     const catalog = { ...facets, type: [{ value: 'podcast', label: 'Podcast', count: 12 }] };
@@ -113,7 +113,7 @@ describe('cursor completion', () => {
     try {
       const suggestions = complete('source:', 7, catalog);
       expect(suggestions).toHaveLength(size);
-      expect(suggestions[999].insert).toBe('source:"Publisher 999"');
+      expect(suggestions[999].insert).toBe('source:"publisher-999"');
       expect(normalize.mock.calls.length).toBeLessThan(size * 10);
       normalize.mockClear();
       expect(complete('source:publisher  ', 16, catalog)).toHaveLength(size);
@@ -127,7 +127,7 @@ describe('cursor completion', () => {
     const scoped = { ...catalog, source: [{...catalog.source[1],count:1},{...catalog.source[2],count:3}] };
     const first = complete('source:', 7, scoped, Date.now(), catalog);
     expect(first.map(item => [item.id,item.insert,item.count])).toEqual([
-      ['source:third','source:"Unique"',3], ['source:second','source:second',1]
+      ['source:third','source:"third"',3], ['source:second','source:"second"',1]
     ]);
     const refreshed = {...scoped,source:scoped.source.map(facet => ({...facet,count:facet.value==='second'?4:1}))};
     expect(complete('source:',7,refreshed,Date.now(),catalog).map(item=>item.id)).toEqual(['source:second','source:third']);
@@ -138,9 +138,9 @@ describe('cursor completion', () => {
 describe('completion menu interaction', () => {
   it('accepts the selected stable identity despite reordered or identically labelled options', () => {
     const items = complete('source:',7,{...facets,source:[{value:'one',label:'Same',count:2},{value:'two',label:'Same',count:1}]});
-    expect(selectedCompletion(items,'source:two')?.insert).toBe('source:two');
-    expect(selectedCompletion([...items].reverse(),'source:two')?.insert).toBe('source:two');
-    expect(selectedCompletion([items[0]],'source:two')?.insert).toBe('source:one');
+    expect(selectedCompletion(items,'source:two')?.insert).toBe('source:"two"');
+    expect(selectedCompletion([...items].reverse(),'source:two')?.insert).toBe('source:"two"');
+    expect(selectedCompletion([items[0]],'source:two')?.insert).toBe('source:"one"');
     expect(selectedCompletion([],'source:two')).toBeUndefined();
   });
   it('leaves a moved highlight untouched across store emissions, falls back when it vanishes and leads unmoved lists', () => {

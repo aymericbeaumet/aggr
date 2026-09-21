@@ -340,7 +340,7 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .shortcut-help {
   position: fixed;
   inset: 0;
-  width: min(42rem, calc(100% - 2rem));
+  width: min(62rem, calc(100% - 2rem));
   max-height: calc(100dvh - max(1rem, env(safe-area-inset-top)) - max(1rem, env(safe-area-inset-bottom)));
   margin: auto;
   padding: 0;
@@ -407,12 +407,17 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .row {
   --row-divider: var(--faint);
   --row-inset: 1.25rem;
+  /* Rows bleed past the column by this much; the rule and the new-entry highlight stop at the
+     column edge, flush with the search field, and the copy keeps the same clearance from the
+     rule's end as from its start. */
+  --row-bleed: 0.75rem;
   --rank-font: 0.875rem/1.4 var(--mono);
   --row-rule-start: calc((var(--row-inset) - var(--rank-indent, 0ch) + 3px) / 2);
+  --row-rule-end: var(--row-bleed);
   position: relative;
   isolation: isolate;
-  margin-inline: -0.75rem;
-  padding: var(--row-padding) var(--row-inset);
+  margin-inline: calc(-1 * var(--row-bleed));
+  padding: var(--row-padding) calc(var(--row-rule-end) + var(--row-inset) - var(--row-rule-start)) var(--row-padding) var(--row-inset);
   scroll-margin-block: 4rem 6rem;
 }
 .row::before {
@@ -430,8 +435,8 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .row::after, .row > .cell::before {
   content: "";
   position: absolute;
-  inset: 0 var(--row-inset);
-  inset-inline-start: var(--row-rule-start);
+  inset-block: 0;
+  inset-inline: var(--row-rule-start) var(--row-rule-end);
   font: var(--rank-font);
   pointer-events: none;
 }
@@ -603,7 +608,10 @@ body[data-kind="item"] .main {
 .body p:has(> :is(img, picture, video, iframe):first-child) { text-indent: 0; }
 .body ul, .body ol { padding-inline-start: 1.55em; }
 .body li + li { margin-top: 0.25em; }
-.body li > p { margin-block: 0.35em; }
+.body li > :is(ul, ol) { margin-block: 0.25em 0; }
+.body li > p { margin-block: 0.25em; }
+.body li > p:first-child { margin-block-start: 0; }
+.body li > p:last-child { margin-block-end: 0; }
 .body :is(h1, h2, h3, h4, h5, h6) { line-height: 1.3; margin: 1.75em 0 0.6em; text-wrap: pretty; break-after: avoid; }
 /* Headings are anchors, not links: a hover marker sits in the margin without moving the title. */
 .body :is(h1, h2, h3, h4, h5, h6)[id] { position: relative; cursor: pointer; }
@@ -646,8 +654,8 @@ body[data-kind="item"] .main {
 .body td, .body th { border: 1px solid var(--faint); padding: 0.25em 0.5em; }
 
 /* Comrak's standard footnotes stay compact and easy to navigate on every viewport. */
-.body .footnote-ref { font-size: 0.72em; line-height: 0; vertical-align: super; }
-.body .footnote-ref a, .body .footnote-backref { color: var(--accent-strong); text-decoration: none; }
+.body :is(.footnote-ref, .citation-ref) { font-size: 0.72em; line-height: 0; vertical-align: super; }
+.body :is(.footnote-ref, .citation-ref) a, .body .footnote-backref { color: var(--accent-strong); text-decoration: none; }
 .body .footnotes { clear: both; margin-top: 1.75rem; padding-top: 0.65rem; color: var(--muted); border-top: 1px solid var(--faint); font-size: 0.875rem; line-height: 1.5; }
 .body .footnotes ol { margin: 0; padding-inline-start: 1.4rem; }
 .body .footnotes li:target { background: color-mix(in srgb, var(--accent) 12%, transparent); }
@@ -679,8 +687,7 @@ body[data-kind="item"] .main {
 .interactive-frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
 .interactive-preview { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .5rem; padding: 1rem; text-align: center; }
 .interactive-preview[hidden] { display: none; }
-.interactive-preview small, .interactive-reader figcaption { color: var(--muted); font-size: .8rem; }
-.interactive-reader figcaption { margin-top: .5rem; }
+.interactive-preview small { color: var(--muted); font-size: .8rem; }
 .article-more-link.title { margin-bottom: .3rem; font-size: var(--row-title-size); line-height: 1.3; }
 .sha { font-family: var(--mono); }
 
@@ -806,8 +813,10 @@ body[data-kind="item"] .main {
   }
   .row .title { min-height: var(--tap-target); padding: 0.2rem 0; }
   .meta .domain { min-height: 2rem; }
+  .meta .domain a { display: inline-block; min-height: 2rem; align-content: center; }
   .meta > * { min-height: 2rem; }
   html[data-density="comfortable"] .meta .domain,
+  html[data-density="comfortable"] .meta .domain a,
   html[data-density="comfortable"] .meta > * { min-height: var(--tap-target); }
   .views a, .pager a {
     justify-content: center;
@@ -819,7 +828,7 @@ body[data-kind="item"] .main {
   .body .footnote-ref a { position: relative; }
   .body .footnote-ref a::before { content: ""; position: absolute; width: var(--tap-target); height: var(--tap-target); inset: 50% auto auto 50%; transform: translate(-50%, -50%); }
   .body .footnote-backref { display: inline-flex; align-items: center; justify-content: center; min-width: var(--tap-target); min-height: var(--tap-target); }
-  .domain, .page-header a, .meta a, .views a, .pager a { text-decoration: underline; text-underline-offset: 0.14em; }
+  .page-header a, .meta a, .views a, .pager a { text-decoration: underline; text-underline-offset: 0.14em; }
   .itemhead .meta a { text-decoration: none; }
 }
 
@@ -958,7 +967,7 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   .row::before { background: Highlight; forced-color-adjust: none; }
 }
 
-/* The tab surface meets the screen edge; only its controls clear the home indicator. */
+/* The fixed wrapper measures the floating tab surface and its home-indicator clearance. */
 .mobile-tabs { display: none; }
 [data-site-navigation] a { transition: none; -webkit-tap-highlight-color: transparent; }
 /* Navigation stays visible; search belongs to the feed it filters. */
@@ -969,7 +978,7 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
 .nav .menu-link, .nav .config-link { font-weight: 400; opacity: 1; }
 .nav a[aria-current] { text-decoration: underline; text-underline-offset: .18em; }
 .nav-separator { opacity: .5; font-weight: 400; }
-.feed-toolbar { min-width: 0; margin: 0.6rem 0 1rem; }
+.feed-toolbar { position: sticky; top: var(--top-nav-offset); z-index: 2; min-width: 0; margin: 0 0 1rem; padding: 0.6rem 0; background: var(--bg); }
 .feed-search { display: flex; align-items: center; margin: 0; width: 100%; min-width: 0; }
 /* One selector list for the server-rendered field and the mounted one, so their geometry cannot drift. */
 .feed-search input[type="search"], .search-input-line #q { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; color: var(--fg); background: var(--search-bg, var(--code)); border: 1px solid var(--faint); border-radius: .35rem; padding: .55rem 2.75rem .55rem .7rem; font: inherit; }
@@ -1001,36 +1010,44 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
 @media (max-width: 40rem) {
   .nav { column-gap: 0.2rem; }
   .nav-primary, .nav-actions { column-gap: 0.1rem; }
-  :root { --bottom-nav-offset: calc(50px + var(--mobile-safe-area)); }
+  :root { --bottom-nav-offset: calc(68px + var(--mobile-safe-area)); }
   .nav { flex-wrap: nowrap; }
   .nav .brand { flex: 1; overflow: hidden; }
   .nav .nav-primary, .footer { display: none; }
   .nav-actions { flex: none; }
-  /* Platform tab bars are a compact row above the home indicator, not a tall panel. */
   .mobile-tabs {
-    position: fixed; inset: auto 0 0; z-index: 5;
-    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-    padding: 0 env(safe-area-inset-right) var(--mobile-safe-area) env(safe-area-inset-left);
-    border-top: 1px solid var(--faint); background: var(--bg); color: var(--muted);
-    contain: layout paint;
+    position: fixed; inset: auto 0 0; z-index: 5; isolation: isolate;
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    padding: 4px max(20px, calc(env(safe-area-inset-right) + 4px)) calc(12px + var(--mobile-safe-area)) max(20px, calc(env(safe-area-inset-left) + 4px));
+    color: var(--muted); pointer-events: none;
+  }
+  .mobile-tabs::before {
+    content: ""; position: absolute; z-index: -1;
+    inset: 0 max(16px, env(safe-area-inset-right)) calc(8px + var(--mobile-safe-area)) max(16px, env(safe-area-inset-left));
+    border: 1px solid color-mix(in srgb, var(--fg) 16%, var(--faint)); border-radius: 999px;
+    background: var(--bg); box-shadow: 0 3px 16px #0002;
   }
   @supports (backdrop-filter: blur(20px)) {
-    .mobile-tabs {
-      background: color-mix(in srgb, var(--bg) 78%, transparent);
-      backdrop-filter: saturate(180%) blur(20px);
+    .mobile-tabs::before {
+      background: color-mix(in srgb, var(--bg) 88%, transparent);
+      backdrop-filter: saturate(150%) blur(20px);
     }
   }
   .mobile-tabs a {
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-    height: 49px; min-width: 0; padding: 3px 0; color: inherit;
-    font-size: 10px; font-weight: 500; line-height: 1.2; text-decoration: none;
-    letter-spacing: 0.01em;
+    display: grid; grid-template-rows: 24px 14px; align-content: center; justify-items: center; gap: 2px;
+    height: 52px; min-width: 0; padding: 0 3px; border-radius: 999px; color: inherit;
+    font-size: 10px; font-weight: 500; line-height: 14px; text-decoration: none;
+    letter-spacing: 0.01em; pointer-events: auto;
     touch-action: manipulation; -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
   }
-  .mobile-tabs a:active { opacity: 1; background: color-mix(in srgb, var(--warm) 12%, var(--bg)); }
-  /* Colour alone marks the current tab, the way a platform tab bar does. */
-  .mobile-tabs a[aria-current] { color: var(--warm); }
+  .mobile-tabs a > svg { display: block; width: 24px; height: 24px; align-self: center; }
+  .mobile-tabs a > span { display: block; line-height: 14px; white-space: nowrap; }
+  .mobile-tabs a:is(:hover, :focus, :active) { text-decoration: none; }
+  .mobile-tabs a[aria-current] { color: var(--warm); background: color-mix(in srgb, var(--fg) 10%, transparent); }
+  .mobile-tabs a:active, .mobile-tabs a[data-pressed] { opacity: 1; background: color-mix(in srgb, var(--warm) 20%, var(--bg)); }
   .mobile-tabs a:focus-visible { outline: 2px solid var(--warm); outline-offset: -3px; }
+  article[data-swipe-navigation] :is(p, h1, h2, h3, h4, h5, h6, li, blockquote):not(:has(pre, table, .table-scroll, audio, video, iframe, object, embed, canvas, [data-no-swipe])) { touch-action: pan-y pinch-zoom; }
   .mobile-tabs[data-keyboard-open] { visibility: hidden; pointer-events: none; }
   /* Touch reading: links read as links by colour, without the desktop underline, and taps do not
      flash the platform's default highlight rectangle. */
@@ -1047,10 +1064,11 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   html:not([data-thumbnails="hide"]) .row .row-content:has(.preview-media) { grid-template-columns: minmax(0, 1fr) var(--mobile-preview-size); }
   .row .row-copy { display: contents; }
   .row .row-heading { grid-column: 1; grid-row: 1; }
-  .row .row-heading .title { line-height: 1.35; }
+  .row .row-heading .title { min-height: 0; padding: 0; line-height: 1.35; }
   .row .preview-media { grid-column: 2; grid-row: 1; width: var(--mobile-preview-size); height: var(--mobile-preview-size); }
   .row .row-copy > :is(.meta, .excerpt, .search-excerpt, .search-saved-status) { grid-column: 1 / -1; }
   .row .meta { grid-row: 2; gap: 0 0.65em; font-size: 0.8125rem; line-height: 1.35; }
+  .row .meta > *, .row .meta .domain, .row .meta .domain a { min-height: 1.5rem; }
   .row .meta > .meta-field:has(> .domain) { flex-basis: 100%; font-size: 0.875rem; }
   .row .meta > .meta-field + .meta-field::before { content: none; }
   .row :is(.excerpt, .search-excerpt) { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
@@ -1065,11 +1083,15 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
 .document-placeholder { position: absolute; inset: 0; display: grid; place-content: center; color: var(--muted); text-align: center; }
 .document-placeholder svg { width: 3rem; height: 4rem; margin: 0 auto 0.5rem; fill: none; stroke: currentColor; stroke-width: 1.2; }
 .document-viewer { position: absolute; inset: 0; display: block; width: 100%; height: 100%; border: 0; }
-.document-reader figcaption { margin-top: 0.5rem; color: var(--muted); font-size: 0.875rem; }
+.document-fallback { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .5rem; min-height: 100%; padding: 1.5rem; background: var(--code); color: var(--fg); text-align: center; }
+.document-fallback p { margin: 0; }
+.document-fallback a { display: inline-flex; align-items: center; min-height: var(--tap-target); }
+.document-reader figcaption, .interactive-reader figcaption { margin-top: 0.5rem; color: var(--muted); font-size: 0.875rem; font-style: italic; text-align: center; }
 @media print { .document-frame { display: none; } }
 
 @media (forced-colors: active) {
-  .mobile-tabs a[aria-current] { color: LinkText; }
-  .mobile-tabs a:active { background: Highlight; color: HighlightText; }
+  .mobile-tabs::before { border-color: CanvasText; background: Canvas; }
+  .mobile-tabs a[aria-current] { color: LinkText; outline: 1px solid LinkText; outline-offset: -2px; }
+  .mobile-tabs a:active, .mobile-tabs a[data-pressed] { background: Highlight; color: HighlightText; }
 }
 @media print { .mobile-tabs { display: none; } }

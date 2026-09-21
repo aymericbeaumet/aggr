@@ -11,6 +11,7 @@ function validToken(raw: string, now: number): boolean {
 }
 const emptyFacets: Facet[] = [];
 function facetInsertion(kind: FacetKind, facet: Facet, alias: string | undefined, excluded: string): string {
+  if (kind === 'source') return excluded + kind + ':"' + facet.value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
   const inserted = alias === undefined || alias === facet.value ? quoteValue(facet.value) : '"' + alias.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
   return excluded + kind + ':' + inserted;
 }

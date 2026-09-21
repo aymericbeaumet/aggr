@@ -3,7 +3,7 @@ name = "aggr"
 version = "1.9.0"
 edition = "2024"
 rust-version = "1.96"
-license = "MIT"
+license-file = "LICENSE"
 description = "Git-native feed reader: aggr.toml in, static site out, history on a branch"
 authors = ["Aymeric Beaumet <hi@aymericbeaumet.com>"]
 repository = "https://github.com/aymericbeaumet/aggr"
@@ -60,6 +60,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal"] }
 toml = "1"
 url = { version = "2", features = ["serde"] }
+unicode-normalization = "0.1"
 unicode-segmentation = "1"
 walkdir = "2"
 # These Apache-2.0 releases support the project's MSRV; newer releases require Rust 1.98.

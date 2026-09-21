@@ -23,6 +23,8 @@ pub(super) struct Planned {
     pub(super) front: FrontMatter,
     pub(super) body: String,
     pub(super) html: Option<String>,
+    /// Explicit body tags stay separate so later capture upgrades preserve hand-written labels.
+    pub(super) boundary_labels: Vec<String>,
 }
 
 impl Planned {
@@ -36,6 +38,7 @@ impl Planned {
             front: item.front,
             body: item.body,
             html: None,
+            boundary_labels: Vec::new(),
         };
         use_existing_path(&mut planned, path)?;
         Ok(planned)
@@ -84,15 +87,18 @@ pub(super) async fn persist_item(
     let store = Arc::clone(store);
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        store.write_item(NewItem {
-            dir: &planned.dir,
-            stem: &planned.stem,
-            front: &planned.front,
-            body: &planned.body,
-            html: planned.html.as_deref(),
-            preview: raw.preview.as_ref().map(|preview| preview.bytes.as_slice()),
-            images: &raw.images,
-        })
+        store.write_item_with_document(
+            NewItem {
+                dir: &planned.dir,
+                stem: &planned.stem,
+                front: &planned.front,
+                body: &planned.body,
+                html: planned.html.as_deref(),
+                preview: raw.preview.as_ref().map(|preview| preview.bytes.as_slice()),
+                images: &raw.images,
+            },
+            raw.document.as_ref(),
+        )
     })
     .await
     .context("persisting article content")?
@@ -117,7 +123,8 @@ pub(super) fn plan(
         Some(html) => content::to_markdown(html, base.as_ref()),
         None => raw.summary.clone().unwrap_or_default(),
     };
-    let body = content::strip_article_metadata(&body, &raw.title, published, &source.slug);
+    let (body, boundary_labels) =
+        content::normalize_article_body(&body, &raw.title, published, &source.slug);
     let (html, truncated) = match &raw.content_html {
         Some(html) if options.html && source.html => {
             let (stored, truncated) = content::storage_html(html, options.html_max_bytes);
@@ -125,7 +132,7 @@ pub(super) fn plan(
         }
         _ => (None, false),
     };
-    let front = FrontMatter {
+    let mut front = FrontMatter {
         title: raw.title.clone(),
         link: raw.link.clone(),
         source: source.slug.clone(),
@@ -134,22 +141,31 @@ pub(super) fn plan(
         first_seen,
         replicated_at: raw.first_seen.map(|_| options.now),
         authors: raw.authors.clone(),
-        labels: normalize_labels(source.labels.iter().chain(&raw.labels)),
+        labels: normalize_labels(
+            source
+                .labels
+                .iter()
+                .chain(&raw.labels)
+                .chain(&boundary_labels),
+        ),
         summary: raw.summary.clone().filter(|s| !s.trim().is_empty()),
         content: content_kind,
         html: None,
         preview: None,
         images: Vec::new(),
+        document: None,
         html_truncated: truncated,
         extra: crate::sources::aggr::persistent_extra(raw),
         hidden: false,
     };
+    let body = content::normalize_aggregator_metadata(&body, &mut front);
     Planned {
         dir: item_dir(&source.slug, date),
         stem: file_stem(date, &raw.title),
         front,
         body,
         html,
+        boundary_labels,
     }
 }
 
@@ -415,6 +431,30 @@ mod tests {
         assert_eq!(
             source_request_state(&remembered, true),
             crate::store::SourceState::default()
+        );
+    }
+
+    #[test]
+    fn article_tags_merge_with_configured_and_feed_labels_on_capture() {
+        let mut configured = source();
+        configured.labels = vec!["Programming".into()];
+        let raw = RawItem {
+            title: "Jev is incredible".into(),
+            labels: vec!["AI".into(), "hand picked".into()],
+            content_html: Some(
+                "<p>Video description.</p><p>#jev #AI #programming #coding</p>".into(),
+            ),
+            ..Default::default()
+        };
+        let planned = plan(&raw, &configured, &options(), ContentKind::Extracted);
+        assert_eq!(planned.body, "Video description.\n");
+        assert_eq!(
+            planned.front.labels,
+            ["ai", "coding", "hand picked", "jev", "programming"]
+        );
+        assert_eq!(
+            planned.boundary_labels,
+            ["ai", "coding", "jev", "programming"]
         );
     }
 
@@ -804,6 +844,7 @@ mod tests {
             },
             body: String::new(),
             html: None,
+            boundary_labels: Vec::new(),
         };
         let mut accepted = planned();
         use_existing_path(&mut accepted, "items/blog/2026/09/2026-09-01-post").unwrap();

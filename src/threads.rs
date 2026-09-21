@@ -5,7 +5,9 @@
 //! the normal article extraction path in charge.
 //! X threads use a separate public HTML adapter; Bluesky uses AT Protocol.
 
+mod embeds;
 mod x;
+pub use embeds::{expand_embedded_x, format_archived_x_embeds};
 pub use x::canonical_url as canonical_x_url;
 pub use x::expand as expand_x;
 
@@ -685,7 +687,11 @@ fn render(posts: &[Post], order: &[usize]) -> ExtractedArticle {
         html.push_str("</article>");
     }
     html.push_str("</section>");
-    ExtractedArticle { html, image }
+    ExtractedArticle {
+        html,
+        image,
+        labels: Vec::new(),
+    }
 }
 
 /// A terminal post counter in archived Markdown, where comrak escapes the square brackets.

@@ -208,7 +208,6 @@ pub(super) fn options() -> Options {
         existing_paths: Arc::default(),
         dry_run: false,
         refresh: false,
-        reprocess: false,
         html: true,
         html_max_bytes: 1000,
         article_concurrency: 4,
@@ -673,12 +672,13 @@ async fn heavy_downloads_the_article_while_light_keeps_feed_content() {
         .mock_async(|when, then| {
             when.method(GET).path("/post");
             then.status(200).header("etag", "\"article-v1\"").body(
-                "<html><title>Post</title><article><h1>Post</h1><p>The complete original article has substantially more useful text than its feed excerpt.</p><p>This second paragraph makes it readable.</p></article></html>",
+                "<html><head><title>Post</title><meta property='article:tag' content='MCP'><meta property='article:tag' content='AI'></head><article><h1>Post</h1><p>The complete original article has substantially more useful text than its feed excerpt.</p><p>This second paragraph makes it readable.</p></article></html>",
             );
         })
         .await;
     let raw = RawItem {
         title: "Post".into(),
+        labels: vec!["existing".into(), "MCP".into()],
         link: server.url("/post"),
         content_html: Some("<p>short feed excerpt</p>".into()),
         ..Default::default()
@@ -693,6 +693,7 @@ async fn heavy_downloads_the_article_while_light_keeps_feed_content() {
     let failures = ArticleFailures::default();
     let (heavy, kind) = heavy_content(&raw, &source(), &client, cache.path(), &failures).await;
     assert_eq!(kind, ContentKind::Extracted);
+    assert_eq!(heavy.labels, ["ai", "existing", "mcp"]);
     assert!(
         heavy
             .content_html
@@ -711,6 +712,7 @@ async fn heavy_downloads_the_article_while_light_keeps_feed_content() {
         .await;
     let (cached, kind) = heavy_content(&raw, &source(), &client, cache.path(), &failures).await;
     assert_eq!(kind, ContentKind::Extracted);
+    assert_eq!(cached.labels, ["ai", "existing", "mcp"]);
     assert!(
         cached
             .content_html
@@ -1171,4 +1173,82 @@ fn binary_links_are_pdfs_and_image_files_whatever_their_case() {
     ] {
         assert!(!is_binary_link(&Url::parse(link).unwrap()), "{link}");
     }
+}
+
+#[tokio::test]
+async fn mirrored_document_is_retained_when_image_options_are_disabled() {
+    let raw = RawItem {
+        link: "https://publisher.invalid/paper.pdf".into(),
+        ..Default::default()
+    };
+    let hydrated =
+        hydrate_new_mirror_companions_with(raw, false, false, false, false, |mut raw| async {
+            raw.document = Some(crate::document::Asset {
+                source_url: raw.link.clone(),
+                bytes: b"%PDF-1.7\nfixture".to_vec(),
+            });
+            raw
+        })
+        .await;
+    assert!(hydrated.document.is_some());
+}
+
+#[tokio::test]
+async fn known_subscription_wall_tries_archives_after_publisher_denies_a_fresh_cache() {
+    crate::http::install_crypto_provider();
+    let publisher = MockServer::start();
+    let archives = MockServer::start();
+    let denied = publisher.mock(|when, then| {
+        when.method(GET).path("/article");
+        then.status(403);
+    });
+    let available = archives.mock(|when, then| {
+        when.method(GET)
+            .path("/available")
+            .query_param("url", publisher.url("/article"))
+            .header_missing("authorization");
+        then.status(200)
+            .json_body(serde_json::json!({"archived_snapshots":{}}));
+    });
+    let lookup = archives.mock(|when, then| {
+        when.method(GET)
+            .path("/lookup")
+            .header_missing("authorization");
+        then.status(404);
+    });
+    let configured = source();
+    let client = http::Client::new(&crate::config::FetchConfig {
+        retries: 0,
+        ..Default::default()
+    })
+    .unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let failures = ArticleFailures::default();
+    let mut raw = RawItem {
+        title: "Article".into(),
+        link: publisher.url("/article"),
+        summary: Some("A meaningful publisher summary.".into()),
+        ..Default::default()
+    };
+    let (_, kind) = heavy_content(&raw, &configured, &client, cache.path(), &failures).await;
+    assert_eq!(kind, ContentKind::None);
+    available.assert_calls(0);
+    lookup.assert_calls(0);
+    raw.extra
+        .insert("subscription_required".into(), true.into());
+    let (enriched, kind) = super::archive::with_test_endpoints(
+        archives.url("/available").parse().unwrap(),
+        archives.url("/lookup").parse().unwrap(),
+        heavy_content(&raw, &configured, &client, cache.path(), &failures),
+    )
+    .await;
+    assert_eq!(kind, ContentKind::None);
+    assert_eq!(
+        enriched.extra["subscription_required"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(enriched.summary, raw.summary);
+    available.assert_calls(1);
+    lookup.assert_calls(1);
+    denied.assert_calls(1);
 }

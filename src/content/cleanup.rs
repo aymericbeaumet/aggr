@@ -79,6 +79,107 @@ pub fn strip_article_metadata(
     markdown
 }
 
+/// Clean publisher metadata and move explicit boundary hashtags into article labels.
+pub fn normalize_article_body(
+    markdown: &str,
+    title: &str,
+    published: Option<DateTime<Utc>>,
+    source_slug: &str,
+) -> (String, Vec<String>) {
+    let mut body = crate::threads::format_archived_x_embeds(markdown);
+    let mut labels = Vec::new();
+    loop {
+        let (cleaned, found) = boundary_hashtags(&body);
+        labels.extend(found);
+        let cleaned = strip_article_metadata(&cleaned, title, published, source_slug);
+        if cleaned == body {
+            return (body, crate::model::normalize_labels(labels));
+        }
+        body = cleaned;
+    }
+}
+
+fn boundary_hashtags(markdown: &str) -> (String, Vec<String>) {
+    if !markdown.contains('#') {
+        return (markdown.to_string(), Vec::new());
+    }
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    let blocks = root.children().collect::<Vec<_>>();
+    let mut first = 0;
+    let mut last = blocks.len();
+    let mut labels = Vec::new();
+    while first < last {
+        let Some(tags) = hashtag_paragraph(blocks[first]) else {
+            break;
+        };
+        labels.extend(tags);
+        first += 1;
+    }
+    while last > first {
+        let Some(tags) = hashtag_paragraph(blocks[last - 1]) else {
+            break;
+        };
+        labels.extend(tags);
+        last -= 1;
+    }
+    if labels.is_empty() {
+        return (markdown.to_string(), labels);
+    }
+    if first == last {
+        return (String::new(), labels);
+    }
+    let mut lines = vec![0];
+    lines.extend(markdown.match_indices('\n').map(|(index, _)| index + 1));
+    let start = if first > 0 {
+        lines[blocks[first].data.borrow().sourcepos.start.line - 1]
+    } else {
+        0
+    };
+    let end = if last < blocks.len() {
+        lines[blocks[last].data.borrow().sourcepos.start.line - 1]
+    } else {
+        markdown.len()
+    };
+    let kept = &markdown[start..end];
+    let body = if last < blocks.len() {
+        format!("{}\n", kept.trim_end_matches('\n'))
+    } else {
+        kept.to_string()
+    };
+    (body, labels)
+}
+
+fn hashtag_paragraph<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<Vec<String>> {
+    use comrak::nodes::NodeValue;
+    if !matches!(node.data.borrow().value, NodeValue::Paragraph) {
+        return None;
+    }
+    let mut text = String::new();
+    for child in node.descendants() {
+        match &child.data.borrow().value {
+            NodeValue::Text(value) => text.push_str(value),
+            NodeValue::SoftBreak | NodeValue::LineBreak => text.push(' '),
+            NodeValue::Paragraph | NodeValue::Link(_) | NodeValue::Emph | NodeValue::Strong => {}
+            _ => return None,
+        }
+    }
+    let tags = text
+        .split_whitespace()
+        .map(|token| {
+            let tag = token.strip_prefix('#')?;
+            (!tag.is_empty()
+                && tag.chars().count() <= 64
+                && tag.chars().any(char::is_alphanumeric)
+                && tag
+                    .chars()
+                    .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-')))
+            .then(|| tag.to_string())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!tags.is_empty()).then_some(tags)
+}
+
 pub(super) fn is_accessibility_label(text: &str) -> bool {
     let text = text.replace('\u{2060}', "").to_ascii_lowercase();
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -114,7 +215,9 @@ fn strip_boundary_controls(markdown: &str) -> String {
         return markdown.to_string();
     }
     let arena = comrak::Arena::new();
-    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    let mut options = comrak::Options::default();
+    options.extension.table = true;
+    let root = comrak::parse_document(&arena, markdown, &options);
     let blocks = root.children().collect::<Vec<_>>();
     if blocks.is_empty() {
         return markdown.to_string();
@@ -139,7 +242,7 @@ fn strip_boundary_controls(markdown: &str) -> String {
     let trailing = blocks
         .iter()
         .rev()
-        .take_while(|node| is_boundary_control(node))
+        .take_while(|node| is_boundary_control(node) || is_lwn_index_table(node))
         .count();
     if leading == 0 && trailing == 0 {
         return markdown.to_string();
@@ -177,6 +280,76 @@ fn strip_boundary_controls(markdown: &str) -> String {
     } else {
         kept.to_string()
     }
+}
+
+/// LWN ends articles with a category/topic index. Match its complete navigation shape and host,
+/// not merely the heading: articles can legitimately discuss indexes or quote the same table.
+fn is_lwn_index_table<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
+    use comrak::nodes::NodeValue;
+    if !matches!(node.data.borrow().value, NodeValue::Table(_)) {
+        return false;
+    }
+    let rows = node.children().collect::<Vec<_>>();
+    let Some(header) = rows.first() else {
+        return false;
+    };
+    let cells = header.children().collect::<Vec<_>>();
+    if rows.len() < 2 || cells.len() != 2 || cells[1].first_child().is_some() {
+        return false;
+    }
+    let label = cells[0].children().collect::<Vec<_>>();
+    if label.len() != 1
+        || !matches!(&label[0].data.borrow().value, NodeValue::Text(text) if text.trim() == "Index entries for this article")
+    {
+        return false;
+    }
+    rows[1..].iter().all(|row| {
+        let cells = row.children().collect::<Vec<_>>();
+        if cells.len() != 2 {
+            return false;
+        }
+        let Some(category) = lwn_index_cell_url(cells[0]) else {
+            return false;
+        };
+        let Some(topic) = lwn_index_cell_url(cells[1]) else {
+            return false;
+        };
+        category.fragment().is_none()
+            && topic
+                .fragment()
+                .is_some_and(|fragment| !fragment.is_empty())
+            && category.path() == topic.path()
+    })
+}
+
+fn lwn_index_cell_url<'a>(cell: &'a comrak::nodes::AstNode<'a>) -> Option<url::Url> {
+    use comrak::nodes::NodeValue;
+    let children = cell.children().collect::<Vec<_>>();
+    if children.len() != 1 {
+        return None;
+    }
+    let NodeValue::Link(link) = &children[0].data.borrow().value else {
+        return None;
+    };
+    // A navigation cell contains only its linked label; embedded code or images may be article data.
+    if !children[0]
+        .children()
+        .all(|node| matches!(&node.data.borrow().value, NodeValue::Text(_)))
+    {
+        return None;
+    }
+    let url = url::Url::parse(&link.url).ok()?;
+    let segments = url.path_segments()?.collect::<Vec<_>>();
+    (matches!(url.scheme(), "http" | "https")
+        && url.host_str() == Some("lwn.net")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
+        && segments.len() == 2
+        && !segments[0].is_empty()
+        && segments[1] == "Index")
+        .then_some(url)
 }
 
 fn boundary_paragraph_text<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<(String, bool)> {
@@ -1083,6 +1256,49 @@ mod tests {
     use crate::content::to_markdown;
 
     #[test]
+    fn article_tags_move_only_explicit_boundary_groups_into_labels() {
+        let (body, labels) = normalize_article_body(
+            "#RUST #AI\n\nCarlo Piovesan, Geertjan Wielenga\n\n2026-09-18 | 9 min\n\nActual prose about #rust.\n\n#interior\n\nMore prose.\n\n[#Jev](https://youtube.com/hashtag/jev) **#AI**\n\n#coding #中文\n",
+            "",
+            None,
+            "video",
+        );
+        assert_eq!(
+            body,
+            "Actual prose about #rust.\n\n#interior\n\nMore prose.\n"
+        );
+        assert_eq!(labels, ["ai", "coding", "jev", "rust", "中文"]);
+        assert_eq!(
+            normalize_article_body(&body, "", None, "video"),
+            (body, Vec::new())
+        );
+    }
+
+    #[test]
+    fn article_tags_preserve_prose_code_lists_quotes_and_headings() {
+        for body in [
+            "Discuss #rust and #ai.\n",
+            "# A heading\n",
+            "`#rust #ai`\n",
+            "```sh\n#rust #ai\n```\n",
+            "    #rust #ai\n",
+            "> #rust #ai\n",
+            "- #rust\n- #ai\n",
+            "#rust is great\n",
+            "#rust.\n",
+            "#rust/path\n",
+            "![#rust](https://example.com/image.png)\n",
+            "Opening.\n\n#rust #ai\n\nClosing.\n",
+        ] {
+            assert_eq!(
+                normalize_article_body(body, "", None, "feed"),
+                (body.to_string(), Vec::new()),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
     fn boundary_update_notices_are_removed_but_prose_mentions_stay() {
         let body = "Opening paragraph.\n\nMore reporting follows here.\n\n*This article was updated on 08 September 2026.*\n";
         assert_eq!(
@@ -1605,6 +1821,79 @@ mod tests {
         ] {
             assert_eq!(
                 strip_leading_metadata(body, "", None, "lobste-rs"),
+                body,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn duckdb_byline_is_removed_when_feed_date_is_the_next_day() {
+        let published = DateTime::parse_from_rfc3339("2026-09-19T18:46:39Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let markdown = to_markdown(
+            "<p>Carlo Piovesan, Geertjan Wielenga</p><p>2026-09-18 | 9 min</p><p><em>TL;DR: DuckDB-Wasm can open a persistent database file.</em></p>",
+            None,
+        );
+        assert_eq!(
+            strip_article_metadata(
+                &markdown,
+                "Persistent Databases in the Browser",
+                Some(published),
+                "lobste-rs"
+            ),
+            "*TL;DR: DuckDB-Wasm can open a persistent database file.*\n"
+        );
+    }
+
+    #[test]
+    fn trailing_lwn_index_navigation_and_surrounding_breaks_are_removed() {
+        let footer = "| Index entries for this article | |\n| --- | --- |\n| [Kernel](https://lwn.net/Kernel/Index) | [io\\_uring](https://lwn.net/Kernel/Index#io_uring) |";
+        for body in [
+            format!("Better performance.\n\n{footer}\n"),
+            format!("Better performance.\\\n\n{footer}\n\n\\\n"),
+        ] {
+            assert_eq!(
+                strip_article_metadata(&body, "", None, "lobste-rs"),
+                "Better performance.\n"
+            );
+        }
+        let html = "<p>Better performance.<br clear=all></p><table class=IndexEntries><tr><th colspan=2>Index entries for this article</th></tr><tr><td><a href='https://lwn.net/Kernel/Index'>Kernel</a></td><td><a href='https://lwn.net/Kernel/Index#io_uring'>io_uring</a></td></tr></table><br clear=all>";
+        assert_eq!(
+            strip_article_metadata(&to_markdown(html, None), "", None, "lobste-rs"),
+            "Better performance.\n"
+        );
+    }
+
+    #[test]
+    fn index_navigation_cleanup_preserves_body_tables_and_code() {
+        let footer = "| Index entries for this article | |\n| --- | --- |\n| [Kernel](https://lwn.net/Kernel/Index) | [io\\_uring](https://lwn.net/Kernel/Index#io_uring) |";
+        for body in [
+            format!("Opening.\n\n{footer}\n\nMore article.\n"),
+            format!("Opening.\n\n```markdown\n{footer}\n```\n"),
+            format!("Opening.\n\n{}\n", footer.replace("lwn.net", "example.com")),
+            format!(
+                "Opening.\n\n{}\n",
+                footer.replace("lwn.net", "lwn.net.example.com")
+            ),
+            format!(
+                "Opening.\n\n{}\n",
+                footer.replace("Index entries for this article", "Article data")
+            ),
+            format!(
+                "Opening.\n\n{}\n",
+                footer.replace("[Kernel](https://lwn.net/Kernel/Index)", "Kernel data")
+            ),
+            format!(
+                "Opening.\n\n{}\n",
+                footer.replace("| [io", "| Explanation [io")
+            ),
+            format!("{footer}\n\nArticle body.\n"),
+            format!("Opening.\n\n> {}\n", footer.replace('\n', "\n> ")),
+        ] {
+            assert_eq!(
+                strip_article_metadata(&body, "", None, "lobste-rs"),
                 body,
                 "{body}"
             );

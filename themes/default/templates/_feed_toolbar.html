@@ -1,9 +1,9 @@
 <div class="feed-toolbar" data-nosnippet>
   <div data-search-root{% if page.kind == 'source' and source %} data-scope-kind="source" data-scope-value="{{ source.slug }}"{% elif page.kind in ['category', 'tag'] and category %} data-scope-kind="{{ page.kind }}" data-scope-value="{{ category.slug }}"{% endif %}>
-    <form class="feed-search" id="search-form" action="./" method="get" role="search">
+    <form class="feed-search" id="search-form" action="{{ '' | url_for }}" method="get" role="search">
       <label class="sr-only" for="q">Search articles</label>
       <input id="q" type="search" name="q" value="{% if page.kind == 'source' and source %}source:{{ source.slug }} {% elif page.kind in ['category', 'tag'] and category %}{{ page.kind }}:{{ category.slug }} {% endif %}" placeholder="Search articles, sources, categories…" autocomplete="off" spellcheck="false" data-page-search aria-keyshortcuts="Meta+K Control+K">
     </form>
   </div>
-  <div data-search-results></div>
 </div>
+<div data-search-results data-nosnippet></div>

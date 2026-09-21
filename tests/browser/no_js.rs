@@ -104,7 +104,7 @@ async fn no_javascript_contracts(client: &Client, fixture: &Fixture) -> Result<(
         .await?;
     let fallback = client
         .execute(
-            "return {base:document.baseURI,canonical:!!document.querySelector('link[rel=canonical]'),schema:!!document.querySelector('script[type=\"application/ld+json\"]')}",
+            "return {base:new URL(document.getElementById('aggr-page').dataset.root,location.href).href,canonical:!!document.querySelector('link[rel=canonical]'),schema:!!document.querySelector('script[type=\"application/ld+json\"]')}",
             vec![],
         )
         .await?;

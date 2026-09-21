@@ -38,7 +38,7 @@ const rejected: unknown[] = [
   JSON.parse('{"version":1,"preferences":{"constructor":{"prototype":{"polluted":true}}}}')
 ];
 
-describe("inline preferences bootstrap", () => {
+describe("preferences bootstrap", () => {
   // One run serves the whole scenario: the script must never write, so the last test checks the counter.
   const run = runBootstrap({ stored });
   const { preferences } = run;
@@ -70,7 +70,7 @@ describe("inline preferences bootstrap", () => {
 
   it("defaults paragraph indentation to off on the document as well", () => {
     expect(preferences.values["paragraph-indent"]).toBe(false);
-    expect(run.dataset.paragraphIndent).toBe(false);
+    expect(run.dataset.paragraphIndent).toBe('false');
   });
 
   it("writes every attribute-backed preference to the document and nothing else", () => {

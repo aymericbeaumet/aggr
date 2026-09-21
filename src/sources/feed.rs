@@ -817,6 +817,7 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<RawItem> {
             .collect(),
         preview: None,
         images: Vec::new(),
+        document: None,
     })
 }
 

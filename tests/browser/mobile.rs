@@ -360,7 +360,7 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
         .await?;
         assert_eq!(
             client
-                .execute("return document.querySelector('#aggr-base').href", vec![])
+                .execute("return new URL(document.getElementById('aggr-page').dataset.root,location.href).href", vec![])
                 .await?,
             fixture.base,
             "the persistent document base must keep every mobile route site-relative"
@@ -376,7 +376,7 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
     .await?;
     for (directory, kind, value) in [
         ("browse", "", ""),
-        ("sources/example", "source", "example"),
+        ("sources/publisher.invalid", "source", "publisher.invalid"),
         ("tags/reading", "tag", "reading"),
         ("categories/engineering", "category", "engineering"),
     ] {
@@ -468,13 +468,16 @@ async fn mobile_tabs_and_instant_cached_navigation() -> Result<()> {
               const visible=element=>!!element.getClientRects().length&&getComputedStyle(element).visibility!=='hidden';
               return {bottom:r.bottom,height:r.height,viewport:innerHeight,position:getComputedStyle(bar).position,
                 top:[...document.querySelectorAll('.nav a')].filter(visible).map(a=>a.textContent.trim()),
-                tabs:[...bar.querySelectorAll('a')].filter(visible).map(a=>({label:a.textContent.trim(),height:a.getBoundingClientRect().height,current:a.getAttribute('aria-current')})),
+                tabs:[...bar.querySelectorAll('a')].filter(visible).map(a=>({label:a.textContent.trim(),height:a.getBoundingClientRect().height,current:a.getAttribute('aria-current'),iconTop:a.querySelector('svg').getBoundingClientRect().top,iconHeight:a.querySelector('svg').getBoundingClientRect().height,labelTop:a.querySelector('span').getBoundingClientRect().top,radius:parseFloat(getComputedStyle(a).borderRadius),background:getComputedStyle(a).backgroundColor})),
+                surface:{left:parseFloat(getComputedStyle(bar,'::before').left),right:parseFloat(getComputedStyle(bar,'::before').right),radius:parseFloat(getComputedStyle(bar,'::before').borderRadius)},
                 padding:parseFloat(getComputedStyle(document.querySelector('.main')).paddingBottom),footer:visible(document.querySelector('.footer'))};
             "#,vec![]).await?;
             anyhow::ensure!(layout["position"]=="fixed" && (layout["bottom"].as_f64().unwrap()-layout["viewport"].as_f64().unwrap()).abs()<1.0,"tabs meet the viewport bottom: {layout}");
             anyhow::ensure!(layout["top"].as_array().unwrap().len()==2 && layout["top"][1]=="aggr.toml ↗" && layout["footer"]==false,"mobile header has only brand and config: {layout}");
             let tabs=layout["tabs"].as_array().unwrap();
-            anyhow::ensure!(tabs.iter().map(|tab|tab["label"].as_str().unwrap()).collect::<Vec<_>>()==["feed","search","browse","preferences"] && tabs.iter().all(|tab|tab["height"].as_f64().unwrap()>=44.0) && tabs[0]["current"]=="page","four accessible tabs with an active feed: {layout}");
+            anyhow::ensure!(tabs.iter().map(|tab|tab["label"].as_str().unwrap()).collect::<Vec<_>>()==["feed","browse","preferences"] && tabs.iter().all(|tab|tab["height"].as_f64().unwrap()>=44.0) && tabs[0]["current"]=="page","three accessible tabs with an active feed: {layout}");
+            anyhow::ensure!(layout["height"]==68 && layout["surface"]["left"]==16 && layout["surface"]["right"]==16 && layout["surface"]["radius"].as_f64().unwrap()>=30.0,"floating surface stays compact and inset from both screen edges: {layout}");
+            anyhow::ensure!(tabs.iter().all(|tab|tab["iconTop"]==tabs[0]["iconTop"] && tab["iconHeight"]==24 && tab["labelTop"]==tabs[0]["labelTop"] && tab["radius"].as_f64().unwrap()>=26.0) && tabs[0]["background"]!="rgba(0, 0, 0, 0)","icons and labels share exact vertical tracks and the active tab has a rounded pill: {layout}");
             anyhow::ensure!((layout["padding"].as_f64().unwrap()-layout["height"].as_f64().unwrap()-12.0).abs()<1.0,"content clears the measured bar with one compact gap: {layout}");
             screenshot(&client, &format!("mobile-tabs-{width}")).await?;
             client.execute("scrollTo(0,document.documentElement.scrollHeight);document.documentElement.style.setProperty('--mobile-safe-area','32px')",vec![]).await?;
@@ -483,7 +486,7 @@ async fn mobile_tabs_and_instant_cached_navigation() -> Result<()> {
               const bar=document.querySelector('.mobile-tabs'),r=bar.getBoundingClientRect();
               return {bottom:r.bottom,viewport:innerHeight,height:r.height,padding:parseFloat(getComputedStyle(document.querySelector('.main')).paddingBottom),safe:parseFloat(getComputedStyle(bar).paddingBottom)};
             "#,vec![]).await?;
-            anyhow::ensure!(inset["safe"]==32 && (inset["height"].as_f64().unwrap()-layout["height"].as_f64().unwrap()-32.0).abs()<1.0 && (inset["bottom"].as_f64().unwrap()-inset["viewport"].as_f64().unwrap()).abs()<1.0,"scrolling keeps the bar docked and safe area is counted once: {inset}");
+            anyhow::ensure!(inset["safe"]==44 && (inset["height"].as_f64().unwrap()-layout["height"].as_f64().unwrap()-32.0).abs()<1.0 && (inset["bottom"].as_f64().unwrap()-inset["viewport"].as_f64().unwrap()).abs()<1.0,"scrolling keeps the bar docked and safe area is counted once: {inset}");
             anyhow::ensure!((inset["padding"].as_f64().unwrap()-inset["height"].as_f64().unwrap()-12.0).abs()<1.0,"home-indicator padding is not duplicated in content: {inset}");
             let keyboard=client.execute_async(r#"
               const done=arguments[arguments.length-1],bar=document.querySelector('.mobile-tabs'),input=document.querySelector('#q'),viewport=window.visualViewport;
@@ -521,7 +524,7 @@ async fn mobile_tabs_and_instant_cached_navigation() -> Result<()> {
                 let animationStarts=0;const durations=[];
                 const off=window.swup.hooks.on('animation:in:start',()=>animationStarts++);
                 for(const route of ['browse/','preferences/','']){
-                  const url=new URL(route,document.baseURI);
+                  const url=new URL(route,new URL(document.getElementById('aggr-page').dataset.root,location.href));
                   await until(()=>!window.swup.navigating&&window.swup.cache.has(url.pathname));
                   const started=performance.now();
                   document.querySelector(`.mobile-tabs a[data-route="${route}"]`).click();
@@ -536,26 +539,23 @@ async fn mobile_tabs_and_instant_cached_navigation() -> Result<()> {
             "#,vec![]).await?;
             anyhow::ensure!(navigation.get("error").is_none() && navigation["animationStarts"]==0 && navigation["cacheSize"].as_u64().unwrap()<=32,"cached tab navigation skips all animation frames: {navigation}");
             eprintln!("mobile cached navigation ({width}px): {navigation}");
-            client.find(Locator::Css(".mobile-tabs [data-search-action]")).await?.click().await?;
-            wait_for(&client,"document.activeElement?.id==='q' && document.querySelector('.mobile-tabs [aria-current]')?.hasAttribute('data-search-action')").await?;
+            client.find(Locator::Css("#q")).await?.click().await?;
+            wait_for(&client,"document.activeElement?.id==='q' && document.querySelector('.mobile-tabs [aria-current]')?.hasAttribute('data-feed-action')").await?;
             client.find(Locator::Css("#q")).await?.send_keys("category:engineering").await?;
             wait_for(&client,"new URL(location.href).searchParams.get('q')==='category:engineering'").await?;
-            let search_reselected=client.execute_async(r#"
-              const done=arguments[arguments.length-1],input=document.querySelector('#q'),tab=document.querySelector('.mobile-tabs [data-search-action]');
-              input.setSelectionRange(9,12);
-              let visits=0;const off=window.swup.hooks.on('visit:start',()=>visits++);
-              tab.click();
-              queueMicrotask(()=>{off();done({query:input.value,selection:[input.selectionStart,input.selectionEnd],focused:document.activeElement===input,visits,active:document.querySelectorAll('.mobile-tabs [aria-current]').length,hrefQuery:new URL(tab.href).searchParams.get('q')})});
+            let focused=client.execute(r#"
+              const input=document.querySelector('#q');input.setSelectionRange(9,12);
+              return {query:input.value,selection:[input.selectionStart,input.selectionEnd],focused:document.activeElement===input,active:document.querySelectorAll('.mobile-tabs [aria-current]').length,searchTab:!!document.querySelector('.mobile-tabs [data-search-action]')};
             "#,vec![]).await?;
-            anyhow::ensure!(search_reselected==json!({"query":"category:engineering","selection":[9,12],"focused":true,"visits":0,"active":1,"hrefQuery":"category:engineering"}),"Search reselect preserves the query, caret, and native link destination without navigating: {search_reselected}");
+            anyhow::ensure!(focused==json!({"query":"category:engineering","selection":[9,12],"focused":true,"active":1,"searchTab":false}),"the persistent field preserves query and caret while Feed remains the single active tab: {focused}");
             escape_search(&client).await?;
-            wait_for(&client,"document.activeElement?.id!=='q' && document.querySelector('.mobile-tabs [aria-current]')?.hasAttribute('data-search-action')").await?;
+            wait_for(&client,"document.activeElement?.id!=='q' && document.querySelector('.mobile-tabs [aria-current]')?.hasAttribute('data-feed-action')").await?;
             client.execute("const input=document.querySelector('#q');input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));input.blur()",vec![]).await?;
             wait_for(&client,"!new URL(location.href).searchParams.has('q') && document.querySelector('.mobile-tabs [aria-current]')?.hasAttribute('data-feed-action')").await?;
             client.find(Locator::Css(".mobile-tabs [data-route='browse/']")).await?.click().await?;
             wait_for(&client,"document.body.dataset.kind==='browse' && !window.swup.navigating").await?;
-            client.find(Locator::Css(".mobile-tabs [data-search-action]")).await?.click().await?;
-            wait_for(&client,"location.pathname==='/reader/' && document.activeElement?.id==='q' && document.querySelector('.mobile-tabs [aria-current]')?.hasAttribute('data-search-action')").await?;
+            key(&client,"/").await?;
+            wait_for(&client,"location.pathname==='/reader/' && document.activeElement?.id==='q' && document.querySelector('.mobile-tabs [aria-current]')?.hasAttribute('data-feed-action')").await?;
         }
         Ok(())
     }.await;
@@ -588,6 +588,7 @@ async fn mobile_feed_rows_keep_metadata_readable_without_thumbnail_indentation()
                 separators:fields.every(field=>getComputedStyle(field,'::before').content==='none'),
                 preview:{width:box(preview).width,height:box(preview).height,top:box(preview).top-title.getBoundingClientRect().top,right:box(preview).right-box(copy).right},
                 textOnlyMinHeight:getComputedStyle(textOnly.querySelector('.row-content')).minHeight,
+                textOnlyMetadataGap:box(textOnly.querySelector('.meta')).top-box(textOnly.querySelector('.title')).bottom,
                 rowTargets:rows.every(row=>box(row).height>=44),
                 padding:parseFloat(getComputedStyle(row).paddingTop),
                 titleSize:parseFloat(getComputedStyle(title).fontSize),
@@ -596,6 +597,7 @@ async fn mobile_feed_rows_keep_metadata_readable_without_thumbnail_indentation()
             anyhow::ensure!(layout["overflow"]==false && layout["rank"]==true && layout["metadataFullWidth"]==true && layout["sharedAxis"]==true,"mobile text uses the full row width without a rank or preview column below the title: {layout}");
             anyhow::ensure!(layout["sourceSeparate"]==true && layout["fieldsVisible"]==true && layout["separators"]==true,"source and secondary metadata form a clear hierarchy without losing fields or wrapping leading dots: {layout}");
             anyhow::ensure!(layout["preview"]==json!({"width":48,"height":48,"top":0,"right":0}) && layout["textOnlyMinHeight"]=="0px","previews reserve a stable square only where present: {layout}");
+            anyhow::ensure!(layout["textOnlyMetadataGap"].as_f64().unwrap()<=6.0,"text-only rows place source metadata directly below the title: {layout}");
             anyhow::ensure!(layout["rowTargets"]==true && layout["padding"].as_f64().unwrap()>=10.0 && layout["titleSize"].as_f64().unwrap()>=16.0 && layout["metaSize"].as_f64().unwrap()>=13.0,"mobile rows retain readable text and a comfortable full-row target: {layout}");
             let hidden=client.execute("document.documentElement.dataset.thumbnails='hide';const row=document.querySelector('.row'),full=row.querySelector('.row-content').getBoundingClientRect().width,title=row.querySelector('.title').getBoundingClientRect().width;const hidden=getComputedStyle(row.querySelector('.preview-media')).display==='none';delete document.documentElement.dataset.thumbnails;return {hidden,reclaimed:Math.abs(full-title)<1}",vec![]).await?;
             anyhow::ensure!(hidden==json!({"hidden":true,"reclaimed":true}),"hiding previews also removes their column and gap: {hidden}");
@@ -621,7 +623,7 @@ async fn mobile_search_pagination_uses_compact_inline_controls() -> Result<()> {
         emulate(&client, "Page.addScriptToEvaluateOnNewDocument", json!({"source":"localStorage.setItem('aggr:feed-page-size','10')"})).await?;
         for width in [390, 320] {
             emulate(&client, "Emulation.setDeviceMetricsOverride", json!({"width":width,"height":844,"deviceScaleFactor":1,"mobile":true})).await?;
-            client.goto(&format!("{}?q=source:example",fixture.base)).await?;
+            client.goto(&format!("{}?q=source:%22publisher.invalid%22",fixture.base)).await?;
             wait_for(&client,"!!document.querySelector('[data-search-results] .pager button')").await?;
             let state=client.execute(r#"
               const pager=document.querySelector('[data-search-results] .pager');
@@ -638,5 +640,242 @@ async fn mobile_search_pagination_uses_compact_inline_controls() -> Result<()> {
         Ok(())
     }.await;
     report_failure(&client, "mobile-search-pagination", &result).await;
+    finish(client, result).await
+}
+
+async fn touch(client: &Client, phase: &str, point: Option<(f64, f64)>) -> Result<()> {
+    let points = point
+        .map(|(x, y)| json!([{"x":x,"y":y,"id":1}]))
+        .unwrap_or_else(|| json!([]));
+    emulate(
+        client,
+        "Input.dispatchTouchEvent",
+        json!({"type":phase,"touchPoints":points}),
+    )
+    .await
+}
+
+async fn touch_point(client: &Client, selector: &str) -> Result<(f64, f64)> {
+    let point = client
+        .execute(
+            r#"
+      const element=document.querySelector(arguments[0]);
+      if(!element)throw Error('missing touch target: '+arguments[0]);
+      const box=element.getBoundingClientRect();
+      return [box.left+box.width/2,box.top+box.height/2];
+    "#,
+            vec![json!(selector)],
+        )
+        .await?;
+    Ok((
+        point[0].as_f64().context("touch x")?,
+        point[1].as_f64().context("touch y")?,
+    ))
+}
+
+async fn tap(client: &Client, selector: &str) -> Result<()> {
+    let point = touch_point(client, selector).await?;
+    touch(client, "touchStart", Some(point)).await?;
+    touch(client, "touchEnd", None).await
+}
+
+async fn swipe(client: &Client, from: (f64, f64), to: (f64, f64)) -> Result<()> {
+    touch(client, "touchStart", Some(from)).await?;
+    for step in 1..=8 {
+        let fraction = f64::from(step) / 8.0;
+        touch(
+            client,
+            "touchMove",
+            Some((
+                from.0 + (to.0 - from.0) * fraction,
+                from.1 + (to.1 - from.1) * fraction,
+            )),
+        )
+        .await?;
+    }
+    touch(client, "touchEnd", None).await
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome WebDriver"]
+async fn mobile_physical_taps_navigate_once_without_delay_or_reload() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fixture = Fixture::with_pwa(false)?;
+    let client = browser_client().await?;
+    let result=async {
+        phone_session(&client).await?;
+        client.goto(&fixture.base).await?;
+        wait_booted_with(&client,"!!window.swup && window.swup.cache.has(new URL('browse/',new URL(document.getElementById('aggr-page').dataset.root,location.href)).pathname) && window.swup.cache.has(new URL('preferences/',new URL(document.getElementById('aggr-page').dataset.root,location.href)).pathname)").await?;
+        client.execute(r#"
+          window.__mobileTouchProbe={visits:[],released:0,initialHistory:history.length};
+          document.addEventListener('pointerup',()=>__mobileTouchProbe.released=performance.now(),true);
+          window.swup.hooks.on('visit:start',()=>__mobileTouchProbe.visits.push({at:performance.now(),released:__mobileTouchProbe.released}));
+        "#,vec![]).await?;
+        for (index,route) in ["browse/","preferences/"].iter().enumerate() {
+            let selector=format!(".mobile-tabs a[data-route='{route}']");
+            let point=touch_point(&client,&selector).await?;
+            let rest=client.execute("return getComputedStyle(document.querySelector(arguments[0])).backgroundColor",vec![json!(selector)]).await?;
+            touch(&client,"touchStart",Some(point)).await?;
+            let pressed=client.execute("const tab=document.querySelector(arguments[0]);return {background:getComputedStyle(tab).backgroundColor,transition:getComputedStyle(tab).transitionDuration}",vec![json!(selector)]).await?;
+            anyhow::ensure!(pressed["background"]!=rest && pressed["transition"]=="0s","touch contact gives immediate visible feedback: {pressed}; resting {rest}");
+            touch(&client,"touchEnd",None).await?;
+            wait_for(&client,&format!("!window.swup.navigating && location.pathname===new URL('{route}',new URL(document.getElementById('aggr-page').dataset.root,location.href)).pathname && document.querySelector('.mobile-tabs [aria-current]')?.dataset.route==='{route}'")).await?;
+            let state=client.execute(r#"
+              const probe=window.__mobileTouchProbe,tab=document.querySelector('.mobile-tabs [aria-current]');
+              return {visits:probe?.visits,history:history.length-(probe?.initialHistory||0),active:document.querySelectorAll('.mobile-tabs [aria-current]').length,
+                touchAction:getComputedStyle(tab).touchAction,decoration:getComputedStyle(tab).textDecorationLine};
+            "#,vec![]).await?;
+            let visits=state["visits"].as_array().context("touch navigation must preserve the document")?;
+            anyhow::ensure!(visits.len()==index+1 && state["history"]==index+1 && state["active"]==1,"one physical tap produces one client navigation and one history entry: {state}");
+            let visit=&visits[index];
+            let elapsed=visit["at"].as_f64().context("visit time")?-visit["released"].as_f64().context("touch release time")?;
+            anyhow::ensure!(elapsed.abs()<200.0,"navigation starts on release without a double-tap delay: {elapsed} ms; {state}");
+            anyhow::ensure!(state["touchAction"]=="manipulation" && state["decoration"]=="none","tabs expose immediate touch activation without link decoration: {state}");
+        }
+        tap(&client,".mobile-tabs a[data-route='preferences/']").await?;
+        let same=client.execute("return {visits:__mobileTouchProbe.visits.length,history:history.length-__mobileTouchProbe.initialHistory}",vec![]).await?;
+        anyhow::ensure!(same==json!({"visits":2,"history":2}),"reselecting a tab does not duplicate navigation or history: {same}");
+        client.back().await?;
+        wait_for(&client,"!window.swup.navigating && document.body.dataset.kind==='browse' && document.querySelector('.mobile-tabs [aria-current]')?.dataset.route==='browse/'").await?;
+        anyhow::ensure!(client.execute("return !!window.__mobileTouchProbe",vec![]).await?==true,"Back remains in the same reader document");
+        screenshot(&client,"mobile-physical-tap-navigation").await?;
+        Ok(())
+    }.await;
+    report_failure(&client, "mobile-physical-taps", &result).await;
+    finish(client, result).await
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome WebDriver"]
+async fn mobile_article_swipes_follow_neighbors_and_preserve_scroll_and_controls() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fixture = Fixture::with_pwa(false)?;
+    let archive = fixture.directory.path().join(".aggr/data");
+    for (index, body) in [
+        (
+            28,
+            "Ocean currents transport heat between continents. Marine biologists study coastal plankton and tidal habitats. Deep water circulation influences seasonal temperatures and marine life.",
+        ),
+        (
+            29,
+            "Ancient manuscripts preserve the history of alphabets. Conservators examine parchment pigments and restore damaged bindings. Museums catalogue writing systems and their cultural origins.",
+        ),
+        (
+            30,
+            "Orbital telescopes measure distant stellar spectra. Astronomers track planetary transits and estimate atmospheric composition. Observatory teams compare ultraviolet measurements and calibrate optical instruments.",
+        ),
+    ] {
+        let path = archive.join(format!(
+            "items/example/2026/09/2026-09-01-story-{index:02}.md"
+        ));
+        let original = std::fs::read_to_string(&path)?;
+        let (frontmatter, _) = original
+            .split_once("\n---\n")
+            .context("fixture frontmatter")?;
+        std::fs::write(
+            path,
+            format!(
+                "{frontmatter}\n---\n\n{}\n\n[Reference link](https://example.invalid/reference)\n\n```text\n{}\n```\n",
+                format!("{body}\n\n").repeat(15),
+                "A deliberately wide line for horizontal code scrolling. ".repeat(16)
+            ),
+        )?;
+    }
+    crate::harness::git(&archive, &["add", "items"])?;
+    crate::harness::git(
+        &archive,
+        &["commit", "-qm", "distinct gesture fixture articles"],
+    )?;
+    fixture.build()?;
+    let client = browser_client().await?;
+    let result=async {
+        phone_session(&client).await?;
+        let start=format!("{}items/example/2026-09-01-story-29/",fixture.base);
+        client.goto(&start).await?;
+        wait_booted_with(&client,"document.querySelector('article.item')?.dataset.nextUrl && document.querySelector('article.item')?.dataset.previousUrl").await?;
+        let neighbors=client.execute("const article=document.querySelector('article.item');window.__swipeSentinel=true;return {next:new URL(article.dataset.nextUrl,new URL(document.getElementById('aggr-page').dataset.root,location.href)).href,previous:new URL(article.dataset.previousUrl,new URL(document.getElementById('aggr-page').dataset.root,location.href)).href}",vec![]).await?;
+        wait_for(&client,"window.swup.cache.has(new URL(document.querySelector('article.item').dataset.nextUrl,new URL(document.getElementById('aggr-page').dataset.root,location.href)).pathname)").await?;
+        client.execute("document.querySelector('.body p').scrollIntoView({block:'center'})",vec![]).await?;
+        let (_,y)=touch_point(&client,".body p").await?;
+        swipe(&client,(300.0,y),(85.0,y+5.0)).await?;
+        wait_for(&client,&format!("!window.swup.navigating && location.href==={}",neighbors["next"])).await?;
+        anyhow::ensure!(client.execute("return window.__swipeSentinel===true",vec![]).await?==true,"article swipes must not reload the document");
+        client.execute("document.querySelector('.body p').scrollIntoView({block:'center'})",vec![]).await?;
+        let (_,y)=touch_point(&client,".body p").await?;
+        swipe(&client,(85.0,y),(300.0,y-5.0)).await?;
+        wait_for(&client,&format!("!window.swup.navigating && location.href==={}",json!(start))).await?;
+        client.execute("scrollTo(0,100)",vec![]).await?;
+        swipe(&client,(190.0,620.0),(180.0,300.0)).await?;
+        wait_for(&client,"scrollY>200").await?;
+        anyhow::ensure!(client.current_url().await?.as_str()==start,"vertical reading gestures must not change article");
+        client.execute("document.querySelector('.body a').scrollIntoView({block:'center'})",vec![]).await?;
+        let (x,y)=touch_point(&client,".body a").await?;
+        swipe(&client,(x,y),(x+120.0,y)).await?;
+        anyhow::ensure!(client.current_url().await?.as_str()==start,"gestures starting on links stay with the control");
+        client.execute("document.querySelector('.body pre').scrollIntoView({block:'center'})",vec![]).await?;
+        let (_,y)=touch_point(&client,".body pre").await?;
+        swipe(&client,(300.0,y),(85.0,y)).await?;
+        wait_for(&client,"document.querySelector('.body pre').scrollLeft>0").await?;
+        anyhow::ensure!(client.current_url().await?.as_str()==start,"horizontal code scrolling must not turn the article");
+        Ok(())
+    }.await;
+    report_failure(&client, "mobile-article-swipes", &result).await;
+    finish(client, result).await
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome WebDriver"]
+async fn mobile_feed_search_stays_below_header_while_articles_and_results_scroll() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fixture = Fixture::with_pwa(false)?;
+    let config = fixture.directory.path().join("aggr.toml");
+    std::fs::write(
+        &config,
+        std::fs::read_to_string(&config)?.replace("items_per_page=3", "items_per_page=30"),
+    )?;
+    fixture.build()?;
+    let client = browser_client().await?;
+    let result=async {
+        phone_session(&client).await?;
+        for width in [390,1024] {
+            emulate(&client,"Emulation.setDeviceMetricsOverride",json!({"width":width,"height":844,"deviceScaleFactor":1,"mobile":width<640})).await?;
+            client.goto(&fixture.base).await?;
+            wait_booted_with(&client,"document.querySelectorAll('[data-static-feed] .row').length>=20").await?;
+            client.execute("scrollTo(0,700)",vec![]).await?;
+            wait_for(&client,"scrollY>=600 && Math.abs(document.querySelector('.feed-toolbar').getBoundingClientRect().top-document.querySelector('.top').getBoundingClientRect().bottom)<1").await?;
+            let pinned=client.execute(r#"
+              const toolbar=document.querySelector('.feed-toolbar'),input=document.querySelector('#q'),box=input.getBoundingClientRect();
+              return {position:getComputedStyle(toolbar).position,visible:document.elementFromPoint(box.x+box.width/2,box.y+box.height/2)===input,
+                separateResults:!toolbar.querySelector('[data-search-results]'),tabs:[...document.querySelectorAll('.mobile-tabs a')].map(a=>a.textContent.trim()),scroll:scrollY};
+            "#,vec![]).await?;
+            anyhow::ensure!(pinned["position"]=="sticky" && pinned["visible"]==true && pinned["separateResults"]==true && pinned["tabs"]==json!(["feed","browse","preferences"]),"only the search field stays pinned below the header: {pinned}");
+            key(&client,"/").await?;
+            wait_for(&client,"document.activeElement?.id==='q'").await?;
+            let focused_scroll=client.execute("return scrollY",vec![]).await?;
+            anyhow::ensure!((focused_scroll.as_f64().unwrap()-pinned["scroll"].as_f64().unwrap()).abs()<1.0,"focusing an already visible pinned search keeps the reading position");
+            client.find(Locator::Css("#q")).await?.send_keys("source:\"publisher.invalid\"").await?;
+            wait_for(&client,"document.querySelectorAll('[data-search-results] .row').length>=20").await?;
+            client.execute("document.querySelector('#q').blur();scrollTo(0,700)",vec![]).await?;
+            wait_for(&client,"scrollY>=600 && Math.abs(document.querySelector('.feed-toolbar').getBoundingClientRect().top-document.querySelector('.top').getBoundingClientRect().bottom)<1").await?;
+            let results=client.execute("return {query:document.querySelector('#q').value,active:document.querySelector('.mobile-tabs [aria-current]')?.dataset.route,resultsTop:document.querySelector('[data-search-results]').getBoundingClientRect().top,fieldBottom:document.querySelector('.feed-toolbar').getBoundingClientRect().bottom}",vec![]).await?;
+            anyhow::ensure!(results["query"]=="source:\"publisher.invalid\"" && results["active"]=="" && results["resultsTop"].as_f64().unwrap()<results["fieldBottom"].as_f64().unwrap(),"results scroll independently under the field while Feed stays active: {results}");
+            if width<640 {
+                let keyboard=client.execute_async(r#"
+                  const done=arguments[arguments.length-1],input=document.querySelector('#q'),viewport=visualViewport,bar=document.querySelector('.mobile-tabs'),before=scrollY;
+                  input.focus({preventScroll:true});Object.defineProperty(viewport,'height',{configurable:true,value:innerHeight-300});viewport.dispatchEvent(new Event('resize'));
+                  const result={hidden:getComputedStyle(bar).visibility==='hidden',searchVisible:input.getBoundingClientRect().top>=document.querySelector('.top').getBoundingClientRect().bottom && input.getBoundingClientRect().bottom<viewport.height,stable:scrollY===before};
+                  input.blur();delete viewport.height;viewport.dispatchEvent(new Event('resize'));queueMicrotask(()=>done(result));
+                "#,vec![]).await?;
+                anyhow::ensure!(keyboard==json!({"hidden":true,"searchVisible":true,"stable":true}),"keyboard leaves the pinned search visible without moving content: {keyboard}");
+                screenshot(&client,"mobile-pinned-feed-search").await?;
+            }
+            client.find(Locator::Css("#q")).await?.clear().await?;
+            client.find(Locator::Css("#q")).await?.send_keys("source:").await?;
+            wait_for(&client,"document.querySelector('.search-completions')?.getBoundingClientRect().height>0").await?;
+            anyhow::ensure!(client.execute("const input=document.querySelector('#q').getBoundingClientRect(),list=document.querySelector('.search-completions').getBoundingClientRect();return list.top>=input.bottom && list.bottom<=innerHeight",vec![]).await?==true,"completion remains visible below the pinned input");
+        }
+        Ok(())
+    }.await;
+    report_failure(&client, "mobile-pinned-search", &result).await;
     finish(client, result).await
 }

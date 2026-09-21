@@ -524,7 +524,8 @@ self.addEventListener("install", function (event) {
 function isImageAsset(url) {
   return url.origin === self.location.origin &&
     (url.pathname.indexOf(BASE + "assets/previews/") === 0 ||
-      url.pathname.indexOf(BASE + "assets/images/") === 0);
+      url.pathname.indexOf(BASE + "assets/images/") === 0 ||
+      url.pathname.indexOf(BASE + "assets/documents/") === 0);
 }
 
 function isAppAsset(request) {

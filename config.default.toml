@@ -26,6 +26,14 @@ max_age_days = 365
 # Public URL used by `aggr build --release` (the workflow passes it automatically for
 # *.github.io). A custom domain here also writes the CNAME file GitHub Pages needs.
 # url = "https://reads.example.com"
+# Allow search-engine indexing and emit a sitemap in release builds. This does not control access.
+indexing = false
+# Maximum generated-site bytes, including text, search, and assets (1 decimal GB by default).
+# Every retained article stays readable; media is compressed or left at its publisher to fit.
+build_max_bytes = 1000000000
+# Keep recent articles' local media intact; compact older images in the generated site only.
+# The archive's full-quality masters and Git history are never changed by a build.
+media_full_quality_days = 30
 # Output directory of `aggr build`.
 out = "_site"
 # In a secure context, emit install metadata and cache a bounded offline reading set.

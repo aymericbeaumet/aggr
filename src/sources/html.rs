@@ -226,6 +226,7 @@ fn card_items(document: &Html, page_url: &Url) -> Result<Vec<RawItem>> {
             preview_candidates: crate::preview::html_candidates(&block.html(), page_url),
             preview: None,
             images: Vec::new(),
+            document: None,
         });
     }
     Ok(out)
@@ -315,6 +316,7 @@ fn collect_articles(value: &Value, page_url: &Url, out: &mut Vec<RawItem>) {
                         preview_candidates: json_ld_images(object.get("image"), page_url),
                         preview: None,
                         images: Vec::new(),
+                        document: None,
                     });
                 }
             }

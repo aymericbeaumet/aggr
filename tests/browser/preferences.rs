@@ -24,7 +24,7 @@ async fn preference_controls_transfer_and_import() -> Result<()> {
 async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
     phone_session(client).await?;
     // The bootstrap's validation rules are covered by web/src/preferences/bootstrap.test.ts; the
-    // browser confirms the inline script runs before paint: the stored theme is on <html> while the
+    // browser confirms the shared script runs before paint: the stored theme is on <html> while the
     // head is still parsing and the app has not loaded, and an invalid stored value has already
     // fallen back to its default.
     client.goto(&fixture.base).await?;
@@ -59,7 +59,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
             .execute("return window.__aggrBootstrap || null", vec![])
             .await?,
         json!({"theme":"dark","density":"compact","headParsing":true,"appLoaded":false}),
-        "the inline preferences script must apply stored values before paint and fall back for invalid ones"
+        "the shared preferences script must apply stored values before paint and fall back for invalid ones"
     );
     client
         .execute(
@@ -295,7 +295,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     );
 
     let ignored_transfer = client.execute(r#"
-      const url=new URL('preferences/',document.baseURI);
+      const url=new URL('preferences/',new URL(document.getElementById('aggr-page').dataset.root,location.href));
       url.searchParams.set('aggr-state',btoa(JSON.stringify({version:1,preferences:{theme:'light'}})));
       return url.href;
     "#,vec![]).await?.as_str().context("query-string transfer URL")?.to_owned();

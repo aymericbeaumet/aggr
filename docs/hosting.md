@@ -21,6 +21,11 @@ with mise, append its version, for example `github:aymericbeaumet/aggr@1.6.0`.
 
 ## Adding aggr to an existing GitHub repository
 
+Before the first push, open the repository's **Settings → Pages → Build and deployment** and set
+**Source** to **GitHub Actions**. Enable Actions as well if GitHub has disabled them for a fork.
+The workflow publishes to an already enabled Pages site; it cannot enable Pages with its default
+`GITHUB_TOKEN`.
+
 ```sh
 aggr init --github
 $EDITOR aggr.toml
@@ -136,21 +141,38 @@ is down. `check` is the strict one: it probes every source and exits non-zero wh
 (`N of M source(s) failed`), which makes it the right command for validating `aggr.toml` before a
 merge.
 
-## Making a public snapshot discoverable
+## Publication and search indexing
 
-Release builds give every published, retained item an indexable page with a self-canonical URL. The
-exact upstream URL remains visibly labelled as the original and is also expressed in structured
-data, feeds, the Markdown and JSON representations, and the generated `linkset.json`. Keeping the
-canonical on the local page is intentional: making the upstream page canonical would ask search
-engines to discard the snapshot as a duplicate.
+Pages use `noindex,follow` by default, and aggr omits the sitemap. Local article search, feeds,
+portable exports, and instance-to-instance discovery still work. This asks cooperating search
+engines to leave pages out of their results; it does not make a publicly hosted reader or its Git
+archive private, prevent copying, or grant permission to republish a publisher's text and images.
+Use material you have permission to publish and apply access controls at your host when needed.
 
-The sitemap exposes every published, retained item. `linkset.json` gives aggr-aware tools a direct
-mapping from original URLs to local copies. Site search deliberately indexes exact and normalized
-original URLs alongside article prose, so a pasted URL can find a local copy on a best-effort
-basis. General search engines can still choose the live original—or another copy—as the
-representative result. There is no central registry and no guarantee that an unlinked instance
-will be crawled, so link the public reader and submit its `sitemap.xml` through the search engines
-you care about.
+If you want search engines to index your public reader, opt in explicitly:
+
+```toml
+[site]
+indexing = true
+```
+
+This takes effect only in `aggr build --release`. Development and preview builds always use
+`noindex,follow`, even with indexing enabled. An enabled release build emits a sitemap when its
+public URL is known. At an origin root, `robots.txt` permits crawling and advertises that sitemap;
+with indexing disabled it still permits crawling so engines can read the page's `noindex` directive.
+An instance under a subpath does not write `robots.txt`, since that file only governs an origin
+when served at its root. Custom themes must preserve `page.indexable` in their robots metadata.
+
+Every published article keeps its self-canonical URL and visibly labelled original URL. Original
+provenance also appears in structured data, feeds, portable representations, and `linkset.json`.
+The canonical identifies the local snapshot; it does not claim authorship of the upstream work.
+
+When enabled, the sitemap exposes every published, retained item. `linkset.json` gives aggr-aware
+tools a direct mapping from original URLs to local copies. Local search indexes exact and
+normalized original URLs alongside article prose, so a pasted URL can find a copy on a best-effort
+basis. Search engines can choose the live original or another copy as the representative result.
+There is no central registry or guarantee of crawling; you can link your public reader and submit
+its sitemap when indexing is enabled.
 
 For a public personal or organizational archive, add truthful ownership metadata rather than
 making aggr guess an identity:
@@ -164,7 +186,7 @@ same_as = ["https://github.com/you"]
 ```
 
 Retention changes what remains searchable on the live site. With the default unlimited store
-retention, all published captured items stay in its archives and sitemap. If `[store] max_age_days`
+retention, all published captured items stay in its archives and, when enabled, sitemap. If `[store] max_age_days`
 or `max_items` removes one, its old git object remains reachable through append-only history but
 its static article page is no longer published.
 

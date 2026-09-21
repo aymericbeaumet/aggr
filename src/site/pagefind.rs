@@ -92,13 +92,22 @@ impl SearchDocument {
 
         let mut filters = BTreeMap::new();
         let day = item.date.format("%Y-%m-%d").to_string();
-        filters.insert("source".into(), vec![item.source.clone()]);
+        filters.insert(
+            "source".into(),
+            item.source_memberships
+                .iter()
+                .map(|source| source.slug.clone())
+                .collect(),
+        );
         filters.insert("type".into(), vec![item.item_type.as_str().into()]);
         filters.insert("published-day".into(), vec![day.clone()]);
         let mut facet_labels = BTreeMap::from([
             (
                 "source".into(),
-                BTreeMap::from([(item.source.clone(), item.source_name.clone())]),
+                item.source_memberships
+                    .iter()
+                    .map(|source| (source.slug.clone(), source.name.clone()))
+                    .collect(),
             ),
             ("published-day".into(), BTreeMap::from([(day.clone(), day)])),
         ]);
@@ -398,6 +407,13 @@ mod tests {
             link: "https://secret.example/path?token=noise".into(),
             domain: "secret.example".into(),
             source: "blog".into(),
+            publisher_source: "blog".into(),
+            source_memberships: vec![crate::site::context::SourceMembershipCtx {
+                query_value: "blog".into(),
+                slug: "blog".into(),
+                name: "Blog".into(),
+                display: "secret.example".into(),
+            }],
             source_name: "Blog".into(),
             source_display: "secret.example".into(),
             source_title: "Blog".into(),
@@ -453,6 +469,18 @@ mod tests {
             item,
             crate::content::PreparedMarkdown::new(markdown).plain_text(),
         )
+    }
+
+    #[test]
+    fn display_queries_are_readable_while_index_filters_keep_stable_source_ids() {
+        let mut item = item();
+        item.source_memberships[0].query_value = "Publisher display".into();
+        let document = SearchDocument::new(&item, "Article text");
+        assert_eq!(document.filters["source"], vec!["blog"]);
+        let opaque = hex::decode(&document.meta["aggr_display"]).unwrap();
+        let display: serde_json::Value = serde_json::from_slice(&opaque).unwrap();
+        assert_eq!(display["source_slug"], "blog");
+        assert_eq!(display["source_query"], "Publisher display");
     }
 
     #[test]
@@ -554,6 +582,13 @@ mod tests {
         item.source_title = "Publisher \"quoted\"".into();
         item.is_aggregated = true;
         item.feed_display = "feed.example/news".into();
+        item.source_memberships
+            .push(crate::site::context::SourceMembershipCtx {
+                query_value: "feed".into(),
+                slug: "feed".into(),
+                name: "The feed".into(),
+                display: "feed.example/news".into(),
+            });
         item.extra.insert("points".into(), 0.into());
         item.extra.insert("num_comments".into(), "12".into());
         item.extra.insert(
@@ -580,7 +615,8 @@ mod tests {
             .unwrap();
         assert!(rendered.contains("publisher&lt;&amp;&gt;"));
         assert!(rendered.contains("Publisher &quot;quoted&quot;"));
-        assert!(rendered.contains("<em>via feed.example/news</em>"));
+        assert!(rendered.contains("</a> <em>via <a class=\"source-feed\""));
+        assert!(rendered.contains("title=\"The feed\">feed.example/news</a></em>"));
         assert!(rendered.contains("0 points</span>"));
         assert!(rendered.contains("12 comments</a>"));
         assert!(rendered.contains("a=1&amp;b=2"));

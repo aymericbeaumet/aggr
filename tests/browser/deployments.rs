@@ -22,7 +22,7 @@ async fn content_and_app_deployments_have_distinct_browser_behavior() -> Result<
             eprintln!("deployment width={width}, installed={installed}");
             eprintln!("deployment state: {}", client.execute_async(r#"
               const done=arguments[arguments.length-1];
-              fetch(new URL('updates.json',document.baseURI),{cache:'no-store'}).then(response=>response.json()).then(latest=>done({
+              fetch(new URL('updates.json',new URL(document.getElementById('aggr-page').dataset.root,location.href)),{cache:'no-store'}).then(response=>response.json()).then(latest=>done({
                 rows:[...document.querySelectorAll('#list .row [data-row-open]')].map(link=>link.textContent),
                 empty:document.querySelector('#empty')?.textContent,status:document.querySelector('#search-status')?.textContent,
                 versions:window.manifestVersionsSeen,q:document.querySelector('#q')?.value,
@@ -439,7 +439,7 @@ async fn clearing_updated_search_reveals_the_latest_static_feed() -> Result<()> 
         Ok(())
     }.await;
     if result.is_err() {
-        eprintln!("search deployment diagnostics: {}",client.execute("return {error:document.querySelector('.search-error')?.textContent,requests:window.searchRequests,base:document.baseURI}",vec![]).await.unwrap_or(Value::Null));
+        eprintln!("search deployment diagnostics: {}",client.execute("return {error:document.querySelector('.search-error')?.textContent,requests:window.searchRequests,base:new URL(document.getElementById('aggr-page').dataset.root,location.href)}",vec![]).await.unwrap_or(Value::Null));
     }
     report_failure(&client, "search-deployment-clear", &result).await;
     finish(client, result).await

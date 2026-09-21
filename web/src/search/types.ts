@@ -45,8 +45,9 @@ export interface SearchHandle { destroy(): Promise<void>; focus(options?: { rest
 /** Rust display::Metadata, transported inside opaque Pagefind display metadata. */
 export interface ItemMetadata {
   original?: string; date?: string; updated?: string;
-  source_slug?: string; source_display?: string; source_title?: string;
+  source_slug?: string; source_query?: string; source_display?: string; source_title?: string;
   is_aggregated?: boolean; feed_display?: string;
+  feed_sources?: Array<{ slug: string; query_value?: string; name: string; display: string }>;
   category?: { slug: string; name: string };
   word_count?: number; reading_minutes?: number;
   consumption?: { action: 'read' | 'listen' | 'watch'; minutes?: number; seconds?: number; words?: number };

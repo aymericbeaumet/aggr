@@ -32,15 +32,22 @@ jobs:
       - run: npm --prefix web run verify
       - name: Enforce the reader bundle budget
         run: |
-          budget=72000
-          size="$(gzip -c themes/default/static/app.js | wc -c | tr -d '[:space:]')"
-          echo "themes/default/static/app.js: $size bytes gzipped (budget $budget)"
-          if [ "$size" -gt "$budget" ]; then
-            echo "::error file=themes/default/static/app.js::app.js is $size bytes gzipped, over the $budget byte budget; trim the reader or raise the budget deliberately in ci.yml"
-            exit 1
-          fi
+          for asset in app.js bootstrap.js; do
+            # The parser-blocking bootstrap has its own small budget; the main app keeps its cap.
+            case "$asset" in
+              app.js) budget=72000 ;;
+              bootstrap.js) budget=2500 ;;
+            esac
+            path="themes/default/static/$asset"
+            size="$(gzip -nc "$path" | wc -c | tr -d '[:space:]')"
+            echo "$path: $size bytes gzipped (budget $budget)"
+            if [ "$size" -gt "$budget" ]; then
+              echo "::error file=$path::$asset is $size bytes gzipped, over the $budget byte budget; trim the reader or raise the budget deliberately in ci.yml"
+              exit 1
+            fi
+          done
       - name: Check embedded reader assets match their source
-        run: git diff --exit-code -- themes/default/static/app.js themes/default/static/client.css themes/default/static/client.LICENSE
+        run: git diff --exit-code -- themes/default/static/app.js themes/default/static/bootstrap.js themes/default/static/client.css themes/default/static/client.LICENSE
 
   test:
     name: test (${{ matrix.name }})

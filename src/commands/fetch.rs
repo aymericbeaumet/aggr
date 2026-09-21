@@ -1,6 +1,8 @@
 //! Shared fetch stage for sync/build/dev: every source runs in parallel and writes only its own
 //! directory. Source-local keys and shared URL reservations decide what is new; no git operations.
 
+mod archive;
+mod documents;
 mod duration;
 mod index;
 mod links;
@@ -55,6 +57,8 @@ pub struct Report {
     pub status_changed: bool,
     /// Items deleted by `[store]` retention.
     pub removed: usize,
+    /// Retained bodies re-derived locally, independently of configured source outcomes.
+    pub reprocessed: usize,
 }
 
 pub struct SourceReport {
@@ -74,7 +78,7 @@ pub enum StatePolicy {
 
 impl Report {
     pub fn added(&self) -> usize {
-        self.sources.iter().map(|s| s.added).sum()
+        self.sources.iter().map(|s| s.added).sum::<usize>() + self.reprocessed
     }
 
     pub fn ok(&self) -> usize {
@@ -104,7 +108,6 @@ struct Options {
     existing_paths: Arc<OnceCell<ExistingPaths>>,
     dry_run: bool,
     refresh: bool,
-    reprocess: bool,
     html: bool,
     html_max_bytes: usize,
     article_concurrency: usize,
@@ -144,16 +147,23 @@ pub async fn run_with_cache(
     let store = Arc::new(Store::open(worktree.dir()).with_image_cache(cache_dir));
     let client = Arc::new(http::Client::new(&project.config.fetch)?);
     let index_store = store.clone();
-    let (known_links, existing_paths) =
-        tokio::task::spawn_blocking(move || index_store.items().map(index_archive))
-            .await
-            .context("indexing archived article URLs and paths")??;
+    let reprocess_args = args.clone();
+    let store_root = worktree.dir().to_path_buf();
+    let (known_links, existing_paths, reprocessed) = tokio::task::spawn_blocking(move || {
+        let reprocessed = reprocess_stored_bodies(&index_store, &reprocess_args, &store_root)?;
+        let (links, paths) = index_archive(index_store.items()?);
+        Ok::<_, anyhow::Error>((links, paths, reprocessed))
+    })
+    .await
+    .context("preparing archived article bodies and index")??;
+    if reprocessed > 0 {
+        println!("reprocess: {reprocessed} stored article body(ies)");
+    }
     let options = Options {
         archived_links: Arc::new(SharedLinks::new(known_links)),
         existing_paths: Arc::new(OnceCell::new_with(Some(existing_paths))),
         dry_run: args.dry_run,
         refresh: args.refresh,
-        reprocess: args.reprocess,
         html: project.config.store.html,
         html_max_bytes: project.config.store.html_max_bytes,
         article_concurrency: project.config.fetch.article_concurrency,
@@ -254,6 +264,7 @@ pub async fn run_with_cache(
         sources: reports,
         status_changed,
         removed,
+        reprocessed,
     })
 }
 
@@ -522,6 +533,7 @@ async fn fetch_one_inner(
                     (raw, keys, known, existing_path, stem)
                 })
                 .collect::<Vec<_>>();
+            let document_context = &context;
             let mut enriched = stream::iter(candidates)
                 .map(|(raw, keys, known, existing_path, stem)| async move {
                     let mut raw = hydrate_new_mirror_companions(
@@ -564,6 +576,24 @@ async fn fetch_one_inner(
                             .as_deref()
                             .map(|path| store.read_item(path))
                             .transpose()?;
+                        if !options.dry_run
+                            && stored
+                                .as_ref()
+                                .map(|item| {
+                                    store.read_document(item).map(|asset| {
+                                        asset.filter(|asset| {
+                                            documents::url(&raw.link, &raw.extra)
+                                                .is_some_and(|url| url.as_str() == asset.source_url)
+                                        })
+                                    })
+                                })
+                                .transpose()?
+                                .flatten()
+                                .is_none()
+                            && let Some(url) = documents::url(&raw.link, &raw.extra)
+                        {
+                            raw.document = documents::capture(&url, source, document_context).await;
+                        }
                         let has_stored_images = stored
                             .as_ref()
                             .is_some_and(|item| !item.front.images.is_empty());
@@ -740,10 +770,10 @@ async fn fetch_one_inner(
     };
     let added = report.added;
     let duration_repairs = repair_recordings(source, &context, transaction.as_deref_mut()).await?;
-    let repaired = duration_repairs
+    let repaired = documents::repair(source, &context, transaction.as_deref_mut()).await?
+        + duration_repairs
         + repair_feed_captures(source, &context, transaction.as_deref_mut()).await?
-        + repair_archived_images(source, store, options, transaction.as_deref_mut()).await?
-        + reprocess_stored_bodies(source, store, options, transaction.as_deref_mut())?;
+        + repair_archived_images(source, store, options, transaction.as_deref_mut()).await?;
     report.added += repaired;
     report.unchanged &= repaired == 0;
     if !options.dry_run && should_persist_state(added, repaired, metadata_changed, state_policy) {
@@ -974,7 +1004,12 @@ async fn heavy_content(
     if is_binary_link(&url) {
         return (raw.clone(), fallback);
     }
-    if failures.blocked(&url) {
+    let known_subscription = raw
+        .extra
+        .get("subscription_required")
+        .and_then(serde_yaml_ng::Value::as_bool)
+        == Some(true);
+    if failures.blocked(&url) && !known_subscription {
         return (raw.clone(), fallback);
     }
     if let Some(id) = openreview::note_id(&url) {
@@ -1011,7 +1046,10 @@ async fn heavy_content(
     let mut interactive = false;
     let mut duration = None;
     let mut thread_link = None;
+    let mut subscription_required = false;
+    let mut archive_provenance = None;
     let result = async {
+        if failures.blocked(&url) { anyhow::bail!("original page is already unavailable for this run"); }
         let cache = crate::cache::ArticleCache::new(cache_dir);
         match crate::threads::expand_x(&url, source, client, &cache).await {
             Ok(Some(expanded)) => {
@@ -1154,15 +1192,56 @@ async fn heavy_content(
             );
             return Ok(None);
         }
+        let mut extracted = extracted;
+        if content::is_subscription_wall(&extracted.html, &url) {
+            match archive::recover(&url, &raw.title, client, &cache).await {
+                Some(recovered) => {
+                    extracted = recovered.article;
+                    page_candidates = preview::html_candidate_groups(&extracted.html, &url);
+                    archive_provenance = Some((recovered.snapshot, recovered.captured_at));
+                }
+                None => {
+                    subscription_required = true;
+                    page_candidates = preview::HtmlCandidateGroups::default();
+                    return Ok(None);
+                }
+            }
+        }
+        extracted.html = crate::threads::expand_embedded_x(&extracted.html, source, client, &cache).await;
         Ok(Some(extracted))
     }
     .await;
+    let result = match result {
+        Err(error) if known_subscription => {
+            failures.record(&url, http::status_code(&error));
+            let cache = crate::cache::ArticleCache::new(cache_dir);
+            if let Some(recovered) = archive::recover(&url, &raw.title, client, &cache).await {
+                page_candidates = preview::html_candidate_groups(&recovered.article.html, &url);
+                archive_provenance = Some((recovered.snapshot, recovered.captured_at));
+                Ok(Some(recovered.article))
+            } else {
+                subscription_required = true;
+                page_candidates = preview::HtmlCandidateGroups::default();
+                Ok(None)
+            }
+        }
+        other => other,
+    };
     match result {
         // The page was fetched but its readable region is not the item: the feed entry (its
         // content, or its summary when that is all it has) is the article, and the page still
         // supplies what it knows about media and duration.
         Ok(None) => {
             let mut enriched = raw.clone();
+            if subscription_required {
+                enriched
+                    .extra
+                    .insert("subscription_required".into(), true.into());
+                enriched.extra.insert(
+                    "archive_lookup_url".into(),
+                    content::archive_lookup_url(&url).into(),
+                );
+            }
             if let Some(seconds) = duration {
                 enriched
                     .extra
@@ -1181,6 +1260,22 @@ async fn heavy_content(
         }
         Ok(Some(extracted)) => {
             let mut enriched = raw.clone();
+            for key in [
+                "subscription_required",
+                "archive_lookup_url",
+                "archive_url",
+                "archive_captured_at",
+            ] {
+                enriched.extra.remove(key);
+            }
+            if let Some((snapshot, captured_at)) = archive_provenance {
+                enriched.extra.insert("archive_url".into(), snapshot.into());
+                if let Some(captured_at) = captured_at {
+                    enriched
+                        .extra
+                        .insert("archive_captured_at".into(), captured_at.into());
+                }
+            }
             if let Some(link) = thread_link {
                 enriched.link = link.to_string();
             }
@@ -1194,6 +1289,8 @@ async fn heavy_content(
                     .extra
                     .insert(crate::site::interactive::METADATA_KEY.into(), true.into());
             }
+            enriched.labels =
+                crate::model::normalize_labels(enriched.labels.iter().chain(&extracted.labels));
             enriched.content_html = Some(extracted.html);
             if source.previews || source.images {
                 enriched.preview_candidates = preview::ordered_article_candidates(
@@ -1265,7 +1362,8 @@ where
     F: FnOnce(RawItem) -> Fut,
     Fut: std::future::Future<Output = RawItem>,
 {
-    if known || dry_run || (!previews && !images) {
+    if known || dry_run || (!previews && !images && documents::url(&raw.link, &raw.extra).is_none())
+    {
         crate::sources::aggr::discard_companion_locator(&mut raw);
         raw
     } else {

@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod content;
 mod discussions;
+mod document;
 mod git;
 mod http;
 mod media;

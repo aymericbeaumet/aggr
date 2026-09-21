@@ -182,12 +182,32 @@ These are contributor and release build requirements; prebuilt binaries do not r
 CI and release workflows keep native Linux GNU, macOS, and Windows runners for both architectures.
 Windows ARM64 must pass those workflows; upstream's documented build matrix does not cover it.
 
+## PDF preservation
+
+In heavy content mode, direct PDF articles and explicitly resolved PDF alternates can retain an
+item-owned document companion. Capture obeys `fetch.max_body_bytes` (10 MB by default) and accepts
+at most 16 MiB. It requires a PDF signature and a compatible response type, and validates the
+stored path and content hash before publication. HTML challenges never
+become document companions. Fetching does not run the PDF or launch a browser.
+
+Later syncs repair missing companions without replacing the article's body, HTML, or existing
+media. Automatic repairs are bounded to eight attempts per source per run and share the capture
+retry policy: once daily, stopping after seven failures. Explicit refresh bypasses that backoff.
+A valid retained companion needs no repeat download. Copies followed from another aggr instance
+retain the verified companion without fetching its publisher again.
+
+The build publishes admitted documents under immutable same-origin URLs; oversized or unavailable
+companions leave the original-link fallback. Store retention removes the current item's companion
+through an ordinary commit, leaving its historical Git object intact. See
+[PDF reader behavior](themes.md#pdf-documents) and [build budgets](build-budget.md).
+
 ## A local snapshot and its original
 
 An item page identifies the readable copy held by one aggr instance. Its canonical URL therefore
-points to itself, not to the upstream article. An upstream canonical would tell search engines to
-consolidate the local page into the original and would work against finding the copy when the
-original disappears.
+points to itself, not to the upstream article. This identifies the snapshot; it does not claim
+authorship or permission to republish. Pages use `noindex,follow` by default. Search-engine
+indexing requires `[site] indexing = true` and a release build; development stays noindex.
+See [publication and search indexing](hosting.md#publication-and-search-indexing).
 
 Provenance is expressed separately and consistently:
 
@@ -245,7 +265,8 @@ list. The OPML output round-trips through aggr's own importer: pointing another 
 A release build emits standard, server-rendered pages; crawlers do not need JavaScript. It also
 emits:
 
-- `sitemap.xml`, or a sitemap index plus chunks for a large retained archive;
+- `sitemap.xml`, or a sitemap index plus chunks for a large retained archive, only when
+  `[site] indexing = true` and a public base URL is known;
 - `opensearch.xml` for the local Pagefind search UI;
 - `linkset.json`, an RFC 9264-shaped set of typed relationships between originals, local copies,
   and alternate representations;
@@ -254,7 +275,7 @@ emits:
 
 HTML advertises the descriptor and linkset. `aggr.json` names the instance and generator, identifies
 the aggr network, and enumerates feeds, the collection directories and combined Browse directory,
-search, sitemap, PWA, and linkset endpoints.
+search, PWA, and linkset endpoints, plus the sitemap when indexing is enabled.
 When GitHub repository identity is known, it also points to the pinned root config and data tree.
 The human `aggr.toml` navigation link opens GitHub's commit-pinned blob page, while machine
 metadata uses the raw-content URL. On another host those GitHub-specific fields are omitted and
@@ -266,12 +287,12 @@ URL fragments pollute article snippets. `linkset.json` provides the non-interact
 tools that already know an instance. Neither creates a global registry: a client must first
 discover the public instance.
 
-Ordinary search engines can crawl every published, retained item through archive pagination and the
-sitemap, and the visible original URL gives them a truthful relationship to index. They may
-nevertheless cluster similar copies, select the live original as the representative result, or
-decline to crawl an unlinked site. The custom `aggr:*` metadata is for aggr-aware clients, not a
-claim that general search engines understand the aggr network. Public links and optional sitemap
-submission remain the reliable ways to seed discovery.
+Pages remain publicly accessible when indexing is disabled; `noindex` asks cooperating search
+engines not to include them in results and is not access control. When indexing is enabled,
+engines can discover retained items through archive pagination and the sitemap. They may cluster
+similar copies, select the live original as the representative result, or decline to crawl an
+unlinked site. The custom `aggr:*` metadata is for aggr-aware clients, not a claim that general
+search engines understand the aggr network.
 
 ## The aggr network
 
@@ -301,7 +322,7 @@ repository's complete Git history.
 - Internal links never assume an origin root. They resolve relative to the generated page.
 - Canonical links, feed identifiers, linkset targets, OpenSearch templates, and sitemaps are emitted
   only when the public base URL is known from `--base-url`, or from `[site] url` during an
-  `aggr build --release`.
+  `aggr build --release`. Sitemaps additionally require the release indexing opt-in.
 - Moving a published site to a new origin or mount path requires one rebuild so absolute identities
   remain truthful.
 - Item paths do not change after capture. Their current static pages remain published while the
@@ -309,8 +330,9 @@ repository's complete Git history.
 - Hashed immutable assets may be cached indefinitely. HTML, feeds, the linkset, manifest, and
   `sw.js` remain revalidatable so new builds take effect.
 - `robots.txt` is emitted only for an origin-root deployment; a file under a project subpath cannot
-  govern that host. Absence of that file does not block crawling, but the sitemap should be
-  submitted directly when the host-level robots file cannot advertise it.
+  govern that host. It allows crawling so engines can read each page's indexing directive, and
+  advertises a sitemap only when indexing is enabled. Submit the sitemap directly for a subpath
+  deployment if you choose to enable indexing.
 
 Retention removes an item from the current static site and discovery outputs. Append-only Git
 history still contains the old object while its ancestor commits remain reachable, but search
@@ -341,6 +363,63 @@ references, and interior prose remain intact. Provider-specific description
 normalization stays scoped to that provider. Public YouTube captions are fetched with bounded
 requests when advertised; unavailable captions leave the description intact and do not count as a
 successfully cached transcript.
+
+Subscription offers are not article bodies. aggr recognizes FT's subscription-plan page and
+short, explicitly marked gate-only panels; subscription notices beside readable prose do not
+trigger replacement. On a verified gate, capture checks the public Wayback availability API and
+an exact-original archive.today lookup, without credentials or creating new snapshots. A recovered
+copy must match both the original URL and article title and contain substantial readable prose.
+The item's original link stays unchanged; `archive_url` records the public snapshot and
+`archive_captured_at` retains Wayback's supplied `YYYYMMDDhhmmss` capture timestamp when available.
+
+Archive requests share normal HTTP byte limits and the article cache. Recovery is limited to
+three requests under fifteen seconds, with a six-second request deadline, a fifteen-minute failed
+provider backoff, and a one-day retry delay per unsuccessful article. Archives may be unavailable,
+rate-limited, missing, or contain the same gate; no recovery is promised. In those cases the reader
+keeps a meaningful feed summary and offers the original and an exact-URL archive lookup. Older
+captured offers receive the same cleanup during build without network requests or archive writes.
+The existing bounded daily capture-repair pass also retries positively identified stored gates,
+including entries no longer listed by the feed; successful recovery keeps the item path and dates.
+See the [Wayback availability API](https://archive.org/help/wayback_api.php) for its response contract.
+
+Aggregator feed bookkeeping is not article prose. Feed captures with a complete boundary group
+of `Article URL` and a recognized Hacker News or Lobsters `Comments URL` are normalized when
+captured and built; the article URL must match the item's original URL. Numeric points and comment
+counts move to metadata, existing metadata wins, and a bookkeeping-only summary is discarded.
+A PDF can therefore have an empty text body while retaining its document and caption. Meaningful
+feed summaries, interior examples, code, quotes, and extracted publisher prose remain unchanged.
+Build cleanup leaves archived Markdown and HTML untouched.
+
+Standalone hashtag paragraphs at the beginning or end of an article become item labels, merged
+with configured and feed labels using the same lowercase, sorted, deduplicated representation.
+Interior hashtags, prose, code, lists, and quoted examples stay in the body. Builds apply this to
+older Markdown without changing the archive; capture and explicit reprocessing persist the labels.
+Original-page extraction also captures explicit `article:tag` metadata and article-scoped `rel=tag`
+links before Readability removes them. Pure tag-link groups at article boundaries are removed from
+the body; generic site keywords, navigation, and related-article links do not become labels. Tags
+whose original-page metadata was already discarded require a new original-page capture.
+
+Embedded X posts and standalone status-link paragraphs become quoted cards inside the article,
+with canonical X attribution. Capture fetches at most four cards under one ten-second deadline,
+using the shared bounded HTTP client and article cache; it preserves only the requested post,
+not surrounding replies. Available images enter normal bounded media retention. Source-provided
+quote text remains when the public mirror is unavailable or returns a shorter version. Inline
+references stay links. Older standalone cards receive the same portable Markdown blockquote
+format during build without network requests; downloading their media requires a new capture.
+
+Publisher code-language hints are captured before Readability removes presentation classes, then
+carried through stored HTML into Markdown fences. Explicit plain-text blocks remain plain text;
+unknown language names are retained without promising a matching syntax grammar. Legacy `<tt>`
+markup becomes inline code. Cloudflare email-protection payloads are decoded as escaped text,
+including package versions mistakenly classified as email addresses, without running publisher
+JavaScript. LWN's trailing article-index navigation is removed without removing prose tables.
+Consecutive numbered citations stay inline, as does prose following a link. Intentional HTML
+line breaks remain intact; action-link layout rules must not split citations or ordinary prose.
+
+`--reprocess` can recover these semantics when the retained HTML still contains them. Language
+metadata discarded by an older extraction needs an original-page extraction; it cannot be reliably
+reconstructed from the stored code alone. Extraction cache versions change with these rules.
+Reprocessing includes articles from renamed or removed sources and runs before source fetching.
 
 Explicit `--refresh` may fill missing previews or article media while preserving existing
 companions and historical blob URLs. To refresh existing dev items, run `dev --refresh` once and

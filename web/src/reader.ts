@@ -1,3 +1,4 @@
+import { mountArticleSwipe } from "./reader/article-swipe";
 import { createSearchSession, inertSearchHandle, mountSearch, type SearchHandle } from "./search";
 import type { PreferenceValues, BuildManifest, NavigationRequest, NavigationOptions, SwupAdapter, ReaderWindow, ReaderNavigator } from "./contracts";
 const readerWindow = window as unknown as ReaderWindow;
@@ -25,7 +26,7 @@ import { createArticleHeader } from "./reader/article-header";
 import { ageBand, entryStateKey, mergeNewEntries, remainingEntries, resolveEntries, scopedEntries } from "./reader/entries";
 import { FEED_PAGE_PARAMETER, feedPageUrl, paginationLayout, type PagerLink } from "./reader/pagination";
 import { pullLabel, wireTouchPullRefresh, type PullPhase } from "./reader/pull-refresh";
-import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget, gotoRoute, lineHeight, scrollDistance, scrollShortcut } from "./reader/shortcuts";
+import { articleNavigationDirection, articleNavigationTarget, externalShortcutKey, externalShortcutTarget, gotoRoute, lineHeight, scrollDistance, scrollShortcut } from "./reader/shortcuts";
 (function () {
   "use strict";
   // Cache the server-rendered page before enhancement adds binding flags or transient UI.
@@ -37,8 +38,6 @@ import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget
   function resolveRoot(relative?: string) { return new URL(relative || "./", window.location.href).href; }
   const script = document.querySelector("script[src$='assets/app.js']");
   let BASE = resolveRoot((readerWindow.AGGR && readerWindow.AGGR.base) || (script && (script.getAttribute("src") || "").slice(0, -"assets/app.js".length)) || "./");
-  const baseElement = document.querySelector<HTMLBaseElement>("#aggr-base");
-  if (baseElement) baseElement.href = BASE;
   let KIND = (readerWindow.AGGR && readerWindow.AGGR.kind) || document.body.getAttribute("data-kind") || "";
   let PWA = readerWindow.AGGR ? readerWindow.AGGR.pwa !== false : true;
   const darkPreference = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)");
@@ -151,7 +150,8 @@ import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget
   function updateFavicon(active: boolean) {
     let icon = $('link[rel~="icon"]');
     if (!icon) return;
-    if (!faviconState.original) faviconState.original = icon.getAttribute("href");
+    // Resolve now: the attribute is relative to the page that rendered it, and later pages sit at other depths.
+    if (!faviconState.original) faviconState.original = new URL(icon.getAttribute("href") || "", location.href).href;
     faviconState.active = active;
     if (!active) {
       icon.setAttribute("href", faviconState.original || "");
@@ -184,7 +184,7 @@ import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget
       if (faviconState.active) icon.setAttribute("href", faviconState.badged);
     };
     image.onerror = function () { faviconState.loading = false; };
-    image.src = new URL(faviconState.original || "", document.baseURI).href;
+    image.src = faviconState.original || "";
   }
   function acknowledgeNewEntries(entries: string[]) {
     const acknowledged = new Set(entries || []);
@@ -251,7 +251,7 @@ import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget
     const anchor = $<HTMLAnchorElement>(selector, pager);
     if (!anchor) return;
     anchor.hidden = !link.visible;
-    if (link.visible) anchor.href = feedPageUrl(link.target, link.slice, location.href, document.baseURI);
+    if (link.visible) anchor.href = feedPageUrl(link.target, link.slice, location.href, BASE);
   }
   function applyFeedPagination() {
     if (KIND !== "river" || (searchController && searchController.isActive())) return;
@@ -279,7 +279,7 @@ import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget
     updatePagerLink(pager, "[data-page-next]", layout.next);
     updatePagerLink(pager, "[data-page-last]", layout.last);
 
-    navigation.replaceLocation(feedPageUrl(location.href, layout.normalizedSlice, location.href, document.baseURI));
+    navigation.replaceLocation(feedPageUrl(location.href, layout.normalizedSlice, location.href, BASE));
     restoreListCursor(false);
   }
   function listRows() {
@@ -306,7 +306,8 @@ import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget
   const restoreListCursor = selection.restore;
   const moveListCursor = selection.move;
   const navigation = createNavigation({
-    location, history, base: () => document.baseURI, swup: () => swup,
+    // Site-relative targets resolve against the site root; absolute ones are unaffected.
+    location, history, base: () => BASE, swup: () => swup,
     releaseReady: () => updates.snapshot().phase !== "current", beforeNavigate: saveListPosition,
     reselectCurrent: () => {
       const active = document.activeElement;
@@ -470,8 +471,8 @@ import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget
       if (KIND === "item") {
         let article = $("article.item");
         if (article) {
-          prefetchPage(article.dataset.nextUrl);
-          prefetchPage(article.dataset.previousUrl);
+          prefetchPage(articleNavigationTarget("next", article.dataset, BASE));
+          prefetchPage(articleNavigationTarget("previous", article.dataset, BASE));
           $$<HTMLAnchorElement>(".article-more-card .title", article).forEach(link => prefetchPage(link.href));
         }
       } else {
@@ -503,28 +504,11 @@ import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget
   }
   function updateMenuSelection() {
     if (appScope.signal.aborted) return;
-    const input = $<HTMLInputElement>("#q");
-    const hasQuery = searchController?.isActive() ?? !!new URL(location.href).searchParams.get("q")?.trim();
-    const searching = KIND === "river" && (hasQuery || !!input && document.activeElement === input);
     $$("[data-site-navigation] [data-kinds]").forEach(function (link) {
-      let active = (link.dataset.kinds || "").split(/\s+/).includes(KIND);
-      if (link.hasAttribute("data-search-action")) {
-        active = searching;
-        const target = new URL(BASE);
-        const query = hasQuery ? input?.value || new URL(location.href).searchParams.get("q") : "";
-        if (query) target.searchParams.set("q", query);
-        target.searchParams.set("focus-search", "1");
-        const href = target.pathname + target.search;
-        if (link.getAttribute("href") !== href) link.setAttribute("href", href);
-      } else if (link.hasAttribute("data-feed-action") && searching) active = false;
+      const active = (link.dataset.kinds || "").split(/\s+/).includes(KIND);
       if (active) link.setAttribute("aria-current", "page");
       else link.removeAttribute("aria-current");
     });
-  }
-  for (const name of ["focusin", "focusout"]) {
-    document.addEventListener(name, function (event) {
-      if (event.target instanceof Element && event.target.id === "q") queueMicrotask(updateMenuSelection);
-    }, { signal: appScope.signal });
   }
   function wireMenuNavigation() {
     $$<HTMLAnchorElement>("[data-site-navigation] a[data-route]:not([target])").forEach(function (link) {
@@ -534,8 +518,7 @@ import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget
         if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         event.preventDefault();
         event.stopPropagation();
-        if (link.hasAttribute("data-search-action")) openGlobalSearch();
-        else navigate(link.href);
+        navigate(link.href);
       });
     });
   }
@@ -628,6 +611,13 @@ import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget
     }
     if (event.altKey || event.ctrlKey || event.metaKey || isEditing(event.target)) return;
     if (event.key.length === 1 && !singleKeyShortcuts()) return;
+    if (event.key === "/") {
+      event.preventDefault();
+      waitingForGoto = false;
+      clearTimeout(gotoTimer);
+      openGlobalSearch();
+      return;
+    }
     const focusedLink = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
     if (event.key === "Enter" && focusedLink) return;
     if (event.key === "?") {
@@ -668,8 +658,8 @@ import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget
     const direction = KIND === "item" && articleNavigationDirection(event.key);
     if (direction) {
       let article = $("article.item");
-      let target = article && article.dataset[direction === "next" ? "nextUrl" : "previousUrl"];
-      if (!target) return;
+      if (!article) return;
+      const target = articleNavigationTarget(direction, article.dataset, BASE);
       event.preventDefault();
       navigate(target);
       return;
@@ -930,10 +920,9 @@ import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget
       if (!page) return;
       BASE = resolveRoot(page.dataset.root);
       KIND = page.dataset.kind || "";
-      if ($("#aggr-base")?.getAttribute("href") !== BASE) $("#aggr-base")?.setAttribute("href", BASE);
       if (document.body.dataset.kind !== KIND) document.body.dataset.kind = KIND;
       $$("[data-site-navigation] [data-route]").forEach(function (link) {
-        const target = new URL(link.dataset.route || "", document.baseURI);
+        const target = new URL(link.dataset.route || "", BASE);
         const href = target.pathname + target.search + target.hash;
         if (link.getAttribute("href") !== href) link.setAttribute("href", href);
       });
@@ -953,6 +942,19 @@ import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget
     safely("boot:article-media", () => enhanceArticleMedia($("#swup") || document));
     safely("boot:selection-sharing", () => mountSelectionSharing($("#swup") || document, pageScope.signal));
     safely("boot:article-header", () => articleHeader.wire());
+    safely("boot:article-swipe", () => {
+      const article = $("article.item");
+      if (!article) return;
+      const scope = pageScope;
+      article.setAttribute("data-swipe-navigation", "");
+      scope.add(mountArticleSwipe(article, {
+        previous: () => articleNavigationTarget("previous", article.dataset, BASE),
+        next: () => articleNavigationTarget("next", article.dataset, BASE),
+        navigate,
+        isBusy: () => !!swup?.navigating || scope.signal.aborted,
+      }));
+      scope.add(() => article.removeAttribute("data-swipe-navigation"));
+    });
     safely("boot:external-links", () => externalLinks(pageEpoch ? $("#swup") || document : document));
     safely("boot:search", () => fillSearch());
     safely("boot:list-cursor", () => { if (!searchController?.isActive()) restoreListCursor(restoreListFocus && !swup); });

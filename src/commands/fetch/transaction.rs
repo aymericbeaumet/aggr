@@ -136,6 +136,12 @@ impl SourceTransaction {
                 self.track_relative(directory.join(companion.metadata.file))?;
             }
         }
+        if let Some(document) = &raw.document {
+            let metadata = document.metadata(&planned.stem);
+            crate::document::validate_stored(&document.bytes, &metadata, &planned.stem)?;
+            self.track_relative(crate::store::document_attributes_path(directory)?)?;
+            self.track_relative(directory.join(metadata.file))?;
+        }
         Ok(())
     }
 
@@ -229,6 +235,138 @@ mod tests {
     use httpmock::prelude::*;
     use std::sync::Arc;
     use url::Url;
+
+    #[test]
+    fn rollback_removes_new_document_and_restores_existing_item() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path());
+        let front = crate::model::FrontMatter {
+            source: "blog".into(),
+            ..Default::default()
+        };
+        store
+            .write_item(crate::store::NewItem {
+                dir: "items/blog",
+                stem: "paper",
+                front: &front,
+                body: "Before",
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let planned = Planned::from_existing(
+            store.read_item("items/blog/paper").unwrap(),
+            "items/blog/paper",
+        )
+        .unwrap();
+        let document = crate::document::Asset {
+            source_url: "https://example.com/paper.pdf".into(),
+            bytes: b"%PDF-1.7\nfixture".to_vec(),
+        };
+        let raw = RawItem {
+            document: Some(document.clone()),
+            ..Default::default()
+        };
+        let mut transaction = SourceTransaction::new(directory.path()).unwrap();
+        transaction.track_item(&planned, &raw).unwrap();
+        store
+            .write_item_with_document(
+                crate::store::NewItem {
+                    dir: &planned.dir,
+                    stem: &planned.stem,
+                    front: &planned.front,
+                    body: "After",
+                    html: None,
+                    preview: None,
+                    images: &[],
+                },
+                Some(&document),
+            )
+            .unwrap();
+        let companion = directory
+            .path()
+            .join("items/blog")
+            .join(document.metadata("paper").file);
+        assert!(companion.exists());
+        transaction.rollback().unwrap();
+        assert!(!companion.exists());
+        assert!(!directory.path().join("items/blog/.gitattributes").exists());
+        let restored = store.read_item("items/blog/paper").unwrap();
+        assert_eq!(restored.body.trim(), "Before");
+        assert!(restored.front.document.is_none());
+    }
+
+    #[test]
+    fn rollback_restores_document_bytes_replaced_during_repair() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path());
+        let document = crate::document::Asset {
+            source_url: "https://example.com/paper.pdf".into(),
+            bytes: b"%PDF-1.7\nfixture".to_vec(),
+        };
+        let front = crate::model::FrontMatter {
+            source: "blog".into(),
+            ..Default::default()
+        };
+        store
+            .write_item_with_document(
+                crate::store::NewItem {
+                    dir: "items/blog",
+                    stem: "paper",
+                    front: &front,
+                    body: "Before",
+                    html: None,
+                    preview: None,
+                    images: &[],
+                },
+                Some(&document),
+            )
+            .unwrap();
+        let companion = directory
+            .path()
+            .join("items/blog")
+            .join(document.metadata("paper").file);
+        fs::write(&companion, b"damaged previous bytes").unwrap();
+        let attributes = directory.path().join("items/blog/.gitattributes");
+        fs::write(&attributes, "*.md linguist-language=Markdown\n").unwrap();
+        let planned = Planned::from_existing(
+            store.read_item("items/blog/paper").unwrap(),
+            "items/blog/paper",
+        )
+        .unwrap();
+        let raw = RawItem {
+            document: Some(document.clone()),
+            ..Default::default()
+        };
+        let mut transaction = SourceTransaction::new(directory.path()).unwrap();
+        transaction.track_item(&planned, &raw).unwrap();
+        store
+            .write_item_with_document(
+                crate::store::NewItem {
+                    dir: &planned.dir,
+                    stem: &planned.stem,
+                    front: &planned.front,
+                    body: "After",
+                    html: None,
+                    preview: None,
+                    images: &[],
+                },
+                Some(&document),
+            )
+            .unwrap();
+        assert_eq!(fs::read(&companion).unwrap(), document.bytes);
+        transaction.rollback().unwrap();
+        assert_eq!(fs::read(&companion).unwrap(), b"damaged previous bytes");
+        assert_eq!(
+            fs::read_to_string(&attributes).unwrap(),
+            "*.md linguist-language=Markdown\n"
+        );
+        assert_eq!(
+            store.read_item("items/blog/paper").unwrap().body.trim(),
+            "Before"
+        );
+    }
 
     #[tokio::test]
     async fn failed_source_rolls_back_earlier_items_and_seen_state() {

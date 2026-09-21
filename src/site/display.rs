@@ -42,12 +42,15 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated: Option<String>,
     pub source_slug: String,
+    pub source_query: String,
     pub source_display: String,
     pub source_title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<Category>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feed_display: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub feed_sources: Vec<super::context::SourceMembershipCtx>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub is_aggregated: bool,
     pub word_count: usize,
@@ -143,7 +146,13 @@ impl From<&super::context::ItemCtx> for Metadata {
                 .updated
                 .filter(|date| *date != item.date)
                 .map(|date| date.to_rfc3339()),
-            source_slug: item.source.clone(),
+            source_slug: item.publisher_source.clone(),
+            source_query: item
+                .source_memberships
+                .iter()
+                .find(|source| source.slug == item.publisher_source)
+                .map(|source| source.query_value.clone())
+                .unwrap_or_else(|| item.publisher_source.clone()),
             source_display: item.source_display.clone(),
             source_title: item.source_title.clone(),
             category: item.category.as_ref().map(|name| Category {
@@ -151,6 +160,12 @@ impl From<&super::context::ItemCtx> for Metadata {
                 slug: super::context::category_slug(name),
             }),
             feed_display: item.is_aggregated.then(|| item.feed_display.clone()),
+            feed_sources: item
+                .source_memberships
+                .iter()
+                .filter(|source| source.slug != item.publisher_source)
+                .cloned()
+                .collect(),
             is_aggregated: item.is_aggregated,
             word_count: item.word_count,
             reading_minutes: item.reading_minutes,

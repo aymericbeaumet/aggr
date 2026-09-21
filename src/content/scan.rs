@@ -63,6 +63,9 @@ pub(super) struct Tag {
 /// Parse `<name …>` / `</name …>` at the start of `s`. `None` when `<` does not start a tag.
 pub(super) fn parse_tag(s: &str) -> Option<Tag> {
     let bytes = s.as_bytes();
+    if bytes.first() != Some(&b'<') {
+        return None;
+    }
     let mut pos = 1;
     let closing = bytes.get(pos) == Some(&b'/');
     if closing {
@@ -346,4 +349,28 @@ pub(super) fn close_removed_element(html: &str, mut position: usize, out: &mut S
         out.push(' ');
     }
     position
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_parser_requires_an_opening_angle_bracket() {
+        for prose in [
+            " a large portion <i>later</i>",
+            "another <span>phrase</span>",
+            "",
+            "a",
+        ] {
+            assert!(parse_tag(prose).is_none(), "{prose:?}");
+        }
+        let opening = parse_tag("<a href=\"/source\">label</a>").unwrap();
+        assert_eq!(opening.name, "a");
+        assert!(!opening.closing);
+        assert_eq!(opening.end, Some(18));
+        let closing = parse_tag("</A>").unwrap();
+        assert_eq!(closing.name, "a");
+        assert!(closing.closing);
+    }
 }

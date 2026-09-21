@@ -1,7 +1,5 @@
-import { readFileSync } from "node:fs";
-import { runInNewContext } from "node:vm";
 import { describe, expect, it, vi } from "vitest";
-import type { Preferences } from "../contracts";
+import { applyInitialPreferences, createPreferences } from './bootstrap';
 import { createPreferencesService } from "./service";
 import { fields, preferenceDescription } from "./presentation";
 
@@ -10,11 +8,8 @@ function fixture() {
   const meta = { setAttribute: vi.fn() };
   const document = { documentElement: { dataset: {} as Record<string, string> }, querySelector: () => meta };
   const localStorage = { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { stored.set(key, value); } };
-  const template = readFileSync(new URL("../../../themes/default/templates/base.html", import.meta.url), "utf8");
-  const script = template.split('<script id="aggr-preferences">')[1].split("</script>")[0].replace("{{ site.preferences | json }}", '{"theme":"sepia","offline-items":7}');
-  const global: { AGGRPreferences?: Preferences } = {};
-  runInNewContext(script, { window: global, document, localStorage });
-  const bootstrap = global.AGGRPreferences!;
+  const bootstrap = createPreferences({ theme: 'sepia', 'offline-items': 7 }, localStorage.getItem);
+  applyInitialPreferences(bootstrap, document.documentElement.dataset);
   const window = Object.assign(new EventTarget(), {
     localStorage,
     btoa, atob,

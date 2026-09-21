@@ -93,3 +93,17 @@ export function articleNavigationDirection(key: string): "previous" | "next" | n
   if (normalized === "j") return "next";
   return null;
 }
+
+/**
+ * The absolute address of the neighbouring article: its site-relative path resolved against the
+ * site root (never the current page). Leaving either end of the article sequence returns to the feed.
+ */
+export function articleNavigationTarget(
+  direction: "previous" | "next",
+  links: { previousUrl?: string | null; nextUrl?: string | null },
+  base: string,
+): string {
+  const target = links[direction === "next" ? "nextUrl" : "previousUrl"];
+  if (!target) return base;
+  try { return new URL(target, base).href; } catch { return base; }
+}

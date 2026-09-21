@@ -58,6 +58,12 @@ pub struct SiteConfig {
     pub repository: Option<String>,
     /// Public URL of the site (`--release` builds). A custom domain here also writes `CNAME`.
     pub url: Option<Url>,
+    /// Opt into search-engine indexing and sitemaps for release builds.
+    pub indexing: bool,
+    /// Maximum logical bytes in a successful generated site, including search and assets.
+    pub build_max_bytes: u64,
+    /// Publication-age window whose retained media keeps its full quality in the site.
+    pub media_full_quality_days: u32,
     pub out: PathBuf,
     /// Emit install metadata and cache a bounded offline set in a secure context.
     pub pwa: bool,
@@ -99,6 +105,9 @@ impl Default for SiteConfig {
             max_age_days: 365,
             repository: None,
             url: None,
+            indexing: false,
+            build_max_bytes: 1_000_000_000,
+            media_full_quality_days: 30,
             out: PathBuf::from("_site"),
             pwa: true,
             preferences: ReaderPreferences::default(),
@@ -425,6 +434,9 @@ impl Config {
         validate_theme(&self.site.theme).context("[site] theme")?;
         if self.site.items_per_page == 0 {
             bail!("[site] items_per_page must be at least 1");
+        }
+        if self.site.build_max_bytes == 0 {
+            bail!("[site] build_max_bytes must be at least 1");
         }
         if self.fetch.concurrency == 0 {
             bail!("[fetch] concurrency must be at least 1");
@@ -911,6 +923,7 @@ mod tests {
         let config =
             Config::parse("[[sources]]\nurl = \"https://example.com/feed.xml\"\n").unwrap();
         assert_eq!(config.site.title, "aggr");
+        assert!(!config.site.indexing);
         assert_eq!(config.store.branch, "aggr");
         assert_eq!(config.fetch.concurrency, 16);
         let sources = config.resolve_sources(&no_env).unwrap();
@@ -1359,6 +1372,12 @@ images = false
         assert_eq!(config.site.max_age_days, compiled.site.max_age_days);
         assert_eq!(config.site.repository, compiled.site.repository);
         assert_eq!(config.site.url, compiled.site.url);
+        assert_eq!(config.site.indexing, compiled.site.indexing);
+        assert_eq!(config.site.build_max_bytes, compiled.site.build_max_bytes);
+        assert_eq!(
+            config.site.media_full_quality_days,
+            compiled.site.media_full_quality_days
+        );
         assert_eq!(config.site.out, compiled.site.out);
         assert_eq!(config.site.pwa, compiled.site.pwa);
         assert_eq!(config.site.identity, compiled.site.identity);

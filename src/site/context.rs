@@ -23,6 +23,8 @@ pub struct SiteCtx {
     pub base_path: String,
     /// Absolute URL of the site root when known (feed and canonical links).
     pub base_url: Option<String>,
+    /// Search-engine indexing is enabled only for explicitly opted-in release builds.
+    pub indexing: bool,
     pub repository: Option<String>,
     pub data_branch: String,
     /// Canonical identity shared by every generated aggr instance.
@@ -187,6 +189,10 @@ pub struct ItemCtx {
     pub link: String,
     pub domain: String,
     pub source: String,
+    /// Canonical publisher collection, independent of the stored capture's source.
+    pub publisher_source: String,
+    /// Publisher and every feed that supplied this canonical article, once per source.
+    pub source_memberships: Vec<SourceMembershipCtx>,
     pub source_name: String,
     /// Publisher host, retaining the channel/profile path on shared platforms.
     pub source_display: String,
@@ -349,6 +355,8 @@ const MIN_LEAD_WIDTH: u32 = 640;
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceCtx {
     pub slug: String,
+    /// Canonical hostname used in generated source queries, identical to the public slug.
+    pub query_value: String,
     pub name: String,
     pub url: Option<String>,
     /// Feed endpoint resolved by the fetch pipeline, when a public one is known.
@@ -363,6 +371,14 @@ pub struct SourceCtx {
     pub error: Option<SourceErrorCtx>,
     /// Site path of the per-source page.
     pub page: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceMembershipCtx {
+    pub slug: String,
+    pub query_value: String,
+    pub name: String,
+    pub display: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -433,8 +449,10 @@ pub fn domain_of(link: &str) -> String {
     url::Url::parse(link)
         .ok()
         .and_then(|url| {
-            url.host_str()
-                .map(|host| host.trim_start_matches("www.").to_string())
+            url.host_str().map(|host| {
+                let host = host.trim_end_matches('.');
+                host.strip_prefix("www.").unwrap_or(host).to_string()
+            })
         })
         .unwrap_or_default()
 }
@@ -460,19 +478,16 @@ fn publisher_url(link: &str) -> String {
         .unwrap_or_default()
 }
 
-fn source_host(url: &url::Url) -> &str {
-    match url
-        .host_str()
-        .unwrap_or_default()
-        .trim_start_matches("www.")
-    {
+pub(super) fn source_host(url: &url::Url) -> &str {
+    let host = url.host_str().unwrap_or_default().trim_end_matches('.');
+    match host.strip_prefix("www.").unwrap_or(host) {
         "youtu.be" | "m.youtube.com" => "youtube.com",
         "twitter.com" => "x.com",
         host => host,
     }
 }
 
-fn profile_url(value: &str) -> Option<url::Url> {
+pub(super) fn profile_url(value: &str) -> Option<url::Url> {
     let mut url = url::Url::parse(value).ok()?;
     if !matches!(url.scheme(), "http" | "https") {
         return None;
@@ -525,7 +540,15 @@ fn profile_url(value: &str) -> Option<url::Url> {
 }
 
 fn url_label(url: &url::Url) -> String {
-    format!("{}{}", source_host(url), url.path().trim_end_matches('/'))
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    format!(
+        "{}{port}{}",
+        source_host(url),
+        url.path().trim_end_matches('/')
+    )
 }
 
 fn source_profile_label(url: &url::Url, title: &str) -> String {
@@ -544,7 +567,11 @@ fn source_profile_label(url: &url::Url, title: &str) -> String {
         return url_label(url);
     }
     // This is a publisher label, not a synthesized destination: links keep their real URL.
-    format!("{provider}/{name}")
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    format!("{provider}{port}/{name}")
 }
 
 pub fn profile_label(value: &str) -> String {
@@ -636,6 +663,13 @@ impl ItemCtx {
             link: item.front.link.clone(),
             domain: domain_of(&item.front.link),
             source: item.front.source.clone(),
+            publisher_source: item.front.source.clone(),
+            source_memberships: vec![SourceMembershipCtx {
+                query_value: item.front.source.clone(),
+                slug: item.front.source.clone(),
+                name: source_name.clone(),
+                display: domain_of(&item.front.link),
+            }],
             source_name: source_name.clone(),
             source_display: domain_of(&item.front.link),
             source_title: source_name.clone(),
@@ -974,6 +1008,7 @@ mod tests {
             og_locale: "en".into(),
             base_path: crate::site::base_path(base_url),
             base_url: base_url.map(str::to_string),
+            indexing: false,
             repository: None,
             data_branch: "aggr".into(),
             network_url: "",
@@ -1254,6 +1289,38 @@ mod tests {
     }
 
     #[test]
+    fn source_labels_preserve_nondefault_ports_without_changing_configured_titles() {
+        for (url, expected) in [
+            ("http://localhost:8080/feed", "localhost:8080"),
+            ("http://localhost:9090/feed", "localhost:9090"),
+            (
+                "https://example.test:8443/@alice/rss",
+                "example.test:8443/@alice",
+            ),
+            ("http://[::1]:8080/feed", "[::1]:8080"),
+            ("https://example.test:443/feed", "example.test"),
+        ] {
+            assert_eq!(profile_label(url), expected, "{url}");
+        }
+        let identity = source_identity(
+            "http://localhost:8080/article",
+            "My configured publisher",
+            Some("http://localhost:8080/feed"),
+            None,
+        );
+        assert_eq!(identity.title, "My configured publisher");
+        assert_eq!(identity.display, "localhost:8080");
+        let podcast = source_identity(
+            "https://open.spotify.com:8443/episode/123",
+            "My Podcast",
+            Some("https://open.spotify.com:8443/show/abc"),
+            None,
+        );
+        assert_eq!(podcast.title, "My Podcast");
+        assert_eq!(podcast.display, "spotify.com:8443/my-podcast");
+    }
+
+    #[test]
     fn source_identity_uses_discovered_profile_for_feed_endpoints() {
         let identity = source_identity(
             "https://example.social/@alice/123",
@@ -1306,6 +1373,7 @@ mod tests {
         assert_eq!(context.feed_display, "Example");
         assert_eq!(context.language, None, "unknown until the source says");
         context.set_source(&SourceCtx {
+            query_value: "example".into(),
             slug: "example".into(),
             name: "☀ Daily News 🗞️".into(),
             url: Some("https://news.example/feed.xml".into()),

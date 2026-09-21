@@ -1,7 +1,7 @@
 import { parseQuery, QueryError } from './query';
 import type { Facet, FacetKind, SearchCatalog } from './types';
 
-export const normalized = (value: string) => value.normalize('NFKC').toLocaleLowerCase();
+export const normalized = (value: string) => value.normalize('NFKC').toLowerCase();
 
 interface IndexedFacet { facet: Facet; search: string; alias: string | undefined }
 
@@ -67,6 +67,13 @@ export function readableQuery(raw: string, facets: SearchCatalog['facets']): str
     for (const clause of parseQuery(raw).clauses.reverse()) {
       if (clause.kind !== 'facet' || !clause.field) continue;
       const values = facets[clause.field] || [];
+      if (clause.field === 'source') {
+        const facet = facetIndex(values).lookup(clause.value);
+        if (!facet || facet.value === clause.value) continue;
+        const quoted = '"' + facet.value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+        result = result.slice(0, clause.start) + `${clause.exclude ? '-' : ''}source:${quoted}` + result.slice(clause.end);
+        continue;
+      }
       const facet = values.find(facet => facet.value === clause.value);
       if (!facet) continue;
       const alias = facetAlias(facet, values);

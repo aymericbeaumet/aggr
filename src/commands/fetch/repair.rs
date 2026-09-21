@@ -1,6 +1,6 @@
-//! Repairs that run after a source's feed pass, on items the feed may no longer list: missing
-//! image and preview companions, feed-only captures whose original page is retried, recording
-//! durations backfilled from their pages, and podcast episodes whose enclosure moved.
+//! Local archive reprocessing and repairs for items feeds may no longer list: missing media,
+//! feed-only captures, recording durations, and podcast episodes whose enclosure moved.
+//! Explicit reprocessing precedes all source fetches; other repairs follow each source's pass.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ use futures_util::{StreamExt as _, stream};
 use super::plan::{Planned, merge_image_metadata, persist_item, prepare_item, use_existing_path};
 use super::transaction::SourceTransaction;
 use super::{FetchOneContext, Options, heavy_content, podcast, recording};
+use crate::cli::FetchArgs;
 use crate::config::{ContentMode, Engine, Source};
 use crate::content;
 use crate::media;
@@ -20,68 +21,76 @@ use crate::preview;
 use crate::sources;
 use crate::store::{NewItem, Store};
 
-/// Re-derive stored bodies from the HTML retained beside them. Content cleanup added after an item
-/// was captured cannot reach it any other way: its source eventually stops listing it, and a build
-/// never overrides a stored body. Explicit, like `--refresh`, because it discards hand edits, and
-/// bounded to items whose retained HTML is complete so a body can never come back shorter.
+/// Re-derive every retained body from complete local HTML before source fetching begins. Source
+/// membership and dedupe keys cannot enumerate the archive: sources may be retired or renamed,
+/// and distinct retained paths can share a key. Roll back the pass if any write fails.
 pub(super) fn reprocess_stored_bodies(
-    source: &Source,
     store: &Store,
-    options: &Options,
-    mut transaction: Option<&mut SourceTransaction>,
+    args: &FetchArgs,
+    store_root: &Path,
 ) -> Result<usize> {
-    if !options.reprocess || options.dry_run {
+    if !args.reprocess || args.dry_run {
         return Ok(0);
     }
-    let Some(index) = options
-        .existing_paths
-        .get()
-        .and_then(|index| index.items.get(&source.slug))
-    else {
-        return Ok(0);
-    };
-    let mut rewritten = 0;
-    for path in index.values().collect::<BTreeSet<_>>() {
-        let existing = store.read_item(path)?;
-        if existing.front.source != source.slug || existing.front.html_truncated {
-            continue;
-        }
-        let Some(html) = store.read_html(&existing)? else {
-            continue;
-        };
-        let base = url::Url::parse(&existing.front.link).ok();
-        let body = content::strip_article_metadata(
-            &content::to_markdown(&html, base.as_ref()),
-            &existing.front.title,
-            existing.front.published,
-            &source.slug,
-        );
-        if body == existing.body || body.trim().is_empty() {
-            continue;
-        }
-        let planned = Planned::from_existing(Item { body, ..existing }, path)?;
-        if let Some(transaction) = transaction.as_deref_mut() {
+    let mut transaction = SourceTransaction::new(store_root)?;
+    let result = (|| -> Result<usize> {
+        let mut rewritten = 0;
+        for existing in store.items()? {
+            if existing.front.html_truncated {
+                continue;
+            }
+            let Some(html) = store.read_html(&existing)? else {
+                continue;
+            };
+            let base = url::Url::parse(&existing.front.link).ok();
+            let (body, boundary_labels) = content::normalize_article_body(
+                &content::to_markdown(&html, base.as_ref()),
+                &existing.front.title,
+                existing.front.published,
+                &existing.front.source,
+            );
+            let labels = if boundary_labels.is_empty() {
+                existing.front.labels.clone()
+            } else {
+                crate::model::normalize_labels(existing.front.labels.iter().chain(&boundary_labels))
+            };
+            if (body == existing.body && labels == existing.front.labels) || body.trim().is_empty()
+            {
+                continue;
+            }
+            let path = existing.path.clone();
+            let mut existing = existing;
+            existing.front.labels = labels;
+            let planned = Planned::from_existing(Item { body, ..existing }, &path)?;
             transaction.track_item(&planned, &RawItem::default())?;
+            store.write_item(NewItem {
+                dir: &planned.dir,
+                stem: &planned.stem,
+                front: &planned.front,
+                body: &planned.body,
+                html: None,
+                preview: None,
+                images: &[],
+            })?;
+            log::debug!("re-derived the stored body for {path}");
+            rewritten += 1;
         }
-        store.write_item(NewItem {
-            dir: &planned.dir,
-            stem: &planned.stem,
-            front: &planned.front,
-            body: &planned.body,
-            html: None,
-            preview: None,
-            images: &[],
-        })?;
-        log::debug!("{}: re-derived the stored body for {path}", source.slug);
-        rewritten += 1;
+        Ok(rewritten)
+    })();
+    match result {
+        Ok(rewritten) => {
+            transaction.commit();
+            Ok(rewritten)
+        }
+        Err(error) => {
+            if let Err(rollback) = transaction.rollback() {
+                return Err(
+                    error.context(format!("rolling back article reprocessing: {rollback:#}"))
+                );
+            }
+            Err(error)
+        }
     }
-    if rewritten > 0 {
-        log::info!(
-            "{}: re-derived {rewritten} stored article body(ies)",
-            source.slug
-        );
-    }
-    Ok(rewritten)
 }
 
 pub(super) async fn repair_archived_images(
@@ -402,12 +411,12 @@ const CAPTURE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_se
 
 /// Remembers failed original-page retries so a persistently unavailable page is tried at most
 /// once a day and gives up after a week. Success removes the record.
-struct CaptureRetries {
+pub(super) struct CaptureRetries {
     root: PathBuf,
 }
 
 impl CaptureRetries {
-    fn new(cache_dir: &Path) -> Self {
+    pub(super) fn new(cache_dir: &Path) -> Self {
         Self {
             root: crate::cache::Namespace::CaptureRetries.dir(cache_dir),
         }
@@ -417,7 +426,7 @@ impl CaptureRetries {
         self.root.join(crate::model::sha1_hex(link.as_bytes()))
     }
 
-    fn due(&self, link: &str) -> bool {
+    pub(super) fn due(&self, link: &str) -> bool {
         let path = self.path(link);
         let Ok(metadata) = std::fs::metadata(&path) else {
             return true;
@@ -434,7 +443,7 @@ impl CaptureRetries {
                 .is_none_or(|age| age >= CAPTURE_RETRY_INTERVAL)
     }
 
-    fn failed(&self, link: &str) {
+    pub(super) fn failed(&self, link: &str) {
         let path = self.path(link);
         let attempts = std::fs::read_to_string(&path)
             .ok()
@@ -444,7 +453,7 @@ impl CaptureRetries {
         let _ = std::fs::write(path, format!("{}\n", attempts + 1));
     }
 
-    fn succeeded(&self, link: &str) {
+    pub(super) fn succeeded(&self, link: &str) {
         let _ = std::fs::remove_file(self.path(link));
     }
 }
@@ -508,9 +517,21 @@ pub(super) async fn repair_feed_captures(
         }
         let placeholder = existing.front.content == ContentKind::Extracted
             && content::is_placeholder_body(&existing.body);
+        let subscription_wall = url::Url::parse(&existing.front.link)
+            .is_ok_and(|url| content::is_subscription_wall(&existing.body, &url));
+        if subscription_wall && kind != ContentKind::Extracted {
+            raw.extra
+                .insert("subscription_required".into(), true.into());
+            if let Ok(url) = url::Url::parse(&raw.link) {
+                raw.extra.insert(
+                    "archive_lookup_url".into(),
+                    content::archive_lookup_url(&url).into(),
+                );
+            }
+        }
         if kind != ContentKind::Extracted || raw.content_html.is_none() {
             retries.failed(&raw.link);
-            if placeholder && raw.summary.is_some() {
+            if (placeholder && raw.summary.is_some()) || subscription_wall {
                 // The page is still a script shell. Its feed summary reads better than the
                 // archived "loading…", so the item returns to feed content until a retry succeeds.
                 let (raw, mut planned) =
@@ -519,13 +540,23 @@ pub(super) async fn repair_feed_captures(
                 planned.front.preview = existing.front.preview.clone();
                 planned.front.images = existing.front.images.clone();
                 planned.front = upgrade_front(existing.front, planned.front);
+                if !planned.boundary_labels.is_empty() || !raw.labels.is_empty() {
+                    planned.front.labels = crate::model::normalize_labels(
+                        planned
+                            .front
+                            .labels
+                            .iter()
+                            .chain(&raw.labels)
+                            .chain(&planned.boundary_labels),
+                    );
+                }
                 if let Some(transaction) = transaction.as_deref_mut() {
                     transaction.track_item(&planned, &raw)?;
                 }
                 let link = raw.link.clone();
                 persist_item(context.store, context.options, planned, raw).await?;
                 log::info!(
-                    "{}: {} had archived a loading placeholder; keeping its feed summary until the page is available",
+                    "{}: {} had archived a placeholder or subscription wall; keeping its feed summary until the page is available",
                     source.slug,
                     link
                 );
@@ -539,7 +570,7 @@ pub(super) async fn repair_feed_captures(
             );
             continue;
         }
-        if existing.front.content == ContentKind::Extracted && !placeholder {
+        if existing.front.content == ContentKind::Extracted && !placeholder && !subscription_wall {
             continue;
         }
         if source.images
@@ -583,6 +614,16 @@ pub(super) async fn repair_feed_captures(
         planned.front.images = existing.front.images.clone();
         merge_image_metadata(&mut planned.front.images, &raw.images, &planned.stem);
         planned.front = upgrade_front(existing.front, planned.front);
+        if !planned.boundary_labels.is_empty() || !raw.labels.is_empty() {
+            planned.front.labels = crate::model::normalize_labels(
+                planned
+                    .front
+                    .labels
+                    .iter()
+                    .chain(&raw.labels)
+                    .chain(&planned.boundary_labels),
+            );
+        }
         if let Some(transaction) = transaction.as_deref_mut() {
             transaction.track_item(&planned, &raw)?;
         }
@@ -671,6 +712,25 @@ fn upgrade_front(existing: FrontMatter, planned: FrontMatter) -> FrontMatter {
         if let Some(value) = planned.extra.get(key) {
             front.extra.insert(key.to_string(), value.clone());
         }
+    }
+    for key in [
+        "subscription_required",
+        "archive_lookup_url",
+        "archive_url",
+        "archive_captured_at",
+    ] {
+        front.extra.remove(key);
+        if let Some(value) = planned.extra.get(key) {
+            front.extra.insert(key.into(), value.clone());
+        }
+    }
+    if front
+        .extra
+        .get("subscription_required")
+        .and_then(serde_yaml_ng::Value::as_bool)
+        == Some(true)
+    {
+        front.summary = planned.summary;
     }
     front
 }
@@ -911,7 +971,7 @@ mod tests {
         let available = server.mock_async(|when, then| {
             when.path("/post");
             then.status(200).header("content-type", "text/html").body(
-                "<html><head><title>Why teens deserve safe AI</title></head><body><article><h1>Why teens deserve safe AI</h1><p>The complete article explains age-appropriate protections, learning tools, and parental controls in depth, with every paragraph the publisher wrote.</p><p>A second paragraph keeps the extraction meaningful and well above the readability thresholds used for short pages.</p></article></body></html>",
+                "<html><head><title>Why teens deserve safe AI</title><meta property='article:tag' content='AI'></head><body><article><h1>Why teens deserve safe AI</h1><p>The complete article explains age-appropriate protections, learning tools, and parental controls in depth, with every paragraph the publisher wrote.</p><p>A second paragraph keeps the extraction meaningful and well above the readability thresholds used for short pages.</p><p>#parenting</p></article></body></html>",
             );
         }).await;
         // Still backed off: nothing is requested until a day has passed.
@@ -935,7 +995,8 @@ mod tests {
             upgraded.body
         );
         assert_eq!(upgraded.front.first_seen, first_seen);
-        assert_eq!(upgraded.front.labels, vec!["safety".to_string()]);
+        assert_eq!(upgraded.front.labels, ["ai", "parenting", "safety"]);
+        assert!(!upgraded.body.contains("#parenting"));
         assert!(upgraded.front.html.is_some());
         assert!(upgraded.front.hidden, "a hand-hidden capture stays hidden");
         assert_eq!(upgraded.front.replicated_at, None);
@@ -1258,7 +1319,7 @@ mod tests {
         // the stored body, and the source has long since stopped listing the article.
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(root.path()));
-        let html = "<div data-component=\"uni-audio-player-tts\"><p><audio title=\"Listen\"><source src=\"https://cdn.example/a.mp3\" type=\"audio/mpeg\"><p>Your browser does not support the audio element.</p></audio></p><div><p>Listen to article</p><p>[[duration]] minutes</p></div></div><p>Today, we are launching the app.</p>";
+        let html = "<div data-component=\"uni-audio-player-tts\"><p><audio title=\"Listen\"><source src=\"https://cdn.example/a.mp3\" type=\"audio/mpeg\"><p>Your browser does not support the audio element.</p></audio></p><div><p>Listen to article</p><p>[[duration]] minutes</p></div></div><p>Today, we are launching the app.</p><p>#Jev #AI #programming #coding</p>";
         let stale = "Your browser does not support the audio element.\n\nListen to article\n\n\\[\\[duration\\]\\] minutes\n\nToday, we are launching the app.\n";
         let front = FrontMatter {
             source: "blog".into(),
@@ -1280,47 +1341,173 @@ mod tests {
             })
             .unwrap();
 
-        let configured = source();
-        let (_, archive) = index_archive(store.items().unwrap());
-        let idle = Options {
-            existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
-            ..options()
-        };
+        let idle = FetchArgs::default();
         // Without the flag nothing is touched, however stale the body is.
         assert_eq!(
-            reprocess_stored_bodies(&configured, &store, &idle, None).unwrap(),
+            reprocess_stored_bodies(&store, &idle, root.path()).unwrap(),
             0
         );
         assert_eq!(store.read_item("items/blog/launch").unwrap().body, stale);
 
-        let (_, archive) = index_archive(store.items().unwrap());
-        let reprocessing = Options {
-            existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+        let reprocessing = FetchArgs {
             reprocess: true,
-            ..options()
+            ..Default::default()
         };
         assert_eq!(
-            reprocess_stored_bodies(&configured, &store, &reprocessing, None).unwrap(),
+            reprocess_stored_bodies(&store, &reprocessing, root.path()).unwrap(),
             1
         );
         let repaired = store.read_item("items/blog/launch").unwrap();
         assert_eq!(repaired.body, "Today, we are launching the app.\n");
+        assert_eq!(
+            repaired.front.labels,
+            ["ai", "coding", "jev", "programming"]
+        );
         // The retained HTML and the front matter are left exactly as they were.
         assert_eq!(store.read_html(&repaired).unwrap().as_deref(), Some(html));
         assert_eq!(repaired.front.title, front.title);
         assert_eq!(repaired.front.html.as_deref(), Some("launch.html"));
 
         // A second run has nothing left to do.
-        let (_, archive) = index_archive(store.items().unwrap());
-        let again = Options {
-            existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+        let again = FetchArgs {
             reprocess: true,
-            ..options()
+            ..Default::default()
         };
         assert_eq!(
-            reprocess_stored_bodies(&configured, &store, &again, None).unwrap(),
+            reprocess_stored_bodies(&store, &again, root.path()).unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn reprocess_includes_retired_sources_and_every_retained_path() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path());
+        let html = "<p>Fresh body from the retained HTML.</p>";
+        let paths = [
+            "items/old-source/a",
+            "items/old-source/b",
+            "items/removed-source/c",
+        ];
+        for path in paths {
+            let (dir, stem) = path.rsplit_once('/').unwrap();
+            let front = FrontMatter {
+                source: dir.strip_prefix("items/").unwrap().into(),
+                // Two retained paths share every dedupe key; both still need reprocessing.
+                link: "https://unconfigured.example/article".into(),
+                html: Some(format!("{stem}.html")),
+                hidden: stem == "b",
+                ..Default::default()
+            };
+            store
+                .write_item(NewItem {
+                    dir,
+                    stem,
+                    front: &front,
+                    body: "Old body.\n",
+                    html: Some(html),
+                    preview: None,
+                    images: &[],
+                })
+                .unwrap();
+        }
+        let reprocessing = FetchArgs {
+            reprocess: true,
+            ..Default::default()
+        };
+        let dry_run = FetchArgs {
+            dry_run: true,
+            ..reprocessing.clone()
+        };
+        assert_eq!(
+            reprocess_stored_bodies(&store, &dry_run, root.path()).unwrap(),
+            0
+        );
+        for path in paths {
+            assert_eq!(store.read_item(path).unwrap().body, "Old body.\n");
+        }
+        assert_eq!(
+            reprocess_stored_bodies(&store, &reprocessing, root.path()).unwrap(),
+            3
+        );
+        let mut after = Vec::new();
+        for path in paths {
+            let item = store.read_item(path).unwrap();
+            assert_eq!(item.body, "Fresh body from the retained HTML.\n");
+            assert_eq!(store.read_html(&item).unwrap().as_deref(), Some(html));
+            assert!(path.starts_with(&format!("items/{}/", item.front.source)));
+            assert_eq!(item.front.hidden, path.ends_with("/b"));
+            let file = root.path().join(format!("{path}.md"));
+            after.push((
+                file.clone(),
+                fs::read(&file).unwrap(),
+                fs::metadata(&file).unwrap().modified().unwrap(),
+            ));
+        }
+        assert_eq!(
+            reprocess_stored_bodies(&store, &reprocessing, root.path()).unwrap(),
+            0
+        );
+        for (file, bytes, modified) in after {
+            assert_eq!(fs::read(&file).unwrap(), bytes);
+            assert_eq!(fs::metadata(file).unwrap().modified().unwrap(), modified);
+        }
+        assert!(!root.path().join("sources").exists());
+        assert!(!root.path().join("status.toml").exists());
+    }
+
+    #[test]
+    fn reprocess_rolls_back_earlier_bodies_when_a_later_write_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path());
+        for stem in ["a", "z"] {
+            let front = FrontMatter {
+                source: "blog".into(),
+                link: format!("https://example.com/{stem}"),
+                html: Some(format!("{stem}.html")),
+                ..Default::default()
+            };
+            store
+                .write_item(NewItem {
+                    dir: "items/blog",
+                    stem,
+                    front: &front,
+                    body: "Old body.\n",
+                    html: Some("<p>Fresh body.</p>"),
+                    preview: None,
+                    images: &[],
+                })
+                .unwrap();
+        }
+        // A missing, validly named preview makes writing the later item fail.
+        let mut last = store.read_item("items/blog/z").unwrap();
+        last.front.preview = Some(crate::model::Preview {
+            file: "z.preview-0123456789ab.jpg".into(),
+            width: 320,
+            height: 240,
+            alt: None,
+            color: None,
+        });
+        let last_path = root.path().join("items/blog/z.md");
+        fs::write(
+            &last_path,
+            crate::store::frontmatter::render(&last.front, &last.body).unwrap(),
+        )
+        .unwrap();
+        let before = ["a", "z"]
+            .map(|stem| fs::read(root.path().join(format!("items/blog/{stem}.md"))).unwrap());
+        let reprocessing = FetchArgs {
+            reprocess: true,
+            ..Default::default()
+        };
+        let error = reprocess_stored_bodies(&store, &reprocessing, root.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("preview companion is missing"));
+        for (stem, bytes) in ["a", "z"].into_iter().zip(before) {
+            assert_eq!(
+                fs::read(root.path().join(format!("items/blog/{stem}.md"))).unwrap(),
+                bytes
+            );
+        }
     }
 
     #[test]
@@ -1348,14 +1535,12 @@ mod tests {
                 images: &[],
             })
             .unwrap();
-        let (_, archive) = index_archive(store.items().unwrap());
-        let reprocessing = Options {
-            existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+        let reprocessing = FetchArgs {
             reprocess: true,
-            ..options()
+            ..Default::default()
         };
         assert_eq!(
-            reprocess_stored_bodies(&source(), &store, &reprocessing, None).unwrap(),
+            reprocess_stored_bodies(&store, &reprocessing, root.path()).unwrap(),
             0
         );
         assert_eq!(store.read_item("items/blog/long").unwrap().body, body);
@@ -1696,6 +1881,42 @@ mod tests {
     }
 
     #[test]
+    fn subscription_recovery_clears_stale_gate_metadata_and_keeps_archive_provenance() {
+        let mut existing = FrontMatter {
+            content: ContentKind::Feed,
+            ..Default::default()
+        };
+        existing
+            .extra
+            .insert("subscription_required".into(), true.into());
+        existing.extra.insert(
+            "archive_lookup_url".into(),
+            "https://archive.ph/https://publisher.example/article".into(),
+        );
+        let mut planned = FrontMatter {
+            content: ContentKind::Extracted,
+            ..Default::default()
+        };
+        planned
+            .extra
+            .insert("archive_url".into(), "https://archive.ph/Ab123".into());
+        planned
+            .extra
+            .insert("archive_captured_at".into(), "20260921120000".into());
+        let upgraded = upgrade_front(existing, planned);
+        assert!(!upgraded.extra.contains_key("subscription_required"));
+        assert!(!upgraded.extra.contains_key("archive_lookup_url"));
+        assert_eq!(
+            upgraded.extra["archive_url"].as_str(),
+            Some("https://archive.ph/Ab123")
+        );
+        assert_eq!(
+            upgraded.extra["archive_captured_at"].as_str(),
+            Some("20260921120000")
+        );
+    }
+
+    #[test]
     fn upgrade_front_replaces_only_what_the_original_page_supplies() {
         use serde_yaml_ng::Value;
 
@@ -1719,6 +1940,7 @@ mod tests {
             html: None,
             preview: None,
             images: Vec::new(),
+            document: None,
             html_truncated: false,
             extra: BTreeMap::from([
                 ("via".to_string(), Value::from("https://news.example/via")),
@@ -1762,6 +1984,7 @@ mod tests {
             html: Some("post.html".into()),
             preview: Some(preview.clone()),
             images: vec![image.clone()],
+            document: None,
             html_truncated: true,
             extra: BTreeMap::from([
                 ("duration_seconds".to_string(), Value::from(1234u64)),

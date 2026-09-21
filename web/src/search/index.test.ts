@@ -132,12 +132,12 @@ describe('facet completion in the search controller', () => {
     expect(mocks.search).toHaveBeenCalledTimes(1);
     controls.choose(state().suggestions[0]);
     await settle();
-    expect(state().query).toBe('source:"The Rust Blog" ');
+    expect(state().query).toBe('source:"rust-blog" ');
     expect(state().error).toBe('');
     expect(state().open).toBe(false);
     expect(state().ready).toBe(true);
     expect(mocks.search).toHaveBeenCalledTimes(2);
-    expect(mocks.search.mock.lastCall![0].clauses[0]).toMatchObject({ kind: 'facet', field: 'source', value: 'The Rust Blog' });
+    expect(mocks.search.mock.lastCall![0].clauses[0]).toMatchObject({ kind: 'facet', field: 'source', value: 'rust-blog' });
   });
 
   it('hides the initial feed immediately and waits for the current search response', async () => {
@@ -218,7 +218,7 @@ describe('facet completion in the search controller', () => {
     expect(state().suggestions).toEqual([]);
     expect(staticFeed.hidden).toBe(true);
     expect(mocks.search).toHaveBeenCalledTimes(1);
-    expect(mocks.search.mock.lastCall![0].raw).toBe(query === 'source:rust-blog' ? 'source:"The Rust Blog"' : query);
+    expect(mocks.search.mock.lastCall![0].raw).toBe(query === 'source:rust-blog' ? query : 'source:"rust-blog"');
   });
 
   it('still reports unmatched values and invalid syntax outside the active completion', async () => {
@@ -255,7 +255,7 @@ describe('facet completion in the search controller', () => {
     await settle();
     expect(state().suggestions.map(item=>item.id)).toEqual(['source:openai']);
     controls.choose(state().suggestions[0]);
-    expect(state().query).toBe('category:news source:openai ');
+    expect(state().query).toBe('category:news source:"openai" ');
     expect(state().open).toBe(false);
   });
 
@@ -269,7 +269,7 @@ describe('facet completion in the search controller', () => {
     expect(state().query).toBe('source:open');
     expect(state().suggestions[0].id).toBe('source:openai');
     controls.choose(state().suggestions[0]);
-    expect(state().query).toBe('source:openai ');
+    expect(state().query).toBe('source:"openai" ');
   });
 
   it('does not rewrite user typing when initial URL vocabulary arrives late', async () => {
@@ -281,7 +281,7 @@ describe('facet completion in the search controller', () => {
     resolve({manifest});
     await settle();
     expect(state().query).toBe('source:rust');
-    expect(state().suggestions[0].insert).toBe('source:"The Rust Blog"');
+    expect(state().suggestions[0].insert).toBe('source:"rust-blog"');
   });
 });
 

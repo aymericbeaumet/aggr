@@ -6,9 +6,71 @@ use serde_json::{Value, json};
 use sha1::{Digest as _, Sha1};
 
 use crate::harness::{
-    Fixture, browser_client, catch_panics, emulate, finish, git, phone_session, report_failure,
-    screenshot, wait_booted_with, wait_for,
+    Fixture, browser_client, catch_panics, emulate, finish, git, key, phone_session,
+    report_failure, screenshot, wait_booted_with, wait_for,
 };
+
+#[tokio::test]
+#[ignore = "requires a local Chrome WebDriver"]
+async fn article_boundary_keys_and_swipes_return_to_feed() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fixture = Fixture::with_pwa(false)?;
+    let archive = fixture.directory.path().join(".aggr/data");
+    for (index, date, title, body) in [
+        (
+            45,
+            "2026-09-09",
+            "Newest boundary article",
+            "The latest dispatch covers navigation at the beginning of the reading sequence. Continue across this entire paragraph to return to the feed.",
+        ),
+        (
+            1,
+            "2026-08-01",
+            "Oldest boundary article",
+            "An earlier essay examines how a reader reaches the archive boundary after browsing the collection. A deliberate gesture beyond this essay returns to the article list.",
+        ),
+    ] {
+        std::fs::write(
+            archive.join(format!(
+                "items/example/2026/09/2026-09-01-story-{index:02}.md"
+            )),
+            format!(
+                "---\ntitle: {title}\nlink: https://publisher.invalid/boundary-{index}\nsource: example\npublished: {date}T12:00:00Z\nfirst_seen: {date}T12:00:00Z\ncontent: extracted\n---\n\n{body}\n"
+            ),
+        )?;
+    }
+    git(&archive, &["add", "items"])?;
+    git(&archive, &["commit", "-qm", "article boundary fixture"])?;
+    fixture.build()?;
+    let client = browser_client().await?;
+    let result = async {
+        phone_session(&client).await?;
+        for (index, direction, input) in [(45, "previous", "k"), (1, "next", "j"), (45, "previous", "swipe"), (1, "next", "swipe")] {
+            client.goto(&format!("{}items/example/2026-09-01-story-{index:02}/", fixture.base)).await?;
+            wait_booted_with(&client, "document.querySelector('article.item[data-swipe-navigation] .body p')").await?;
+            let missing = client.execute("return !document.querySelector('article.item').dataset[arguments[0]+'Url']", vec![json!(direction)]).await?;
+            anyhow::ensure!(missing == true, "{index} must be the real {direction} archive boundary");
+            client.execute("window.__boundaryNavigation=true;document.activeElement?.blur()", vec![]).await?;
+            if input == "swipe" {
+                let y = client.execute("const p=document.querySelector('.body p');p.scrollIntoView({block:'center'});const box=p.getBoundingClientRect();return (box.top+box.bottom)/2", vec![]).await?.as_f64().context("article gesture height")?;
+                let (from, to) = if direction == "previous" { (85.0, 300.0) } else { (300.0, 85.0) };
+                emulate(&client, "Input.dispatchTouchEvent", json!({"type":"touchStart","touchPoints":[{"x":from,"y":y,"id":1}]})).await?;
+                for step in 1..=8 {
+                    let x = from + (to-from) * f64::from(step) / 8.0;
+                    emulate(&client, "Input.dispatchTouchEvent", json!({"type":"touchMove","touchPoints":[{"x":x,"y":y,"id":1}]})).await?;
+                }
+                emulate(&client, "Input.dispatchTouchEvent", json!({"type":"touchEnd","touchPoints":[]})).await?;
+            } else {
+                key(&client, input).await?;
+            }
+            wait_for(&client, &format!("!window.swup.navigating && location.href==={} && document.body.dataset.kind==='river'", json!(fixture.base))).await?;
+            anyhow::ensure!(client.execute("return window.__boundaryNavigation", vec![]).await? == true, "boundary navigation must preserve the document");
+        }
+        Ok(())
+    }.await;
+    report_failure(&client, "article-boundary-navigation", &result).await;
+    finish(client, result).await
+}
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
@@ -35,7 +97,7 @@ async fn prefetch_and_video_contracts(client: &Client, fixture: &Fixture) -> Res
     "#, vec![]).await?, true, "the initial page must be cached before event-binding markers are added");
     let shared_fetch = client.execute_async(r#"
       const done = arguments[arguments.length-1];
-      const target = new URL('browse/?prefetch-contract=1',document.baseURI);
+      const target = new URL('browse/?prefetch-contract=1',new URL(document.getElementById('aggr-page').dataset.root,location.href));
       Promise.all([window.swup.fetchPage(target.href), window.swup.fetchPage(target.pathname+target.search)]).then(pages => {
         done({requests:performance.getEntriesByName(target.href).length, sameHtml:pages[0].html===pages[1].html});
       }).catch(error => done({error:String(error)}));
@@ -48,13 +110,13 @@ async fn prefetch_and_video_contracts(client: &Client, fixture: &Fixture) -> Res
     client.execute(r#"
       const state = {
         originalFetch:window.fetch, home:location.href,
-        destination:new URL('browse/?prefetch-cancellation=destination',document.baseURI).href,
-        unrelated:new URL('preferences/?prefetch-cancellation=unrelated',document.baseURI).href,
+        destination:new URL('browse/?prefetch-cancellation=destination',new URL(document.getElementById('aggr-page').dataset.root,location.href)).href,
+        unrelated:new URL('preferences/?prefetch-cancellation=unrelated',new URL(document.getElementById('aggr-page').dataset.root,location.href)).href,
         requests:{}, aborted:[], release:{}, settled:{}
       };
       window.prefetchCancellationContract = state;
       window.fetch = function(input, options) {
-        const url = new URL(typeof input === 'string' ? input : input.url, document.baseURI);
+        const url = new URL(typeof input === 'string' ? input : input.url, new URL(document.getElementById('aggr-page').dataset.root,location.href));
         const key = url.searchParams.get('prefetch-cancellation');
         if (!key) return state.originalFetch.call(window,input,options);
         state.requests[key] = (state.requests[key] || 0) + 1;
@@ -234,7 +296,7 @@ async fn prefetch_reserves_capacity_for_pointer_intent() -> Result<()> {
           const original=window.fetch;
           window.fetch=function(input,options){
             if(options?.priority!=='low')return original.call(this,input,options);
-            const url=new URL(typeof input==='string'?input:input.url,document.baseURI).href;
+            const url=new URL(typeof input==='string'?input:input.url,new URL(document.getElementById('aggr-page').dataset.root,location.href)).href;
             window.prefetchProbe.started.push(url);
             return new Promise(resolve=>window.prefetchProbe.release.push(resolve)).then(()=>original.call(this,input,options));
           };

@@ -163,13 +163,13 @@ fn stop_dev(mut child: std::process::Child) -> std::process::Output {
 }
 
 #[cfg(unix)]
-fn wait_for_cached_site(root: &Path, timeout: Duration) {
+fn wait_for_cached_site(root: &Path, timeout: Duration) -> PathBuf {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if walkdir::WalkDir::new(root)
+        if let Some(entry) = walkdir::WalkDir::new(root)
             .into_iter()
             .filter_map(Result::ok)
-            .any(|entry| {
+            .find(|entry| {
                 entry.file_name() == ".aggr-site"
                     && entry.path().parent().is_some_and(|site| {
                         site.file_name().is_some_and(|name| name == "site")
@@ -180,7 +180,7 @@ fn wait_for_cached_site(root: &Path, timeout: Duration) {
                     })
             })
         {
-            return;
+            return entry.path().parent().unwrap().to_path_buf();
         }
         thread::sleep(Duration::from_millis(25));
     }
@@ -721,6 +721,48 @@ fn dev_uses_an_external_persistent_cache_and_stops_on_ctrl_c() {
         "{}",
         String::from_utf8_lossy(&status.stdout)
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn dev_release_keeps_an_opted_in_site_out_of_search_engines() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200).body(FEED);
+    });
+    let repo = TestRepo::new();
+    repo.write_config(
+        &server.url("/feed.xml"),
+        "indexing = true\nurl = \"https://reads.example.com\"",
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let cache_path = cache.path().canonicalize().unwrap();
+    let available = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = available.local_addr().unwrap().port();
+    drop(available);
+    let child = repo
+        .aggr()
+        .env("AGGR_CACHE_DIR", &cache_path)
+        .args(["dev", "--release", "--port", &port.to_string()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_dev(port, Duration::from_secs(10));
+    let site = wait_for_cached_site(&cache_path, Duration::from_secs(20));
+    let output = stop_dev(child);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let html = std::fs::read_to_string(site.join("index.html")).unwrap();
+    assert!(html.contains("name=\"robots\" content=\"noindex,follow\""));
+    assert!(!site.join("sitemap.xml").exists());
+    let descriptor: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("aggr.json")).unwrap()).unwrap();
+    assert!(descriptor["discovery"].get("sitemap").is_none());
 }
 
 #[test]
@@ -1437,15 +1479,16 @@ fn build_renders_the_site_and_release_needs_a_url() {
     let site = repo.clone.join("_site");
     let index = std::fs::read_to_string(site.join("index.html")).unwrap();
     assert!(
-        index.contains("href=\"items/demo/2026-09-01-hello-there/\""),
+        index.contains("href=\"./items/demo/2026-09-01-hello-there/\""),
         "{index}"
     );
     assert!(index.contains("Hello there"));
     assert!(index.contains(">aggr.toml <span aria-hidden=\"true\">↗</span></a>"));
     assert!(index.contains(">built with aggr</a>"));
     assert!(index.contains("href=\"https://github.com/aymericbeaumet/aggr\""));
-    assert!(index.contains("href=\"browse/\""), "{index}");
-    assert!(index.contains("href=\"preferences/\""), "{index}");
+    assert!(index.contains("href=\"./browse/\""), "{index}");
+    assert!(index.contains("href=\"./preferences/\""), "{index}");
+    assert!(!index.contains("<base "), "{index}");
     assert!(index.contains("target=\"_blank\""), "{index}");
     assert!(!index.contains("built <time"));
     assert!(index.contains("id=\"swup\""));
@@ -1512,7 +1555,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(site.join("feed.json").exists());
     assert!(site.join(".nojekyll").exists());
     assert!(site.join("browse/index.html").exists());
-    assert!(site.join("sources/demo/index.html").exists());
+    assert!(site.join("sources/127.0.0.1/index.html").exists());
     assert!(site.join("sources/index.html").exists());
     assert!(!site.join("sources/atom.xml").exists());
     assert!(!site.join("sources/rss.xml").exists());
@@ -1541,15 +1584,15 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(browse.contains("id=\"categories\""), "{browse}");
     assert!(browse.contains("id=\"tags\""), "{browse}");
     assert!(
-        browse.contains("href=\"./?q=source%3A%22demo%22\""),
+        browse.contains("href=\"../?q=source%3A%22127.0.0.1%22\""),
         "{browse}"
     );
     assert!(
-        browse.contains("href=\"./?q=category%3A%22demo%22\""),
+        browse.contains("href=\"../?q=category%3A%22demo%22\""),
         "{browse}"
     );
     assert!(
-        browse.contains("href=\"./?q=tag%3A%22example%22\""),
+        browse.contains("href=\"../?q=tag%3A%22example%22\""),
         "{browse}"
     );
     assert!(browse.contains(">#example</a>"), "{browse}");
@@ -1617,7 +1660,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
         .assert()
         .success();
     let index = std::fs::read_to_string(site.join("index.html")).unwrap();
-    assert!(index.contains("href=\"items/demo/"), "{index}");
+    assert!(index.contains("href=\"./items/demo/"), "{index}");
     assert!(
         !site.join("CNAME").exists(),
         "github.io hosts need no CNAME"

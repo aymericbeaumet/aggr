@@ -70,7 +70,9 @@ pub fn instance_descriptor(
             Value::String(endpoint("opensearch.xml")),
         );
         discovery.insert("linkset".into(), Value::String(endpoint("linkset.json")));
-        discovery.insert("sitemap".into(), Value::String(endpoint("sitemap.xml")));
+        if site.indexing {
+            discovery.insert("sitemap".into(), Value::String(endpoint("sitemap.xml")));
+        }
     }
     if site.pwa {
         discovery.insert(
@@ -142,10 +144,12 @@ pub fn llms_txt(site: &SiteCtx) -> String {
     ));
     if site.base_url.is_some() {
         out.push_str(&format!(
-            "- [Original URL to snapshot linkset]({})\n- [Sitemap]({})\n",
-            endpoint("linkset.json"),
-            endpoint("sitemap.xml")
+            "- [Original URL to snapshot linkset]({})\n",
+            endpoint("linkset.json")
         ));
+        if site.indexing {
+            out.push_str(&format!("- [Sitemap]({})\n", endpoint("sitemap.xml")));
+        }
     }
     out
 }
@@ -910,6 +914,45 @@ pub fn item_json(
     }))?)
 }
 
+/// Markdown has no native media-caption syntax; italic links retain the reader's figure legends.
+pub(super) fn published_markdown_body(item: &ItemCtx, markdown: &str) -> String {
+    let caption = if let Some(document) = &item.document {
+        Some(("Open PDF", document.url.as_str()))
+    } else if item.video.is_some() || item.native_media.is_some() {
+        None
+    } else {
+        item.interactive
+            .as_ref()
+            .map(|interactive| ("Open original", interactive.source_url.as_str()))
+    };
+    let Some((label, url)) = caption else {
+        return markdown.to_string();
+    };
+    let mut destination = String::with_capacity(url.len());
+    for ch in url.chars() {
+        if ch.is_ascii_control() || matches!(ch, ' ' | '<' | '>' | '\\') {
+            destination.push_str(&format!("%{:02X}", ch as u32));
+        } else {
+            destination.push(ch);
+        }
+    }
+    let caption = format!("*[{label}](<{destination}>)*");
+    if markdown
+        .trim_start()
+        .strip_prefix(&caption)
+        .is_some_and(|tail| {
+            tail.trim().is_empty() || tail.starts_with("\n\n") || tail.starts_with("\r\n\r\n")
+        })
+    {
+        return markdown.to_string();
+    }
+    if markdown.trim().is_empty() {
+        format!("{caption}\n")
+    } else {
+        format!("{caption}\n\n{markdown}")
+    }
+}
+
 pub fn text_item(item: &ItemCtx) -> String {
     let body = item
         .body_html
@@ -1171,6 +1214,7 @@ mod tests {
             og_locale: "en_GB".into(),
             base_path: "/reads/".into(),
             base_url: Some("https://example.test/reads/".into()),
+            indexing: true,
             repository: None,
             data_branch: "aggr".into(),
             network_url: AGGR_NETWORK,
@@ -1199,6 +1243,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn media_captions_remain_italic_links_in_portable_markdown() {
+        let mut pdf = item();
+        pdf.document = Some(super::super::document::DocumentCtx {
+            url: "https://example.org/puzzle(1996).pdf?download=1&file=notes#page=2".into(),
+            local_url: Some("blob/example/document.pdf".into()),
+        });
+        let body = "Original notes.\n\nKeep **formatting**.\n";
+        let exported = published_markdown_body(&pdf, body);
+        assert!(exported.starts_with("*[Open PDF](<https://example.org/puzzle(1996).pdf?download=1&file=notes#page=2>)*\n\n"), "{exported}");
+        assert!(exported.ends_with(body));
+        assert_eq!(published_markdown_body(&pdf, &exported), exported);
+        let rendered = crate::content::render_markdown(&exported);
+        assert!(rendered.contains("<em><a "), "{rendered}");
+        assert!(rendered.contains("file=notes#page=2"), "{rendered}");
+
+        let mut interactive = item();
+        interactive.interactive = Some(super::super::interactive::InteractiveCtx {
+            source_url: "https://example.org/demo?value=<safe>".into(),
+        });
+        let exported = published_markdown_body(&interactive, "");
+        assert_eq!(
+            exported,
+            "*[Open original](<https://example.org/demo?value=%3Csafe%3E>)*\n"
+        );
+        assert_eq!(published_markdown_body(&item(), body), body);
+    }
+
     fn item() -> ItemCtx {
         ItemCtx {
             path: "items/source/a-story".into(),
@@ -1207,6 +1279,13 @@ mod tests {
             link: "https://upstream.test/story?a=1&b=2".into(),
             domain: "upstream.test".into(),
             source: "source".into(),
+            publisher_source: "source".into(),
+            source_memberships: vec![crate::site::context::SourceMembershipCtx {
+                query_value: "source".into(),
+                slug: "source".into(),
+                name: "Upstream".into(),
+                display: "upstream.example".into(),
+            }],
             source_name: "Upstream".into(),
             source_display: "upstream.example".into(),
             source_title: "Upstream".into(),
@@ -1742,6 +1821,7 @@ mod tests {
 
     fn sources() -> Vec<SourceCtx> {
         let source = |slug: &str, name: &str, engine: &str| SourceCtx {
+            query_value: slug.into(),
             slug: slug.into(),
             name: name.into(),
             url: None,

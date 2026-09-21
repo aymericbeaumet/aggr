@@ -639,6 +639,7 @@ pub fn deezer_items(page: &str, url: &Url) -> Result<(SourceMeta, Vec<RawItem>)>
                 .unwrap_or_default(),
             preview: None,
             images: vec![],
+            document: None,
         });
     }
     if items.is_empty() {
@@ -769,6 +770,7 @@ pub fn spotify_items(page: &str, url: &Url) -> Result<(SourceMeta, Vec<RawItem>)
                 .unwrap_or_default(),
             preview: None,
             images: vec![],
+            document: None,
         });
     }
     if items.is_empty() {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { articleNavigationDirection, externalShortcutKey, externalShortcutTarget, gotoRoute, lineHeight, scrollDistance, scrollShortcut } from "./shortcuts";
+import { articleNavigationDirection, articleNavigationTarget, externalShortcutKey, externalShortcutTarget, gotoRoute, lineHeight, scrollDistance, scrollShortcut } from "./shortcuts";
 
 const base = "https://reader.test/nested/";
 
@@ -86,4 +86,22 @@ it("steps through the feed with j and k on an article", () => {
   expect(articleNavigationDirection("K")).toBe("previous");
   expect(articleNavigationDirection("Enter")).toBeNull();
   expect(articleNavigationDirection("x")).toBeNull();
+});
+
+describe("article navigation targets", () => {
+  it("keeps adjacent article URLs for both keyboard and swipe directions", () => {
+    const links = { previousUrl: "items/newer/", nextUrl: "items/older/" };
+    expect(articleNavigationTarget("previous", links, base)).toBe("https://reader.test/nested/items/newer/");
+    expect(articleNavigationTarget("next", links, base)).toBe("https://reader.test/nested/items/older/");
+  });
+
+  it("returns to the feed past either archive boundary", () => {
+    expect(articleNavigationTarget("previous", { nextUrl: "items/older/" }, base)).toBe(base);
+    expect(articleNavigationTarget("next", { previousUrl: "items/newer/" }, base)).toBe(base);
+  });
+
+  it("returns to the feed in both directions for a single article", () => {
+    expect(articleNavigationTarget("previous", {}, base)).toBe(base);
+    expect(articleNavigationTarget("next", { nextUrl: "" }, base)).toBe(base);
+  });
 });

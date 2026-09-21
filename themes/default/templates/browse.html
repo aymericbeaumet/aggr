@@ -17,7 +17,7 @@
             {% if entry.count > 0 or directory_kind == 'sources' %}
             <li class="browse-entry" data-directory-entry>
               <div class="browse-entry-heading">
-                <a class="browse-entry-link" href="{{ entry.slug | facet_url('source' if directory_kind == 'sources' else 'category' if directory_kind == 'categories' else 'tag') }}">{{ '#' if directory_kind == 'tags' else '/' if directory_kind == 'categories' }}{{ entry.name }}</a>
+                <a class="browse-entry-link" href="{{ (entry.query_value if directory_kind == 'sources' else entry.slug) | facet_url('source' if directory_kind == 'sources' else 'category' if directory_kind == 'categories' else 'tag') }}">{{ '#' if directory_kind == 'tags' else '/' if directory_kind == 'categories' }}{{ entry.name }}</a>
                 {% if directory_kind == 'sources' and entry.site_url %}<a class="browse-entry-website" href="{{ entry.site_url }}" title="{{ entry.site_url }}" target="_blank" rel="noopener noreferrer" data-aggr-external-label="Open {{ entry.name }} website" aria-label="Open {{ entry.name }} website, opens in a new tab">↗</a>{% endif %}
               </div>
               <p class="browse-entry-meta"><span>{{ entry.count }} {{ 'item' if entry.count == 1 else 'items' }}</span>{% if entry.latest %}<span><span class="sr-only">Latest: </span><time datetime="{{ entry.latest }}" title="{{ entry.latest }}">{{ entry.latest | date }}</time></span>{% endif %}{% if directory_kind == 'sources' %}<span>{{ entry.engine }}</span>{% if entry.category %}<span><a href="{{ (entry.category | slug) | facet_url('category') }}">/{{ entry.category }}</a></span>{% endif %}{% endif %}</p>

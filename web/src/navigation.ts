@@ -1,4 +1,5 @@
 import { queryHistoryState } from './search/query';
+import { mountTouchTabs } from './reader/mobile-tabs';
 
 interface NavigationPorts {
   location: Pick<Location, 'href' | 'assign'>;
@@ -63,6 +64,7 @@ export function keyboardObscuresNavigation(editing: boolean, layoutHeight: numbe
 
 export function mountMobileNavigation(bar: HTMLElement, window: Window) {
   const document = bar.ownerDocument;
+  const disposeTouch = mountTouchTabs(bar);
   const viewport = window.visualViewport;
   const resize = new ResizeObserver(() => measure());
   let disposed = false;
@@ -95,6 +97,7 @@ export function mountMobileNavigation(bar: HTMLElement, window: Window) {
   document.addEventListener('focusout', afterFocus);
   return () => {
     disposed = true;
+    disposeTouch();
     resize.disconnect();
     bar.removeEventListener('click', reselect, true);
     viewport?.removeEventListener('resize', keyboard);

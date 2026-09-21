@@ -65,6 +65,7 @@ pub async fn extract(
     ExtractedArticle {
         html,
         image: thumbnail(video),
+        labels: Vec::new(),
     }
 }
 

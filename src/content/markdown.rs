@@ -166,7 +166,8 @@ fn responsive_json_candidate(value: &str) -> Option<String> {
 /// [`sanitize`] then htmd. Trailing whitespace trimmed, exactly one trailing newline, runs of
 /// blank lines collapsed to one.
 pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
-    let description = normalize_youtube_description(html, base);
+    let publisher = super::normalize::publisher_html(html);
+    let description = normalize_youtube_description(&publisher, base);
     let normalized_images = normalize_image_sources(&description);
     let framed = link_embedded_frames(&normalized_images);
     let passive = strip_active_content(&framed);
@@ -781,25 +782,81 @@ fn markdown_heading(
 
 fn code_language(element: scraper::ElementRef<'_>) -> Option<String> {
     let value = element.value();
-    let language = value
-        .attr("data-lang")
-        .or_else(|| value.attr("data-language"))
-        .or_else(|| {
-            value.attr("class").and_then(|classes| {
-                classes.split_whitespace().find_map(|class| {
-                    class
-                        .strip_prefix("language-")
-                        .or_else(|| class.strip_prefix("lang-"))
-                        .or_else(|| class.strip_prefix("highlight-source-"))
-                })
+    let token = super::highlight::hint_token;
+    let class = value.attr("class");
+    if class.is_some_and(|classes| {
+        classes
+            .split_whitespace()
+            .any(|class| matches!(class, "nohighlight" | "no-highlight"))
+    }) {
+        return Some("plaintext".into());
+    }
+    if let Some(language) = ["data-language", "data-lang"]
+        .into_iter()
+        .filter_map(|name| value.attr(name))
+        .find_map(token)
+    {
+        return Some(language);
+    }
+    let class = class?;
+    let classes = class.split_whitespace().collect::<Vec<_>>();
+    if let Some(language) = classes.iter().find_map(|class| {
+        class
+            .strip_prefix("language-")
+            .or_else(|| class.strip_prefix("lang-"))
+            .or_else(|| class.strip_prefix("highlight-source-"))
+            // Sphinx's Pygments wrapper names the lexer; plain `highlight` does not.
+            .or_else(|| {
+                let language = class.strip_prefix("highlight-")?;
+                (classes.contains(&"notranslate")
+                    || element
+                        .children()
+                        .filter_map(scraper::ElementRef::wrap)
+                        .any(|child| child.value().classes().any(|class| class == "highlight")))
+                .then_some(language)
             })
-        })?;
-    (language.len() <= 40
-        && !language.is_empty()
-        && language
-            .bytes()
-            .all(|ch| ch.is_ascii_alphanumeric() || b"_+-#".contains(&ch)))
-    .then(|| language.to_ascii_lowercase())
+            .and_then(token)
+    }) {
+        return Some(language);
+    }
+    // SyntaxHighlighter stores options in a CSS class attribute, including quoted brush aliases.
+    if let Some(language) = class.split(';').find_map(|option| {
+        let (name, value) = option.split_once(':')?;
+        (name.split_whitespace().last() == Some("brush"))
+            .then(|| token(value.trim().trim_matches(['\'', '"'])))
+            .flatten()
+    }) {
+        return Some(language);
+    }
+    // Legacy highlight.js and SyntaxHighlighter use one bare alias beside their marker.
+    // Multiple unrelated classes are ambiguous, and Shiki's bare classes name themes.
+    if classes.len() == 2
+        && classes
+            .iter()
+            .any(|class| matches!(*class, "hljs" | "syntaxhighlighter"))
+    {
+        return classes
+            .iter()
+            .copied()
+            .find(|class| !matches!(*class, "hljs" | "syntaxhighlighter"))
+            .filter(|class| {
+                !matches!(
+                    *class,
+                    "highlight"
+                        | "highlighted"
+                        | "line-numbers"
+                        | "linenums"
+                        | "notranslate"
+                        | "collapsed"
+                        | "nogutter"
+                        | "toolbar"
+                        | "dark"
+                        | "light"
+                )
+            })
+            .and_then(token);
+    }
+    None
 }
 
 /// Highlighters routinely lay a listing out as a table with a line-number gutter. Read as a table
@@ -1119,11 +1176,53 @@ fn is_bracketed_navigation(line: &str) -> bool {
 }
 
 /// Flatten highlighting wrappers before htmd can trim the line endings inside their spans.
-fn normalize_code_blocks(html: &str) -> String {
+pub(super) fn normalize_code_blocks(html: &str) -> String {
+    // Resolve inheritance against the original tree before flattening the wrappers. A hint on
+    // the actual code element wins over its pre and the nearest enclosing publisher wrapper.
+    let document = Html::parse_document(html);
+    let (Ok(pre_selector), Ok(code_selector)) = (Selector::parse("pre"), Selector::parse("code"))
+    else {
+        return html.to_string();
+    };
+    let mut languages = document.select(&pre_selector).map(|pre| {
+        let code = pre.select(&code_selector).next().unwrap_or(pre);
+        std::iter::once(code)
+            .chain(code.ancestors().filter_map(scraper::ElementRef::wrap))
+            .find_map(code_language)
+    });
     let mut out = String::with_capacity(html.len());
     let mut position = 0;
     while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
         out.push_str(&html[position..start]);
+        if let Some(length) = comment_end(&html[start..]) {
+            out.push_str(&html[start..start + length]);
+            position = start + length;
+            continue;
+        }
+        if let Some(tag) = parse_tag(&html[start..])
+            && !tag.closing
+            && matches!(
+                tag.name.as_str(),
+                "script"
+                    | "style"
+                    | "textarea"
+                    | "title"
+                    | "xmp"
+                    | "iframe"
+                    | "noembed"
+                    | "noframes"
+                    | "plaintext"
+            )
+            && let Some(length) = tag.end
+        {
+            position = if tag.name == "plaintext" {
+                html.len()
+            } else {
+                skip_element(html, start + length, &tag.name)
+            };
+            out.push_str(&html[start..position]);
+            continue;
+        }
         if let Some(tag) = parse_tag(&html[start..])
             && !tag.closing
             && tag.name == "pre"
@@ -1131,9 +1230,7 @@ fn normalize_code_blocks(html: &str) -> String {
         {
             let body = strip_listing_navigation(&html[inner..closing]);
             let fragment = Html::parse_fragment(&format!("<pre>{body}</pre>"));
-            let language = Selector::parse("code,pre")
-                .ok()
-                .and_then(|selector| fragment.select(&selector).find_map(code_language));
+            let language = languages.next().flatten();
             let mut code = String::new();
             for node in fragment.tree.nodes() {
                 match node.value() {
@@ -1144,15 +1241,40 @@ fn normalize_code_blocks(html: &str) -> String {
             }
             out.push_str("<pre><code");
             if let Some(language) = language {
-                out.push_str(&format!(" class=\"language-{language}\""));
+                // Readability removes CSS classes but retains this semantic data attribute.
+                out.push_str(&format!(
+                    " class=\"language-{language}\" data-language=\"{language}\""
+                ));
             }
             out.push('>');
             out.push_str(&escape_html(&code));
             out.push_str("</code></pre>");
             position = end;
+        } else if let Some(tag) = parse_tag(&html[start..])
+            && !tag.closing
+            && tag.name == "code"
+            && let Some((inner, closing, end)) = element_bounds(html, start, "code")
+        {
+            let fragment = Html::parse_fragment(&html[start..end]);
+            let linked = fragment.tree.nodes().any(|node| {
+                matches!(node.value(), scraper::Node::Element(element) if element.name() == "a")
+            });
+            if linked {
+                // Markdown cannot represent a link inside a code span. Keep the visible code
+                // before htmd creates link syntax and its punctuation-protection marker.
+                out.push_str(&html[start..inner]);
+                out.push_str(&escape_html(&element_text(&fragment.root_element())));
+                out.push_str(&html[closing..end]);
+            } else {
+                out.push_str(&html[start..end]);
+            }
+            position = end;
         } else {
-            out.push('<');
-            position = start + 1;
+            let length = parse_tag(&html[start..])
+                .and_then(|tag| tag.end)
+                .unwrap_or(1);
+            out.push_str(&html[start..start + length]);
+            position = start + length;
         }
     }
     out.push_str(&html[position..]);
@@ -1320,7 +1442,7 @@ fn endnotes_bounds(html: &str) -> Option<ElementRange> {
 /// fragment link earlier in the document: the structure of footnotes, whatever the publisher's
 /// class names.
 fn is_referenced_note_list(before: &str, inner: &str) -> bool {
-    if !inner.contains("<li") {
+    if !inner.contains("<li") && !inner.contains(" id=") {
         return false;
     }
     let notes = endnote_items(inner);
@@ -1330,8 +1452,18 @@ fn is_referenced_note_list(before: &str, inner: &str) -> bool {
         })
 }
 
-/// `(anchor id, note HTML)` for each list item in the endnotes container, in document order.
+/// `(anchor id, note HTML)` for each note in the endnotes container, in document order: the
+/// list items of an `<ol>`, or identified blocks when the publisher uses no list markup.
 fn endnote_items(inner: &str) -> Vec<(String, String)> {
+    let items = list_note_items(inner);
+    if items.is_empty() {
+        block_note_items(inner)
+    } else {
+        items
+    }
+}
+
+fn list_note_items(inner: &str) -> Vec<(String, String)> {
     let mut notes = Vec::new();
     let mut position = 0;
     while let Some(tag_start) = inner[position..].find('<').map(|at| position + at) {
@@ -1361,6 +1493,94 @@ fn endnote_items(inner: &str) -> Vec<(String, String)> {
         position = end;
     }
     notes
+}
+
+/// Notes laid out as sibling blocks rather than a list (libroot.org's `div.citation`): the
+/// container opens with an identified block, each may open with its own number, and a block
+/// without an id (a quotation the publisher placed after its citation) continues the note
+/// before it. A note left with no text is not a note; its reference stays an ordinary link.
+fn block_note_items(inner: &str) -> Vec<(String, String)> {
+    let mut notes: Vec<(String, String)> = Vec::new();
+    let mut position = 0;
+    while let Some(tag_start) = inner[position..].find('<').map(|at| position + at) {
+        if !inner[position..tag_start].trim().is_empty() {
+            return Vec::new();
+        }
+        if let Some(length) = comment_end(&inner[tag_start..]) {
+            position = tag_start + length;
+            continue;
+        }
+        let Some(tag) = parse_tag(&inner[tag_start..]) else {
+            return Vec::new();
+        };
+        let Some(tag_len) = tag.end else {
+            break;
+        };
+        if tag.closing {
+            return Vec::new();
+        }
+        if tag.self_closing || matches!(tag.name.as_str(), "br" | "hr" | "img") {
+            position = tag_start + tag_len;
+            continue;
+        }
+        let Some((content, closing, end)) = element_bounds(inner, tag_start, &tag.name) else {
+            return Vec::new();
+        };
+        let id = attribute_value(&inner[tag_start..tag_start + tag_len], "id").unwrap_or_default();
+        if id.is_empty() {
+            let Some((_, note)) = notes.last_mut() else {
+                return Vec::new();
+            };
+            note.push_str(&inner[tag_start..end]);
+        } else if matches!(tag.name.as_str(), "div" | "p" | "section") {
+            notes.push((
+                id.to_string(),
+                strip_note_marker(&strip_backreferences(&inner[content..closing])),
+            ));
+        } else {
+            return Vec::new();
+        }
+        position = end;
+    }
+    if !inner[position..].trim().is_empty() {
+        return Vec::new();
+    }
+    notes.retain(|(_, note)| !html_to_text(note).trim().is_empty());
+    notes
+}
+
+/// A note that opens with its own number (`[1]:`, `1.`) repeats what the Markdown footnote
+/// already says; drop that marker whether it is a block of its own or leading text.
+fn strip_note_marker(note: &str) -> String {
+    let trimmed = note.trim_start();
+    if let Some(tag) = parse_tag(trimmed)
+        && !tag.closing
+        && matches!(tag.name.as_str(), "p" | "div" | "span" | "strong" | "b")
+        && let Some((inner, closing, end)) = element_bounds(trimmed, 0, &tag.name)
+        && is_note_marker(&html_to_text(&trimmed[inner..closing]))
+    {
+        return trimmed[end..].to_string();
+    }
+    if !trimmed.starts_with('<')
+        && let Some((head, rest)) = trimmed.split_once(char::is_whitespace)
+        && is_note_marker(head)
+    {
+        return rest.trim_start().to_string();
+    }
+    note.to_string()
+}
+
+fn is_note_marker(text: &str) -> bool {
+    let text = text.trim();
+    let text = text.strip_prefix(['[', '(']).unwrap_or(text);
+    let rest = text.trim_start_matches(|c: char| c.is_ascii_digit());
+    let digits = text.len() - rest.len();
+    if !(1..=4).contains(&digits) {
+        return false;
+    }
+    rest.trim_start_matches([']', ')'])
+        .trim_start_matches([':', '.'])
+        .is_empty()
 }
 
 /// The `↩` link back to the reference is navigation, not note content.
@@ -1724,11 +1944,13 @@ fn append_footnotes(
 
 /// Restore separators that were supplied by the origin page's CSS rather than its text nodes.
 /// Directly adjacent links are usually action/button rows, so retain their visual separation with
-/// a line break. Other adjacent layout wrappers need a space to avoid merging dates, labels, and
+/// a line break, except numbered fragment citations that belong to the surrounding prose.
+/// Other adjacent layout wrappers need a space to avoid merging dates, labels, and
 /// footnote text into neighboring words after the wrappers are discarded by the converter.
 fn restore_inline_layout_boundaries(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut position = 0;
+    let mut anchor_is_citation = false;
 
     while position < html.len() {
         let Some(tag_start) = html[position..].find('<').map(|offset| position + offset) else {
@@ -1749,6 +1971,9 @@ fn restore_inline_layout_boundaries(html: &str) -> String {
         let after_tag = tag_start + tag_len;
         out.push_str(&html[tag_start..after_tag]);
         position = after_tag;
+        if tag.name == "a" && !tag.closing {
+            anchor_is_citation = is_numbered_citation(html, tag_start);
+        }
 
         if !tag.closing
             || !(LAYOUT_INLINE_ELEMENTS.contains(&tag.name.as_str())
@@ -1778,6 +2003,9 @@ fn restore_inline_layout_boundaries(html: &str) -> String {
             continue;
         }
         if tag.name == "a" && next.name == "a" {
+            if anchor_is_citation || is_numbered_citation(html, position) {
+                continue;
+            }
             out.push_str("<br>");
         } else {
             out.push(' ');
@@ -1785,6 +2013,32 @@ fn restore_inline_layout_boundaries(html: &str) -> String {
     }
 
     out
+}
+
+/// Numbered references remain attached even when the publisher renders the anchors as siblings.
+pub(super) fn is_numbered_citation(html: &str, start: usize) -> bool {
+    let Some(tag_len) = parse_tag(&html[start..]).and_then(|tag| tag.end) else {
+        return false;
+    };
+    if attribute_value(&html[start..start + tag_len], "href")
+        .and_then(|href| href.split_once('#'))
+        .is_none_or(|(_, fragment)| fragment.is_empty())
+    {
+        return false;
+    }
+    let Some((inner, closing, _)) = element_bounds(html, start, "a") else {
+        return false;
+    };
+    if closing - inner > 128 {
+        return false;
+    }
+    let text = html_to_text(&html[inner..closing]);
+    text.trim()
+        .strip_prefix('[')
+        .and_then(|label| label.strip_suffix(']'))
+        .is_some_and(|number| {
+            !number.is_empty() && number.len() <= 12 && number.bytes().all(|b| b.is_ascii_digit())
+        })
 }
 
 /// Keep punctuation before generated links literal and restore trimmed link-label boundaries.
@@ -2273,6 +2527,209 @@ List:       openbsd-tech
     }
 
     #[test]
+    fn publisher_highlighter_wrappers_preserve_languages_and_literal_code() {
+        for (html, language) in [
+            (
+                r#"<div class="language-javascript highlighter-rouge"><div class="highlight"><pre class="highlight"><code>value &lt; 1 &amp;&amp; other</code></pre></div></div>"#,
+                "javascript",
+            ),
+            (
+                r#"<section class="language-firestore-security-rules"><div><pre><code>value &lt; 1 &amp;&amp; other</code></pre></div></section>"#,
+                "firestore-security-rules",
+            ),
+            (
+                r#"<pre class="language-objective-c"><code>value &lt; 1 &amp;&amp; other</code></pre>"#,
+                "objective-c",
+            ),
+            (
+                r#"<pre><code class="hljs erlang-repl">value &lt; 1 &amp;&amp; other</code></pre>"#,
+                "erlang-repl",
+            ),
+            (
+                r#"<div class="highlight-coq notranslate"><div class="highlight"><pre>value &lt; 1 &amp;&amp; other</pre></div></div>"#,
+                "coq",
+            ),
+            (
+                r#"<div class="highlight-crystal"><div class="highlight"><pre>value &lt; 1 &amp;&amp; other</pre></div></div>"#,
+                "crystal",
+            ),
+            (
+                r#"<pre class="shiki github-dark" data-language="astro"><code><span class="line">value &lt; 1 &amp;&amp; other</span></code></pre>"#,
+                "astro",
+            ),
+            (
+                r#"<pre class="brush: actionscript3; gutter: false;">value &lt; 1 &amp;&amp; other</pre>"#,
+                "actionscript3",
+            ),
+            (
+                r#"<pre class="brush:'custom-language-name-longer-than-twenty-four';">value &lt; 1 &amp;&amp; other</pre>"#,
+                "custom-language-name-longer-than-twenty-four",
+            ),
+        ] {
+            let markdown = to_markdown(html, None);
+            assert_eq!(
+                markdown,
+                format!("```{language}\nvalue < 1 && other\n```\n"),
+                "{html}"
+            );
+            let rendered = render_markdown(&markdown);
+            assert!(
+                rendered.contains("data-language="),
+                "{language}: {rendered}"
+            );
+            assert_eq!(html_to_text(&rendered).trim(), "value < 1 && other");
+        }
+    }
+
+    #[test]
+    fn publisher_code_hints_use_nearest_scope_without_leaking_to_siblings() {
+        let html = r#"<div class="language-ruby"><pre class="language-javascript"><code class="language-python">value = 1</code></pre><div class="language-sql"><pre><code>value = 2</code></pre></div><pre><code>value = 3</code></pre></div><pre><code>value = 4</code></pre>"#;
+        let markdown = to_markdown(html, None);
+        assert!(markdown.contains("```python\nvalue = 1\n```"), "{markdown}");
+        assert!(markdown.contains("```sql\nvalue = 2\n```"), "{markdown}");
+        assert!(markdown.contains("```ruby\nvalue = 3\n```"), "{markdown}");
+        assert!(markdown.contains("```\nvalue = 4\n```"), "{markdown}");
+    }
+
+    #[test]
+    fn publisher_highlighter_theme_classes_are_not_language_hints() {
+        for classes in [
+            "highlight",
+            "highlight rounded",
+            "python",
+            "hljs python ruby",
+            "shiki github-dark",
+            "syntaxhighlighter toolbar collapsed",
+            "highlight-important",
+        ] {
+            let markdown = to_markdown(
+                &format!("<pre class=\"{classes}\"><code>value = 1</code></pre>"),
+                None,
+            );
+            assert_eq!(markdown, "```\nvalue = 1\n```\n", "{classes}");
+        }
+    }
+
+    #[test]
+    fn publisher_plain_text_opt_out_overrides_inherited_language_and_inference() {
+        for attribute in [
+            "class=\"language-none\"",
+            "class=\"nohighlight\"",
+            "data-lang=\"text\"",
+        ] {
+            let markdown = to_markdown(
+                &format!(
+                    "<div class=\"language-python\"><pre><code {attribute}>{{\"message\": \"literal output\"}}</code></pre></div>"
+                ),
+                None,
+            );
+            assert!(
+                !render_markdown(&markdown).contains("data-language="),
+                "{markdown}"
+            );
+        }
+    }
+
+    #[test]
+    fn publisher_language_survives_readability_class_cleanup() {
+        let prose = "This article explains a database experiment in enough detail to identify its main body. ".repeat(20);
+        let original = format!(
+            r#"<html><head><title>A database experiment</title></head><body><article><h1>A database experiment</h1><p>{prose}</p><div class="language-javascript highlighter-rouge"><div class="highlight"><pre class="highlight"><code>import db from "database";
+  await db.open();</code></pre></div></div><p>{prose}</p></article></body></html>"#
+        );
+        let normalized = normalize_code_blocks(&original);
+        let article = dom_smoothie::Readability::new(
+            normalized.as_str(),
+            Some("https://example.com/post"),
+            None,
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+        let retained = article.content.to_string();
+        assert!(
+            !retained.contains("language-javascript"),
+            "default Readability should strip classes: {retained}"
+        );
+        assert!(
+            retained.contains("data-language=\"javascript\""),
+            "{retained}"
+        );
+        let markdown = to_markdown(&retained, None);
+        assert!(
+            markdown
+                .contains("```javascript\nimport db from \"database\";\n  await db.open();\n```"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn publisher_document_language_ignores_fake_blocks_inside_raw_text_and_comments() {
+        let html = r#"<html class="language-coq"><head><script>const example = '<pre class="language-python">fake</pre>';</script></head><body><!-- <pre class="language-ruby">fake</pre> --><pre><code>value = 1</code></pre></body></html>"#;
+        let normalized = normalize_code_blocks(html);
+        assert!(
+            normalized.contains("const example = '<pre class=\"language-python\">fake</pre>';")
+        );
+        assert!(normalized.contains("<!-- <pre class=\"language-ruby\">fake</pre> -->"));
+        assert!(
+            normalized
+                .contains("<code class=\"language-coq\" data-language=\"coq\">value = 1</code>"),
+            "{normalized}"
+        );
+    }
+
+    #[test]
+    fn publisher_language_scan_respects_all_raw_text_boundaries() {
+        for tag in [
+            "script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes",
+        ] {
+            let raw = format!("<{tag}><pre class=\"language-python\">literal</pre></{tag}>");
+            let normalized =
+                normalize_code_blocks(&format!("{raw}<pre class=\"language-sql\">value = 1</pre>"));
+            assert!(normalized.starts_with(&raw), "{tag}: {normalized}");
+            assert!(
+                normalized.contains(
+                    "<code class=\"language-sql\" data-language=\"sql\">value = 1</code>"
+                ),
+                "{tag}: {normalized}"
+            );
+        }
+        let raw = "<plaintext><pre class=\"language-python\">literal</pre></plaintext><pre class=\"language-sql\">also literal</pre>";
+        assert_eq!(normalize_code_blocks(raw), raw);
+    }
+
+    #[test]
+    fn links_inside_inline_code_are_literal_but_links_around_code_remain_links() {
+        for contents in [
+            "npm install <a href=\"https://example.com/package\">package</a>",
+            "npm install <span><a href=\"https://example.com/package\"><strong>package</strong></a></span>",
+        ] {
+            let markdown = to_markdown(&format!("<p><code>{contents}</code></p>"), None);
+            assert_eq!(markdown, "`npm install package`\n");
+            assert!(!markdown.contains(MARKDOWN_LINK_START));
+            let rendered = render_markdown(&markdown);
+            assert!(
+                rendered.contains("<code>npm install package</code>"),
+                "{rendered}"
+            );
+        }
+        let linked = to_markdown(
+            "<p><a href=\"https://example.com/package\"><code>package</code></a></p>",
+            None,
+        );
+        assert_eq!(linked, "[`package`](https://example.com/package)\n");
+        let literal = to_markdown(
+            "<p><code>literal <a href=\"https://example.com\">`x` &amp; [y]</a></code></p>",
+            None,
+        );
+        assert_eq!(
+            html_to_text(&render_markdown(&literal)).trim(),
+            "literal `x` & [y]"
+        );
+        assert!(!literal.contains(MARKDOWN_LINK_START));
+    }
+
+    #[test]
     fn markdown_repairs_accessibility_link_labels_and_word_boundaries() {
         let html = concat!(
             r#"<p>using more than<span></span><a href="/tasks"><span> 54,000 internal Codex tasks</span><span>"#,
@@ -2313,6 +2770,41 @@ List:       openbsd-tech
             concat!(
                 "[Open the data explorer](https://example.com/explorer)\\\n",
                 "[Download all the data](https://example.com/download)\n",
+            )
+        );
+    }
+
+    #[test]
+    fn markdown_keeps_adjacent_citations_attached_to_prose() {
+        let html = r##"<p>The archive contained about 50,000 documents.<a href="#n4">[4]</a><a href="#n5">[5]</a><a href="#n1">[1]</a></p>"##;
+        assert_eq!(
+            to_markdown(html, None),
+            "The archive contained about 50,000 documents.[\\[4\\]](#n4)[\\[5\\]](#n5)[\\[1\\]](#n1)\n"
+        );
+    }
+
+    #[test]
+    fn markdown_does_not_parse_prose_after_inline_links_as_tags() {
+        let html = r#"<p><a href="/source">Snowden gave</a> a large portion of the archive to the journalist. In <i>Citizenfour</i>, he explains.</p>
+<p><a href="/other">He sent</a> small portions, too.</p>"#;
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            concat!(
+                "[Snowden gave](https://example.com/source) a large portion of the archive to the journalist. In *Citizenfour*, he explains.\n\n",
+                "[He sent](https://example.com/other) small portions, too.\n",
+            )
+        );
+    }
+
+    #[test]
+    fn markdown_preserves_explicit_breaks_between_citations_and_prose() {
+        let html = r##"<p>Documents.<a href="#n4">[4]</a><br><a href="#n5">[5]</a></p>
+<p><a href="/source">Snowden gave</a><br>a large portion.</p>"##;
+        assert_eq!(
+            to_markdown(html, None),
+            concat!(
+                "Documents.[\\[4\\]](#n4)\\\n[\\[5\\]](#n5)\n\n",
+                "[Snowden gave](/source)\\\na large portion.\n",
             )
         );
     }
@@ -2489,6 +2981,40 @@ List:       openbsd-tech
                 "    Second paragraph.\n",
             )
         );
+    }
+
+    #[test]
+    fn markdown_rebuilds_block_citations_led_by_their_numbers() {
+        // libroot.org: bracketed references into identified note blocks that repeat the number.
+        let html = r##"<p>Sent the keys.<a class="note-source" href="#n1">[1]</a> Failed to progress.<a href="#n2">[2]</a> Quoted.<a href="#n3">[3]</a> Nothing.<a href="#n4">[4]</a></p>
+<div><div id="n1"><p>[1]:</p><p><i>Dark Mirror</i>, pp. 388-389.</p></div>
+<div id="n2">[2]: First.<p>Second.</p></div>
+<div id="n3"><p>[3]:</p><p><i>Dark Mirror</i>, p. 68:</p></div>
+<blockquote>The <i>Post</i> could not handle a story this sensitive.</blockquote>
+<div id="n4"><p>[4]:</p></div></div>"##;
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            concat!(
+                "Sent the keys.[^1] Failed to progress.[^2] Quoted.[^3] Nothing.[\\[4\\]](https://example.com/blog/post/#n4)\n\n",
+                "[^1]: *Dark Mirror*, pp. 388-389.\n\n",
+                "[^2]: First.\n\n",
+                "    Second.\n\n",
+                "[^3]: *Dark Mirror*, p. 68:\n\n",
+                "    > The *Post* could not handle a story this sensitive.\n",
+            )
+        );
+        // Identified sections a table of contents links to by name are prose, not notes.
+        let sections = r##"<p><a href="#intro">Introduction</a> <a href="#method">Method</a></p>
+<div><section id="intro"><p>Intro text.</p></section><section id="method"><p>Method text.</p></section></div>"##;
+        let markdown = to_markdown(sections, Some(&base()));
+        assert!(markdown.contains("Intro text."), "{markdown}");
+        assert!(!markdown.contains("[^1]"), "{markdown}");
+        for marker in ["[1]:", "1.", "(1)", "[12]"] {
+            assert!(is_note_marker(marker), "{marker}");
+        }
+        for text in ["", "a", "[a]:", "12345", "1 note", "[1] text"] {
+            assert!(!is_note_marker(text), "{text}");
+        }
     }
 
     #[test]

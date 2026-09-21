@@ -329,6 +329,13 @@ mod tests {
             link: format!("https://{source}.example/{}", slug::slugify(title)),
             domain: format!("{source}.example"),
             source: source.into(),
+            publisher_source: source.to_string(),
+            source_memberships: vec![crate::site::context::SourceMembershipCtx {
+                query_value: source.to_string(),
+                slug: source.to_string(),
+                name: "Example".into(),
+                display: "example.com".into(),
+            }],
             source_name: source.into(),
             source_display: "example.com".into(),
             source_title: "Example".into(),

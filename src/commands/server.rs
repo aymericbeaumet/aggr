@@ -960,6 +960,7 @@ pub fn content_type(path: &Path) -> &'static str {
         Some("css") => "text/css; charset=utf-8",
         Some("js") => "text/javascript; charset=utf-8",
         Some("json") => "application/json",
+        Some("pdf") => "application/pdf",
         Some("webmanifest") => "application/manifest+json",
         Some("xml") => "application/xml",
         Some("md") => "text/markdown; charset=utf-8",
@@ -1405,6 +1406,10 @@ mod tests {
             "text/html; charset=utf-8"
         );
         assert_eq!(content_type(Path::new("x.json")), "application/json");
+        assert_eq!(
+            content_type(Path::new("assets/documents/paper.pdf")),
+            "application/pdf"
+        );
         assert_eq!(
             content_type(Path::new("items/source/post.json")),
             "application/ld+json; charset=utf-8"

@@ -1,5 +1,11 @@
 # Fetch and build performance
 
+For a pinned public-instance snapshot, actual workflow durations, storage breakdown and
+reproduction commands, see [archive and deployment measurements](benchmarks.md). Keep archive
+files, historical Git storage, published-site size and cache space separate when planning capacity.
+The [build budget](build-budget.md) limits published bytes through media selection and older-image
+compression; it does not prune article text or reduce the archive's Git storage.
+
 `sync`, `build`, and `dev` share the same fetch pipeline. Config loading performs no requests for
 ordinary remote feed/page URLs; only known or explicitly declared collections expand before fetching. Sources use the configured
 `fetch.concurrency` limit; article requests within each source use `fetch.article_concurrency`.
@@ -98,11 +104,31 @@ version, but never the application-release fingerprint.
 `src/cache.rs` is the registry of every `.aggr/cache/build-v1` namespace; `Namespace::ci_cached`
 decides which ones the reusable workflow carries between runners, and a unit test holds the
 workflow's `actions/cache` paths to that list. Only derived state about bytes the site already
-publishes qualifies, because it invalidates itself: `validated-images-v2` (content-keyed receipts),
+publishes qualifies, because it invalidates itself: `deployment-media-v1` (validated compressed
+publication copies), `validated-images-v2` (content-keyed receipts),
 `pagefind-v1` (index keyed by its input fingerprint), `feed-parsing` (parser-version receipts that
 gate conditional GET), and the timestamped backoff markers in `discussions-v1`, `image-failures-v1`,
-`capture-retries-v1` and `recording-duration-v1`. Each run saves under its own key and the next run
-restores the newest entry; the save runs only after a successful build.
+`capture-retries-v1` and `recording-duration-v1`.
+
+Compressed media uses its own `aggr-media-v1-…` Actions cache, separate from the smaller mutable
+state in `aggr-state-v1-…`. After restore and after a successful build, the workflow hashes the
+sorted relative file paths and exact contents of `deployment-media-v1`, reading in bounded chunks.
+It saves a new media entry only when those bytes changed or no entry was restored; an empty cache
+is not uploaded. File timestamps and changes to source backoffs do not trigger media uploads.
+The smaller derived-state cache still saves after each successful build. Both restore the newest
+matching entry on the next run; neither saves a failed build's state.
+
+The compression cache is keyed by source content and encoding policy, so unchanged older media
+can reuse validated publication copies without repeating compression on a fresh runner. A corrupt,
+missing or evicted entry is recomputed from the stored master. The age cutoff and deployment budget
+decide which copies to publish, independently of the reusable encoded bytes. See
+[build-budget caching](build-budget.md#reusing-compressed-media).
+
+Actions caches are evictable performance aids, never the archive or a backup. New media entries
+are complete snapshots, not incremental uploads; a changed snapshot still transfers its cache
+contents, and retained snapshots consume the repository's cache quota. Separating media avoids
+copying it merely because a small backoff marker changed. The before/after fingerprints also read
+all cached media bytes twice, so cache transfer, hashing and encoding should be measured separately.
 
 `articles-v1` holds raw original-page responses. It is private to the machine that fetched it and is
 never uploaded. `render-v1` is not cached on Actions either: the fingerprint folds each item's age
@@ -122,8 +148,8 @@ sweep is best-effort: a path that cannot be removed is logged at debug and retri
 and no sweep failure ever fails the sync. The marker lives in the git-excluded cache, so a run that
 finds nothing new still leaves no trace in the repository.
 
-A warm run on Actions therefore still renders every page, but skips cold image validation and
-Pagefind indexing, fetches feeds conditionally, and honours the image, capture and duration
+A warm run on Actions therefore still renders every page, but reuses unchanged image compression,
+skips cold image validation and Pagefind indexing, fetches feeds conditionally, and honours the image, capture and duration
 backoffs. Expect rendering to dominate the build; the cold image validation that took about seven
 minutes on a 1,120-item instance disappears once the receipt cache restores. The first run after a
 cache eviction is cold again.

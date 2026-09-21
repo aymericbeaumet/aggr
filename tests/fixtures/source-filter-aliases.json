@@ -1,0 +1,159 @@
+[
+  {
+    "name": "publisher host",
+    "facets": [
+      {
+        "value": "maharship.com",
+        "label": "maharship.com",
+        "expected": "maharship.com",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "feed hostname despite a friendly title",
+    "facets": [
+      {
+        "value": "hnrss.org",
+        "label": "Hacker News: Front Page",
+        "expected": "hnrss.org",
+        "count": 2
+      }
+    ]
+  },
+  {
+    "name": "equivalent identifier",
+    "facets": [
+      {
+        "value": "duckdb",
+        "label": "DuckDB",
+        "expected": "duckdb",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "duplicate labels",
+    "facets": [
+      {
+        "value": "one",
+        "label": "Daily News",
+        "expected": "one",
+        "count": 1
+      },
+      {
+        "value": "two",
+        "label": "daily news",
+        "expected": "two",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "unicode normalization",
+    "facets": [
+      {
+        "value": "one",
+        "label": "ＮＥＷＳ",
+        "expected": "one",
+        "count": 1
+      },
+      {
+        "value": "two",
+        "label": "News",
+        "expected": "two",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "composed unicode",
+    "facets": [
+      {
+        "value": "one",
+        "label": "Café",
+        "expected": "one",
+        "count": 1
+      },
+      {
+        "value": "two",
+        "label": "Café",
+        "expected": "two",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "identifier shadows a label",
+    "facets": [
+      {
+        "value": "one",
+        "label": "shadow",
+        "expected": "one",
+        "count": 1
+      },
+      {
+        "value": "shadow",
+        "label": "Other label",
+        "expected": "shadow",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "equivalent identifier wins over duplicate label",
+    "facets": [
+      {
+        "value": "news",
+        "label": "News",
+        "expected": "news",
+        "count": 1
+      },
+      {
+        "value": "two",
+        "label": "NEWS",
+        "expected": "two",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "empty label",
+    "facets": [
+      {
+        "value": "empty",
+        "label": " ",
+        "expected": "empty",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "quoted and escaped name",
+    "facets": [
+      {
+        "value": "feed-id",
+        "label": "Hacker \"News\" \\ feed",
+        "expected": "feed-id",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "distinct profiles",
+    "facets": [
+      {
+        "value": "alice",
+        "label": "x.com/alice",
+        "expected": "alice",
+        "count": 1
+      },
+      {
+        "value": "bob",
+        "label": "x.com/bob",
+        "expected": "bob",
+        "count": 1
+      }
+    ]
+  }
+]

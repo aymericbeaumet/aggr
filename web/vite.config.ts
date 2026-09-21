@@ -2,9 +2,10 @@ import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { fileURLToPath, URL } from 'node:url';
 import { licenses } from './build/licenses.ts';
+import { bootstrap } from './build/bootstrap.ts';
 
 export default defineConfig({
-  plugins: [svelte(), licenses()],
+  plugins: [svelte(), bootstrap(), licenses()],
   test: { include: ['src/**/*.test.ts', 'build/**/*.test.ts'], environment: 'node' },
   server: { strictPort: true, cors: { origin: /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/ } },
   build: {
