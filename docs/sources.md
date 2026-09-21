@@ -47,6 +47,31 @@ All forms reduce to the same source model before validation and discovery, using
 global defaults, `${ENV}` expansion, collection expansion, and deduplication. Sources are expanded
 in declaration order, with the first declaration of an equivalent endpoint winning.
 
+## Source names in URLs
+
+Each source gets a directory under `sources/`, named after its `slug`. Set `slug` to choose it;
+otherwise it comes from the source's `name`, and failing that from its canonical name: the
+publisher's domain, since everything under one domain is normally the same publisher.
+
+```toml
+[[sources]]
+url = "https://www.example.com/blog/feed.xml"   # -> sources/example-com/
+```
+
+Some hosts carry thousands of unrelated publishers, so there the account's path is part of who is
+publishing and stays in the name. That list lives in `src/platform.rs` and covers YouTube, X,
+GitHub, GitLab, Codeberg, Reddit, Medium, Bluesky, Twitch, Vimeo and SoundCloud, plus the `@handle`
+convention on any host.
+
+```toml
+[[sources]]
+url = "https://www.youtube.com/@SomeChannel"    # -> sources/youtube-com-somechannel/
+```
+
+Two feeds from one publisher arrive at the same name, so the path that differs is added to tell
+them apart (`example-com` and `example-com-notes`). Set `slug` yourself when you want a specific
+name; the same slug written twice is an error rather than something aggr renames for you.
+
 ## How a URL is resolved
 
 aggr tries the URL as a feed, follows RSS/Atom/JSON Feed discovery metadata, probes the

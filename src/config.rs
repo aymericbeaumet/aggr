@@ -487,7 +487,7 @@ impl Config {
         let mut seen_identities = BTreeMap::<String, (usize, String)>::new();
         let mut sources = Vec::with_capacity(self.sources.len());
         for (index, raw) in self.sources.iter().enumerate() {
-            let source = resolve_source(
+            let mut source = resolve_source(
                 raw,
                 self.fetch.content,
                 self.fetch.previews,
@@ -504,6 +504,12 @@ impl Config {
                     slug
                 );
                 continue;
+            }
+            // A derived slug names the publisher, so several feeds from one host arrive at the
+            // same name. Tell them apart with the path that differs rather than making the reader
+            // name each one by hand. An explicit duplicate is still a mistake worth reporting.
+            if raw.slug.is_none() {
+                source.slug = distinct_slug(&source.slug, source.engine.url(), &seen_slugs);
             }
             if !seen_slugs.insert(source.slug.clone()) {
                 bail!(
@@ -834,8 +840,9 @@ fn validate_slug(slug: &str) -> Result<()> {
     Ok(())
 }
 
-/// Derive a directory-safe slug from the display name, else from the URL's host and path
-/// (`https://www.example.com/blog/feed.xml` → `example-com-blog`).
+/// Derive a directory-safe slug from the display name, else from the source's canonical name
+/// (`https://www.example.com/blog/feed.xml` → `example-com`, and a platform account keeps the
+/// path that names it: `https://youtube.com/@Alice` → `youtube-com-alice`).
 pub fn derive_slug(name: Option<&str>, url: Option<&Url>) -> String {
     if let Some(name) = name {
         let slug = slug::slugify(name);
@@ -843,22 +850,10 @@ pub fn derive_slug(name: Option<&str>, url: Option<&Url>) -> String {
             return truncate_slug(&slug);
         }
     }
-    let Some(url) = url else {
-        return "source".into();
-    };
-    let host = url
-        .host_str()
-        .unwrap_or("")
-        .trim_start_matches("www.")
-        .to_string();
-    let path = url
-        .path_segments()
-        .into_iter()
-        .flatten()
-        .filter(|segment| !segment.is_empty() && !is_feed_noise(segment))
-        .collect::<Vec<_>>()
-        .join("-");
-    let slug = slug::slugify(format!("{host} {path}"));
+    let slug = url
+        .and_then(crate::platform::canonical_name)
+        .map(slug::slugify)
+        .unwrap_or_default();
     if slug.is_empty() {
         "source".into()
     } else {
@@ -866,6 +861,7 @@ pub fn derive_slug(name: Option<&str>, url: Option<&Url>) -> String {
     }
 }
 
+/// Path segments that describe the transport rather than the publisher.
 fn is_feed_noise(segment: &str) -> bool {
     let stem = segment
         .rsplit_once('.')
@@ -875,6 +871,31 @@ fn is_feed_noise(segment: &str) -> bool {
         stem.to_ascii_lowercase().as_str(),
         "feed" | "feeds" | "rss" | "atom" | "index" | "default" | "posts"
     )
+}
+
+/// Keep a derived slug unique: first by adding the feed path that distinguishes it from a
+/// sibling on the same host, then by counting.
+fn distinct_slug(slug: &str, url: Option<&Url>, taken: &BTreeSet<String>) -> String {
+    if !taken.contains(slug) {
+        return slug.to_string();
+    }
+    if let Some(url) = url {
+        let path = url
+            .path_segments()
+            .into_iter()
+            .flatten()
+            .filter(|segment| !segment.is_empty() && !is_feed_noise(segment))
+            .collect::<Vec<_>>()
+            .join("-");
+        let extended = truncate_slug(&slug::slugify(format!("{slug} {path}")));
+        if !extended.is_empty() && extended != slug && !taken.contains(&extended) {
+            return extended;
+        }
+    }
+    (2..)
+        .map(|suffix| truncate_slug(&format!("{slug}-{suffix}")))
+        .find(|candidate| !taken.contains(candidate))
+        .unwrap_or_else(|| slug.to_string())
 }
 
 fn truncate_slug(slug: &str) -> String {
@@ -1244,10 +1265,27 @@ images = false
     }
 
     #[test]
-    fn rejects_duplicate_slugs() {
+    fn derived_slugs_stay_distinct_and_explicit_duplicates_are_rejected() {
+        // Two feeds from one publisher share a canonical name, so the path that differs names
+        // them apart; a feed endpoint carries no identity, so the second falls back to counting.
         let config = Config::parse(
-            "[[sources]]\nurl = \"https://example.com/feed.xml\"\n\
+            "[[sources]]\nurl = \"https://example.com/blog/feed.xml\"\n\
+             [[sources]]\nurl = \"https://example.com/notes/feed.xml\"\n\
              [[sources]]\nurl = \"https://www.example.com/rss\"\n",
+        )
+        .unwrap();
+        let slugs: Vec<_> = config
+            .resolve_sources(&no_env)
+            .unwrap()
+            .into_iter()
+            .map(|source| source.slug)
+            .collect();
+        assert_eq!(slugs, ["example-com", "example-com-notes", "example-com-2"]);
+
+        // A slug the reader set by hand twice is a mistake, not something to paper over.
+        let config = Config::parse(
+            "[[sources]]\nslug = \"mine\"\nurl = \"https://a.example/feed.xml\"\n\
+             [[sources]]\nslug = \"mine\"\nurl = \"https://b.example/feed.xml\"\n",
         )
         .unwrap();
         let err = config.resolve_sources(&no_env).unwrap_err();
@@ -1265,24 +1303,34 @@ images = false
     fn derives_slugs() {
         let url = |s: &str| Url::parse(s).unwrap();
         assert_eq!(derive_slug(Some("Rust Blog"), None), "rust-blog");
+        // An ordinary site is named by its domain: the feed's path says nothing more.
         assert_eq!(
             derive_slug(None, Some(&url("https://blog.rust-lang.org/feed.xml"))),
             "blog-rust-lang-org"
         );
         assert_eq!(
             derive_slug(None, Some(&url("https://www.example.com/blog/feed/"))),
-            "example-com-blog"
+            "example-com"
         );
+        assert_eq!(
+            derive_slug(None, Some(&url("https://hnrss.org/frontpage"))),
+            "hnrss-org"
+        );
+        // A platform shares one host between publishers, so the account's path names the source.
         assert_eq!(
             derive_slug(
                 None,
                 Some(&url("https://github.com/rust-lang/rust/releases.atom"))
             ),
-            "github-com-rust-lang-rust-releases-atom"
+            "github-com-rust-lang"
         );
         assert_eq!(
-            derive_slug(None, Some(&url("https://hnrss.org/frontpage"))),
-            "hnrss-org-frontpage"
+            derive_slug(None, Some(&url("https://www.youtube.com/@SomeChannel"))),
+            "youtube-com-somechannel"
+        );
+        assert_eq!(
+            derive_slug(None, Some(&url("https://www.reddit.com/r/rust/.rss"))),
+            "reddit-com-r-rust"
         );
         assert_eq!(derive_slug(Some("   "), None), "source");
         let long = "a".repeat(40) + "-" + &"b".repeat(40);

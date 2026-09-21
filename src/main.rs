@@ -10,6 +10,7 @@ mod http;
 mod media;
 mod media_duration;
 mod model;
+mod platform;
 mod preview;
 mod site;
 mod sources;

@@ -543,16 +543,10 @@ pub(super) fn profile_url(value: &str) -> Option<url::Url> {
     Some(url)
 }
 
+/// How a source reads: its domain, plus the account path only where one host is shared between
+/// publishers. See [`crate::platform`] for which hosts those are.
 fn url_label(url: &url::Url) -> String {
-    let port = url
-        .port()
-        .map(|port| format!(":{port}"))
-        .unwrap_or_default();
-    format!(
-        "{}{port}{}",
-        source_host(url),
-        url.path().trim_end_matches('/')
-    )
+    crate::platform::canonical_name(url).unwrap_or_else(|| source_host(url).to_string())
 }
 
 fn source_profile_label(url: &url::Url, title: &str) -> String {
@@ -1252,7 +1246,9 @@ mod tests {
         assert_eq!(identity.display, "edge.org");
         assert_eq!(identity.url, "https://www.edge.org/");
         assert_eq!(identity.title, "edge.org · via Hacker News: Front Page");
-        assert_eq!(identity.feed_display, "hnrss.org/frontpage");
+        // hnrss.org is one publisher's service, not a platform, so its feed path is transport
+        // detail; the configured name is what tells its feeds apart.
+        assert_eq!(identity.feed_display, "hnrss.org");
         assert!(identity.is_aggregated);
     }
 

@@ -195,8 +195,10 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   or conventional `www.`, paths, ports, or cross-domain provider aliases. Preserve other subdomains.
   Preserve configured/persisted feed identities and profile names as provenance; never migrate
   stored source IDs to publisher IDs. Canonical articles carry deduplicated publisher/feed
-  memberships and stay unique globally. Visible publisher and `via` labels use canonical hostnames,
-  without subscription paths or profile names. Exact source IDs win manual alias collisions. See [client development](docs/client.md).
+  memberships and stay unique globally. Visible publisher and `via` labels use the source's canonical
+  name: its hostname alone, plus the account path only on the platform hosts listed in
+  `src/platform.rs`, where one domain is shared between unrelated publishers. A derived source slug
+  is that same canonical name, disambiguated by the differing feed path when two sources collide. Exact source IDs win manual alias collisions. See [client development](docs/client.md).
   Public source IDs and filter values use normalized hostnames only; group same-host subscriptions
   while preserving their archived IDs, article paths, and individual OPML endpoints. Display names
   must never replace hostnames in generated queries.

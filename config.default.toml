@@ -144,7 +144,8 @@ images = true
 # [[sources]]
 # url = "https://blog.rust-lang.org"
 # name = "Rust Blog"          # display name; the feed title when unset
-# slug = "rust-blog"          # directory under items/; derived from name or url when unset
+# slug = "rust-blog"          # directory under items/; from the name, else the source's
+#                             # canonical name (example.com, youtube.com/@channel)
 # category = "rust"           # optional; an item belongs to at most one category
 # An item has one category and any number of labels. Source labels are merged with feed labels.
 # labels = ["programming", "rust"]
