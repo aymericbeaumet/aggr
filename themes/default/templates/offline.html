@@ -1,9 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="listhead"><h1>Offline</h1></div>
-<p>This page has not been saved. Return to the <a href="{{ '' | url_for }}">feed</a> or open a downloaded article below.</p>
-<p id="offline-download-status" role="status">Checking downloaded articles…</p>
-<ul id="offline-articles"></ul>
-<p id="offline-empty">No complete article downloads are available yet. Set how many recent articles to keep in <a href="{{ 'preferences/' | url_for }}">Preferences</a> while online.</p>
-<noscript><p>Enable JavaScript to see which articles are saved on this device.</p></noscript>
+<p>This page has not been opened on this device yet, so there is no saved copy. Pages you have read recently are still available.</p>
+<p>Return to the <a href="{{ '' | url_for }}">feed</a>, or reconnect and try again.</p>
 {% endblock %}

@@ -444,8 +444,12 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
   z-index: -1;
   transition: background-color 5s ease-out;
 }
-html.swup-enabled .row:has([data-row-open]), html.swup-enabled .article-more-card { cursor: pointer; }
-html.swup-enabled :is(.row, .article-more-card):where(:hover):not(:has(a:not(.title):hover, button:hover, input:hover, select:hover, textarea:hover, label:hover, summary:hover, [role="button"]:hover, [role="link"]:hover, [contenteditable]:hover)) .title { text-decoration: underline; }
+.row:has([data-row-open]), .article-more-card { cursor: pointer; }
+:is(.row, .article-more-card):where(:hover):not(:has(a:not(.title):hover, button:hover, input:hover, select:hover, textarea:hover, label:hover, summary:hover, [role="button"]:hover, [role="link"]:hover, [contenteditable]:hover)) .title { text-decoration: underline; }
+/* The whole row opens its article: one stretched link, with native modifier and middle clicks. */
+.row:has([data-row-open]) { position: relative; }
+.row [data-row-open]::after, .article-more-card .article-more-link::after { content: ""; position: absolute; inset: 0; z-index: 0; }
+.row :is(.meta, .preview-media), .row a:not(.title), .article-more-card .meta { position: relative; z-index: 1; }
 .row.is-selected .title,
 .row.is-selected .title:hover,
 .row.is-selected .title:focus-visible { text-decoration: none; }
@@ -1073,3 +1077,72 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   .mobile-tabs a:active { background: Highlight; color: HighlightText; }
 }
 @media print { .mobile-tabs { display: none; } }
+
+/* ---------------------------------------------------------------- platform behaviour */
+
+/* Cross-document navigation animates itself; motion preferences still win. */
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-motion="off"]) { view-transition-name: none; }
+  html:not([data-motion="off"]) .top { view-transition-name: top-nav; }
+  html:not([data-motion="off"]) .mobile-tabs { view-transition-name: mobile-tabs; }
+}
+html[data-motion="off"]::view-transition-group(*),
+html[data-motion="off"]::view-transition-old(*),
+html[data-motion="off"]::view-transition-new(*) { animation: none; }
+
+/* Reading progress and the folding article header follow the scroll position directly, with no
+   script and no per-frame work. Browsers without scroll timelines simply do not fold. */
+@property --header-progress {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+
+@supports (animation-timeline: scroll(root)) {
+  @media (prefers-reduced-motion: no-preference) {
+    html:not([data-motion="off"]) body[data-kind="item"] .itemhead-progress {
+      animation: aggr-reading-progress linear both;
+      animation-timeline: scroll(root block);
+    }
+  }
+  body[data-kind="item"] .itemhead {
+    animation: aggr-header-fold linear both;
+    animation-timeline: scroll(root block);
+    animation-range: 0 10rem;
+  }
+  /* The title interpolates its size instead of being measured, and the tags collapse with the
+     grid-rows idiom so they leave the accessibility tree as they disappear. */
+  body[data-kind="item"] .itemhead h1 { height: auto; font-size: calc(clamp(1.65rem, 4vw, 2.25rem) * (1 - 0.4 * var(--header-progress, 0))); }
+  body[data-kind="item"] .item-tags { height: auto; display: grid; grid-template-rows: calc(1 - var(--header-progress, 0)) fr; }
+  body[data-kind="item"] .item-tags-inner { min-height: 0; overflow: hidden; }
+}
+
+@keyframes aggr-reading-progress {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@keyframes aggr-header-fold {
+  to { --header-progress: 1; }
+}
+
+/* ---------------------------------------------------------------- search results */
+
+/* Ranks are numbered by the stylesheet, so the result list needs no per-row arithmetic. */
+.rows.search-results { counter-reset: rank var(--rank-offset, 0); }
+.rows.search-results .row { counter-increment: rank; }
+.rows.search-results .rank::before { content: counter(rank) "."; }
+
+/* A live query hides the static feed it replaces. */
+body[data-searching] [data-static-feed] { display: none; }
+
+/* The syntax reminder is a mouse affordance; touch and keyboard never open it. */
+.search-query-help { display: none; }
+@media (hover: hover) and (pointer: fine) {
+  .search-control:hover .search-query-help { display: block; }
+}
+
+.search-completions[hidden], .search-error[hidden], .search-clear[hidden] { display: none; }
+
+/* ---------------------------------------------------------------- interactive originals */
+
+.interactive-viewer { display: block; width: 100%; height: 100%; border: 0; }

@@ -301,12 +301,7 @@ struct SwCtx<'a> {
     site: &'a SiteCtx,
     build: &'a BuildCtx,
     version: String,
-    app_version: &'a str,
-    content_version: &'a str,
     precache: Vec<assets::PrecacheEntry>,
-    offline_catalog: Vec<assets::OfflineArticle>,
-    offline_count: usize,
-    search_manifest: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -940,7 +935,7 @@ pub fn build(
     let assets = renderer.write_static(out)?;
     phase("feeds and static assets");
 
-    let search_manifest = pagefind::build_cached(
+    pagefind::build_cached(
         out,
         &search_documents,
         &site.language,
@@ -972,29 +967,13 @@ pub fn build(
                 ))?
                 .as_bytes(),
         )?;
-        let scoped_lists = source_ctxs
-            .iter()
-            .map(|s| s.page.clone())
-            .chain(categories.iter().map(|c| c.page.clone()))
-            .chain(tags.iter().map(|tag| tag.page.clone()))
-            .take(config.site.preferences.offline_items.clamp(32, 256));
-        let lists = ["browse/".to_string()].into_iter().chain(scoped_lists);
-        let paths = assets::precache_paths("", lists, &assets, std::iter::empty(), 0);
+        // Only the shell: the reader caches the pages it actually opens.
+        let paths = assets::precache_paths("", &assets);
         let mut sw_ctx = SwCtx {
             site: &site,
             build: &build_ctx,
             version: cache_version(&build_ctx),
-            app_version: &build_ctx.app_version,
-            content_version: &build_ctx.content_version,
             precache: assets::precache_entries(out, paths, &written_assets)?,
-            offline_catalog: assets::offline_catalog(
-                out,
-                &archive_items,
-                &article_images,
-                &written_assets,
-            )?,
-            offline_count: config.site.preferences.offline_items.min(1000),
-            search_manifest: serde_json::json!({"version": search_manifest.version, "base": search_manifest.base}),
         };
         // Include the rendered worker and every resource revision so an installation never
         // deletes a live precache when only the theme or worker implementation changed.
