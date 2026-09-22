@@ -211,8 +211,12 @@ pub(super) fn options() -> Options {
         html: true,
         html_max_bytes: 1000,
         article_concurrency: 4,
-        preparation_limit: Arc::new(Semaphore::new(PREPARATION_SLOTS)),
-        persist_limit: Arc::new(Semaphore::new(PREPARATION_SLOTS)),
+        preparation_limit: Arc::new(Semaphore::new(preparation_slots(
+            StatePolicy::PersistentBranch,
+        ))),
+        persist_limit: Arc::new(Semaphore::new(preparation_slots(
+            StatePolicy::PersistentBranch,
+        ))),
         recording_limit: Arc::new(Semaphore::new(RECORDING_PROBE_SLOTS)),
         max_items_per_source: 200,
         preview_fetcher: Arc::new(preview::Fetcher::new().unwrap()),
@@ -293,7 +297,7 @@ async fn recording_probes_and_article_preparation_never_wait_for_each_other() {
 
     // Every preparation slot is busy with slow articles from other sources: the probe for
     // the archived episode must still run and record its duration.
-    let preparations = (0..PREPARATION_SLOTS)
+    let preparations = (0..preparation_slots(StatePolicy::PersistentBranch))
         .map(|_| {
             test_options
                 .preparation_limit
@@ -376,6 +380,7 @@ fn one_parse_yields_every_page_derived_fact() {
     );
     let analysis = analyze_page(page.clone(), &page_url, &page_url, Some(audio), true);
     assert_eq!(analysis.duration, Some(1671));
+    assert_eq!(analysis.publisher, None);
     assert!(analysis.interactive);
     assert_eq!(
         preview::ordered_article_candidates(&[], analysis.candidates, None)
@@ -405,9 +410,29 @@ fn one_parse_yields_every_page_derived_fact() {
         false,
     );
     assert_eq!(plain.duration, None);
+    assert_eq!(plain.publisher, None);
     assert!(!plain.interactive);
     assert!(preview::ordered_article_candidates(&[], plain.candidates, None).is_empty());
     assert!(plain.activity_alternates.is_empty());
+}
+
+#[test]
+fn a_watch_page_names_the_channel_its_own_url_cannot() {
+    let page = r#"<script>var ytInitialPlayerResponse = {"videoDetails":{"videoId":"abc","channelId":"UC123"},"microformat":{"playerMicroformatRenderer":{"ownerProfileUrl":"http://www.youtube.com/@Veritasium","lengthSeconds":"600"}}};</script>"#;
+    let watch = Url::parse("https://www.youtube.com/watch?v=abc").unwrap();
+    let analysis = analyze_page(page.into(), &watch, &watch, None, false);
+    assert_eq!(
+        analysis.publisher.as_deref(),
+        Some("https://www.youtube.com/@Veritasium")
+    );
+    assert_eq!(analysis.duration, Some(600));
+
+    // A URL that already names its account has nothing to ask the page for.
+    let profile = Url::parse("https://www.youtube.com/@Veritasium/videos").unwrap();
+    assert_eq!(
+        analyze_page(page.into(), &profile, &profile, None, false).publisher,
+        None
+    );
 }
 
 #[tokio::test]

@@ -562,11 +562,32 @@ pub fn profile_label(value: &str) -> String {
         .unwrap_or_else(|| domain_of(value))
 }
 
+/// The profile of the account an article names for itself: the one in its own path, or the one
+/// its page named at capture when the path cannot carry it (a YouTube watch URL). Catalogues are
+/// excluded because their paths are entry identifiers, not accounts.
+fn article_profile(article: Option<&url::Url>, captured: Option<&str>) -> Option<url::Url> {
+    let article = article?;
+    let named = captured
+        .and_then(|value| url::Url::parse(value).ok())
+        .filter(|profile| source_host(profile) == source_host(article))
+        .unwrap_or_else(|| article.clone());
+    if crate::platform::opaque(&named) {
+        return None;
+    }
+    let account = crate::platform::account_path(&named)?;
+    let mut profile = named;
+    profile.set_path(&account);
+    profile.set_query(None);
+    profile.set_fragment(None);
+    Some(profile)
+}
+
 fn source_identity(
     article: &str,
     title: &str,
     configured: Option<&str>,
     website: Option<&str>,
+    captured: Option<&str>,
 ) -> SourceIdentity {
     let title = super::display::title(title, &domain_of(configured.or(website).unwrap_or(article)));
     let configured_profile = configured.and_then(profile_url);
@@ -585,7 +606,13 @@ fn source_identity(
                 .is_some_and(|article| source_host(article) == source_host(profile))
         });
     let is_aggregated = profile.is_some() && matching_profile.is_none();
-    let display = matching_profile
+    // The publisher belongs to the article, so an account it names reads the same however the
+    // article was found. Only where nothing names one does the subscription that carried it, and
+    // then its host, stand in.
+    let publisher = article_profile(article_url.as_ref(), captured);
+    let display = publisher
+        .as_ref()
+        .or(matching_profile)
         .map(|url| source_profile_label(url, &title))
         .unwrap_or_else(|| domain_of(article));
     SourceIdentity {
@@ -594,7 +621,9 @@ fn source_identity(
         } else {
             title
         },
-        url: matching_profile
+        url: publisher
+            .as_ref()
+            .or(matching_profile)
             .map(ToString::to_string)
             .unwrap_or_else(|| publisher_url(article)),
         display,
@@ -623,6 +652,9 @@ impl ItemCtx {
             &self.source_name,
             source.url.as_deref(),
             source.site_url.as_deref(),
+            self.extra
+                .get(crate::platform::PUBLISHER_KEY)
+                .and_then(serde_yaml_ng::Value::as_str),
         );
         self.source_display = identity.display;
         self.source_title = identity.title;
@@ -1209,6 +1241,7 @@ mod tests {
                 "The channel title",
                 Some(configured),
                 Some(website),
+                None,
             );
             assert_eq!(identity.display, expected, "{configured}");
             assert_eq!(identity.title, "The channel title");
@@ -1219,12 +1252,71 @@ mod tests {
     }
 
     #[test]
+    fn a_platform_article_names_its_own_account_whoever_linked_it() {
+        // The same article read from its publisher's own feed and from an aggregator.
+        for (configured, website) in [
+            (
+                Some("https://github.com/torvalds/linux/releases.atom"),
+                None,
+            ),
+            (
+                Some("https://hnrss.org/frontpage"),
+                Some("https://news.ycombinator.com/"),
+            ),
+        ] {
+            let identity = source_identity(
+                "https://github.com/torvalds/linux/releases/tag/v7.0",
+                "Whatever the feed calls itself",
+                configured,
+                website,
+                None,
+            );
+            assert_eq!(identity.display, "github.com/torvalds", "{configured:?}");
+            assert_eq!(
+                identity.url, "https://github.com/torvalds",
+                "{configured:?}"
+            );
+        }
+        // A watch URL cannot carry its channel, so the account its page named stands in.
+        let captured = source_identity(
+            "https://www.youtube.com/watch?v=abc",
+            "Hacker News: Front Page",
+            Some("https://hnrss.org/frontpage"),
+            Some("https://news.ycombinator.com/"),
+            Some("https://www.youtube.com/@veritasium"),
+        );
+        assert_eq!(captured.display, "youtube.com/@veritasium");
+        assert_eq!(captured.url, "https://www.youtube.com/@veritasium");
+        assert!(captured.is_aggregated);
+        assert_eq!(captured.feed_display, "hnrss.org");
+        // Captured metadata is untrusted: an account on another host is another publisher.
+        let foreign = source_identity(
+            "https://www.youtube.com/watch?v=abc",
+            "Hacker News: Front Page",
+            Some("https://hnrss.org/frontpage"),
+            None,
+            Some("https://evil.example/@someone"),
+        );
+        assert_eq!(foreign.display, "youtube.com");
+        // A catalogue path is an entry identifier, so the show title still names the publisher.
+        let podcast = source_identity(
+            "https://open.spotify.com/episode/abc",
+            "Underscore_",
+            Some("https://open.spotify.com/show/1sz1"),
+            None,
+            None,
+        );
+        assert_eq!(podcast.display, "spotify.com/underscore");
+    }
+
+    #[test]
     fn aggregators_preserve_the_article_publisher_and_feed_provenance() {
         let identity = source_identity(
             "https://www.edge.org/conversation/impedance-matching",
             "Hacker News: Front Page",
             Some("https://hnrss.org/frontpage"),
             Some("https://news.ycombinator.com/"),
+            None,
         );
         assert_eq!(identity.display, "edge.org");
         assert_eq!(identity.url, "https://www.edge.org/");
@@ -1257,7 +1349,7 @@ mod tests {
                 "pocketcasts.com/a-show",
             ),
         ] {
-            let identity = source_identity(article, title, Some(configured), None);
+            let identity = source_identity(article, title, Some(configured), None, None);
             assert_eq!(identity.display, expected);
             assert_eq!(identity.feed_display, expected);
             assert_eq!(identity.url, configured);
@@ -1268,6 +1360,7 @@ mod tests {
             "Underscore_",
             Some("https://open.spotify.com/show/abc123"),
             Some("https://publisher.example/"),
+            None,
         );
         assert_eq!(identity.display, "publisher.example");
         assert_eq!(identity.feed_display, "spotify.com/underscore");
@@ -1292,6 +1385,7 @@ mod tests {
             "My configured publisher",
             Some("http://localhost:8080/feed"),
             None,
+            None,
         );
         assert_eq!(identity.title, "My configured publisher");
         assert_eq!(identity.display, "localhost:8080");
@@ -1299,6 +1393,7 @@ mod tests {
             "https://open.spotify.com:8443/episode/123",
             "My Podcast",
             Some("https://open.spotify.com:8443/show/abc"),
+            None,
             None,
         );
         assert_eq!(podcast.title, "My Podcast");
@@ -1312,6 +1407,7 @@ mod tests {
             "Alice",
             Some("https://example.social/api/feed?user=alice"),
             Some("https://example.social/@alice"),
+            None,
         );
         assert_eq!(identity.display, "example.social/@alice");
         assert_eq!(identity.url, "https://example.social/@alice");

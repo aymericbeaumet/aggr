@@ -1116,6 +1116,80 @@ struct LeadingDate {
     labelled: bool,
 }
 
+/// `Tuesday 22 Sept 2026`: the weekday names the same day the date does, so a byline that opens
+/// with one is still that date.
+fn without_weekday(value: &str) -> String {
+    const WEEKDAYS: [&str; 14] = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri",
+        "sat",
+        "sun",
+    ];
+    let trimmed = value.trim_start();
+    let Some((head, rest)) = trimmed.split_once(char::is_whitespace) else {
+        return value.to_string();
+    };
+    let head = head.trim_end_matches([',', '.']).to_ascii_lowercase();
+    if WEEKDAYS.contains(&head.as_str()) {
+        return rest.trim_start().to_string();
+    }
+    value.to_string()
+}
+
+/// `Sept` is the month the publisher wrote; the date parser only knows `Sep`.
+fn with_known_month_abbreviations(value: String) -> String {
+    const ABBREVIATIONS: [(&str, &str); 2] = [("Sept ", "Sep "), ("Sept. ", "Sep ")];
+    let mut value = value;
+    for (from, to) in ABBREVIATIONS {
+        if let Some(at) = value.find(from) {
+            value.replace_range(at..at + from.len(), to);
+        }
+    }
+    value
+}
+
+/// `Press release issued: 22 September 2026`: a publisher can introduce its date with any short
+/// phrase, so the phrase is read rather than listed. Only a few plain words before a colon count,
+/// and only the ones that say a date follows let the line go on its own evidence: everything else
+/// still has to match the item's own date.
+fn colon_label(value: &str) -> Option<(&str, bool)> {
+    const DATE_WORDS: [&str; 9] = [
+        "issued",
+        "published",
+        "posted",
+        "updated",
+        "written",
+        "released",
+        "modified",
+        "date",
+        "dated",
+    ];
+    let (label, rest) = value.split_once(':')?;
+    let words: Vec<&str> = label.split_whitespace().collect();
+    if words.is_empty()
+        || words.len() > 4
+        || !words
+            .iter()
+            .all(|word| word.chars().all(char::is_alphabetic))
+    {
+        return None;
+    }
+    let dated = words
+        .iter()
+        .any(|word| DATE_WORDS.contains(&word.to_ascii_lowercase().as_str()));
+    Some((rest.trim_start(), dated))
+}
+
 fn parse_date_only(raw: &str) -> Option<LeadingDate> {
     let value = raw.trim().trim_matches(['*', '_']).trim();
     let lowercase = value.to_ascii_lowercase();
@@ -1126,8 +1200,11 @@ fn parse_date_only(raw: &str) -> Option<LeadingDate> {
                 .starts_with(label)
                 .then(|| (&value[label.len()..], true))
         })
+        .or_else(|| colon_label(value))
         .unwrap_or((value, false));
     let value = without_ordinal_suffixes(value);
+    let value = without_weekday(&value);
+    let value = with_known_month_abbreviations(value);
     // `%Y%m%d` is a compact permalink date; it only ever strips a line that matches the item's
     // own publication date, so an unrelated eight-digit number stays put.
     [
@@ -1643,6 +1720,43 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn strips_a_masthead_line_whose_date_names_its_weekday() {
+        use chrono::TimeZone as _;
+
+        // dbushell.com: a policy badge and the publication date, written the way a person says it.
+        let published = Utc.with_ymd_and_hms(2026, 9, 22, 15, 0, 0).unwrap();
+        let markdown = to_markdown(
+            "<div><p data-speech-synth=\"none\"><img alt=\"No AI - Made by Human\" width=\"70\" height=\"38\" src=\"https://dbushell.com/assets/images/ai-policy.svg\"><time datetime=\"2026-09-22T15:00:00.000Z\"> Tuesday 22 <abbr title=\"September\">Sept</abbr> 2026 </time></p><p>The nice thing about keeping a blog is that I can say precisely when.</p></div>",
+            None,
+        );
+        assert_eq!(
+            strip_article_metadata(&markdown, "I said no", Some(published), "dbushell-com"),
+            "The nice thing about keeping a blog is that I can say precisely when.\n"
+        );
+        // A publisher's own phrase introduces the date as well as a known label does.
+        for date in [
+            "Tuesday 22 Sept 2026",
+            "22 Sept 2026",
+            "Tue, 22 Sept 2026",
+            "Press release issued: 22 September 2026",
+            "Date: 2026-09-22",
+        ] {
+            assert_eq!(
+                parse_date_only(date).map(|parsed| parsed.date.to_string()),
+                Some("2026-09-22".to_string()),
+                "{date}"
+            );
+        }
+        assert!(parse_date_only("Tuesday morning 2026").is_none());
+        // A sentence that happens to hold a colon is prose, not a label.
+        assert!(parse_date_only("The answer to the whole question: 42").is_none());
+        assert!(parse_date_only("Note: it rained all 22 September 2026 long").is_none());
+        // Only a phrase that says a date follows lets a line go without matching the item.
+        assert_eq!(colon_label("Press release issued: x"), Some(("x", true)));
+        assert_eq!(colon_label("Location: x"), Some(("x", false)));
     }
 
     #[test]

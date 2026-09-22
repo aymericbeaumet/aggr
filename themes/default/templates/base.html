@@ -68,7 +68,7 @@
 {% if site.pwa %}
 <link rel="manifest" href="{{ 'manifest.webmanifest' | url_for }}">
 {% endif %}
-<script>window.AGGR = {base: {{ page.root | json }}, kind: {{ page.kind | json }}, pwa: {{ site.pwa | json }}, discussions: {{ site.discussions | json }}, entries: {{ site.entry_shortcuts | json }}, assets: {search: {{ ('assets/search.js' | url_for) | json }}, media: {{ ('assets/media.js' | url_for) | json }}}};</script>
+<script>window.AGGR = {base: {{ page.root | json }}, kind: {{ page.kind | json }}, pwa: {{ site.pwa | json }}, discussions: {{ site.discussions | json }}, entries: {{ site.entry_shortcuts | json }}, assets: {search: {{ ('assets/search.js' | url_for) | json }}, media: {{ ('assets/media.js' | url_for) | json }}}, content: {{ build.content_version | json }}};</script>
 <script type="speculationrules">
 {
   "prefetch": [{
@@ -159,7 +159,7 @@
         <dl class="shortcut-list">
           <div><dt class="key-alternatives">{{ key_pair('g', 'f', 'then') }}<small>or</small>{{ key_pair('g', 'i', 'then') }}</dt><dd>Feed</dd></div>
           <div><dt>{{ key_pair('g', '1–9', 'then') }}</dt><dd>Open feed entry</dd></div>
-          <div><dt>{{ key_pair('g', 'l', 'then') }}</dt><dd>Browse</dd></div>
+          <div><dt>{{ key_pair('g', 'b', 'then') }}</dt><dd>Browse</dd></div>
           <div><dt>{{ key_pair('g', 'p', 'then') }}</dt><dd>Preferences</dd></div>
         </dl>
       </section>

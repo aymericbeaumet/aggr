@@ -24,7 +24,9 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   no build step and no dependencies. Site generation stays entirely Rust: never execute
   JavaScript/SSR or invoke a frontend compiler from the CLI or Cargo build. Never reintroduce a
   frontend toolchain, a framework, or a vendored browser library. Async Rust
-  work uses tokio (`JoinSet` + `Semaphore`); git is shelled out. Normal HTTP uses rustls with
+  work uses tokio (`JoinSet` + `Semaphore`); git is shelled out. Every CPU-bound stage is sized from
+  the machine's parallelism, never a fixed slot count, and stages that run at the same time share it
+  rather than each claiming the whole machine. Normal HTTP uses rustls with
   ring, installed via `http::install_crypto_provider()` before any client (tests too). The bounded
   challenge fallback uses wreq/BoringSSL; both transports share request and preservation limits.
 - `config.default.toml` is the source of truth for defaults and must stay in sync with
@@ -33,7 +35,10 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   the full defaults. Retention bounds the current tree, never accumulated Git history.
 - Search-engine indexing is opt-in with `[site] indexing = true` in release builds; development
   and previews remain noindex. Preserve local search and instance discovery regardless.
-- Build budgets preserve all article text and leave archived media untouched. Admit complete media
+- Build budgets preserve all article text and leave archived media untouched. The budget is a
+  publishing limit: only a release build measures it, because measuring an over-budget archive
+  costs a second complete build, and a development snapshot is never published. `dev --release`
+  still applies it. Admit complete media
   families newest first, measure the complete output, and fail if text and required assets cannot
   fit. Include publication cache markers and recheck restored output. Cache compressed publication
   copies separately from sync state; see `docs/build-budget.md`.
@@ -130,6 +135,10 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   new mock for the same path.
 - minijinja: `trim_blocks`/`lstrip_blocks` are on, autoescape follows the `.html` extension, and
   the custom formatter escapes `& < > " '` only.
+- A listing that is only the page it came from is not a listing: probe the conventional endpoints
+  before accepting a single-page app's own shell, and prefer any feed that parses. Keep the
+  subscribed origin's endpoints in the probe set when a response redirects away from it, and say in
+  `check` whether items came from a feed or from cards read off a page.
 - A normal source URL is intentionally enough: keep HTML heuristics internal and remember the
   discovered feed endpoint. `type = "html"` and site-specific selectors are not public config.
   A listing URL names a section, so probe conventional endpoints relative to it with or without a
@@ -180,6 +189,17 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   Script-drawn charts with inline data become tables; feed-only captures are retried with a daily,
   bounded backoff and upgraded in place when the original page becomes available. Bump the extraction-cache version when extraction semantics change;
   missing content already absent from stored HTML requires a fresh extraction.
+  A formula is a formula wherever a page put it: MathML with a TeX annotation, a `math` class, or
+  `$…$` in the prose. One command the bounded translator does not know leaves the whole formula as
+  its source, so a command it can read as text belongs in `src/content/math.rs`.
+  Markdown must be able to say what the HTML said: an inline wrapper never holds a block, emphasis
+  markers flank their content or move aside, and markers with nothing to mark are dropped rather
+  than written into the prose. `src/content/markdown/fuzz.rs` generates documents to hold the
+  conversion to that, and points the same oracle at a real archive through `AGGR_CORPUS`.
+  An article URL that cannot name its own account (a YouTube watch URL) has one read from its page
+  during the fetch it already makes and stored beside the item; a captured account on another host
+  is discarded, never shown. Markdown link labels are inline: an anchor wrapping blocks keeps them
+  and links only its leading run.
   Notes the prose cites by number are content however link-dense they are; sibling note blocks
   with ids (not only `<li>` lists) become Markdown footnotes, and an unreferenced or empty note
   leaves its reference an ordinary link. A note's links back to the places citing it are
@@ -197,13 +217,17 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   or conventional `www.`, paths, ports, or cross-domain provider aliases. Preserve other subdomains.
   Preserve configured/persisted feed identities and profile names as provenance; never migrate
   stored source IDs to publisher IDs. Canonical articles carry deduplicated publisher/feed
-  memberships and stay unique globally. Visible publisher and `via` labels use the source's canonical
-  name: its hostname alone, plus the account path only on the platform hosts listed in
+  memberships and stay unique globally. Visible labels use a canonical name: a hostname alone, plus
+  the account path only on the platform hosts listed in
   `src/platform.rs`, where one domain is shared between unrelated publishers. `src/platform.rs` is
   the only place that knows host aliases, account path shapes, or which hosts use opaque
-  identifiers; never re-derive any of that elsewhere. Grouping an item under its publisher host
-  must not overwrite that label with the bare host. A derived source slug
+  identifiers; never re-derive any of that elsewhere. A publisher label names the account the
+  article itself identifies, so it reads the same whoever linked it; only where nothing names one
+  does the subscription that carried it, and then the bare host, stand in. A `via` label names the
+  subscription. Grouping an item under its publisher host must not overwrite its label with the
+  bare host. A derived source slug
   is that same canonical name, disambiguated by the differing feed path when two sources collide. Exact source IDs win manual alias collisions. See [client development](docs/client.md).
+  A readable alias never replaces a source in a query: its hostname is already the readable name.
   Public source IDs and filter values use normalized hostnames only; group same-host subscriptions
   while preserving their archived IDs, article paths, and individual OPML endpoints. Display names
   must never replace hostnames in generated queries.
@@ -218,6 +242,16 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   strip terminal thread counters, and keep X links canonical even when xcancel supplies the data.
   Concatenate posts without separators, per-post links, or partial-thread notices: the metadata
   original link is the only pointer. Keep traversal bounded and log incomplete continuations.
+- New items arrive without a reload: a list page polls `updates.json`, on an interval and whenever
+  the window is activated, and swaps its rows for the current ones when the content version moves.
+  The swap waits for the top of the list unless the reader has just come back to the window, so it
+  never moves the ground under them. The page carries the version it was built from.
+- Following a footnote, or its way back, marks both halves: the note and the reference. `:target`
+  carries the half the fragment names without JavaScript; the reader pairs the other, which is the
+  margin note when the notes list is off screen.
+- A source chip navigates to the collection page the build already wrote, not to a query the
+  browser has to answer: same list, no index to download. Modules a page can use load with the
+  page, and the search engine warms its index on mount rather than on the first keystroke.
 - Keep source names visible below titles in feed, search, and item metadata; tags appear only
   on item pages. The feed toolbar's omission of sources does not apply to individual feed entries.
   Put separators outside links and hover targets. Share metadata typography and spacing; format
@@ -290,6 +324,8 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   selection repositions it without re-deriving it: index the article once per page scope.
 - Mobile is a platform surface: a compact tab bar above the home indicator, colour rather than
   underline for the current tab and for links, and no default tap highlight.
+  A page whose figures are mounted by scripts has no pictures in its HTML either: two or more
+  media-less figures naming a module are read the same way as a canvas application.
   Detect interactive canvas capabilities before stripping source HTML; retain only a metadata
   marker and load live originals automatically in an opaque-origin sandbox when the reader opens
   the article, never during ingestion. Release live frames when their page scope is disposed.

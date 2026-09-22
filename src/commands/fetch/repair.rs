@@ -35,20 +35,29 @@ pub(super) fn reprocess_stored_bodies(
     let mut transaction = SourceTransaction::new(store_root)?;
     let result = (|| -> Result<usize> {
         let mut rewritten = 0;
-        for existing in store.items()? {
+        let items = store.items()?;
+        // Re-deriving a body is pure CPU and every item is independent, so the archive is worked
+        // through on the shared pool. Applying stays on this thread in archive order: the
+        // transaction and the bytes written never depend on how the work was scheduled.
+        let derived = crate::site::parallel::map(&items, |existing| {
             if existing.front.html_truncated {
-                continue;
+                return Ok(None);
             }
-            let Some(html) = store.read_html(&existing)? else {
-                continue;
+            let Some(html) = store.read_html(existing)? else {
+                return Ok(None);
             };
             let base = url::Url::parse(&existing.front.link).ok();
-            let (body, boundary_labels) = content::normalize_article_body(
+            Ok(Some(content::normalize_article_body(
                 &content::to_markdown(&html, base.as_ref()),
                 &existing.front.title,
                 existing.front.published,
                 &existing.front.source,
-            );
+            )))
+        })?;
+        for (existing, derived) in items.into_iter().zip(derived) {
+            let Some((body, boundary_labels)) = derived else {
+                continue;
+            };
             let labels = if boundary_labels.is_empty() {
                 existing.front.labels.clone()
             } else {

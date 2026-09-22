@@ -318,6 +318,9 @@ const RENDER_INDEPENDENT_SOURCES: &[&str] = &[
     // is listed above; its `duration.rs` submodule serves ingestion-only duration and caption
     // probes.
     "sources/",
+    // Generated documents and their oracles. Test-only: the conversion they exercise is
+    // fingerprinted through `content/markdown.rs` itself.
+    "content/markdown/fuzz.rs",
     // Retention plans remove files from the checkout in sync; the build sees the resulting tree.
     "store/retention.rs",
 ];

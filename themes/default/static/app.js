@@ -399,7 +399,7 @@ function externalTarget(key) {
 /** The `g` chord: `gg` to the top, letters to routes, digits to the numbered entries. */
 function gotoTarget(key) {
   if (key === "g") return { top: true };
-  const routes = { f: "", i: "", l: "browse/", p: "preferences/" };
+  const routes = { f: "", i: "", b: "browse/", p: "preferences/" };
   if (Object.prototype.hasOwnProperty.call(routes, key))
     return { url: new URL(routes[key], BASE).href };
   if (/^[1-9]$/.test(key)) {
@@ -578,7 +578,7 @@ function focusSearch() {
 }
 
 let searchModule;
-/** The search engine is a separate file, fetched the first time someone reaches for it. */
+/** The search engine is a separate file, fetched with the page that can use it. */
 function loadSearch() {
   if (searchModule || !AGGR.assets?.search || !$("[data-search-root]")) return searchModule;
   searchModule = import(new URL(AGGR.assets.search, document.baseURI).href)
@@ -613,7 +613,8 @@ function installSearchIntent() {
 
 /* ------------------------------------------------------------------ media */
 
-/** Players and their timing readouts only exist on article pages that carry media. */
+/** Players and their timing readouts only exist on article pages that carry media, where they
+ * load with the page rather than when someone reaches for the controls. */
 function loadMedia() {
   if (!AGGR.assets?.media) return;
   if (!$(".video-player, [data-audio-component], .native-video, [data-media-timing]")) return;
@@ -623,6 +624,37 @@ function loadMedia() {
 }
 
 /* ------------------------------------------------------------------ preferences */
+
+/**
+ * Light up both halves of a footnote when either one is followed. `:target` already covers the
+ * half the fragment names; this marks the other, which is the margin note beside the reference
+ * when the notes list is off screen, and the reference itself when the note points back to it.
+ */
+function installFootnoteTargets() {
+  const paired = () => {
+    for (const marked of $$("[data-footnote-active]")) marked.removeAttribute("data-footnote-active");
+    const id = decodeURIComponent(location.hash.slice(1));
+    if (!id) return;
+    const note = document.getElementById(id);
+    if (!note) return;
+    // A note: mark it, and the margin note that stands in for it beside each reference.
+    if (note.closest(".footnotes")) {
+      note.setAttribute("data-footnote-active", "");
+      for (const reference of $$('.footnote-ref a[href="#' + CSS.escape(id) + '"]')) {
+        const aside = reference.parentElement?.nextElementSibling;
+        if (aside?.classList.contains("footnote-margin-note")) {
+          aside.setAttribute("data-footnote-active", "");
+        }
+      }
+      return;
+    }
+    // A reference: mark the marker, so the word it sits against is easy to find again.
+    const reference = note.closest(".footnote-ref, .citation-ref");
+    if (reference) reference.setAttribute("data-footnote-active", "");
+  };
+  paired();
+  window.addEventListener("hashchange", paired);
+}
 
 function installPreferences() {
   if (!PREFS) return;
@@ -871,6 +903,78 @@ function installPreferences() {
  * Mark the entries that appeared since this browsing session last saw the feed. Without a
  * remembered head nothing is new, so a first visit never lights up the whole page.
  */
+/** How often a page that shows a list asks whether the build has moved on. */
+const UPDATE_INTERVAL = 300000;
+
+/**
+ * New items should arrive without anyone reaching for reload. `updates.json` is the build's own
+ * statement of what it published, so a list page polls it, and swaps its rows for the current
+ * ones when the content version has moved. The swap waits for a moment that does not move the
+ * ground under the reader: the top of the list, or coming back to the window.
+ */
+function installFeedUpdates() {
+  if (!AGGR.content || !$(".rows:not(.search-results)")) return;
+  let content = AGGR.content;
+  let pending = false;
+  let swapping = false;
+
+  async function swap() {
+    if (swapping) return;
+    swapping = true;
+    try {
+      const response = await fetch(location.href, { cache: "no-store" });
+      if (!response.ok) return;
+      const page = new DOMParser().parseFromString(await response.text(), "text/html");
+      const rows = $(".rows:not(.search-results)");
+      const fresh = page.querySelector(".rows:not(.search-results)");
+      if (!rows || !fresh) return;
+      rows.replaceWith(document.importNode(fresh, true));
+      const pager = page.querySelector("[data-feed-pager]");
+      const current = $("[data-feed-pager]");
+      if (pager && current) current.replaceWith(document.importNode(pager, true));
+      dates.render();
+      applyFeedPaging();
+      markNewEntries();
+      selection.restore();
+    } finally {
+      swapping = false;
+    }
+  }
+
+  const settle = (activated = false) => {
+    if (!pending || (!activated && window.scrollY > 200)) return;
+    pending = false;
+    void swap();
+  };
+
+  const check = async (activated = false) => {
+    try {
+      const response = await fetch(new URL("updates.json", BASE).href, { cache: "no-store" });
+      if (!response.ok) return;
+      const update = await response.json();
+      if (typeof update.content_version !== "string" || update.content_version === content) return;
+      content = update.content_version;
+      // The numbered shortcuts point at the newest entries, which are the ones that just changed.
+      if (Array.isArray(update.entries)) AGGR.entries = update.entries;
+      pending = true;
+    } catch {
+      return;
+    }
+    settle(activated);
+  };
+
+  void check();
+  setInterval(() => {
+    if (!document.hidden) void check();
+  }, UPDATE_INTERVAL);
+  // Opening the app again is the moment a reader expects to be caught up.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) void check(true);
+  });
+  window.addEventListener("focus", () => void check(true));
+  window.addEventListener("scroll", () => settle(), { passive: true });
+}
+
 function markNewEntries() {
   if (KIND !== "river") return;
   const rows = selection.rows();
@@ -903,8 +1007,13 @@ function boot() {
   safely("selection", () => selection.restore());
   safely("feed-paging", applyFeedPaging);
   safely("new-entries", markNewEntries);
+  safely("feed-updates", installFeedUpdates);
   safely("keyboard", installKeyboard);
   safely("shortcut-help", installShortcutHelp);
+  safely("footnotes", installFootnoteTargets);
+  // Every module this page can use is fetched now rather than on the first gesture: waiting for
+  // intent puts the download in front of the person who just asked for the thing.
+  safely("search", loadSearch);
   safely("preferences", installPreferences);
   safely("search-intent", installSearchIntent);
   safely("media", loadMedia);

@@ -6,7 +6,7 @@ use crate::{
 };
 
 mod duration;
-pub use duration::duration_seconds;
+pub use duration::{duration_seconds, owner_profile};
 
 pub fn thumbnail(url: &Url) -> Option<String> {
     let id = video_id(url)?;

@@ -2050,7 +2050,11 @@ fn included_topic_files_and_automatic_html_fallback_work_end_to_end() {
         .success()
         .stdout(predicate::str::contains("ok     demo"))
         .stdout(predicate::str::contains("ok     scraped  web"))
-        .stdout(predicate::str::contains("2 item(s)  \"Blog | Scraped\""));
+        // Cards read off a page say so; a feed's own entries do not.
+        .stdout(predicate::str::contains(
+            "2 item(s) (extracted)  \"Blog | Scraped\"",
+        ))
+        .stdout(predicate::str::contains("2 item(s)  \"Demo blog\""));
 
     repo.aggr()
         .arg("sync")

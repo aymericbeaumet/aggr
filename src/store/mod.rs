@@ -639,15 +639,20 @@ impl Store {
 
     /// Every item under `items/`, unsorted. Files that fail to parse are logged and skipped so
     /// one hand edit never takes the site down.
+    /// Every archived item. Each is an independent file read and parse, so the archive is read on
+    /// the shared worker pool and the results keep their sorted path order.
     pub fn items(&self) -> Result<Vec<Item>> {
-        let mut items = Vec::new();
-        for path in self.item_paths()? {
-            match self.read_item(&path) {
-                Ok(item) => items.push(item),
-                Err(err) => log::warn!("skipping {path}.md: {err:#}"),
-            }
-        }
-        Ok(items)
+        let paths = self.item_paths()?;
+        let read = crate::site::parallel::map(&paths, |path| {
+            Ok(match self.read_item(path) {
+                Ok(item) => Some(item),
+                Err(err) => {
+                    log::warn!("skipping {path}.md: {err:#}");
+                    None
+                }
+            })
+        })?;
+        Ok(read.into_iter().flatten().collect())
     }
 
     /// Relative item paths (without extension), for stub generation and sorting.

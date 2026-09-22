@@ -174,6 +174,11 @@ function queryURL(base, query, page = 1, now = Date.now()) {
 const facetURL = (base, field, value) =>
   queryURL(base, field + ':"' + value.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"');
 
+/** The collection page a facet already has, matching `facet_page` in the templates. */
+const facetPage = (base, field, value) =>
+  new URL((field === "source" ? "sources/" : field === "category" ? "categories/" : "tags/") + value + "/", base)
+    .href;
+
 /* ------------------------------------------------------------------ facets */
 
 const normalized = (value) => value.normalize("NFKC").toLocaleLowerCase();
@@ -182,7 +187,7 @@ const normalized = (value) => value.normalize("NFKC").toLocaleLowerCase();
  * Facet values by identifier and by readable label. A label shared by two values resolves to
  * nothing rather than silently picking one.
  */
-function facetIndex(values) {
+function facetIndex(values, kind) {
   const identifiers = new Map();
   const labels = new Map();
   for (const facet of values) {
@@ -191,6 +196,9 @@ function facetIndex(values) {
     labels.set(label, labels.has(label) ? null : facet);
   }
   const alias = (facet) => {
+    // A source is named by its hostname everywhere it is published, including in a query: that
+    // name is already the readable one, and a display name would not survive being shared.
+    if (kind === "source") return undefined;
     if (!facet.label.trim()) return undefined;
     const label = normalized(facet.label);
     if (label === normalized(facet.value)) return facet.value;
@@ -212,14 +220,14 @@ function facetIndex(values) {
 }
 
 const indexCache = new WeakMap();
-function cachedIndex(values) {
+function cachedIndex(values, kind) {
   let index = indexCache.get(values);
-  if (!index) indexCache.set(values, (index = facetIndex(values)));
+  if (!index) indexCache.set(values, (index = facetIndex(values, kind)));
   return index;
 }
 
 function resolveFacet(value, values, kind) {
-  const facet = cachedIndex(values).lookup(value);
+  const facet = cachedIndex(values, kind).lookup(value);
   if (facet === undefined)
     throw new QueryError("Unknown " + kind + " “" + value + "”. Choose a " + kind + " from the suggestions.");
   if (facet === null)
@@ -236,7 +244,7 @@ function readableQuery(raw, facets) {
       const values = facets[clause.field] || [];
       const facet = values.find((candidate) => candidate.value === clause.value);
       if (!facet) continue;
-      const alias = cachedIndex(values).alias(facet);
+      const alias = cachedIndex(values, clause.field).alias(facet);
       if (alias === undefined || alias === facet.value) continue;
       result =
         result.slice(0, clause.start) +
@@ -292,9 +300,9 @@ function complete(query, cursor, facets, now = Date.now(), catalogue = facets) {
   if (field) {
     const kind = field[1].toLowerCase();
     const fragment = normalized(field[2]);
-    const identities = cachedIndex(catalogue?.[kind] || []);
+    const identities = cachedIndex(catalogue?.[kind] || [], kind);
     if (finished && identities.lookup(field[2])) return [];
-    return cachedIndex(facets?.[kind] || [])
+    return cachedIndex(facets?.[kind] || [], kind)
       .entries.filter((entry) => entry.search.includes(fragment))
       .map(({ facet }) => {
         const alias = identities.alias(facet);
@@ -445,7 +453,7 @@ function renderMetadata(display, base, original, dates) {
       "a",
       {
         class: "domain",
-        href: facetURL(base, "source", display.source_slug || ""),
+        href: facetPage(base, "source", display.source_slug || ""),
         title: display.source_title || display.source_display,
       },
       [element("span", { class: "source-resolved", text: display.source_display })],
@@ -797,6 +805,10 @@ function createEngine(base) {
 
   return {
     catalogue: loadCatalogue,
+    /** Load the catalogue, the engine and its entry table now; a query should only have to ask. */
+    warm() {
+      void instance().catch(() => {});
+    },
     async run(query, requestedPage, size) {
       const { manifest, api: client } = await instance();
       const { results } = await matching(client, query, manifest);
@@ -861,6 +873,8 @@ export function mount(options) {
   const error = $(".search-error", root);
 
   const engine = createEngine(base);
+  // The index is what a search waits for, so start it with the page rather than with the query.
+  engine.warm();
   const scope = root.dataset.scopeKind
     ? root.dataset.scopeKind + ":" + root.dataset.scopeValue
     : "";

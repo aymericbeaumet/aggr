@@ -122,6 +122,8 @@ pub fn extract(page: &str, page_url: &Url) -> Result<(SourceMeta, Vec<RawItem>)>
             .value()
             .attr("lang")
             .and_then(super::normalize_language),
+        // Cards read off a page, not entries a publisher wrote in a feed.
+        extracted: true,
     };
     let mut items = json_ld_items(&document, page_url);
     items.extend(card_items(&document, page_url)?);

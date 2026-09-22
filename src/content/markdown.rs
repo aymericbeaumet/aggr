@@ -13,6 +13,9 @@ use super::scan::{
 use super::strip::{decode_entities, html_to_text, is_active_url, sanitize, strip_active_content};
 use super::{balanced_json_object, escape_html};
 
+#[cfg(test)]
+mod fuzz;
+
 /// Inline wrappers commonly used as CSS layout children. Readability keeps these elements but not
 /// the CSS `gap` or grid columns that visually separated directly adjacent siblings.
 const LAYOUT_INLINE_ELEMENTS: &[&str] = &["a", "label", "span", "time", "small"];
@@ -176,7 +179,9 @@ pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
     let passive = strip_inert_templates(&passive);
     let passive = strip_site_chrome(&passive);
     let passive = strip_invisible_characters(&passive);
-    let passive = unwrap_blank_emphasis(&passive);
+    let passive = drop_empty_code(&passive);
+    let passive = normalize_emphasis(&passive);
+    let passive = inline_link_labels(&passive);
     let passive = normalize_table_breaks(&passive);
     let passive = demote_captions_of_media_less_figures(&passive);
     let (passive, formulas) = normalize_mathml(&passive);
@@ -204,7 +209,16 @@ pub fn to_markdown(html: &str, base: Option<&Url>) -> String {
     });
     let markdown = restore_formulas(&markdown, &formulas);
     let markdown = restore_footnote_references(markdown, normalized.footnotes.len());
-    append_footnotes(markdown, &normalized.footnotes, base, &converter)
+    let markdown = append_footnotes(markdown, &normalized.footnotes, base, &converter);
+    // Code spans are carried through the prose repairs untouched, so a marker that landed inside
+    // one is still here. Private-use characters are never content; drop whatever is left.
+    if markdown.contains([FOOTNOTE_REF_START, FOOTNOTE_REF_END, MARKDOWN_LINK_START]) {
+        return markdown.replace(
+            [FOOTNOTE_REF_START, FOOTNOTE_REF_END, MARKDOWN_LINK_START],
+            "",
+        );
+    }
+    markdown
 }
 
 /// Site chrome Readability lets through: `<nav>` elements (breadcrumbs, a site menu), a
@@ -350,33 +364,372 @@ fn strip_invisible_characters(html: &str) -> String {
     html.replace(INVISIBLE, "")
 }
 
-/// `<a>Ivan</a><em> </em>who`: emphasis around nothing but a space is dropped by the Markdown
-/// converter, and the space with it. The space is the content; keep it.
-fn unwrap_blank_emphasis(html: &str) -> String {
-    const EMPHASIS: [&str; 5] = ["em", "strong", "b", "i", "u"];
+/// A Markdown link label is inline, so an anchor wrapping whole blocks — a publisher's embed card
+/// (a quoted post, a linked figure) — becomes a link the converter opens and never closes, leaving
+/// a literal `[` in the prose and its `](url)` blocks below. Keep the card's blocks and leave the
+/// anchor around the leading run a label can hold, which is the card's own lead image or title.
+fn inline_link_labels(html: &str) -> String {
+    if !html.contains("<a") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find("<a").map(|at| position + at) {
+        out.push_str(&html[position..start]);
+        let wrapper = parse_tag(&html[start..])
+            .filter(|tag| !tag.closing && tag.name == "a")
+            .and_then(|tag| {
+                // An anchor left open ends where the browser ends it: at the next block.
+                let inner = start + tag.end?;
+                Some(element_bounds(html, start, "a").unwrap_or((inner, html.len(), html.len())))
+            })
+            .filter(|(inner, closing, _)| block_boundary(html, *inner, *closing) < *closing);
+        let Some((inner, closing, end)) = wrapper else {
+            out.push_str(&html[start..start + 2]);
+            position = start + 2;
+            continue;
+        };
+        match label_bounds(html, inner, closing) {
+            Some(label) => {
+                out.push_str(&html[inner..label.start]);
+                out.push_str(&html[start..inner]);
+                out.push_str(&html[label.clone()]);
+                out.push_str("</a>");
+                out.push_str(&html[label.end..closing]);
+                if closing == end {
+                    // The source never closed it, so nothing downstream will either.
+                    position = closing;
+                    continue;
+                }
+            }
+            // Nothing inline to label: the blocks are all the card has left to say.
+            None => out.push_str(&html[inner..closing]),
+        }
+        position = end;
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// Where the blocks inside `inner..closing` begin, or `closing` when it holds inline content only.
+/// Line breaks and rules are inline enough for a label: only a blank line ends one.
+fn block_boundary(html: &str, inner: usize, closing: usize) -> usize {
+    let mut position = inner;
+    while let Some(tag_start) = html[position..closing].find('<').map(|at| position + at) {
+        let Some(tag) = parse_tag(&html[tag_start..]) else {
+            position = tag_start + 1;
+            continue;
+        };
+        if BLOCK_ELEMENTS.contains(&tag.name.as_str()) && !matches!(tag.name.as_str(), "br" | "hr")
+        {
+            return tag_start;
+        }
+        match tag.end {
+            Some(length) => position = tag_start + length,
+            None => break,
+        }
+    }
+    closing
+}
+
+/// The leading inline run inside `inner..closing`, looked for past the wrappers that hold it.
+/// `None` when the content is blocks and whitespace all the way down.
+fn label_bounds(html: &str, inner: usize, closing: usize) -> Option<std::ops::Range<usize>> {
+    let mut position = inner;
+    loop {
+        let start = skip_html_whitespace(html, position);
+        if start >= closing {
+            return None;
+        }
+        let boundary = block_boundary(html, start, closing);
+        if start < boundary {
+            return Some(start..boundary);
+        }
+        // The content opens on a block: its own content is where a label can still be found.
+        let tag = parse_tag(&html[boundary..])?;
+        position = match tag.closing || tag.self_closing {
+            true => boundary + tag.end?,
+            false => element_bounds(html, boundary, &tag.name)?.0,
+        };
+        if position >= closing {
+            return None;
+        }
+    }
+}
+
+const EMPHASIS_ELEMENTS: [&str; 5] = ["em", "strong", "b", "i", "u"];
+/// Wrappers that carry no block of their own. A block inside one has no inline Markdown form, so
+/// the converter writes the wrapper's markers into the prose instead.
+const INLINE_WRAPPERS: [&str; 10] = [
+    "em", "strong", "b", "i", "u", "span", "small", "time", "sub", "sup",
+];
+
+/// CommonMark's "punctuation" for the flanking rules, without a Unicode category table: anything
+/// that is neither part of a word nor whitespace.
+fn is_punctuation(c: char) -> bool {
+    !c.is_alphanumeric() && !c.is_whitespace()
+}
+
+/// Elements the converter writes with delimiters of their own — `[text](url)`, `![alt](src)`,
+/// `` `code` `` — so whatever they contain, the character beside them is punctuation.
+const DELIMITED_ELEMENTS: [&str; 4] = ["a", "code", "img", "picture"];
+
+/// The character that will precede `at` in the Markdown, looked for past inline markup. `None` at
+/// a block edge, where a fresh line begins and nothing can flank.
+fn visible_before(html: &str, mut at: usize) -> Option<char> {
+    for _ in 0..64 {
+        let head = &html[..at];
+        if !head.ends_with('>') {
+            let start = head
+                .char_indices()
+                .rev()
+                .nth(12)
+                .map_or(0, |(index, _)| index);
+            return decode_entities(&head[start..]).chars().next_back();
+        }
+        let open = head.rfind('<')?;
+        let tag = parse_tag(&html[open..])?;
+        if BLOCK_ELEMENTS.contains(&tag.name.as_str()) {
+            return None;
+        }
+        if DELIMITED_ELEMENTS.contains(&tag.name.as_str()) {
+            return Some(')');
+        }
+        at = open;
+    }
+    None
+}
+
+/// The character that will follow `at` in the Markdown, under the same rule as [`visible_before`].
+fn visible_after(html: &str, mut at: usize) -> Option<char> {
+    for _ in 0..64 {
+        let tail = &html[at..];
+        if !tail.starts_with('<') {
+            let end = tail
+                .char_indices()
+                .nth(12)
+                .map_or(tail.len(), |(index, _)| index);
+            return decode_entities(&tail[..end]).chars().next();
+        }
+        let tag = parse_tag(tail)?;
+        if BLOCK_ELEMENTS.contains(&tag.name.as_str()) {
+            return None;
+        }
+        if DELIMITED_ELEMENTS.contains(&tag.name.as_str()) {
+            return Some('[');
+        }
+        at += tag.end?;
+    }
+    None
+}
+
+/// How many bytes of leading (or trailing) plain text are punctuation or space, which is as far as
+/// an edge can be moved out of the markers without disturbing markup.
+fn edge_run(text: &str, from_end: bool) -> usize {
+    let mut run = 0;
+    let mut chars: Box<dyn Iterator<Item = char>> = if from_end {
+        Box::new(text.chars().rev())
+    } else {
+        Box::new(text.chars())
+    };
+    for c in chars.by_ref() {
+        if c == '<' || c == '>' || c.is_alphanumeric() {
+            break;
+        }
+        run += c.len_utf8();
+    }
+    let breaks = if from_end { "</br>" } else { "<br>" };
+    while text.len() > run
+        && (if from_end {
+            text[..text.len() - run].ends_with(breaks) || text[..text.len() - run].ends_with("<br>")
+        } else {
+            text[run..].starts_with("<br>")
+        })
+    {
+        run += 4;
+    }
+    run
+}
+
+/// A code listing with nothing in it is nothing: its fences or backticks would be all the reader
+/// sees. The same goes for the wrappers a publisher leaves behind around removed media.
+fn drop_empty_code(html: &str) -> String {
+    if !html.contains("<pre") && !html.contains("<code") {
+        return html.to_string();
+    }
     let mut out = String::with_capacity(html.len());
     let mut position = 0;
     while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
         out.push_str(&html[position..start]);
-        let blank = parse_tag(&html[start..])
-            .filter(|tag| !tag.closing && EMPHASIS.contains(&tag.name.as_str()))
+        let empty = parse_tag(&html[start..])
+            .filter(|tag| !tag.closing && matches!(tag.name.as_str(), "pre" | "code"))
             .and_then(|tag| element_bounds(html, start, &tag.name))
-            .filter(|(inner, closing, _)| {
-                let content = &html[*inner..*closing];
-                !content.contains('<') && decode_entities(content).trim().is_empty()
-            });
-        match blank {
-            Some((inner, closing, end)) => {
-                if inner < closing {
-                    out.push(' ');
-                }
-                position = end;
-            }
+            .filter(|(inner, closing, _)| html_to_text(&html[*inner..*closing]).trim().is_empty());
+        match empty {
+            Some((.., end)) => position = end,
             None => {
                 out.push('<');
                 position = start + 1;
             }
         }
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// Emphasis inside the same emphasis emphasises nothing further, and its markers close the outer
+/// run early. Keep the outer one and drop the repeat.
+fn strip_nested(html: &str, name: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        let repeat = parse_tag(&html[start..]).filter(|tag| tag.name == name);
+        match repeat.and_then(|tag| tag.end) {
+            Some(length) => position = start + length,
+            None => {
+                out.push('<');
+                position = start + 1;
+            }
+        }
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// `<strong>a</strong><strong>b</strong>` writes four asterisks in a row, which close and reopen
+/// nothing the reader can see. The two runs say one thing; join them.
+fn merge_adjacent_emphasis(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find("</").map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        let joined = parse_tag(&html[start..])
+            .filter(|tag| tag.closing && EMPHASIS_ELEMENTS.contains(&tag.name.as_str()))
+            .and_then(|tag| {
+                let after = start + tag.end?;
+                let next = parse_tag(&html[after..])?;
+                (!next.closing && next.name == tag.name)
+                    .then_some(())
+                    .and(next.end)
+                    .map(|length| after + length)
+            });
+        match joined {
+            Some(end) => position = end,
+            None => {
+                out.push_str("</");
+                position = start + 2;
+            }
+        }
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// Emphasis is inline and its markers must flank their content: `context<strong>,</strong>tools`
+/// has no Markdown form, and the converter writes the asterisks into the prose instead. Move the
+/// edge punctuation that breaks the rule outside the markers (`*with AI*—like`), drop markers left
+/// with nothing to emphasize, and unwrap emphasis around blocks, which is never expressible.
+fn normalize_emphasis(html: &str) -> String {
+    let mut current = html.to_string();
+    for _ in 0..4 {
+        let next = unwrap_inexpressible_emphasis(&merge_adjacent_emphasis(&current));
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
+fn unwrap_inexpressible_emphasis(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        // A wrapper the page never closed runs to the end of the fragment, as the parser reads it.
+        let element = parse_tag(&html[start..])
+            .filter(|tag| !tag.closing && INLINE_WRAPPERS.contains(&tag.name.as_str()))
+            .and_then(|tag| {
+                let inner = start + tag.end?;
+                let bounds = element_bounds(html, start, &tag.name).unwrap_or((
+                    inner,
+                    html.len(),
+                    html.len(),
+                ));
+                Some((tag.name.clone(), bounds))
+            });
+        let Some((name, (inner, closing, end))) = element else {
+            out.push('<');
+            position = start + 1;
+            continue;
+        };
+        let open = &html[start..inner];
+        // A sidenote's own span is read later, with its blocks intact.
+        if attribute_value(open, "data-n").is_some()
+            || attribute_value(open, "class").is_some_and(|value| value.contains("sidenote"))
+        {
+            out.push('<');
+            position = start + 1;
+            continue;
+        }
+        let content = &html[inner..closing];
+        if block_boundary(html, inner, closing) < closing {
+            out.push_str(content);
+            position = end;
+            continue;
+        }
+        if !EMPHASIS_ELEMENTS.contains(&name.as_str()) {
+            out.push_str(&html[start..inner]);
+            position = inner;
+            continue;
+        }
+        // Emphasis around nothing but a space loses the space with the markers; keep the space.
+        if !content.contains('<') && decode_entities(content).trim().is_empty() {
+            if inner < closing {
+                out.push(' ');
+            }
+            position = end;
+            continue;
+        }
+        let lead = edge_run(content, false);
+        let tail = edge_run(&content[lead..], true);
+        let (head, _, foot) = (
+            &content[..lead],
+            &content[lead..content.len() - tail],
+            &content[content.len() - tail..],
+        );
+        let text = html_to_text(content);
+        let flanks = |edge: Option<char>, outside: Option<char>| {
+            edge.is_some_and(|edge| {
+                !edge.is_whitespace()
+                    && (!is_punctuation(edge)
+                        || outside.is_none_or(|c| c.is_whitespace() || is_punctuation(c)))
+            })
+        };
+        let opens = flanks(text.chars().next(), visible_before(html, start));
+        let closes = flanks(text.chars().next_back(), visible_after(html, end));
+        let head = if opens && !head.contains("<br") {
+            ""
+        } else {
+            head
+        };
+        let foot = if closes && !foot.contains("<br") {
+            ""
+        } else {
+            foot
+        };
+        let body = &content[head.len()..content.len() - foot.len()];
+        out.push_str(head);
+        if !decode_entities(body).trim().is_empty() {
+            out.push_str(&html[start..inner]);
+            out.push_str(&strip_nested(body, &name));
+            out.push_str(&html[closing..end]);
+        } else {
+            out.push_str(body);
+        }
+        out.push_str(foot);
+        position = end;
     }
     out.push_str(&html[position..]);
     out
@@ -430,6 +783,42 @@ fn normalize_table_breaks(html: &str) -> String {
 /// A `<figure>` around a table, a list or a chart placeholder has no media for a caption to
 /// attach to, so its caption is written as an ordinary paragraph where it stands instead of the
 /// hard break that reunites a caption with its image.
+/// A figure with no media is only its own text, and a caption that repeats that text says it
+/// twice: a script-mounted embed labelled `Spymark` above a fallback reading `“Spymark”` leaves
+/// the reader two stray lines where the figure was.
+fn demoted_caption(body: &str) -> String {
+    let demote = |body: &str| {
+        body.replace("<figcaption", "<p")
+            .replace("</figcaption>", "</p>")
+    };
+    let Some(start) = body.find("<figcaption") else {
+        return demote(body);
+    };
+    let Some((inner, closing, end)) = element_bounds(body, start, "figcaption") else {
+        return demote(body);
+    };
+    let caption = words(&html_to_text(&body[inner..closing]));
+    let rest = format!("{}{}", &body[..start], &body[end..]);
+    if caption.is_empty() || !words(&html_to_text(&rest)).contains(&caption) {
+        return demote(body);
+    }
+    rest
+}
+
+/// Text as a reader hears it: letters, digits and single spaces, so `Spymark` and `“Spymark”`
+/// are the same words.
+fn words(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            out.extend(c.to_lowercase());
+        } else if !out.ends_with(' ') {
+            out.push(' ');
+        }
+    }
+    out.trim().to_string()
+}
+
 fn demote_captions_of_media_less_figures(html: &str) -> String {
     if !html.contains("<figcaption") {
         return html.to_string();
@@ -455,11 +844,7 @@ fn demote_captions_of_media_less_figures(html: &str) -> String {
             out.push_str(&html[start..end]);
         } else {
             out.push_str(&html[start..inner]);
-            out.push_str(
-                &body
-                    .replace("<figcaption", "<p")
-                    .replace("</figcaption>", "</p>"),
-            );
+            out.push_str(&demoted_caption(body));
             out.push_str(&html[closing..end]);
         }
         position = end;
@@ -506,12 +891,80 @@ struct Formula {
     display: bool,
 }
 
+/// TeX a page published as text in a `math` class rather than as MathML, which is what a static
+/// site generator leaves behind when its formula renderer never ran in the browser. Without this
+/// the reader is shown the source: `\\text{score}(\\text{candidate}) = …`.
+fn normalize_class_math(html: &str, formulas: &mut Vec<Formula>) -> String {
+    if !html.contains("math") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        let formula = parse_tag(&html[start..])
+            .filter(|tag| !tag.closing && matches!(tag.name.as_str(), "code" | "span"))
+            .and_then(|tag| Some((tag.name.clone(), element_bounds(html, start, &tag.name)?)))
+            .filter(|(_, (inner, ..))| {
+                attribute_value(&html[start..*inner], "class")
+                    .is_some_and(|class| class.split([' ', '-']).any(|name| name == "math"))
+            });
+        let Some((_, (inner, closing, end))) = formula else {
+            out.push('<');
+            position = start + 1;
+            continue;
+        };
+        let content = &html[inner..closing];
+        let classes = attribute_value(&html[start..inner], "class").unwrap_or_default();
+        let tex = decode_entities(content);
+        let tex = tex.trim();
+        let (tex, delimited) = strip_tex_delimiters(tex);
+        // Only text is TeX; markup inside means the page rendered the formula after all.
+        if content.contains('<') || tex.is_empty() {
+            out.push('<');
+            position = start + 1;
+            continue;
+        }
+        let display = classes.contains("display") || delimited;
+        out.push_str(&formula_placeholder(formulas.len()));
+        formulas.push(Formula {
+            tex: tex.to_string(),
+            display,
+        });
+        position = end;
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// `\(…\)`, `\[…\]` and `$…$` around TeX say inline or display; the TeX itself is what is left.
+fn strip_tex_delimiters(tex: &str) -> (&str, bool) {
+    for (open, close) in [("\\[", "\\]"), ("$$", "$$")] {
+        if let Some(inner) = tex
+            .strip_prefix(open)
+            .and_then(|rest| rest.strip_suffix(close))
+        {
+            return (inner.trim(), true);
+        }
+    }
+    for (open, close) in [("\\(", "\\)"), ("$", "$")] {
+        if let Some(inner) = tex
+            .strip_prefix(open)
+            .and_then(|rest| rest.strip_suffix(close))
+        {
+            return (inner.trim(), false);
+        }
+    }
+    (tex, false)
+}
+
 /// Replace every `<math>` element by a placeholder for the TeX it annotates, so the formula
 /// survives Markdown conversion untouched and is written back as `$…$` or `$$…$$`, which the
 /// renderer already reads. A `<math>` without a TeX annotation is left to its text.
 fn normalize_mathml(html: &str) -> (String, Vec<Formula>) {
     if !html.contains("<math") {
-        return (html.to_string(), Vec::new());
+        let mut formulas = Vec::new();
+        return (normalize_class_math(html, &mut formulas), formulas);
     }
     let mut out = String::with_capacity(html.len());
     let mut formulas = Vec::new();
@@ -545,6 +998,7 @@ fn normalize_mathml(html: &str) -> (String, Vec<Formula>) {
         position = end;
     }
     out.push_str(&html[position..]);
+    let out = normalize_class_math(&out, &mut formulas);
     (out, formulas)
 }
 
@@ -564,8 +1018,8 @@ fn tex_annotation(math: &str) -> Option<String> {
     None
 }
 
-const FORMULA_OPEN: char = '\u{e000}';
-const FORMULA_CLOSE: char = '\u{e001}';
+const FORMULA_OPEN: char = '\u{e003}';
+const FORMULA_CLOSE: char = '\u{e004}';
 
 /// Private-use characters around an index: text no conversion step touches.
 fn formula_placeholder(index: usize) -> String {
@@ -772,6 +1226,10 @@ fn markdown_heading(
     let level = element.tag.strip_prefix('h')?.parse::<usize>().ok()?;
     let content = handlers.walk_children(element.node).content;
     let content = content.trim();
+    // A heading with nothing to say would leave its `#` markers stranded in the prose.
+    if content.is_empty() {
+        return Some(String::new().into());
+    }
     let heading = if level <= 2 && content.contains("\\\n") {
         let underline = if level == 1 { "===" } else { "---" };
         format!("{content}\n{underline}")
@@ -2105,7 +2563,9 @@ fn restore_inline_layout_boundaries(html: &str) -> String {
         let Some(next) = parse_tag(&html[position..]) else {
             continue;
         };
-        if next.closing || !LAYOUT_INLINE_ELEMENTS.contains(&next.name.as_str()) {
+        // Two code spans written back to back merge their backticks into a longer fence.
+        let merges = tag.name == "code" && next.name == "code";
+        if next.closing || !(merges || LAYOUT_INLINE_ELEMENTS.contains(&next.name.as_str())) {
             continue;
         }
         let Some(next_len) = next.end else {
@@ -2170,10 +2630,52 @@ pub(super) fn is_numbered_citation(html: &str, start: usize) -> bool {
 /// Keep punctuation before generated links literal and restore trimmed link-label boundaries.
 /// htmd intentionally trims link labels, which can otherwise turn `than <a> 54,000…</a>` into
 /// `than[54,000…](…)`.
+/// Markdown punctuation is escaped in prose, but a bare URL is linkified exactly as written, so
+/// the backslash becomes part of the address and of what the reader sees. Inside a bare URL the
+/// escape has no work to do: the address ends at the first space either way.
+fn unescape_bare_urls(markdown: &str) -> String {
+    if !markdown.contains('\\') {
+        return markdown.to_string();
+    }
+    let mut out = String::with_capacity(markdown.len());
+    let mut position = 0;
+    while let Some(offset) = markdown[position..].find("http").map(|at| position + at) {
+        out.push_str(&markdown[position..offset]);
+        let rest = &markdown[offset..];
+        // A destination inside `](…)` is not prose and was never escaped as prose.
+        let linked = markdown[..offset].ends_with(['(', '<']);
+        let scheme = rest.starts_with("http://") || rest.starts_with("https://");
+        if linked || !scheme {
+            out.push_str(&rest[..4]);
+            position = offset + 4;
+            continue;
+        }
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"'))
+            .unwrap_or(rest.len());
+        let mut characters = rest[..end].chars().peekable();
+        while let Some(c) = characters.next() {
+            if c == '\\'
+                && characters
+                    .peek()
+                    .is_some_and(|next| next.is_ascii_punctuation())
+            {
+                continue;
+            }
+            out.push(c);
+        }
+        position = offset + end;
+    }
+    out.push_str(&markdown[position..]);
+    out
+}
+
 fn repair_generated_markdown(markdown: &str) -> String {
-    let mut value = markdown
-        .replace(&format!("!{MARKDOWN_LINK_START}["), "\\![")
-        .replace(MARKDOWN_LINK_START, "");
+    let mut value = unescape_bare_urls(
+        &markdown
+            .replace(&format!("!{MARKDOWN_LINK_START}["), "\\![")
+            .replace(MARKDOWN_LINK_START, ""),
+    );
     let arena = comrak::Arena::new();
     let root = comrak::parse_document(&arena, &value, &comrak::Options::default());
     let mut lines = vec![0];
@@ -3107,6 +3609,70 @@ List:       openbsd-tech
                 "    Second paragraph.\n",
             )
         );
+    }
+
+    #[test]
+    fn embed_cards_keep_their_blocks_and_link_their_lead() {
+        // latent.space (Substack): a quoted post is one anchor around the whole card.
+        let html = r##"<p>They wrote:</p><a href="https://x.com/ArtificialAnlys/status/2102" target="_blank" rel="noopener noreferrer"><div data-attrs="{}"><div><div title="User"><picture><img src="https://substackcdn.com/avatar.jpg" alt="X avatar for @ArtificialAnlys"></picture></div><div>Artificial Analysis @ArtificialAnlys</div></div><div>MiMo-V2.6-Pro debuts as the top open weights model.</div><div><img src="https://pbs.substack.com/media/HSxCs.jpg"></div><div>8:11 PM · Sep 21, 2026</div></div></a><p>Xiaomi is not a tiger.</p>"##;
+        let markdown = to_markdown(html, Some(&base()));
+
+        assert_eq!(
+            markdown,
+            concat!(
+                "They wrote:\n\n",
+                "[![X avatar for @ArtificialAnlys](https://substackcdn.com/avatar.jpg)](https://x.com/ArtificialAnlys/status/2102)\n\n",
+                "Artificial Analysis @ArtificialAnlys\n\n",
+                "MiMo-V2.6-Pro debuts as the top open weights model.\n\n",
+                "![](https://pbs.substack.com/media/HSxCs.jpg)\n\n",
+                "8:11 PM · Sep 21, 2026\n\n",
+                "Xiaomi is not a tiger.\n",
+            )
+        );
+        // A card with nothing to label keeps what it says rather than an unclosed link.
+        let empty =
+            r##"<a href="https://example.com/card"><div><p>Only prose here.</p></div></a>"##;
+        assert_eq!(
+            to_markdown(empty, Some(&base())),
+            "[Only prose here.](https://example.com/card)\n"
+        );
+        // Ordinary inline links are untouched, breaks and all.
+        let inline =
+            r##"<p><a href="/one">first<br>second</a> and <a href="/two"><em>two</em></a>.</p>"##;
+        assert_eq!(
+            to_markdown(inline, Some(&base())),
+            "[first\\\nsecond](https://example.com/one) and [*two*](https://example.com/two).\n"
+        );
+    }
+
+    #[test]
+    fn published_tex_becomes_a_formula_beside_its_footnotes() {
+        // nathan.rs: `$$…$$` in the prose, and Pandoc's `<span class="math">` form, both with
+        // footnotes in the same document. Formulas and references are marked separately, so
+        // neither is read as the other.
+        let html = r##"<p>A question<sup id="ref-1"><a href="#note-1">1</a></sup> and a score:</p>
+<p><code class="math math-display">\text{score}(\text{candidate}) = \texttt{len(gzip(c))}</code></p>
+<p>Inline <span class="math inline">\(x^2\)</span> too<sup id="ref-2"><a href="#note-2">2</a></sup>.</p>
+<ol><li id="note-1">First note.</li><li id="note-2">Second note.</li></ol>"##;
+        let markdown = to_markdown(html, Some(&base()));
+
+        assert_eq!(
+            markdown,
+            concat!(
+                "A question[^1] and a score:\n\n",
+                "$$\n\\text{score}(\\text{candidate}) = \\texttt{len(gzip(c))}\n$$\n\n",
+                "Inline $x^2$ too[^2].\n\n",
+                "[^1]: First note.\n\n",
+                "[^2]: Second note.\n",
+            )
+        );
+        let rendered = render_markdown(&markdown);
+        assert!(
+            rendered.contains("score(candidate) = len(gzip(c))"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("x²"), "{rendered}");
+        assert!(!rendered.contains("texttt"), "{rendered}");
     }
 
     #[test]

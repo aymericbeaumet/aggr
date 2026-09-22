@@ -32,6 +32,8 @@ export interface AppContext {
   /** The first nine feed entries, for the `g 1` … `g 9` shortcuts. */
   entries: string[];
   assets: AssetMap;
+  /** The content fingerprint this page was built from, for `updates.json` polling. */
+  content?: string;
   /** Where the search index lives, when one was built. */
   search?: { base: string; docs: number };
 }

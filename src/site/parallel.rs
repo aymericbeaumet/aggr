@@ -14,7 +14,7 @@ const MAX_WORKERS: usize = 8;
 /// Below this many inputs, spawning threads costs more than it saves.
 const PARALLEL_THRESHOLD: usize = 8;
 
-pub(super) fn map<T, U, F>(inputs: &[T], transform: F) -> Result<Vec<U>>
+pub(crate) fn map<T, U, F>(inputs: &[T], transform: F) -> Result<Vec<U>>
 where
     T: Sync,
     U: Send,
@@ -25,7 +25,7 @@ where
 
 /// Worker count for this build, between one and [`MAX_WORKERS`]: a test pin first, then the
 /// `AGGR_BUILD_WORKERS` override when it is a positive integer, otherwise available parallelism.
-pub(super) fn workers() -> usize {
+pub(crate) fn workers() -> usize {
     #[cfg(test)]
     if let Some(pinned) = pinned_workers() {
         return pinned.clamp(1, MAX_WORKERS);

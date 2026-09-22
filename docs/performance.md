@@ -68,6 +68,26 @@ bucket replaces its oldest receipt. Cache hits never rewrite timestamps. Warm hi
 the small inline PNG from its validated hash without decoding the master. The first validation
 remains a cold operation, and large cold images are deliberately validated one at a time.
 
+`build_max_bytes` is what a host will accept for a published site, so only a publishing build
+measures it. A development snapshot (`aggr dev` without `--release`) is served from a local cache
+and skips the check: when an archive is larger than the limit, measuring it costs a second complete
+build, which on a 3,000-item instance was 205 s followed by 319 s. `aggr dev --release` still
+applies the budget, and its snapshot keeps every archived rendition rather than the published
+selection, so the local cache holds more bytes than the site would.
+
+Every stage that is CPU-bound runs on the machine's parallelism rather than a fixed slot count.
+Reading the archive (one file read and parse per item) and re-deriving stored bodies both run on the
+shared worker pool. `sync` and `build` own the machine while they fetch, so article conversion and
+persistence take a slot per worker; `dev` fetches in the background while it rebuilds, so it takes
+half and leaves the rest to the build a reader is waiting for. Sizing both to the full worker count
+measured worse on an eight-core machine: the background sync and the rebuild oversubscribed it and
+the build phase grew from 167 s to 322 s.
+
+Re-deriving stored bodies (`--reprocess`) reads each retained HTML companion and converts it again.
+The conversion is pure CPU per item and runs on the shared worker pool; applying the results stays
+on the calling thread in archive order, so the transaction and the written bytes never depend on
+scheduling. On a 3,318-item archive the conversion alone measured 48 s of single-threaded work.
+
 Static article pages and portable representations render with at most eight scoped CPU workers,
 limited by available parallelism or by `AGGR_BUILD_WORKERS`. `parallel::map` hands inputs to those
 workers through a shared claim cursor (each thread takes the next unclaimed input, so a few slow

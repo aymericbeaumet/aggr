@@ -267,7 +267,7 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .shortcut-list dt, .shortcut-list dd { margin: 0; padding: 0.3rem 0; }
 .shortcut-list dd { color: var(--muted); overflow-wrap: anywhere; }
 .shortcut-list kbd { display: inline-block; min-width: 1.6em; margin-right: 0.15rem; padding: 0.08rem 0.3rem; text-align: center; color: var(--fg); background: var(--code); border: 1px solid var(--faint); border-radius: 3px; box-shadow: 0 1px 0 var(--faint); }
-.key-alternatives { display: inline-flex; align-items: center; flex-wrap: wrap; max-width: 10rem; gap: 0.15rem 0; }
+.key-alternatives { display: inline-flex; align-items: center; flex-wrap: wrap; max-width: 15rem; gap: 0.15rem 0; }
 .key-alternatives small { margin: 0 0.35rem 0 0.2rem; color: var(--muted); font-size: 0.78em; }
 .key-pair { display: inline-flex; align-items: center; white-space: nowrap; }
 .key-pair small { margin: 0 0.25rem 0 0.1rem; color: var(--muted); font-size: 0.78em; }
@@ -561,7 +561,19 @@ body[data-kind="item"] .main {
 .body :is(.footnote-ref, .citation-ref) a, .body .footnote-backref { color: var(--accent-strong); text-decoration: none; }
 .body .footnotes { clear: both; margin-top: 1.75rem; padding-top: 0.65rem; color: var(--muted); border-top: 1px solid var(--faint); font-size: 0.875rem; line-height: 1.5; }
 .body .footnotes ol { margin: 0; padding-inline-start: 1.4rem; }
-.body .footnotes li:target { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+/* Following a note, or a note's way back, says which one: the pair lights up wherever it is,
+   whether the notes are a list under the article or margin notes beside it. `:target` carries it
+   without JavaScript; `data-footnote-active` pairs the halves the fragment cannot reach. */
+.body .footnotes li:target,
+.body .footnotes li[data-footnote-active],
+.body .footnote-margin-note[data-footnote-active] { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.body .footnote-ref:has(a:target) + .footnote-margin-note { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.body :is(.footnote-ref, .citation-ref) a:target,
+.body :is(.footnote-ref, .citation-ref)[data-footnote-active] a {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 0.25em;
+  padding-inline: 0.25em;
+}
 .body .footnotes p { margin-block: 0.35rem; }
 
 /* Semantic notes become sidenotes only when the reading column has a real gutter. */
@@ -597,7 +609,7 @@ body[data-kind="item"] .main {
 .preferences input[type="checkbox"] { width: 1.25rem; height: 1.25rem; accent-color: var(--accent-strong); }
 .preferences .setting small { font-weight: 400; }
 .preferences-intro { margin: 0.35rem 0 1rem; color: var(--muted); font-size: 0.875rem; }
-.preferences-body { display: grid; gap: 1rem; }
+.preferences-body { display: grid; gap: 1.6rem; }
 .preferences-group { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; min-width: 0; padding: 0.6rem 1rem; border: 1px solid var(--faint); border-radius: 0.65rem; background: color-mix(in srgb, var(--panel) 65%, var(--bg)); }
 .preferences-group h2 { margin: 0; padding: 0.4rem 0 0.55rem; font-size: 0.875rem; color: var(--muted); font-weight: 650; }
 .preferences-group p { margin: 0; }

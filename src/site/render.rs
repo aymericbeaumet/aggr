@@ -173,6 +173,12 @@ impl Renderer {
         env.add_filter("facet_url", |state: &State, value: String, kind: String| {
             format!("{}{}", page_root(state), facet_url(value, kind))
         });
+        env.add_filter(
+            "facet_page",
+            |state: &State, value: String, kind: String| {
+                format!("{}{}", page_root(state), facet_page(value, kind))
+            },
+        );
         env.add_filter("date", date_filter);
         env.add_filter("excerpt", |text: String, max: Option<usize>| {
             crate::content::excerpt(&text, max.unwrap_or(200))
@@ -324,6 +330,18 @@ fn site_path(assets: &BTreeMap<String, Asset>, path: &str) -> String {
         .and_then(|name| assets.get(name))
         .map(|asset| format!("assets/{}", asset.output))
         .unwrap_or_else(|| path.to_string())
+}
+
+/// The collection page a facet value already has, relative to the site root. A chip navigates to
+/// a page the build wrote rather than to a query the browser has to answer: the same list, with
+/// no index to download.
+fn facet_page(value: String, kind: String) -> String {
+    let directory = match kind.as_str() {
+        "source" => "sources",
+        "category" => "categories",
+        _ => "tags",
+    };
+    format!("{directory}/{value}/")
 }
 
 /// The root feed filtered to one facet value, relative to the site root.
@@ -994,12 +1012,13 @@ mod tests {
             .render_str_for_test(
                 "{{ 'sources/' | url_for }} {{ '' | url_for }} {{ 'https://example.com/x?a=1&b=2' | url_for }} \
                  {{ '#top' | url_for }} {{ 'assets/images/a.png 1x, https://cdn.example/b,c.png 2x' | srcset_for }} \
-                 {{ 'rust' | facet_url('tag') }} {{ '<img src=\"assets/x.png\"><a href=\"#n\">n</a>' | rebase }}",
+                 {{ 'rust' | facet_url('tag') }} {{ 'hnrss.org' | facet_page('source') }} \
+                 {{ '<img src=\"assets/x.png\"><a href=\"#n\">n</a>' | rebase }}",
             )
             .unwrap();
         assert_eq!(
             out,
-            "sources/  https://example.com/x?a=1&b=2 #top assets/images/a.png 1x, https://cdn.example/b,c.png 2x ?q=tag%3A%22rust%22 <img src=\"assets/x.png\"><a href=\"#n\">n</a>"
+            "sources/  https://example.com/x?a=1&b=2 #top assets/images/a.png 1x, https://cdn.example/b,c.png 2x ?q=tag%3A%22rust%22 sources/hnrss.org/ <img src=\"assets/x.png\"><a href=\"#n\">n</a>"
         );
         let out = renderer
             .env

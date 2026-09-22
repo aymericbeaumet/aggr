@@ -79,11 +79,28 @@ Two feeds from one publisher arrive at the same name, so the path that differs i
 them apart (`example-com` and `example-com-notes`). Set `slug` yourself when you want a specific
 name; the same slug written twice is an error rather than something aggr renames for you.
 
+The same canonical name labels each item's publisher in the reader, read from the article's own URL
+rather than from whichever subscription carried it: a repository release reads
+`github.com/torvalds` whether you follow the repository or found it on Hacker News. A YouTube watch
+URL is the one link that cannot carry its account, so aggr takes the channel from the page it
+already downloads and keeps it with the item; items archived before that read `youtube.com` until
+they are fetched again.
+
 ## How a URL is resolved
 
 aggr tries the URL as a feed, follows RSS/Atom/JSON Feed discovery metadata, probes the
 conventional endpoints under that section (`feed.xml`, `rss.xml`, `atom.xml`, `index.xml`, `feed`,
-`rss`), and finally falls back to conservative article discovery on the page itself. A section URL
+`rss`), the nested shapes some sites use instead (`feed/rss`, `feed/atom`, `rss/all.rss`), and
+finally falls back to conservative article discovery on the page itself. A page that redirects to
+another origin leaves the subscribed origin's endpoints in the probe set: a status page moving to a
+status app does not move the feed. At an origin root that has answered nothing, the sections a site
+keeps its writing under (`/blog`, `/posts`, `/news`) are the last thing tried.
+
+A listing that is only the page it came from is not accepted as a listing. A single-page app
+answers every path with its own shell, so card extraction reports one "article" that is the page
+itself; before believing that, aggr probes the conventional endpoints and prefers any feed that
+parses. `aggr check` says which it was, so a feed that quietly became a shell reads as
+`2 item(s) (extracted)` rather than as health. A section URL
 is treated as a directory, so `https://example.com/blog` and `https://example.com/blog/` probe the
 same endpoints. A discovered feed that publishes no entries is skipped in favour of the listing.
 The endpoint that answered is remembered, so the probe happens once per source.

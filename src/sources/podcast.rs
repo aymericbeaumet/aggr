@@ -455,12 +455,74 @@ pub fn feed_links(page: &str, url: &Url) -> Vec<Url> {
             }
         }
     }
+    candidates.extend(media_host_feeds(page));
     let mut seen = BTreeSet::new();
     candidates.retain(|candidate| {
         matches!(candidate.scheme(), "http" | "https") && seen.insert(candidate.to_string())
     });
     candidates.truncate(16);
     candidates
+}
+
+/// A page that advertises no feed still has to name the audio it plays, and a hosting provider's
+/// media URL carries the show it belongs to: Deezer's player embeds
+/// `acast.com/p/acast/s/<show>/e/<id>/media.mp3`, whose show is the public Acast feed. Only the
+/// shapes whose feed is derivable from the media path are read; a host that names an episode
+/// alone says nothing about where the rest of them live.
+fn media_host_feeds(page: &str) -> Vec<Url> {
+    let mut found = Vec::new();
+    for (start, _) in page.match_indices("://") {
+        let rest = &page[start + 3..];
+        let end = rest
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '<' | '>' | ')' | ',')
+            })
+            .unwrap_or(rest.len());
+        let Some(url) = web_url(&format!("https://{}", &rest[..end])) else {
+            continue;
+        };
+        if let Some(feed) = media_show_feed(&url) {
+            found.push(feed);
+        }
+        if found.len() >= 4 {
+            break;
+        }
+    }
+    found
+}
+
+/// The show feed a media URL belongs to, for the hosts whose media path names its show.
+fn media_show_feed(media: &Url) -> Option<Url> {
+    let parts: Vec<&str> = media
+        .path_segments()
+        .map(|segments| segments.filter(|part| !part.is_empty()).collect())
+        .unwrap_or_default();
+    let after = |marker: &str| {
+        parts
+            .iter()
+            .position(|part| *part == marker)
+            .and_then(|at| parts.get(at + 1))
+            .copied()
+            .filter(|show| !show.is_empty())
+    };
+    let target = if host(media) == "acast.com" || subdomain(media, "acast.com").is_some() {
+        // `…/p/<network>/s/<show>/e/<episode>/media.mp3`
+        format!("https://feeds.acast.com/public/shows/{}", after("s")?)
+    } else if subdomain(media, "libsyn.com").is_some_and(|name| name == "traffic") {
+        // `traffic.libsyn.com/<show>/<episode>.mp3`, with an optional `secure` in front.
+        let show = parts
+            .iter()
+            .find(|part| **part != "secure")
+            .filter(|show| !show.contains('.'))?;
+        format!("https://{show}.libsyn.com/rss")
+    } else if host(media) == "buzzsprout.com" || subdomain(media, "buzzsprout.com").is_some() {
+        // `…/<show id>/episodes/<episode>.mp3`
+        let id = parts.first().filter(|id| numeric(id))?;
+        format!("https://feeds.buzzsprout.com/{id}.rss")
+    } else {
+        return None;
+    };
+    web_url(&target)
 }
 
 fn collect_feeds(value: &Value, result: &mut Vec<Url>, depth: usize) {
@@ -542,6 +604,7 @@ pub fn deezer_items(page: &str, url: &Url) -> Result<(SourceMeta, Vec<RawItem>)>
             .map(crate::content::html_to_text),
         site_url: Some(format!("https://www.deezer.com/show/{id}")),
         language: None,
+        extracted: false,
     };
     // The label publishes the show; the catalog may credit a different host, so it is only a hint.
     let publisher = show
@@ -679,6 +742,7 @@ pub fn spotify_items(page: &str, url: &Url) -> Result<(SourceMeta, Vec<RawItem>)
         title: show.get("name").and_then(Value::as_str).map(str::to_string),
         site_url: Some(format!("https://open.spotify.com/show/{id}")),
         language: None,
+        extracted: false,
     };
     let episodes = show
         .pointer("/pages/items")
@@ -783,6 +847,45 @@ pub fn spotify_items(page: &str, url: &Url) -> Result<(SourceMeta, Vec<RawItem>)
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_players_media_url_names_the_show_its_feed_belongs_to() {
+        // deezer.com/fr/show/8153 advertises no feed; its player embeds the Acast media URL.
+        let page = r#"<script>{"MD5_ORIGIN":"x","SOURCES":["https://acast.com/p/acast/s/le-rdv-tech/e/68cf/media.mp3"]}</script>"#;
+        let url = Url::parse("https://www.deezer.com/fr/show/8153").unwrap();
+        assert!(
+            feed_links(page, &url)
+                .iter()
+                .any(|link| link.as_str() == "https://feeds.acast.com/public/shows/le-rdv-tech"),
+            "{:?}",
+            feed_links(page, &url)
+        );
+        // The other hosts whose media path names its show.
+        let shapes = [
+            (
+                "https://traffic.libsyn.com/secure/thisweek/episode-9.mp3",
+                "https://thisweek.libsyn.com/rss",
+            ),
+            (
+                "https://www.buzzsprout.com/1234/episodes/99-a-title.mp3",
+                "https://feeds.buzzsprout.com/1234.rss",
+            ),
+        ];
+        for (media, feed) in shapes {
+            assert_eq!(
+                media_show_feed(&Url::parse(media).unwrap())
+                    .as_ref()
+                    .map(Url::as_str),
+                Some(feed),
+                "{media}"
+            );
+        }
+        // A media URL on a host that says nothing about the rest of the show stays unread.
+        assert!(
+            media_show_feed(&Url::parse("https://cdn.example/audio/episode-9.mp3").unwrap())
+                .is_none()
+        );
+    }
     use super::*;
     use url::Url;
 

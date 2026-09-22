@@ -313,18 +313,53 @@ async fn discovery_ladder(
         return Ok(discovered);
     }
 
-    match crate::sources::html::extract(&page, &body.final_url) {
+    let extracted = crate::sources::html::extract(&page, &body.final_url);
+    // A listing that is only the page it came from is not a listing: a single-page app answers
+    // every path with its own shell, and accepting that hides a feed the site still publishes.
+    // The conventional endpoints are worth the requests before believing it, and after them the
+    // scrape is still better than nothing.
+    let thin = match &extracted {
+        Ok((meta, items)) => is_thin_listing(items, meta, &body.final_url),
+        Err(_) => true,
+    };
+    if thin {
+        let configured = source.engine.url();
+        let candidates = dedupe(
+            common_feed_urls(&body.final_url)
+                .into_iter()
+                .chain(configured_feed_urls(configured, &body.final_url))
+                .collect(),
+        );
+        if let Some(discovered) = probe_feeds(candidates, &body.final_url, source, ctx, false).await
+        {
+            return Ok(discovered);
+        }
+    }
+    match extracted {
         Ok((meta, items)) => Ok(Fetch::Changed {
             validators,
             meta,
             items,
         }),
-        Err(html_err) => {
-            if let Some(discovered) = discover_common(&body.final_url, source, ctx).await {
-                return Ok(discovered);
-            }
-            Err(html_err).context("discovering a feed or article listing")
+        Err(html_err) => Err(html_err).context("discovering a feed or article listing"),
+    }
+}
+
+/// One entry that is the page itself, or that repeats the page's own title, is the page rather
+/// than a listing of what it publishes.
+fn is_thin_listing(items: &[RawItem], meta: &crate::sources::SourceMeta, page: &Url) -> bool {
+    match items {
+        [] => true,
+        [only] => {
+            let same = |url: &str| url.trim_end_matches('/').to_owned();
+            let same_link = same(&only.link) == same(page.as_str());
+            same_link
+                || meta
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.trim() == only.title.trim())
         }
+        _ => false,
     }
 }
 
@@ -456,6 +491,21 @@ fn section_feed_urls(page: &Url) -> Vec<Url> {
     dedupe(urls)
 }
 
+/// Conventional endpoints that are a directory rather than a file: `feed/rss` (Slack) and
+/// `rss/all.rss` (AWS status) answer nothing at any flat path.
+const NESTED_FEED_PATHS: [&str; 5] = [
+    "feed/rss",
+    "feed/atom",
+    "feed/index.xml",
+    "rss/all.rss",
+    "rss/index.xml",
+];
+
+/// Sections a site keeps its writing under when the root publishes nothing: `geohot.github.io`
+/// answers 404 everywhere except `/blog/feed.xml`.
+const FEED_SECTIONS: [&str; 3] = ["blog", "posts", "news"];
+const SECTION_FEED_NAMES: [&str; 3] = ["index.xml", "feed.xml", "rss.xml"];
+
 fn common_feed_urls(page: &Url) -> Vec<Url> {
     let mut urls = section_feed_urls(page);
     if let Ok(mut root) = page.join("/") {
@@ -463,8 +513,47 @@ fn common_feed_urls(page: &Url) -> Vec<Url> {
             root.set_path(&format!("/{name}"));
             urls.push(root.clone());
         }
+        for name in NESTED_FEED_PATHS {
+            root.set_path(&format!("/{name}"));
+            urls.push(root.clone());
+        }
+    }
+    let base = as_directory(page);
+    for name in NESTED_FEED_PATHS {
+        if let Ok(url) = base.join(name) {
+            urls.push(url);
+        }
+    }
+    // Only a URL that names no section of its own has sections left to guess, and only once
+    // every flat and nested candidate above has already failed.
+    if is_origin_root(page)
+        && let Ok(mut root) = page.join("/")
+    {
+        for section in FEED_SECTIONS {
+            for name in SECTION_FEED_NAMES {
+                root.set_path(&format!("/{section}/{name}"));
+                urls.push(root.clone());
+            }
+        }
     }
     dedupe(urls)
+}
+
+fn is_origin_root(page: &Url) -> bool {
+    page.path().trim_matches('/').is_empty()
+}
+
+/// The configured URL's own candidates, for a response that redirected somewhere else.
+/// `status.aws.amazon.com` redirects to a status app that advertises nothing, while the feed
+/// never moved from the origin the subscription names.
+fn configured_feed_urls(configured: Option<&Url>, final_url: &Url) -> Vec<Url> {
+    let Some(configured) = configured else {
+        return Vec::new();
+    };
+    if configured.origin() == final_url.origin() {
+        return Vec::new();
+    }
+    common_feed_urls(configured)
 }
 
 /// A listing URL names a section, so `…/blog` and `…/blog/` must resolve the same candidates.
@@ -591,6 +680,7 @@ pub fn convert(feed: &Feed, feed_url: &Url) -> (SourceMeta, Vec<RawItem>) {
         // RSS `<language>`, the Atom `xml:lang` of `<feed>`, or JSON Feed `language`; entries
         // may carry their own `xml:lang`, which a per-item value could use later.
         language: feed.language.as_deref().and_then(super::normalize_language),
+        extracted: false,
     };
     let items = feed
         .entries
@@ -1521,6 +1611,16 @@ Second paragraph.</media:description></media:group>
             "https://x.test/atom.xml",
             "https://x.test/feed.atom",
             "https://x.test/index.xml",
+            "https://x.test/feed/rss",
+            "https://x.test/feed/atom",
+            "https://x.test/feed/index.xml",
+            "https://x.test/rss/all.rss",
+            "https://x.test/rss/index.xml",
+            "https://x.test/blog/feed/rss",
+            "https://x.test/blog/feed/atom",
+            "https://x.test/blog/feed/index.xml",
+            "https://x.test/blog/rss/all.rss",
+            "https://x.test/blog/rss/index.xml",
         ];
         for page in ["https://x.test/blog/", "https://x.test/blog"] {
             let urls = common_feed_urls(&Url::parse(page).unwrap());
@@ -1530,7 +1630,8 @@ Second paragraph.</media:description></media:group>
                 "{page}"
             );
         }
-        // At the root the section and site-wide guesses coincide: each endpoint is probed once.
+        // At the root the section and site-wide guesses coincide: each endpoint is probed once,
+        // and the sections a site keeps its writing under are the last thing tried.
         let root = common_feed_urls(&Url::parse("https://x.test/").unwrap());
         assert_eq!(
             root.iter().map(Url::as_str).collect::<Vec<_>>(),
@@ -1542,8 +1643,39 @@ Second paragraph.</media:description></media:group>
                 "https://x.test/index.xml",
                 "https://x.test/feed",
                 "https://x.test/rss",
+                "https://x.test/feed/rss",
+                "https://x.test/feed/atom",
+                "https://x.test/feed/index.xml",
+                "https://x.test/rss/all.rss",
+                "https://x.test/rss/index.xml",
+                "https://x.test/blog/index.xml",
+                "https://x.test/blog/feed.xml",
+                "https://x.test/blog/rss.xml",
+                "https://x.test/posts/index.xml",
+                "https://x.test/posts/feed.xml",
+                "https://x.test/posts/rss.xml",
+                "https://x.test/news/index.xml",
+                "https://x.test/news/feed.xml",
+                "https://x.test/news/rss.xml",
             ]
         );
+        // A URL that names a section already says where to look; guessing others would be noise.
+        assert!(
+            !common_feed_urls(&Url::parse("https://x.test/blog/").unwrap())
+                .iter()
+                .any(|url| url.path().starts_with("/posts/"))
+        );
+        // A redirect away from the subscribed origin leaves that origin's endpoints to try.
+        let configured = Url::parse("https://status.x.test/").unwrap();
+        let moved = Url::parse("https://health.x.test/health/status").unwrap();
+        assert!(
+            configured_feed_urls(Some(&configured), &moved)
+                .iter()
+                .any(|url| url.as_str() == "https://status.x.test/rss/all.rss")
+        );
+        // A redirect inside the same origin has nothing extra to offer.
+        let same = Url::parse("https://status.x.test/current").unwrap();
+        assert!(configured_feed_urls(Some(&configured), &same).is_empty());
     }
 
     #[test]
@@ -1789,6 +1921,96 @@ Second paragraph.</media:description></media:group>
             )
             .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn a_single_page_app_shell_never_passes_for_the_feed_it_hides() {
+        let server = MockServer::start_async().await;
+        // cursor.com: every path answers with the same shell, so card extraction reports one
+        // "article" that is the page itself.
+        let shell = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/");
+                then.status(200).body(
+                    "<html><head><title>Ambitious Software</title></head><body>\
+                     <a href=\"/\">Ambitious Software</a></body></html>",
+                );
+            })
+            .await;
+        let feed = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/atom.xml");
+                then.status(200).body(RSS);
+            })
+            .await;
+        let configured = Url::parse(&server.url("/")).unwrap();
+        let source = source(configured.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        // The shell already resolved once, so nothing is remembered as a first discovery.
+        let state = crate::store::SourceState {
+            identity: source.identity.clone(),
+            resolved_url: Some(server.url("/")),
+            ..Default::default()
+        };
+        let ctx = Context {
+            client: &client,
+            state: &state,
+            cache_dir: cache.path(),
+        };
+        let Fetch::Changed {
+            validators, items, ..
+        } = fetch(&configured, &source, &ctx).await.unwrap()
+        else {
+            panic!("expected the feed behind the shell");
+        };
+        assert_eq!(items.len(), 2, "the feed's entries, not the shell");
+        assert_eq!(
+            validators.resolved_url.as_deref(),
+            Some(server.url("/atom.xml").as_str())
+        );
+        shell.assert_calls_async(1).await;
+        feed.assert_calls_async(1).await;
+    }
+
+    #[test]
+    fn a_listing_of_the_page_itself_is_not_a_listing() {
+        let page = Url::parse("https://x.test/").unwrap();
+        let meta = crate::sources::SourceMeta {
+            title: Some("Ambitious Software".into()),
+            ..Default::default()
+        };
+        let entry = |link: &str, title: &str| RawItem {
+            link: link.into(),
+            title: title.into(),
+            ..Default::default()
+        };
+        // The page linking to itself, and an entry repeating the page's own title.
+        assert!(is_thin_listing(
+            &[entry("https://x.test/", "Home")],
+            &meta,
+            &page
+        ));
+        assert!(is_thin_listing(
+            &[entry("https://x.test/x", "Ambitious Software")],
+            &meta,
+            &page
+        ));
+        assert!(is_thin_listing(&[], &meta, &page));
+        // One real article is a listing, and so is a page that links elsewhere.
+        assert!(!is_thin_listing(
+            &[entry("https://x.test/posts/one", "A first post")],
+            &meta,
+            &page
+        ));
+        assert!(!is_thin_listing(
+            &[
+                entry("https://x.test/", "Home"),
+                entry("https://x.test/posts/one", "A first post"),
+            ],
+            &meta,
+            &page
+        ));
     }
 
     #[tokio::test]

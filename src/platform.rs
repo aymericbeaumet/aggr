@@ -10,6 +10,10 @@
 
 use url::Url;
 
+/// Front-matter extra holding the profile URL a page named for its own publisher, captured when
+/// the article's URL does not name one itself.
+pub const PUBLISHER_KEY: &str = "publisher_url";
+
 /// A host shared between publishers, and how to find the account on it.
 struct Platform {
     host: &'static str,

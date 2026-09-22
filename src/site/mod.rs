@@ -15,7 +15,7 @@ mod output_dir;
 pub mod outputs;
 mod page;
 mod pagefind;
-mod parallel;
+pub(crate) mod parallel;
 mod related;
 pub mod render;
 mod source_index;
@@ -336,7 +336,15 @@ pub fn build(
     project_root: &Path,
     info: &BuildInfo,
 ) -> Result<Summary> {
-    let limit = config.site.build_max_bytes;
+    // `build_max_bytes` is what a host will accept, and a development snapshot is never published:
+    // it is served from a local cache. Measuring it there costs a second complete build whenever the
+    // archive is larger than the limit, which is the common case for an instance worth the wait.
+    // `aggr dev --release` is how the published shape is exercised locally, and it still applies.
+    let limit = if info.development && !info.release {
+        u64::MAX
+    } else {
+        config.site.build_max_bytes
+    };
     let mut attempt = budget::Attempt::new(limit);
     loop {
         let mut media_budget = budget::MediaBudget::new(attempt.allowance());
@@ -1276,7 +1284,7 @@ mod tests {
         let article =
             std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
         assert!(
-            article.contains("href=\"../../../?q=source%3A%22hnrss.org%22\""),
+            article.contains("href=\"../../../sources/hnrss.org/\""),
             "{article}"
         );
         assert!(article.contains("title=\"Hacker News: Best\">hnrss.org</a>"));
@@ -1298,7 +1306,7 @@ mod tests {
                     .unwrap()
                     .value()
                     .attr("href"),
-                Some(format!("{root}?q=source%3A%22hnrss.org%22").as_str())
+                Some(format!("{root}sources/hnrss.org/").as_str())
             );
             assert_eq!(
                 source_link.text().collect::<String>().trim(),
@@ -2109,14 +2117,14 @@ url = "https://duckdb.org/news.xml"
                 .value()
                 .attr("href")
                 .unwrap()
-                .contains("source%3A%22duckdb.org%22")
+                .contains("sources/duckdb.org/")
         );
         assert!(
             links[1]
                 .value()
                 .attr("href")
                 .unwrap()
-                .contains("source%3A%22lobste.rs%22")
+                .contains("sources/lobste.rs/")
         );
         assert!(
             links
@@ -2164,7 +2172,7 @@ url = "https://duckdb.org/news.xml"
             .next()
             .unwrap();
         let publisher_href = publisher_link.value().attr("href").unwrap();
-        assert!(publisher_href.contains("source%3A%22maharship.com%22"));
+        assert!(publisher_href.contains("sources/maharship.com/"));
         assert!(!publisher_href.contains("publisher-"));
         assert_eq!(publisher["value"], "maharship.com");
         let browse = std::fs::read_to_string(out.join("sources/index.html")).unwrap();
@@ -2460,6 +2468,29 @@ category = "Science"
     }
 
     #[test]
+    fn a_development_snapshot_keeps_every_rendition_and_a_release_build_fits_its_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut config, sources, store) = fixture(dir.path(), 3, "");
+        let out = dir.path().join("out");
+        // A limit no site can meet: a publishing build must still refuse or shed media for it.
+        config.site.build_max_bytes = 1;
+
+        let mut development = info(out.clone());
+        development.development = true;
+        development.release = false;
+        // The snapshot is served locally, so the hosting limit is not its business.
+        build(&config, &sources, &store, dir.path(), &development).unwrap();
+
+        let mut published = info(out.clone());
+        published.development = true;
+        published.release = true;
+        assert!(
+            build(&config, &sources, &store, dir.path(), &published).is_err(),
+            "a release build measures the limit it will be published under"
+        );
+    }
+
+    #[test]
     fn update_manifest_distinguishes_content_from_application_releases_without_pwa() {
         let dir = tempfile::tempdir().unwrap();
         let (mut config, mut sources, store) = fixture(dir.path(), 1, "pwa = false\n");
@@ -2473,6 +2504,15 @@ category = "Science"
         assert_eq!(
             original["entries"],
             serde_json::json!(["items/blog/2026-09-01-post-0/"])
+        );
+        // A page carries the version it was built from, so it can tell when this manifest moves.
+        let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(
+            feed.contains(&format!(
+                "content: {}",
+                serde_json::to_string(&original["content_version"]).unwrap()
+            )),
+            "{feed}"
         );
 
         build_info.now += Duration::minutes(1);

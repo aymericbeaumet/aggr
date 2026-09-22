@@ -97,8 +97,18 @@ impl Report {
     }
 }
 
-/// Articles converted or written at once per process: both stages are CPU-bound.
-const PREPARATION_SLOTS: usize = 2;
+/// Articles converted or written at once per process. Both stages are CPU-bound and run on the
+/// blocking pool, so the bound is the parallelism the machine has rather than a fixed pair of
+/// slots. `sync` and `build` own the machine while they fetch, and a floor of two keeps the
+/// pipeline overlapping on a single-core runner. `dev` fetches in the background while it
+/// rebuilds, so it takes half and leaves the rest to the build the reader is waiting for.
+fn preparation_slots(policy: StatePolicy) -> usize {
+    let workers = crate::site::parallel::workers();
+    match policy {
+        StatePolicy::PersistentBranch => workers.max(2),
+        StatePolicy::DevCache => workers.div_ceil(2).max(2),
+    }
+}
 /// Recording-metadata probes in flight per process: network-bound, bounded for politeness.
 const RECORDING_PROBE_SLOTS: usize = 8;
 
@@ -167,8 +177,8 @@ pub async fn run_with_cache(
         html: project.config.store.html,
         html_max_bytes: project.config.store.html_max_bytes,
         article_concurrency: project.config.fetch.article_concurrency,
-        preparation_limit: Arc::new(Semaphore::new(PREPARATION_SLOTS)),
-        persist_limit: Arc::new(Semaphore::new(PREPARATION_SLOTS)),
+        preparation_limit: Arc::new(Semaphore::new(preparation_slots(state_policy))),
+        persist_limit: Arc::new(Semaphore::new(preparation_slots(state_policy))),
         recording_limit: Arc::new(Semaphore::new(RECORDING_PROBE_SLOTS)),
         max_items_per_source: project.config.fetch.max_items_per_source,
         preview_fetcher: Arc::new(preview::Fetcher::new()?),
@@ -838,6 +848,16 @@ fn is_binary_link(url: &url::Url) -> bool {
         })
 }
 
+/// The account that published a page whose own URL does not name one. A YouTube watch URL is the
+/// only such link aggr archives: every other platform puts the account in the path, where
+/// [`crate::platform`] already reads it without asking the page.
+fn page_publisher(page: &str, url: &url::Url) -> Option<String> {
+    if crate::platform::account_path(url).is_some() || !sources::youtube::is_video_url(url) {
+        return None;
+    }
+    sources::youtube::owner_profile(page, url)
+}
+
 fn recording_duration(
     page: &str,
     document: &scraper::Html,
@@ -866,6 +886,8 @@ struct PageAnalysis {
     /// The decoded page, handed on to extraction.
     page: String,
     duration: Option<u64>,
+    /// The account that published the page, when its URL does not already name one.
+    publisher: Option<String>,
     interactive: bool,
     candidates: preview::HtmlCandidateGroups,
     /// ActivityPub representations worth a discovery request; empty for ordinary articles.
@@ -885,17 +907,14 @@ fn analyze_page(
     // candidate scan expects; the other checks read elements that pass leaves untouched.
     let normalized = content::normalize_image_sources(&page);
     let document = scraper::Html::parse_document(&normalized);
-    let duration = recording_duration(
-        &page,
-        &document,
-        if sources::youtube::is_video_url(requested) {
-            requested
-        } else {
-            page_url
-        },
-        audio,
-    );
-    let interactive = crate::site::interactive::mentions_canvas(&page)
+    let media_url = if sources::youtube::is_video_url(requested) {
+        requested
+    } else {
+        page_url
+    };
+    let duration = recording_duration(&page, &document, media_url, audio);
+    let publisher = page_publisher(&page, media_url);
+    let interactive = crate::site::interactive::mentions_interactive_markup(&page)
         && crate::site::interactive::is_interactive_document_in(&document);
     let candidates = if wants_candidates {
         preview::html_candidate_groups_in(&document, page_url)
@@ -910,6 +929,7 @@ fn analyze_page(
     PageAnalysis {
         page,
         duration,
+        publisher,
         interactive,
         candidates,
         activity_alternates,
@@ -1045,6 +1065,7 @@ async fn heavy_content(
     let mut page_candidates = preview::HtmlCandidateGroups::default();
     let mut interactive = false;
     let mut duration = None;
+    let mut publisher = None;
     let mut thread_link = None;
     let mut subscription_required = false;
     let mut archive_provenance = None;
@@ -1120,6 +1141,7 @@ async fn heavy_content(
         .await
         .context("analysing the original page")?;
         duration = analysis.duration;
+        publisher = analysis.publisher;
         interactive = analysis.interactive;
         if wants_candidates {
             page_candidates = analysis.candidates;
@@ -1247,6 +1269,11 @@ async fn heavy_content(
                     .extra
                     .insert("duration_seconds".into(), seconds.into());
             }
+            if let Some(profile) = publisher.clone() {
+                enriched
+                    .extra
+                    .insert(crate::platform::PUBLISHER_KEY.into(), profile.into());
+            }
             if interactive {
                 enriched
                     .extra
@@ -1283,6 +1310,11 @@ async fn heavy_content(
                 enriched
                     .extra
                     .insert("duration_seconds".into(), seconds.into());
+            }
+            if let Some(profile) = publisher.clone() {
+                enriched
+                    .extra
+                    .insert(crate::platform::PUBLISHER_KEY.into(), profile.into());
             }
             if interactive {
                 enriched
@@ -1324,6 +1356,11 @@ async fn heavy_content(
                 enriched
                     .extra
                     .insert("duration_seconds".into(), seconds.into());
+            }
+            if let Some(profile) = publisher.clone() {
+                enriched
+                    .extra
+                    .insert(crate::platform::PUBLISHER_KEY.into(), profile.into());
             }
             if interactive {
                 enriched
