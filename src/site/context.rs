@@ -534,8 +534,6 @@ pub(super) fn profile_url(value: &str) -> Option<url::Url> {
 
 /// How a source reads: its domain, plus the account path only where one host is shared between
 /// publishers. See [`crate::platform`] for which hosts those are.
-/// How a source reads: its domain, plus the account path only where one host is shared between
-/// publishers. See [`crate::platform`] for which hosts those are.
 fn url_label(url: &url::Url) -> String {
     crate::platform::canonical_name(url).unwrap_or_else(|| source_host(url).to_string())
 }

@@ -44,6 +44,18 @@ fn source_host(source: &SourceCtx) -> Option<String> {
         .find_map(|url| publisher_host(&url))
 }
 
+/// The label an item's publisher reads by. Grouping is by host, but the canonical name a source's
+/// own metadata resolved to keeps the account path where one host carries many publishers
+/// (`youtube.com/@channel`) and the port where one host serves many ports. A label naming any
+/// other host describes a different publisher than the article's, so the host stands alone.
+fn publisher_label(resolved: &str, host: &str) -> String {
+    match resolved.strip_prefix(host) {
+        Some("") => resolved.to_string(),
+        Some(rest) if rest.starts_with('/') || rest.starts_with(':') => resolved.to_string(),
+        _ => host.to_string(),
+    }
+}
+
 fn membership(source: &SourceCtx) -> SourceMembershipCtx {
     SourceMembershipCtx {
         query_value: source.slug.clone(),
@@ -179,7 +191,7 @@ pub(super) fn resolve(
             && let Some(host) = publisher_host(&root)
         {
             item.publisher_source = host.clone();
-            item.source_display = host.clone();
+            item.source_display = publisher_label(&item.source_display, &host);
             item.source_title = directory
                 .get(host.as_str())
                 .map(|source| source.name.clone())
@@ -315,6 +327,64 @@ mod tests {
                 .count,
             3
         );
+    }
+
+    #[test]
+    fn platform_publishers_keep_their_account_label_while_grouping_by_host() {
+        let channel = SourceCtx {
+            query_value: "youtube-com-veritasium".into(),
+            slug: "youtube-com-veritasium".into(),
+            name: "Veritasium".into(),
+            site_url: Some("https://www.youtube.com/channel/UC123".into()),
+            feed_url: Some("https://www.youtube.com/feeds/videos.xml?channel_id=UC123".into()),
+            ..source("https://www.youtube.com/@veritasium")
+        };
+        let mut items = vec![article(
+            "youtube-com-veritasium",
+            "enigma",
+            "https://www.youtube.com/watch?v=abc",
+        )];
+        items[0].set_source(&channel);
+        let mut sources = vec![channel];
+        resolve(&mut items, &mut sources, &[], &[]);
+
+        let item = &items[0];
+        assert_eq!(item.source_display, "youtube.com/@veritasium");
+        assert_eq!(item.metadata.source_display, "youtube.com/@veritasium");
+        assert_eq!(item.source_title, "Veritasium");
+        assert!(!item.is_aggregated);
+        // The account names the publisher; the collection it joins is still the whole host.
+        assert_eq!(item.publisher_source, "youtube.com");
+        assert_eq!(item.metadata.source_slug, "youtube.com");
+        assert_eq!(item.source_url, "https://youtube.com/");
+        assert!(sources.iter().any(|source| source.slug == "youtube.com"));
+    }
+
+    #[test]
+    fn publisher_labels_keep_only_an_account_of_the_article_host() {
+        for (resolved, host, expected) in [
+            (
+                "youtube.com/@veritasium",
+                "youtube.com",
+                "youtube.com/@veritasium",
+            ),
+            (
+                "example.test:8443/@alice",
+                "example.test",
+                "example.test:8443/@alice",
+            ),
+            ("example.com", "example.com", "example.com"),
+            // The feed names a platform the article does not come from.
+            (
+                "spotify.com/underscore",
+                "publisher.example",
+                "publisher.example",
+            ),
+            // A different host that merely starts with the same letters.
+            ("youtube.community", "youtube.com", "youtube.com"),
+        ] {
+            assert_eq!(publisher_label(resolved, host), expected, "{resolved}");
+        }
     }
 
     #[test]

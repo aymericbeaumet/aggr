@@ -182,7 +182,9 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   missing content already absent from stored HTML requires a fresh extraction.
   Notes the prose cites by number are content however link-dense they are; sibling note blocks
   with ids (not only `<li>` lists) become Markdown footnotes, and an unreferenced or empty note
-  leaves its reference an ordinary link. A page whose files are line tables (GitHub gists) is
+  leaves its reference an ordinary link. A note's links back to the places citing it are
+  navigation the footnote already carries, whether labelled by return glyph or by number
+  (`↑ 1.00 1.01 …`); links pointing anywhere else are what the note says. A page whose files are line tables (GitHub gists) is
   archived as those files, never as the discussion under them.
   Reject positively identified subscription offers as article bodies. Public archive recovery requires
   matching original URL, title, and readable content; keep requests bounded and backed off. Preserve
@@ -199,7 +201,8 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   name: its hostname alone, plus the account path only on the platform hosts listed in
   `src/platform.rs`, where one domain is shared between unrelated publishers. `src/platform.rs` is
   the only place that knows host aliases, account path shapes, or which hosts use opaque
-  identifiers; never re-derive any of that elsewhere. A derived source slug
+  identifiers; never re-derive any of that elsewhere. Grouping an item under its publisher host
+  must not overwrite that label with the bare host. A derived source slug
   is that same canonical name, disambiguated by the differing feed path when two sources collide. Exact source IDs win manual alias collisions. See [client development](docs/client.md).
   Public source IDs and filter values use normalized hostnames only; group same-host subscriptions
   while preserving their archived IDs, article paths, and individual OPML endpoints. Display names

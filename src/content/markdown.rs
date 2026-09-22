@@ -19,6 +19,8 @@ const LAYOUT_INLINE_ELEMENTS: &[&str] = &["a", "label", "span", "time", "small"]
 /// Text-level elements a layout wrapper can follow with no space of its own
 /// (`<strong>libheif</strong><span>Image decoder</span>` in a CSS-laid-out list).
 const TEXT_INLINE_ELEMENTS: &[&str] = &["strong", "b", "em", "i", "code"];
+/// Punctuation that belongs to the words before it, never to the wrapper that carries it.
+const SENTENCE_PUNCTUATION: [char; 8] = ['.', ',', ';', ':', '!', '?', ')', ']'];
 
 const FOOTNOTE_REF_START: char = '\u{e000}';
 const FOOTNOTE_REF_END: char = '\u{e001}';
@@ -1308,6 +1310,7 @@ fn normalize_document_footnotes(html: &str) -> NormalizedHtml {
     let document = format!("{}{}", &html[..notes_start], &html[notes_end..]);
     let mut out = String::with_capacity(document.len());
     let mut used = vec![false; notes.len()];
+    let mut citations = std::collections::BTreeSet::new();
     let mut position = 0;
     while let Some(tag_start) = document[position..].find('<').map(|at| position + at) {
         out.push_str(&document[position..tag_start]);
@@ -1328,6 +1331,7 @@ fn normalize_document_footnotes(html: &str) -> NormalizedHtml {
         match reference {
             Some((index, end)) => {
                 used[index] = true;
+                collect_ids(&document[tag_start..end], &mut citations);
                 out.push(FOOTNOTE_REF_START);
                 out.push_str(&(index + 1).to_string());
                 out.push(FOOTNOTE_REF_END);
@@ -1350,7 +1354,124 @@ fn normalize_document_footnotes(html: &str) -> NormalizedHtml {
     }
     NormalizedHtml {
         html: out,
-        footnotes: notes.into_iter().map(|(_, note)| note).collect(),
+        footnotes: notes
+            .into_iter()
+            .map(|(_, note)| strip_citation_backlinks(&note, &citations))
+            .collect(),
+    }
+}
+
+/// Every `id` an element range carries, so a note can tell the links that point back at the
+/// places citing it from the links that are part of what it says.
+fn collect_ids(html: &str, ids: &mut std::collections::BTreeSet<String>) {
+    let mut position = 0;
+    while let Some(tag_start) = html[position..].find('<').map(|at| position + at) {
+        let Some(tag) = parse_tag(&html[tag_start..]) else {
+            position = tag_start + 1;
+            continue;
+        };
+        let Some(tag_len) = tag.end else {
+            break;
+        };
+        if !tag.closing
+            && let Some(id) = attribute_value(&html[tag_start..tag_start + tag_len], "id")
+            && !id.is_empty()
+        {
+            ids.insert(id.to_string());
+        }
+        position = tag_start + tag_len;
+    }
+}
+
+/// A note cited from several places keeps one link back to each of them, labelled by number
+/// (MediaWiki's `↑ 1.00 1.01 …`) rather than by the return glyph [`strip_backreferences`] knows.
+/// The Markdown footnote carries every reference already, so the whole run is navigation: drop
+/// the links that point at a citation, then the glyph that introduced them.
+fn strip_citation_backlinks(note: &str, citations: &std::collections::BTreeSet<String>) -> String {
+    if citations.is_empty() {
+        return note.to_string();
+    }
+    let mut out = String::with_capacity(note.len());
+    let mut stripped = false;
+    let mut position = 0;
+    while let Some(tag_start) = note[position..].find('<').map(|at| position + at) {
+        out.push_str(&note[position..tag_start]);
+        let Some(tag) = parse_tag(&note[tag_start..]) else {
+            out.push('<');
+            position = tag_start + 1;
+            continue;
+        };
+        let Some(tag_len) = tag.end else {
+            out.push_str(&note[tag_start..]);
+            position = note.len();
+            break;
+        };
+        let backlink = (!tag.closing && matches!(tag.name.as_str(), "a" | "sup"))
+            .then(|| citation_backlink(note, tag_start, &tag.name, citations))
+            .flatten();
+        match backlink {
+            Some(end) => {
+                stripped = true;
+                position = end;
+            }
+            None => {
+                out.push_str(&note[tag_start..tag_start + tag_len]);
+                position = tag_start + tag_len;
+            }
+        }
+    }
+    out.push_str(&note[position..]);
+    if stripped {
+        strip_leading_return_glyph(&out)
+    } else {
+        out
+    }
+}
+
+/// The end offset when the element at `start` is a link back to one of the citations, or the
+/// superscript holding nothing else.
+fn citation_backlink(
+    html: &str,
+    start: usize,
+    name: &str,
+    citations: &std::collections::BTreeSet<String>,
+) -> Option<usize> {
+    let (inner, closing, end) = element_bounds(html, start, name)?;
+    if name == "sup" {
+        let anchor = skip_html_whitespace(html, inner);
+        let anchor_end = citation_backlink(html, anchor, "a", citations)?;
+        return html[skip_html_whitespace(html, anchor_end)..closing]
+            .is_empty()
+            .then_some(end);
+    }
+    let target = attribute_value(&html[start..inner], "href")?.strip_prefix('#')?;
+    citations.contains(target).then_some(end)
+}
+
+/// The glyph that introduced a run of backlinks points at nothing once they are gone.
+fn strip_leading_return_glyph(note: &str) -> String {
+    let mut out = String::with_capacity(note.len());
+    let mut position = 0;
+    while let Some(tag_start) = note[position..].find('<').map(|at| position + at) {
+        let text = &note[position..tag_start];
+        if !text.trim().is_empty() {
+            return if is_return_glyph(text) {
+                format!("{out}{}", &note[tag_start..])
+            } else {
+                note.to_string()
+            };
+        }
+        out.push_str(text);
+        let Some(tag_len) = parse_tag(&note[tag_start..]).and_then(|tag| tag.end) else {
+            return note.to_string();
+        };
+        out.push_str(&note[tag_start..tag_start + tag_len]);
+        position = tag_start + tag_len;
+    }
+    if is_return_glyph(&note[position..]) {
+        out
+    } else {
+        note.to_string()
     }
 }
 
@@ -2000,6 +2121,11 @@ fn restore_inline_layout_boundaries(html: &str) -> String {
                 .next()
                 .is_some_and(char::is_whitespace);
         if boundary_already_spaced {
+            continue;
+        }
+        // A wrapper opening on punctuation continues the sentence it follows (a citation's
+        // `<i>ABC News</i><span>. Retrieved …</span>`); a separator would leave the mark adrift.
+        if html[next_content..].starts_with(SENTENCE_PUNCTUATION) {
             continue;
         }
         if tag.name == "a" && next.name == "a" {
@@ -2980,6 +3106,43 @@ List:       openbsd-tech
                 "[^2]: A brief list:\n\n",
                 "    Second paragraph.\n",
             )
+        );
+    }
+
+    #[test]
+    fn markdown_rebuilds_wiki_citations_cited_from_many_places() {
+        // consumerrights.wiki (MediaWiki): a note cited more than once keeps a numbered link back
+        // to every citation, led by a bare return glyph, where a note cited once keeps a glyph
+        // link. Both belong to the reference the Markdown footnote already carries.
+        let html = r##"<p>An arbitrator found Uber liable.<sup id="cite_ref-abc_1-0" class="reference"><a href="#cite_note-abc-1"><span class="cite-bracket">[</span>1<span class="cite-bracket">]</span></a></sup> He ordered it to pay $40 million.<sup id="cite_ref-abc_1-1" class="reference"><a href="#cite_note-abc-1"><span class="cite-bracket">[</span>1<span class="cite-bracket">]</span></a></sup><sup id="cite_ref-civ_2-0" class="reference"><a href="#cite_note-civ-2"><span class="cite-bracket">[</span>2<span class="cite-bracket">]</span></a></sup></p>
+<div class="references-list"><ol class="references">
+<li id="cite_note-abc-1"><span class="mw-cite-backlink">↑ <sup><a href="#cite_ref-abc_1-0">1.0</a></sup> <sup><a href="#cite_ref-abc_1-1">1.1</a></sup></span> <span class="reference-text">Najib, Shafiq (2026-09-17). <a rel="nofollow" class="external text" href="https://abcnews.com/GMA/News/uber-ordered-pay-40m/story?id=136480407">"Uber ordered to pay $40M"</a>. <i>ABC News</i><span class="reference-accessdate">. Retrieved <span class="nowrap">2026-09-18</span></span>.</span></li>
+<li id="cite_note-civ-2"><span class="mw-cite-backlink"><a href="#cite_ref-civ_2-0">↑</a></span> <span class="reference-text"><a rel="nofollow" class="external text" href="https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?lawCode=CIV">"California Civil Code section 2168"</a>. California Legislative Information.</span></li>
+</ol></div>"##;
+
+        assert_eq!(
+            to_markdown(html, Some(&base())),
+            concat!(
+                "An arbitrator found Uber liable.[^1] He ordered it to pay $40 million.[^1][^2]\n\n",
+                "[^1]: Najib, Shafiq (2026-09-17). [\"Uber ordered to pay $40M\"](https://abcnews.com/GMA/News/uber-ordered-pay-40m/story?id=136480407). *ABC News*. Retrieved 2026-09-18.\n\n",
+                "[^2]: [\"California Civil Code section 2168\"](https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?lawCode=CIV). California Legislative Information.\n",
+            )
+        );
+    }
+
+    #[test]
+    fn markdown_keeps_note_links_that_point_outside_the_citations() {
+        // A note linking to a section of the article is what the note says, not navigation.
+        let html = r##"<p>Body.<sup id="ref-1"><a href="#note-1">1</a></sup></p>
+<h2 id="background">Background</h2>
+<ol><li id="note-1">See <a href="#background">Background</a> above. <a href="#ref-1">↩</a></li></ol>"##;
+        let markdown = to_markdown(html, Some(&base()));
+        assert!(markdown.contains("Body.[^1]"), "{markdown}");
+        assert!(
+            markdown.contains(
+                "[^1]: See [Background](https://example.com/blog/post/#background) above."
+            ),
+            "{markdown}"
         );
     }
 
