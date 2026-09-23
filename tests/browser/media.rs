@@ -296,7 +296,7 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                         fixture.base
                     ))
                     .await?;
-                wait_for(client, &format!("typeof window.swup?.navigate !== 'function' && location.search === '?media={width}-{failed}' && !!document.querySelector('{selector}') && !!document.querySelector('article.item') && getComputedStyle(document.querySelector('.top')).position === 'sticky'")).await?;
+                wait_for(client, &format!("location.search === '?media={width}-{failed}' && !!document.querySelector('{selector}') && !!document.querySelector('article.item') && getComputedStyle(document.querySelector('.top')).position === 'sticky'")).await?;
                 let before_scripts = media_box(client, selector).await?;
                 if matches!(label, "PDF" | "lead image" | "archived image") {
                     let placeholder=client.execute("const frame=document.querySelector('.document-frame,.article-lead,.article-picture');const background=getComputedStyle(frame,'::before').backgroundImage;const matched=background.match(/url\\([\"']?(.*?)[\"']?\\)/);window.expectedPlaceholderHref=matched?.[1];return window.expectedPlaceholderHref||null",vec![]).await?;
@@ -428,7 +428,7 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                     .await?;
                 wait_for(
                 client,
-                &format!("location.search === '?provider={width}-{motion}' && document.querySelector('.video-player')?.dataset.videoProvider === '{provider}' && document.querySelector('[data-video-embed]')?.getAttribute('role') === 'button'"),
+                &format!("location.search === '?provider={width}-{motion}' && document.querySelector('.video-player')?.dataset.videoProvider === '{provider}' && document.querySelector('.video-player[data-video-bound=\"true\"] [data-video-embed]')"),
             )
             .await?;
                 client

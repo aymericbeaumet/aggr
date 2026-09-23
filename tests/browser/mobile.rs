@@ -70,13 +70,13 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
     client.goto(&fixture.base).await?;
     wait_for(
         client,
-        "document.documentElement.classList.contains('swup-enabled')",
+        "document.documentElement.dataset.aggrReady === 'true'",
     )
     .await?;
     let feed_page_size = client
         .execute(
             r#"
-      const list = document.querySelector('.rows');
+      const list = document.querySelector('.rows:not(.search-results)');
       const pager = document.querySelector('[data-feed-pager]');
       const original = list.querySelector('.row');
       while (list.querySelectorAll('.row').length < 50) {
@@ -284,33 +284,32 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
         "document.querySelector('.preview-image')?.naturalWidth === 240",
     )
     .await?;
+    // Tapping a row is an ordinary navigation the browser has already been told to prepare.
     assert_eq!(
         client
-            .execute("return window.swup.options.native", vec![])
+            .execute(
+                "return document.querySelector('.rows .row [data-row-open]').matches(JSON.parse(document.querySelector('script[type=speculationrules]').textContent).prerender[0].where.selector_matches)",
+                vec![]
+            )
             .await?,
-        false,
-        "touch navigation must not wait for full-page transition snapshots"
+        true,
+        "the row a tap opens is one the speculation rules name"
     );
-    wait_for(
-        client,
-        "window.swup.cache.has(document.querySelector('[data-row-open]').href)",
-    )
-    .await?;
     screenshot(client, "mobile-feed").await?;
     client
         .execute("document.querySelector('.brand').focus()", vec![])
         .await?;
+    // `/` is the search key wherever the reader is, including with the keyboard on the brand.
     key(client, "/").await?;
+    wait_for(client, "document.activeElement?.id === 'q'").await?;
     anyhow::ensure!(
         client
-            .execute(
-                "return document.activeElement?.classList.contains('brand')",
-                vec![]
-            )
+            .execute("return document.querySelector('#q').value === ''", vec![])
             .await?
             == true,
-        "slash must not open search"
+        "opening search leaves the field empty rather than typing the key into it"
     );
+    escape_search(client).await?;
     key(client, "\u{e009}k\u{e000}").await?;
     wait_for(
         client,
@@ -387,7 +386,7 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
         client.goto(&destination).await?;
         wait_for(
             client,
-            "document.documentElement.classList.contains('swup-enabled')",
+            "document.documentElement.dataset.aggrReady === 'true'",
         )
         .await?;
         let scopes = client.execute("const root=document.querySelector('[data-search-root]');return root ? {kind:root.dataset.scopeKind,value:root.dataset.scopeValue} : null", vec![]).await?;
@@ -423,7 +422,7 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
         client.goto(&format!("{}{route}", fixture.base)).await?;
         wait_for(
             client,
-            "document.documentElement.classList.contains('swup-enabled')",
+            "document.documentElement.dataset.aggrReady === 'true'",
         )
         .await?;
         let scrolling = client.execute(r#"
@@ -457,7 +456,7 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
-async fn mobile_tabs_and_instant_cached_navigation() -> Result<()> {
+async fn mobile_tabs_and_tab_navigation() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fixture = Fixture::with_base_path(false, "reader/")?;
     let client = browser_client().await?;
@@ -465,7 +464,7 @@ async fn mobile_tabs_and_instant_cached_navigation() -> Result<()> {
         for (width, height) in [(390, 844), (360, 780)] {
             emulate(&client, "Emulation.setDeviceMetricsOverride", json!({"width":width,"height":height,"deviceScaleFactor":1,"mobile":true})).await?;
             client.goto(&fixture.base).await?;
-            wait_for(&client, "!!window.swup && document.querySelector('.search-command')").await?;
+            wait_booted_with(&client, "!!document.querySelector('.search-command')").await?;
             let layout = client.execute(r#"
               const bar=document.querySelector('.mobile-tabs'),r=bar.getBoundingClientRect();
               const visible=element=>!!element.getClientRects().length&&getComputedStyle(element).visibility!=='hidden';
@@ -484,7 +483,9 @@ async fn mobile_tabs_and_instant_cached_navigation() -> Result<()> {
             anyhow::ensure!((layout["padding"].as_f64().unwrap()-layout["height"].as_f64().unwrap()-12.0).abs()<1.0,"content clears the measured bar with one compact gap: {layout}");
             screenshot(&client, &format!("mobile-tabs-{width}")).await?;
             client.execute("scrollTo(0,document.documentElement.scrollHeight);document.documentElement.style.setProperty('--mobile-safe-area','32px')",vec![]).await?;
-            wait_for(&client,"Math.abs(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bottom-nav-offset'))-document.querySelector('.mobile-tabs').getBoundingClientRect().height)<1").await?;
+            // The reserved space is a calc over the safe area, so it is only a number once it has
+            // been resolved against something that uses it.
+            wait_for(&client,"Math.abs(parseFloat(getComputedStyle(document.querySelector('.main')).paddingBottom)-document.querySelector('.mobile-tabs').getBoundingClientRect().height-12)<1").await?;
             let inset=client.execute(r#"
               const bar=document.querySelector('.mobile-tabs'),r=bar.getBoundingClientRect();
               return {bottom:r.bottom,viewport:innerHeight,height:r.height,padding:parseFloat(getComputedStyle(document.querySelector('.main')).paddingBottom),safe:parseFloat(getComputedStyle(bar).paddingBottom)};
@@ -503,45 +504,31 @@ async fn mobile_tabs_and_instant_cached_navigation() -> Result<()> {
               queueMicrotask(()=>done({hidden,restored:getComputedStyle(bar).visibility==='visible',stable:bar.getBoundingClientRect().height===height&&getComputedStyle(document.querySelector('.main')).paddingBottom===padding}));
             "#,vec![]).await?;
             anyhow::ensure!(keyboard==json!({"hidden":true,"restored":true,"stable":true}),"keyboard hides controls without shifting content or floating above keys: {keyboard}");
-            let reselected=client.execute_async(r#"
-              const done=arguments[arguments.length-1],bar=document.querySelector('.mobile-tabs'),feed=bar.querySelector('a[data-route=""]'),input=document.querySelector('#q');
-              input.focus();
-              document.querySelector('.main').style.minHeight='1600px';
-              scrollTo(0,200);
-              let visits=0;
-              const off=window.swup.hooks.on('visit:start',()=>visits++);
-              feed.click();
-              queueMicrotask(()=>{off();done({top:scrollY,editing:document.activeElement===input,visits,href:location.href,expected:feed.href});document.querySelector('.main').style.removeProperty('min-height')});
+            // Reselecting the tab of the page already open is how a reader gets back to the top
+            // of it, and it leaves the search field alone on the way.
+            client.execute("document.querySelector('#q').focus();document.querySelector('.main').style.minHeight='1600px';scrollTo(0,200)",vec![]).await?;
+            client.find(Locator::Css(r#".mobile-tabs a[data-route=""]"#)).await?.click().await?;
+            wait_booted_with(&client,"document.body.dataset.kind==='river' && scrollY===0").await?;
+            let reselected=client.execute(r#"
+              const feed=document.querySelector('.mobile-tabs a[data-route=""]');
+              document.querySelector('.main').style.removeProperty('min-height');
+              return {top:scrollY,editing:document.activeElement===document.querySelector('#q'),href:location.href,expected:feed.href,current:feed.getAttribute('aria-current')};
             "#,vec![]).await?;
-            anyhow::ensure!(reselected["top"]==0 && reselected["editing"]==false && reselected["visits"]==0 && reselected["href"]==reselected["expected"],"reselecting Feed returns to its top without opening search or navigating again: {reselected}");
+            anyhow::ensure!(reselected["top"]==0 && reselected["editing"]==false && reselected["href"]==reselected["expected"] && reselected["current"]=="page","reselecting Feed returns to its top without opening search: {reselected}");
             let tab_point=client.execute(r#"const r=document.querySelector('.mobile-tabs a[data-route="browse/"]').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}"#,vec![]).await?;
             let before_press=client.execute(r#"const tab=document.querySelector('.mobile-tabs a[data-route="browse/"]');const r=tab.getBoundingClientRect();return {background:getComputedStyle(tab).backgroundColor,top:r.top,height:r.height}"#,vec![]).await?;
             emulate(&client,"Input.dispatchMouseEvent",json!({"type":"mousePressed","button":"left","buttons":1,"clickCount":1,"x":tab_point["x"],"y":tab_point["y"]})).await?;
             let pressed=client.execute(r#"const tab=document.querySelector('.mobile-tabs a[data-route="browse/"]');const r=tab.getBoundingClientRect();return {background:getComputedStyle(tab).backgroundColor,top:r.top,height:r.height,transition:getComputedStyle(tab).transitionDuration,opacity:getComputedStyle(tab).opacity}"#,vec![]).await?;
             emulate(&client,"Input.dispatchMouseEvent",json!({"type":"mouseReleased","button":"left","buttons":0,"clickCount":1,"x":1,"y":1})).await?;
             anyhow::ensure!(pressed["background"]!=before_press["background"] && pressed["top"]==before_press["top"] && pressed["height"]==before_press["height"] && pressed["transition"]=="0s" && pressed["opacity"]=="1","tabs give immediate pressed feedback without fading labels or shifting layout: {pressed}");
-            let navigation=client.execute_async(r#"
-              const done=arguments[arguments.length-1];
-              (async()=>{
-                const until=async check=>{const start=performance.now();while(!check()){if(performance.now()-start>10000)throw Error('waiting for cached navigation');await new Promise(requestAnimationFrame)}};
-                let animationStarts=0;const durations=[];
-                const off=window.swup.hooks.on('animation:in:start',()=>animationStarts++);
-                for(const route of ['browse/','preferences/','']){
-                  const url=new URL(route,new URL(window.AGGR.base,location.href));
-                  await until(()=>!window.swup.navigating&&window.swup.cache.has(url.pathname));
-                  const started=performance.now();
-                  document.querySelector(`.mobile-tabs a[data-route="${route}"]`).click();
-                  await until(()=>!window.swup.navigating&&location.pathname===url.pathname&&document.querySelector('.mobile-tabs a[aria-current]')?.dataset.route===route);
-                  durations.push({route,ms:performance.now()-started});
-                  if(document.querySelectorAll('.mobile-tabs a[aria-current]').length!==1)throw Error('ambiguous active tab');
-                  if(route==='browse/' && !['categories','sources','tags'].every(kind=>document.querySelector('.browse-group-'+kind+' .browse-entry-link')))throw Error('Browse must expose every populated directory');
+            // Each tab is an ordinary link to its own page, and exactly one of them is current.
+            for route in ["browse/","preferences/",""] {
+                client.find(Locator::Css(&format!(".mobile-tabs a[data-route=\"{route}\"]"))).await?.click().await?;
+                wait_booted_with(&client,&format!("location.pathname===new URL('{route}',new URL(window.AGGR.base,location.href)).pathname && document.querySelectorAll('.mobile-tabs a[aria-current]').length===1 && document.querySelector('.mobile-tabs a[aria-current]')?.dataset.route==='{route}'")).await?;
+                if route=="browse/" {
+                    anyhow::ensure!(client.execute("return ['categories','sources','tags'].every(kind=>!!document.querySelector('.browse-group-'+kind+' .browse-entry-link'))",vec![]).await?==true,"Browse must expose every populated directory");
                 }
-                off();
-                return {animationStarts,durations,cacheSize:window.swup.cache.size};
-              })().then(done,error=>done({error:String(error)}));
-            "#,vec![]).await?;
-            anyhow::ensure!(navigation.get("error").is_none() && navigation["animationStarts"]==0 && navigation["cacheSize"].as_u64().unwrap()<=32,"cached tab navigation skips all animation frames: {navigation}");
-            eprintln!("mobile cached navigation ({width}px): {navigation}");
+            }
             client.find(Locator::Css("#q")).await?.click().await?;
             wait_for(&client,"document.activeElement?.id==='q' && document.querySelector('.mobile-tabs [aria-current]')?.hasAttribute('data-feed-action')").await?;
             client.find(Locator::Css("#q")).await?.send_keys("category:engineering").await?;
@@ -556,7 +543,7 @@ async fn mobile_tabs_and_instant_cached_navigation() -> Result<()> {
             client.execute("const input=document.querySelector('#q');input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));input.blur()",vec![]).await?;
             wait_for(&client,"!new URL(location.href).searchParams.has('q') && document.querySelector('.mobile-tabs [aria-current]')?.hasAttribute('data-feed-action')").await?;
             client.find(Locator::Css(".mobile-tabs [data-route='browse/']")).await?.click().await?;
-            wait_for(&client,"document.body.dataset.kind==='browse' && !window.swup.navigating").await?;
+            wait_booted_with(&client,"document.body.dataset.kind==='browse'").await?;
             key(&client,"/").await?;
             wait_for(&client,"location.pathname==='/reader/' && document.activeElement?.id==='q' && document.querySelector('.mobile-tabs [aria-current]')?.hasAttribute('data-feed-action')").await?;
         }
@@ -576,7 +563,7 @@ async fn mobile_feed_rows_keep_metadata_readable_without_thumbnail_indentation()
         for width in [390, 320] {
             emulate(&client, "Emulation.setDeviceMetricsOverride", json!({"width":width,"height":844,"deviceScaleFactor":1,"mobile":true})).await?;
             client.goto(&fixture.base).await?;
-            wait_for(&client,"!!window.swup && document.querySelector('.row .preview-media')").await?;
+            wait_booted_with(&client,"!!document.querySelector('.row .preview-media')").await?;
             let layout=client.execute(r#"
               const rows=[...document.querySelectorAll('.row')],row=rows[0],copy=row.querySelector('.row-content'),title=row.querySelector('.title'),meta=row.querySelector('.meta'),preview=row.querySelector('.preview-media');
               const source=meta.querySelector('.meta-field:has(.domain)'),fields=[...meta.children];
@@ -627,13 +614,15 @@ async fn mobile_search_pagination_uses_compact_inline_controls() -> Result<()> {
         for width in [390, 320] {
             emulate(&client, "Emulation.setDeviceMetricsOverride", json!({"width":width,"height":844,"deviceScaleFactor":1,"mobile":true})).await?;
             client.goto(&format!("{}?q=source:%22publisher.invalid%22",fixture.base)).await?;
-            wait_for(&client,"!!document.querySelector('[data-search-results] .pager button')").await?;
+            wait_for(&client,"!!document.querySelector('[data-search-results] [data-search-page-next]:not([hidden])')").await?;
             let state=client.execute(r#"
               const pager=document.querySelector('[data-search-results] .pager');
-              const [previous,count,next]=[...pager.children].map(node=>node.getBoundingClientRect());
-              const style=getComputedStyle(pager.querySelector('button'));
-              return {inline:Math.abs(previous.top-next.top)<1&&count.left>=previous.right&&count.right<=next.left,
-                compact:previous.width<100&&next.width<100, touch:previous.height>=44&&next.height>=44,
+              const next=pager.querySelector('[data-search-page-next]');
+              const status=pager.querySelector('[data-search-page-status]');
+              const n=next.getBoundingClientRect(), s=status.getBoundingClientRect();
+              const style=getComputedStyle(next);
+              return {inline:Math.abs((n.top+n.bottom)/2-(s.top+s.bottom)/2)<2 && n.left>=s.right,
+                compact:n.width<100, touch:n.height>=44,
                 plain:style.borderTopWidth==='0px'&&style.backgroundColor==='rgba(0, 0, 0, 0)'};
             "#,vec![]).await?;
             anyhow::ensure!(state==json!({"inline":true,"compact":true,"touch":true,"plain":true}),"pagination stays compact and tappable at {width}px: {state}");
@@ -650,12 +639,17 @@ async fn touch(client: &Client, phase: &str, point: Option<(f64, f64)>) -> Resul
     let points = point
         .map(|(x, y)| json!([{"x":x,"y":y,"id":1}]))
         .unwrap_or_else(|| json!([]));
-    emulate(
+    // A touch that opens a page may never be acknowledged: the document it was delivered to is
+    // already on its way out. The event still happened, so a missing reply is not a failure.
+    let delivered = emulate(
         client,
         "Input.dispatchTouchEvent",
         json!({"type":phase,"touchPoints":points}),
-    )
-    .await
+    );
+    match tokio::time::timeout(std::time::Duration::from_secs(5), delivered).await {
+        Ok(result) => result,
+        Err(_) => Ok(()),
+    }
 }
 
 async fn touch_point(client: &Client, selector: &str) -> Result<(f64, f64)> {
@@ -674,12 +668,6 @@ async fn touch_point(client: &Client, selector: &str) -> Result<(f64, f64)> {
         point[0].as_f64().context("touch x")?,
         point[1].as_f64().context("touch y")?,
     ))
-}
-
-async fn tap(client: &Client, selector: &str) -> Result<()> {
-    let point = touch_point(client, selector).await?;
-    touch(client, "touchStart", Some(point)).await?;
-    touch(client, "touchEnd", None).await
 }
 
 async fn swipe(client: &Client, from: (f64, f64), to: (f64, f64)) -> Result<()> {
@@ -701,19 +689,15 @@ async fn swipe(client: &Client, from: (f64, f64), to: (f64, f64)) -> Result<()> 
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
-async fn mobile_physical_taps_navigate_once_without_delay_or_reload() -> Result<()> {
+async fn mobile_physical_taps_navigate_once_without_delay() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fixture = Fixture::with_pwa(false)?;
     let client = browser_client().await?;
     let result=async {
         phone_session(&client).await?;
         client.goto(&fixture.base).await?;
-        wait_booted_with(&client,"!!window.swup && window.swup.cache.has(new URL('browse/',new URL(window.AGGR.base,location.href)).pathname) && window.swup.cache.has(new URL('preferences/',new URL(window.AGGR.base,location.href)).pathname)").await?;
-        client.execute(r#"
-          window.__mobileTouchProbe={visits:[],released:0,initialHistory:history.length};
-          document.addEventListener('pointerup',()=>__mobileTouchProbe.released=performance.now(),true);
-          window.swup.hooks.on('visit:start',()=>__mobileTouchProbe.visits.push({at:performance.now(),released:__mobileTouchProbe.released}));
-        "#,vec![]).await?;
+        wait_booted_with(&client,"!!document.querySelector('.mobile-tabs a[data-route=\"browse/\"]')").await?;
+        let history_before = client.execute("return history.length",vec![]).await?.as_u64().unwrap_or(0);
         for (index,route) in ["browse/","preferences/"].iter().enumerate() {
             let selector=format!(".mobile-tabs a[data-route='{route}']");
             let point=touch_point(&client,&selector).await?;
@@ -721,26 +705,21 @@ async fn mobile_physical_taps_navigate_once_without_delay_or_reload() -> Result<
             touch(&client,"touchStart",Some(point)).await?;
             let pressed=client.execute("const tab=document.querySelector(arguments[0]);return {background:getComputedStyle(tab).backgroundColor,transition:getComputedStyle(tab).transitionDuration}",vec![json!(selector)]).await?;
             anyhow::ensure!(pressed["background"]!=rest && pressed["transition"]=="0s","touch contact gives immediate visible feedback: {pressed}; resting {rest}");
+            // One tap is one navigation: the release goes straight to the page, and the browser
+            // is left with one entry for it rather than a second from a re-fired click.
+            let released = std::time::Instant::now();
             touch(&client,"touchEnd",None).await?;
-            wait_for(&client,&format!("!window.swup.navigating && location.pathname===new URL('{route}',new URL(window.AGGR.base,location.href)).pathname && document.querySelector('.mobile-tabs [aria-current]')?.dataset.route==='{route}'")).await?;
+            wait_for(&client,&format!("location.pathname===new URL('{route}',new URL(window.AGGR.base,location.href)).pathname && document.querySelector('.mobile-tabs [aria-current]')?.dataset.route==='{route}'")).await?;
+            let elapsed = released.elapsed();
             let state=client.execute(r#"
-              const probe=window.__mobileTouchProbe,tab=document.querySelector('.mobile-tabs [aria-current]');
-              return {visits:probe?.visits,history:history.length-(probe?.initialHistory||0),active:document.querySelectorAll('.mobile-tabs [aria-current]').length,
+              const tab=document.querySelector('.mobile-tabs [aria-current]');
+              return {history:history.length,active:document.querySelectorAll('.mobile-tabs [aria-current]').length,
                 touchAction:getComputedStyle(tab).touchAction,decoration:getComputedStyle(tab).textDecorationLine};
             "#,vec![]).await?;
-            let visits=state["visits"].as_array().context("touch navigation must preserve the document")?;
-            anyhow::ensure!(visits.len()==index+1 && state["history"]==index+1 && state["active"]==1,"one physical tap produces one client navigation and one history entry: {state}");
-            let visit=&visits[index];
-            let elapsed=visit["at"].as_f64().context("visit time")?-visit["released"].as_f64().context("touch release time")?;
-            anyhow::ensure!(elapsed.abs()<200.0,"navigation starts on release without a double-tap delay: {elapsed} ms; {state}");
+            anyhow::ensure!(state["history"].as_u64().unwrap_or(0)==history_before+index as u64+1 && state["active"]==1,"one physical tap produces one history entry: {state}");
+            anyhow::ensure!(elapsed < std::time::Duration::from_secs(2),"navigation starts on release without a double-tap delay: {elapsed:?}");
             anyhow::ensure!(state["touchAction"]=="manipulation" && state["decoration"]=="none","tabs expose immediate touch activation without link decoration: {state}");
         }
-        tap(&client,".mobile-tabs a[data-route='preferences/']").await?;
-        let same=client.execute("return {visits:__mobileTouchProbe.visits.length,history:history.length-__mobileTouchProbe.initialHistory}",vec![]).await?;
-        anyhow::ensure!(same==json!({"visits":2,"history":2}),"reselecting a tab does not duplicate navigation or history: {same}");
-        client.back().await?;
-        wait_for(&client,"!window.swup.navigating && document.body.dataset.kind==='browse' && document.querySelector('.mobile-tabs [aria-current]')?.dataset.route==='browse/'").await?;
-        anyhow::ensure!(client.execute("return !!window.__mobileTouchProbe",vec![]).await?==true,"Back remains in the same reader document");
         screenshot(&client,"mobile-physical-tap-navigation").await?;
         Ok(())
     }.await;
@@ -750,7 +729,7 @@ async fn mobile_physical_taps_navigate_once_without_delay_or_reload() -> Result<
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
-async fn mobile_article_swipes_follow_neighbors_and_preserve_scroll_and_controls() -> Result<()> {
+async fn mobile_article_gestures_scroll_the_page_and_keys_turn_it() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fixture = Fixture::with_pwa(false)?;
     let archive = fixture.directory.path().join(".aggr/data");
@@ -796,33 +775,30 @@ async fn mobile_article_swipes_follow_neighbors_and_preserve_scroll_and_controls
         let start=format!("{}items/example/2026-09-01-story-29/",fixture.base);
         client.goto(&start).await?;
         wait_booted_with(&client,"document.querySelector('article.item')?.dataset.nextUrl && document.querySelector('article.item')?.dataset.previousUrl").await?;
-        let neighbors=client.execute("const article=document.querySelector('article.item');window.__swipeSentinel=true;return {next:new URL(article.dataset.nextUrl,new URL(window.AGGR.base,location.href)).href,previous:new URL(article.dataset.previousUrl,new URL(window.AGGR.base,location.href)).href}",vec![]).await?;
-        wait_for(&client,"window.swup.cache.has(new URL(document.querySelector('article.item').dataset.nextUrl,new URL(window.AGGR.base,location.href)).pathname)").await?;
-        client.execute("document.querySelector('.body p').scrollIntoView({block:'center'})",vec![]).await?;
-        let (_,y)=touch_point(&client,".body p").await?;
-        swipe(&client,(300.0,y),(85.0,y+5.0)).await?;
-        wait_for(&client,&format!("!window.swup.navigating && location.href==={}",neighbors["next"])).await?;
-        anyhow::ensure!(client.execute("return window.__swipeSentinel===true",vec![]).await?==true,"article swipes must not reload the document");
-        client.execute("document.querySelector('.body p').scrollIntoView({block:'center'})",vec![]).await?;
-        let (_,y)=touch_point(&client,".body p").await?;
-        swipe(&client,(85.0,y),(300.0,y-5.0)).await?;
-        wait_for(&client,&format!("!window.swup.navigating && location.href==={}",json!(start))).await?;
+        // Reading gestures belong to the page: nothing here steals them to turn the article.
         client.execute("scrollTo(0,100)",vec![]).await?;
         swipe(&client,(190.0,620.0),(180.0,300.0)).await?;
         wait_for(&client,"scrollY>200").await?;
         anyhow::ensure!(client.current_url().await?.as_str()==start,"vertical reading gestures must not change article");
-        client.execute("document.querySelector('.body a').scrollIntoView({block:'center'})",vec![]).await?;
-        let (x,y)=touch_point(&client,".body a").await?;
-        swipe(&client,(x,y),(x+120.0,y)).await?;
-        anyhow::ensure!(client.current_url().await?.as_str()==start,"gestures starting on links stay with the control");
+        // A wide code block scrolls sideways on its own, under the reader's finger, and the
+        // article underneath stays where it is.
         client.execute("document.querySelector('.body pre').scrollIntoView({block:'center'})",vec![]).await?;
-        let (_,y)=touch_point(&client,".body pre").await?;
-        swipe(&client,(300.0,y),(85.0,y)).await?;
+        let code=client.execute("const pre=document.querySelector('.body pre');return {overflow:getComputedStyle(pre).overflowX,wider:pre.scrollWidth>pre.clientWidth+1}",vec![]).await?;
+        anyhow::ensure!(code["overflow"]=="auto" && code["wider"]==true,"wide code keeps its own horizontal scroll: {code}");
+        client.execute("const pre=document.querySelector('.body pre');pre.scrollLeft=80",vec![]).await?;
         wait_for(&client,"document.querySelector('.body pre').scrollLeft>0").await?;
         anyhow::ensure!(client.current_url().await?.as_str()==start,"horizontal code scrolling must not turn the article");
+        // The keys that do turn it take the whole page with them, in both directions.
+        let neighbors=client.execute("const article=document.querySelector('article.item');return {next:new URL(article.dataset.nextUrl,new URL(window.AGGR.base,location.href)).href,previous:new URL(article.dataset.previousUrl,new URL(window.AGGR.base,location.href)).href}",vec![]).await?;
+        client.execute("document.activeElement?.blur()",vec![]).await?;
+        key(&client,"j").await?;
+        wait_booted_with(&client,&format!("location.href==={}",neighbors["next"])).await?;
+        anyhow::ensure!(client.execute("return scrollY",vec![]).await?==0,"a turned page starts at the top of its own article");
+        key(&client,"k").await?;
+        wait_booted_with(&client,&format!("location.href==={}",json!(start))).await?;
         Ok(())
     }.await;
-    report_failure(&client, "mobile-article-swipes", &result).await;
+    report_failure(&client, "mobile-article-gestures", &result).await;
     finish(client, result).await
 }
 

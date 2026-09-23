@@ -46,7 +46,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
               theme: document.documentElement.dataset.theme,
               density: document.documentElement.dataset.density,
               headParsing: document.body === null && document.readyState === 'loading',
-              appLoaded: typeof window.swup !== 'undefined'
+              appLoaded: document.documentElement.dataset.aggrReady === 'true'
             };
           }).observe(document, {attributes: true, subtree: true});
         "#}),
@@ -81,7 +81,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
         .await?;
     wait_for(
         client,
-        "document.querySelectorAll('[data-preference]').length === 18",
+        "document.querySelectorAll('[data-preference]').length === 17",
     )
     .await?;
     let preference_controls = client
@@ -102,7 +102,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     assert_eq!(
         preference_controls["ids"],
         json!([
-            "theme-mode",
+            "theme",
             "motion",
             "font-family",
             "text-size",
@@ -118,19 +118,12 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
             "feed-page-size",
             "date-format",
             "scroll-amount",
-            "single-key-shortcuts",
-            "offline-items"
+            "single-key-shortcuts"
         ])
     );
     assert_eq!(
         preference_controls["groups"],
-        json!([
-            "Appearance",
-            "Reading",
-            "Feed",
-            "Keyboard",
-            "Offline reading"
-        ])
+        json!(["Appearance", "Reading", "Feed", "Keyboard"])
     );
     assert_eq!(
         preference_controls["defaults"]["single-key-shortcuts"],
@@ -139,7 +132,8 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     assert_eq!(preference_controls["defaults"]["feed-page-size"], "50");
     assert_eq!(preference_controls["install"], false);
     assert_eq!(preference_controls["config"], false);
-    assert_eq!(preference_controls["shortcutLink"], "A");
+    // Opening a dialog is a button's job, not a link's: there is no page to go to.
+    assert_eq!(preference_controls["shortcutLink"], "BUTTON");
     client
         .execute(
             "document.querySelector('#show-shortcuts').scrollIntoView({block:'center'})",
@@ -173,9 +167,12 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
         .execute(
             r#"
       const keys = [...document.querySelectorAll('#shortcut-help .shortcut-list dt')];
+      // Every alternative of one mapping starts on the same line as the first.
       const wrapped = keys.filter(key => {
-        const rects = key.getClientRects();
-        return rects.length > 1 || key.getBoundingClientRect().height > parseFloat(getComputedStyle(key).lineHeight) * 1.6;
+        const parts = [...key.querySelectorAll('kbd, small')];
+        if (parts.length < 2) return false;
+        const boxes = parts.map(part => part.getBoundingClientRect());
+        return boxes.some(box => box.top >= boxes[0].bottom - 1);
       }).map(key => key.textContent.trim());
       const search = keys.find(key => key.textContent.includes('/'));
       const shown = [...document.querySelectorAll('#shortcut-help [data-platform-key]')]
@@ -206,7 +203,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
         .execute(
             r#"
       const values = {
-        'theme-mode':'dark', motion:'off', 'text-size':'large', 'reading-width':'wide',
+        theme:'dark', motion:'off', 'text-size':'large', 'reading-width':'wide',
         density:'comfortable', thumbnails:'hide', 'date-format':'iso'
       };
       Object.keys(values).forEach(function (id) {
@@ -285,7 +282,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
         .await?;
     wait_for(
         client,
-        "document.querySelectorAll('[data-preference]').length === 18",
+        "document.querySelectorAll('[data-preference]').length === 17",
     )
     .await?;
     client
@@ -337,10 +334,10 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     client.goto(&ignored_transfer).await?;
     wait_for(
         client,
-        "document.querySelector('#theme-mode') && document.querySelector('#preferences-import')",
+        "document.querySelector('#theme') && document.querySelector('#preferences-import')",
     )
     .await?;
-    anyhow::ensure!(client.execute("return document.documentElement.dataset.theme==='dark' && document.querySelector('#theme-mode').value==='dark' && document.querySelector('#preferences-import').hidden",vec![]).await?==true,"query-string preference transfers are ignored without opening a review or changing settings");
+    anyhow::ensure!(client.execute("return document.documentElement.dataset.theme==='dark' && document.querySelector('#theme').value==='dark' && document.querySelector('#preferences-import').hidden",vec![]).await?==true,"query-string preference transfers are ignored without opening a review or changing settings");
 
     let valid_preferences = fixture.directory.path().join("valid-preferences.json");
     let invalid_preferences = fixture.directory.path().join("invalid-preferences.json");
@@ -393,7 +390,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     client.goto(&copied_link).await?;
     wait_for(
         client,
-        "!document.querySelector('#preferences-import').hidden && document.querySelectorAll('#preferences-import-summary li').length === 18",
+        "!document.querySelector('#preferences-import').hidden && document.querySelectorAll('#preferences-import-summary li').length === 17",
     )
     .await?;
     assert_eq!(

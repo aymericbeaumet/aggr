@@ -1,4 +1,4 @@
-//! Search: completion, results, keyboard selection and the offline index.
+//! Search: completion, results, keyboard selection and the query language.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -45,7 +45,7 @@ async fn search_keyboard_contracts(client: &Client, fixture: &Fixture) -> Result
             .execute("return new URL(location.href).href===location.href", vec![])
             .await?,
         true,
-        "canonical search must keep Swup's history URL aligned with the address bar"
+        "a canonical search keeps its own address"
     );
     let input = client.find(Locator::Css("#q")).await?;
     input.clear().await?;
@@ -84,10 +84,14 @@ async fn search_keyboard_contracts(client: &Client, fixture: &Fixture) -> Result
         selected_search.as_str().unwrap()
     );
     client.back().await?;
-    wait_for(client, "document.querySelectorAll('#list .row').length === 25 && !!document.activeElement.matches('[data-row-open]')").await?;
+    // The search comes back with its cursor where it was left, without taking the keyboard.
+    wait_for(client, "document.querySelectorAll('#list .row').length === 25 && !!document.querySelector('#list .row.is-selected')").await?;
     assert_eq!(
         client
-            .execute("return document.activeElement.href", vec![])
+            .execute(
+                "return document.querySelector('#list .row.is-selected [data-row-open]').href",
+                vec![]
+            )
             .await?,
         selected_search
     );
@@ -126,27 +130,39 @@ async fn contextual_source_completion_and_item_types() -> Result<()> {
         let local_publisher = local_publisher.host_str().unwrap().to_string();
         for (query, label, expected) in [
             ("category:engineering source:", "Example", json!({
-                "Example": "source · 45", local_publisher: "source · 1",
-                "twitch.tv": "source · 1", "vimeo.com": "source · 1", "youtube.com": "source · 1",
+                "Example": "source · publisher.invalid · 45", local_publisher: "source · 1",
+                "twitch.tv/videos": "source · 1", "vimeo.com/123456789": "source · 1",
+                "youtube.com": "source · 1",
             })),
-            ("category:news source:", "Underscore_", json!({"Underscore_": "source · 1"})),
-            ("type:podcast source:", "Underscore_", json!({"Underscore_": "source · 1"})),
+            ("category:news source:", "Underscore_", json!({
+                "Underscore_": "source · open.spotify.com/show/opaque123 · 1",
+            })),
+            ("type:podcast source:", "Underscore_", json!({
+                "Underscore_": "source · open.spotify.com/show/opaque123 · 1",
+            })),
         ] {
             client.execute("const q=document.querySelector('#q');q.focus();q.value=arguments[0];q.setSelectionRange(q.value.length,q.value.length);q.dispatchEvent(new Event('input',{bubbles:true}))",vec![json!(query)]).await?;
             wait_for(&client,&format!("[...document.querySelectorAll('.completion-label')].some(label=>label.textContent==={})",json!(label))).await?;
+            // The counts start as the whole archive's and are refined against the rest of the
+            // query; the refined list is the one the reader is offered.
+            wait_for(&client,&format!("document.querySelectorAll('.search-completion').length==={}",expected.as_object().map(|map| map.len()).unwrap_or(0))).await?;
             let completions = client.execute("return Object.fromEntries([...document.querySelectorAll('.search-completion')].map(entry=>[entry.querySelector('.completion-label').textContent,entry.querySelector('small').textContent]))",vec![]).await?;
             anyhow::ensure!(completions == expected, "{query}: publisher and feed counts reflect the other active clauses: {completions}, expected {expected}");
         }
-        client.execute("const q=document.querySelector('#q');q.value='type:podcast source:under';q.setSelectionRange(q.value.length,q.value.length);q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
+        client.execute("const q=document.querySelector('#q');q.focus();q.value='type:podcast source:under';q.setSelectionRange(q.value.length,q.value.length);q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
         wait_for(&client,"document.querySelectorAll('.search-completion').length===1 && document.querySelector('.completion-label')?.textContent==='Underscore_'").await?;
         key(&client,"Enter").await?;
-        wait_for(&client,"document.querySelector('#q').value.includes('source:\"open.spotify.com\"') && !document.querySelector('.search-completions') && document.querySelector('#search-status')?.textContent==='1 article'").await?;
+        wait_for(&client,"document.querySelector('#q').value.includes('source:open.spotify.com/show/opaque123') && !document.querySelector('.search-completions:not([hidden])') && document.querySelector('#search-status')?.textContent==='1 article'").await?;
         anyhow::ensure!(client.execute("return document.querySelector('.search-results .title').textContent",vec![]).await?=="A podcast episode","Enter selects the named show");
-        anyhow::ensure!(client.execute("return document.querySelector('.search-results .source-resolved').textContent",vec![]).await?=="open.spotify.com","podcast publisher metadata uses its canonical hostname");
+        // A show is the publisher of its episodes: the catalogue path names it, and the episode's
+        // own path names nothing anyone follows.
+        let publisher=client.execute("return document.querySelector('.search-results .source-resolved').textContent",vec![]).await?;
+        anyhow::ensure!(publisher=="open.spotify.com/show/opaque123","podcast publisher metadata names the show: {publisher}");
         anyhow::ensure!(client.execute("return document.querySelectorAll('.search-results .source-feed').length",vec![]).await?==0,"same-host podcast publisher and feed share one source membership");
         search_query(&client,"source:youtube.com",1).await?;
         let publisher_hit = client.execute("return document.querySelector('.search-results .title').href",vec![]).await?;
-        anyhow::ensure!(client.execute("return [...document.querySelectorAll('.search-results .domain a')].map(link=>link.textContent)",vec![]).await?==json!(["youtube.com", "publisher.invalid"]),"publisher and originating feed both have source links");
+        let sources=client.execute("return [...document.querySelectorAll('.search-results .domain a')].map(link=>link.textContent)",vec![]).await?;
+        anyhow::ensure!(sources==json!(["youtube.com", "publisher.invalid"]),"publisher and originating feed both have source links: {sources}");
         search_query(&client,"source:publisher.invalid source:youtube.com",45).await?;
         search_query(&client,"source:publisher.invalid type:video",3).await?;
         anyhow::ensure!(client.execute("return [...document.querySelectorAll('.search-results .title')].filter(link=>link.href===arguments[0]).length",vec![publisher_hit]).await?==1,"feed search contains the same canonical publisher article once");
@@ -193,17 +209,19 @@ async fn search_articles_only_appear_as_results() -> Result<()> {
         wait_for(&client,"!!document.querySelector('#q') && new URL(location.href).searchParams.get('q')==='Article'").await?;
         // Out of the field, the results answer the ordinary feed shortcuts on the same cursor.
         escape_search(&client).await?;
+        const CURSOR: &str = "return [...document.querySelectorAll('.search-results .row')].findIndex(row=>row.classList.contains('is-selected'))";
+        let resumed=client.execute(CURSOR,vec![]).await?.as_i64().unwrap_or(-1);
         key(&client,"j").await?;
         let stepped=client.execute("const rows=[...document.querySelectorAll('.search-results .row')];return {selected:rows.findIndex(row=>row.classList.contains('is-selected')),focused:document.activeElement.id}",vec![]).await?;
-        anyhow::ensure!(stepped["selected"].as_i64().unwrap_or(-1)>=1 && stepped["focused"]!="q","j walks the search results once the field is left: {stepped}");
+        anyhow::ensure!(stepped["selected"].as_i64().unwrap_or(-1)==resumed+1 && stepped["focused"]!="q","j walks the search results once the field is left: {stepped}");
         key(&client,"k").await?;
-        anyhow::ensure!(client.execute("return [...document.querySelectorAll('.search-results .row')].findIndex(row=>row.classList.contains('is-selected'))",vec![]).await?==0,"k walks back up the search results");
+        anyhow::ensure!(client.execute(CURSOR,vec![]).await?==resumed,"k walks back up the search results");
         // A half-typed qualifier is completed in two steps: the name, then the values it accepts.
-        client.execute("const q=document.querySelector('#q');q.value='Article sour';q.setSelectionRange(12,12);q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
+        client.execute("const q=document.querySelector('#q');q.focus();q.value='Article sour';q.setSelectionRange(12,12);q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
         wait_for(&client,"document.querySelector('.search-completion')?.dataset.completionId==='source:'").await?;
         key(&client,"Enter").await?;
         wait_for(&client,"document.querySelector('#q').value==='Article source:' && [...document.querySelectorAll('.search-completion')].some(row=>row.dataset.completionId.startsWith('source:'))").await?;
-        client.execute("const q=document.querySelector('#q');q.value='source:';q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
+        client.execute("const q=document.querySelector('#q');q.focus();q.value='source:';q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
         wait_for(&client,"document.querySelectorAll('.search-completion').length>1 && document.querySelector('.search-completion')?.dataset.completionId.startsWith('source:')").await?;
         // Open suggestions take the arrows; the results keep them the rest of the time.
         key(&client,"ArrowDown").await?;
@@ -257,7 +275,7 @@ async fn search_control_mount_and_delayed_facets() -> Result<()> {
             fixture.scripts_blocked.store(true,Ordering::Relaxed);
             client.goto(&fixture.base).await?;
             wait_for(&client, styles_loaded).await?;
-            anyhow::ensure!(client.execute("return typeof window.Swup==='undefined' && !document.querySelector('.search-command')",vec![]).await?==true,"scripts stay blocked while sampling the styled static field");
+            anyhow::ensure!(client.execute("return document.documentElement.dataset.aggrReady !== 'true' && !!document.querySelector('.search-command')",vec![]).await?==true,"the field is part of the generated page, sampled with scripts still blocked");
             let before=client.execute(metrics,vec![]).await?;
             fixture.scripts_blocked.store(false,Ordering::Relaxed);
             client.goto(&fixture.base).await?;
@@ -278,8 +296,14 @@ async fn search_control_mount_and_delayed_facets() -> Result<()> {
         }
         emulate(&client,"Page.addScriptToEvaluateOnNewDocument",json!({"source":r#"
           const originalFetch=window.fetch;
+          const waiting=[];
           window.fetch=async function(input,...rest){
-            if(String(input?.url||input).includes('search-catalog.json')) await new Promise(resolve=>{window.releaseSearchManifest=resolve});
+            if(String(input?.url||input).includes('search-catalog.json')){
+              await new Promise(resolve=>{
+                waiting.push(resolve);
+                window.releaseSearchManifest=()=>waiting.splice(0).forEach(release=>release());
+              });
+            }
             return originalFetch.call(this,input,...rest);
           };
         "#})).await?;
@@ -287,13 +311,18 @@ async fn search_control_mount_and_delayed_facets() -> Result<()> {
         wait_for(&client,"document.querySelector('.search-input-line')").await?;
         client.find(Locator::Css("#q")).await?.send_keys("source:").await?;
         wait_for(&client,"typeof window.releaseSearchManifest==='function'").await?;
+        // The page belongs to the query from the moment it is asked, even though the catalogue
+        // that answers it is still on its way.
+        wait_for(&client,"document.body.hasAttribute('data-searching')").await?;
         anyhow::ensure!(client.execute("return document.querySelector('[data-static-feed]').hidden && !document.querySelector('.search-results .row')",vec![]).await?==true,"feed rows stay hidden while the search catalogue loads");
         client.execute("window.releaseSearchManifest()",vec![]).await?;
-        wait_for(&client,"[...document.querySelectorAll('.search-completion')].some(row=>row.textContent.toLowerCase().includes('example'))").await?;
+        wait_for(&client,"document.querySelectorAll('.search-completion').length>0").await?;
+        let offered=client.execute("return [...document.querySelectorAll('.search-completion')].map(row=>row.textContent)",vec![]).await?;
+        anyhow::ensure!(offered.as_array().is_some_and(|rows|rows.iter().any(|row|row.as_str().unwrap_or_default().to_lowercase().contains("example"))),"the released catalogue names the feeds it knows: {offered}");
         key(&client,"\u{e015}").await?;
         key(&client,"\u{e013}").await?;
         key(&client,"Tab").await?;
-        wait_for(&client,"document.querySelector('#q').value.trim()==='source:\"publisher.invalid\"' && !document.querySelector('.search-completions')").await?;
+        wait_for(&client,"document.querySelector('#q').value.trim()==='source:publisher.invalid' && !document.querySelector('.search-completions:not([hidden])')").await?;
         wait_for(&client,"document.querySelector('.search-results .row')").await?;
         Ok(())
     }.await;
@@ -304,7 +333,7 @@ async fn search_control_mount_and_delayed_facets() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
-async fn search_focus_scrolls_only_when_obscured() -> Result<()> {
+async fn search_focus_keeps_the_reading_position() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fixture = Fixture::with_pwa(false)?;
     let config = fixture.directory.path().join("aggr.toml");
@@ -326,16 +355,19 @@ async fn search_focus_scrolls_only_when_obscured() -> Result<()> {
                 anyhow::ensure!(client.execute("return Math.abs(scrollY-arguments[0])<=1 && document.activeElement.id==='q'",vec![visible_y.clone()]).await?==true,"clicking a fully visible search input preserves scroll at {width}px");
                 client.execute(&format!("document.dispatchEvent(new KeyboardEvent('keydown',{{key:'k',{modifier}:true,bubbles:true,cancelable:true}}))"),vec![]).await?;
                 anyhow::ensure!(client.execute("return Math.abs(scrollY-arguments[0])<=1",vec![visible_y.clone()]).await?==true,"{modifier} preserves scroll when already focused and visible at {width}px");
-                client.execute("window.scrollTo({top:650,behavior:'instant'})",vec![]).await?;
+                // The field is pinned under the header, so it is never out of reach: reaching for
+                // it from deep in the feed must not cost the reader their place.
+                client.execute("document.querySelector('#q').blur();window.scrollTo({top:650,behavior:'instant'})",vec![]).await?;
                 wait_for(&client,"scrollY>500").await?;
                 client.execute(&format!("document.dispatchEvent(new KeyboardEvent('keydown',{{key:'k',{modifier}:true,bubbles:true,cancelable:true}}))"),vec![]).await?;
-                wait_for(&client,"scrollY===0 && document.activeElement.id==='q'").await?;
+                wait_for(&client,"document.activeElement.id==='q'").await?;
+                anyhow::ensure!(client.execute("return Math.abs(scrollY-650)<=1",vec![]).await?==true,"{modifier} reaches the pinned field without scrolling at {width}px");
             }
             client.execute("document.querySelector('#q').blur();const q=document.querySelector('#q').getBoundingClientRect(),header=document.querySelector('.top').getBoundingClientRect();window.scrollTo({top:q.top-header.bottom+q.height/2,behavior:'instant'})",vec![]).await?;
             let point=client.execute("const q=document.querySelector('#q').getBoundingClientRect();return {x:q.left+20,y:q.bottom-4}",vec![]).await?;
             emulate(&client,"Input.dispatchMouseEvent",json!({"type":"mousePressed","x":point["x"],"y":point["y"],"button":"left","clickCount":1})).await?;
             emulate(&client,"Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":point["x"],"y":point["y"],"button":"left","clickCount":1})).await?;
-            wait_for(&client,"scrollY===0 && document.activeElement.id==='q'").await?;
+            wait_for(&client,"document.activeElement.id==='q'").await?;
             escape_search(&client).await?;
             anyhow::ensure!(client.execute("return document.activeElement.id!=='q' && !document.querySelector('.search-completions:not([hidden])')",vec![]).await?==true,"Escape closes suggestions, then blurs search");
         }
@@ -350,7 +382,7 @@ async fn search_focus_scrolls_only_when_obscured() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
-async fn rich_search_and_complete_offline_index() -> Result<()> {
+async fn rich_search_across_the_query_language() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fixture = Fixture::new()?;
     let archive = fixture.directory.path().join(".aggr/data");
@@ -375,7 +407,7 @@ async fn rich_search_and_complete_offline_index() -> Result<()> {
     let result = rich_search_contracts(&client, &fixture).await;
     report_failure(&client, "rich-search", &result).await;
     if result.is_err() {
-        eprintln!("search state: {}", client.execute("return {error:document.querySelector('.search-error')?.textContent,offline:window.searchOfflineStatus,rows:document.querySelectorAll('.search-results .row').length}", vec![]).await.unwrap_or(Value::Null));
+        eprintln!("search state: {}", client.execute("return {error:document.querySelector('.search-error')?.textContent,status:document.querySelector('#search-status')?.textContent,rows:document.querySelectorAll('.search-results .row').length}", vec![]).await.unwrap_or(Value::Null));
         let published: Value = std::fs::read(fixture.out.join("search-manifest.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -391,8 +423,16 @@ async fn rich_search_and_complete_offline_index() -> Result<()> {
 }
 
 async fn search_query(client: &Client, query: &str, count: usize) -> Result<()> {
+    // Two queries in a row can want the same number of articles, so the count only answers for
+    // this one once the previous answer has been cleared away.
+    client
+        .execute(
+            "const status=document.querySelector('#search-status');if(status)status.textContent=''",
+            vec![],
+        )
+        .await?;
     client.execute("const input=document.querySelector('#q');input.focus();input.value=arguments[0];input.setSelectionRange(input.value.length,input.value.length);input.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#search-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))", vec![json!(query)]).await?;
-    wait_for(client, &format!("document.querySelector('#search-status')?.textContent === '{} {}' && !document.querySelector('.search-error')", count, if count == 1 { "article" } else { "articles" })).await?;
+    wait_for(client, &format!("document.querySelector('#search-status')?.textContent === '{} {}' && !document.querySelector('.search-error:not([hidden])')", count, if count == 1 { "article" } else { "articles" })).await?;
     anyhow::ensure!(
         client
             .execute("return document.activeElement?.id", vec![])
@@ -414,21 +454,6 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         "navigator.serviceWorker.controller && document.querySelector('#q')",
     )
     .await?;
-    client.execute("window.searchOfflineStatus=null;navigator.serviceWorker.addEventListener('message',event=>{if(event.data?.type==='AGGR_OFFLINE_STATUS')window.searchOfflineStatus=event.data});navigator.serviceWorker.controller.postMessage({type:'AGGR_OFFLINE_GET_STATUS'})", vec![]).await?;
-    wait_for(client, "window.searchOfflineStatus?.search?.phase==='ready' && window.searchOfflineStatus.saved?.length===4").await?;
-    let ready = client
-        .execute("return window.searchOfflineStatus.search", vec![])
-        .await?;
-    anyhow::ensure!(
-        ready["downloadedFiles"] == ready["totalFiles"]
-            && ready["downloadedBytes"] == ready["totalBytes"],
-        "ready means the entire index, not only its runtime, is saved"
-    );
-    let complete=client.execute_async("const done=arguments[arguments.length-1];(async()=>{const m=await(await fetch('search-manifest.json')).json();const c=await caches.open('aggr:'+encodeURIComponent('/reader/')+':offline-search-'+m.version);const keys=new Set((await c.keys()).map(k=>k.url));return m.docs===45&&m.files.every(f=>keys.has(new URL(f.url,location.href).href))})().then(done)",vec![]).await?;
-    anyhow::ensure!(
-        complete == true,
-        "every index shard must exist before readiness"
-    );
     anyhow::ensure!(client.execute("return getComputedStyle(document.querySelector('#search-query-help')).display==='none' && document.querySelector('#q').getAttribute('aria-expanded')==='false'", vec![]).await? == true, "query help and completion must start collapsed");
     let before_help = client
         .execute(
@@ -484,18 +509,11 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
             == before_help,
         "query help overlays the page without shifting the feed"
     );
-    key(client, "Escape").await?;
+    // Leaving the field takes the reminder with it, along with anything the menu was offering.
+    escape_search(client).await?;
     wait_for(client,"getComputedStyle(document.querySelector('#search-query-help')).display==='none' && document.querySelector('#q').getAttribute('aria-expanded')==='false'").await?;
 
-    // The first query occurs after going offline: no query or result fragment was warmed online.
-    fixture.offline.store(true, Ordering::Relaxed);
-    set_offline(client, true).await?;
     search_query(client, "\"cobalt marmalade\"", 1).await?;
-    wait_for(
-        client,
-        "document.querySelector('.search-results [data-row-open]') && !document.querySelector('.search-results .search-saved-status')",
-    )
-    .await?;
     anyhow::ensure!(
         client
             .execute(
@@ -504,16 +522,9 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
             )
             .await?
             == "Article 1",
-        "fresh offline full-text search must find an old, unsaved article"
+        "a phrase found only in one old article reaches it"
     );
     search_query(client, "\"rare exclusion\"", 2).await?;
-    wait_for(
-        client,
-        "document.querySelectorAll('.search-results [data-saved-offline=true]').length===2",
-    )
-    .await?;
-    fixture.offline.store(false, Ordering::Relaxed);
-    set_offline(client, false).await?;
 
     search_query(
         client,
@@ -534,12 +545,28 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
     );
     client
         .find(Locator::Css(
-            "[data-search-results] .pager button:last-child",
+            "[data-search-results] [data-search-page-next]",
         ))
         .await?
         .click()
         .await?;
-    wait_for(client, "document.querySelectorAll('.search-results .row').length===18 && document.querySelector('.search-results .rank')?.textContent==='26.'").await?;
+    // The stylesheet numbers the results, so the second page continues the count rather than
+    // starting again at one.
+    wait_for(
+        client,
+        "document.querySelectorAll('.search-results .row').length===18",
+    )
+    .await?;
+    let numbering = client
+        .execute(
+            "return getComputedStyle(document.querySelector('.search-results')).counterReset",
+            vec![],
+        )
+        .await?;
+    anyhow::ensure!(
+        numbering == "rank 25",
+        "page two is numbered from 26: {numbering}"
+    );
     anyhow::ensure!(
         client
             .execute(
@@ -552,13 +579,25 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
     );
 
     client.execute("const q=document.querySelector('#q');q.focus();q.value='source:ex tag:rust';q.setSelectionRange(9,9);q.dispatchEvent(new Event('input',{bubbles:true}));q.dispatchEvent(new Event('select',{bubbles:true}))",vec![]).await?;
-    wait_for(client,"Array.from(document.querySelectorAll('.search-completion')).some(e=>e.textContent.includes('Example'))").await?;
-    client
-        .active_element()
-        .await?
-        .send_keys("\u{e015}\u{e007}")
+    wait_for(client,"document.querySelector('.search-completion[data-selected] .completion-label')?.textContent==='Example'").await?;
+    let offered = client
+        .execute(
+            "return document.querySelector('.search-completion[data-selected]').dataset.completionId",
+            vec![],
+        )
         .await?;
-    wait_for(client,"document.querySelector('#q').value.includes('source:\"publisher.invalid\"') && document.querySelector('#q').value.includes('tag:rust')").await?;
+    let state = client.execute("return {open:!document.querySelector('.search-completions').hidden,count:document.querySelectorAll('.search-completion').length,active:document.activeElement?.id||document.activeElement?.className,value:document.querySelector('#q').value,href:location.href,ready:document.readyState}",vec![]).await?;
+    key(client, "Enter").await?;
+    anyhow::ensure!(
+        client
+            .execute("return !!document.querySelector('#q')", vec![])
+            .await?
+            == true,
+        "Enter must accept the completion rather than open a result: {state}"
+    );
+    // Only the half-typed clause is replaced, and a value with nothing to escape is written
+    // plainly; the rest of the query is left exactly as it was.
+    wait_for(client,&format!("document.querySelector('#q').value.includes({}) && document.querySelector('#q').value.includes('tag:rust')",json!(offered))).await?;
     anyhow::ensure!(
         client
             .execute("return document.activeElement?.id", vec![])
@@ -566,42 +605,52 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
             == "q",
         "completion retains editor focus"
     );
-    wait_for(client,"!document.querySelector('.search-completions') && document.querySelector('#q').getAttribute('aria-expanded')==='false'").await?;
-    client.execute("const q=document.querySelector('#q');q.value='sort:';q.setSelectionRange(5,5);q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
+    wait_for(client,"!document.querySelector('.search-completions:not([hidden])') && document.querySelector('#q').getAttribute('aria-expanded')==='false'").await?;
+    client.execute("const q=document.querySelector('#q');q.focus();q.value='sort:';q.setSelectionRange(5,5);q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
     wait_for(
         client,
         "document.querySelectorAll('.search-completion').length===3",
     )
     .await?;
-    // Selection moves asynchronously, so each arrow waits for a different highlighted label
-    // instead of sampling whatever the previous render left behind.
-    let selected_label = "document.querySelector('.search-completion[data-selected] .completion-label')?.textContent";
-    let initial_choice = client
-        .execute(&format!("return {selected_label}"), vec![])
-        .await?;
-    client.active_element().await?.send_keys("\u{e015}").await?;
-    wait_for(client, &format!("(()=>{{const label={selected_label};return typeof label==='string' && label!=={initial_choice}}})()")).await?;
-    let first_choice = client
-        .execute(&format!("return {selected_label}"), vec![])
-        .await?;
-    client.active_element().await?.send_keys("\u{e015}").await?;
-    wait_for(client, &format!("(()=>{{const label={selected_label};return typeof label==='string' && label!=={first_choice}}})()")).await?;
+    // Each arrow moves the highlight one step down the menu, and a re-render of the same choices
+    // in between leaves it where the reader put it.
+    const HIGHLIGHT: &str = "[...document.querySelectorAll('.search-completion')].findIndex(row=>row.hasAttribute('data-selected'))";
+    wait_for(client, &format!("{HIGHLIGHT}===0")).await?;
+    for step in [1, 2] {
+        client
+            .find(Locator::Css("#q"))
+            .await?
+            .send_keys("\u{e015}")
+            .await?;
+        wait_for(client, &format!("{HIGHLIGHT}==={step}")).await?;
+    }
     let second_choice = client
-        .execute(&format!("return {selected_label}"), vec![])
+        .execute(
+            "return document.querySelector('.search-completion[data-selected] .completion-label')?.textContent",
+            vec![],
+        )
         .await?;
     anyhow::ensure!(
-        first_choice.is_string() && second_choice.is_string() && first_choice != second_choice,
-        "successive arrows must advance selection without keyup resetting it"
+        second_choice.is_string(),
+        "successive arrows must advance selection without a re-render resetting it"
     );
+    let before_enter = client.execute("return {open:!document.querySelector('.search-completions').hidden,count:document.querySelectorAll('.search-completion').length,active:document.activeElement?.id,value:document.querySelector('#q').value}",vec![]).await?;
     key(client, "Enter").await?;
-    wait_for(client,&format!("document.querySelector('#q').value.trim()==={} && !document.querySelector('.search-completions')",json!(format!("sort:{}",second_choice.as_str().unwrap_or_default())))).await?;
+    anyhow::ensure!(
+        client
+            .execute("return !!document.querySelector('#q')", vec![])
+            .await?
+            == true,
+        "Enter must accept the highlighted sort, not open a result: {before_enter}"
+    );
+    wait_for(client,&format!("document.querySelector('#q').value.trim()==={} && !document.querySelector('.search-completions:not([hidden])')",json!(format!("sort:{}",second_choice.as_str().unwrap_or_default())))).await?;
     wait_for(
         client,
         "document.querySelector('#search-status')?.textContent==='45 articles'",
     )
     .await?;
     tokio::time::sleep(Duration::from_millis(250)).await;
-    anyhow::ensure!(client.execute("return !document.querySelector('.search-completions') && document.querySelector('#q').getAttribute('aria-expanded')==='false'",vec![]).await?==true,"selected completion must stay closed when results arrive");
+    anyhow::ensure!(client.execute("return !document.querySelector('.search-completions:not([hidden])') && document.querySelector('#q').getAttribute('aria-expanded')==='false'",vec![]).await?==true,"selected completion must stay closed when results arrive");
 
     // Composition updates must not run or publish a half-composed query.
     client.execute("window.beforeCompositionURL=location.href;const q=document.querySelector('#q');q.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));q.value='cobalt';q.dispatchEvent(new InputEvent('input',{bubbles:true,isComposing:true}));q.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,isComposing:true}))",vec![]).await?;
@@ -656,7 +705,7 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         "document.querySelector('#q').value.trim()==='category:engineering'",
     )
     .await?;
-    wait_for(client,"!document.querySelector('.search-completions') && document.querySelector('#q').getAttribute('aria-expanded')==='false'").await?;
+    wait_for(client,"!document.querySelector('.search-completions:not([hidden])') && document.querySelector('#q').getAttribute('aria-expanded')==='false'").await?;
 
     for (directory, scope) in [
         ("sources/publisher.invalid/", "source:publisher.invalid"),
@@ -666,7 +715,7 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         client.goto(&format!("{}{directory}", fixture.base)).await?;
         wait_for(
             client,
-            &format!("document.querySelector('#q')?.value==='{}'", scope),
+            &format!("document.querySelector('#q')?.value.trim()==='{}'", scope),
         )
         .await?;
         anyhow::ensure!(
@@ -750,20 +799,24 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         .await?;
     wait_for(client, "document.querySelector('.item-tags .tag')").await?;
     canonical_facet_click(client, ".item-tags .tag", "tag:reading", 45).await?;
-    canonical_facet_click(
-        client,
-        ".search-results .meta .domain > a",
-        "source:publisher.invalid",
-        45,
-    )
-    .await?;
-    canonical_facet_click(
-        client,
-        ".search-results .meta .category a",
-        "category:engineering",
-        45,
-    )
-    .await?;
+    // The same two facets again, this time on a result the search itself rendered.
+    for (selector, qualifier) in [
+        (
+            ".search-results .meta .domain > a",
+            "source:publisher.invalid",
+        ),
+        (".search-results .meta .category a", "category:engineering"),
+    ] {
+        client
+            .goto(&format!("{}?q=tag%3Areading", fixture.base))
+            .await?;
+        wait_for(
+            client,
+            &format!("document.querySelector({})", json!(selector)),
+        )
+        .await?;
+        canonical_facet_click(client, selector, qualifier, 45).await?;
+    }
 
     let preview_article = walkdir::WalkDir::new(fixture.out.join("items"))
         .into_iter()
@@ -814,114 +867,21 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         );
     }
 
-    client
-        .goto(&format!("{}preferences/", fixture.base))
-        .await?;
-    wait_for(client, "document.querySelector('#offline-items')").await?;
-    client.execute("window.searchOfflineStatus=null;navigator.serviceWorker.addEventListener('message',e=>{if(e.data?.type==='AGGR_OFFLINE_STATUS')window.searchOfflineStatus=e.data});const input=document.querySelector('#offline-items');input.value='1';input.dispatchEvent(new Event('change',{bubbles:true}))",vec![]).await?;
-    wait_for(client,"window.searchOfflineStatus?.saved?.length===1 && window.searchOfflineStatus?.search?.phase==='ready'").await?;
-    anyhow::ensure!(
-        client
-            .execute(
-                "return window.searchOfflineStatus.search.activeVersion",
-                vec![]
-            )
-            .await?
-            == ready["activeVersion"],
-        "changing article count keeps the same complete search index"
-    );
-    // A deployment can expose a new online index before its worker/index replacement succeeds.
-    std::fs::write(
-        fixture.directory.path().join(".block-worker-updates"),
-        b"503",
-    )?;
-    fixture.deploy_content_update(46)?;
-    client
-        .goto(&format!(
-            "{}?q=%22Newly%20delivered%20reading%22",
-            fixture.base
-        ))
-        .await?;
-    wait_for(
-        client,
-        "document.querySelector('#search-status')?.textContent==='1 article'",
-    )
-    .await?;
-    anyhow::ensure!(
-        client
-            .execute(
-                "return document.querySelector('.search-results [data-row-open]').textContent",
-                vec![]
-            )
-            .await?
-            == "Freshly delivered article 46",
-        "the online reader must have loaded the new deployment's index"
-    );
-    client.execute("window.searchOfflineStatus=null;navigator.serviceWorker.addEventListener('message',e=>{if(e.data?.type==='AGGR_OFFLINE_STATUS')window.searchOfflineStatus=e.data});navigator.serviceWorker.controller.postMessage({type:'AGGR_OFFLINE_GET_STATUS'})",vec![]).await?;
-    wait_for(
-        client,
-        "window.searchOfflineStatus?.search?.phase==='ready'",
-    )
-    .await?;
-    anyhow::ensure!(
-        client
-            .execute(
-                "return window.searchOfflineStatus.search.activeVersion",
-                vec![]
-            )
-            .await?
-            == ready["activeVersion"],
-        "the complete old index remains committed while the online reader loads the new one"
-    );
-    fixture.offline.store(true, Ordering::Relaxed);
-    set_offline(client, true).await?;
-    wait_for(
-        client,
-        "document.querySelector('#search-status')?.textContent==='0 articles'",
-    )
-    .await?;
-    search_query(client, "\"cobalt marmalade\"", 1).await?;
-    anyhow::ensure!(client.execute("return document.querySelector('.search-results [data-row-open]')!==null && document.querySelector('.search-results .search-saved-status')===null",vec![]).await?==true,"falling back to the older complete index does not mark uncached articles saved");
-    client
-        .goto(&format!("{}preferences/", fixture.base))
-        .await?;
-    wait_for(client, "document.querySelector('#offline-items')").await?;
-    client.execute("window.searchOfflineStatus=null;navigator.serviceWorker.addEventListener('message',e=>{if(e.data?.type==='AGGR_OFFLINE_STATUS')window.searchOfflineStatus=e.data});navigator.serviceWorker.controller.postMessage({type:'AGGR_OFFLINE_GET_STATUS'})",vec![]).await?;
-    wait_for(
-        client,
-        "window.searchOfflineStatus?.search?.phase==='ready'",
-    )
-    .await?;
-    anyhow::ensure!(
-        client
-            .execute(
-                "return window.searchOfflineStatus.search.activeVersion",
-                vec![]
-            )
-            .await?
-            == ready["activeVersion"],
-        "the online-to-offline transition selects the previously committed index"
-    );
-    client.execute("window.zeroStatusRegressions=[];window.sawDisabledStatus=false;navigator.serviceWorker.addEventListener('message',event=>{const status=event.data;if(status?.type!=='AGGR_OFFLINE_STATUS')return;if((status.requested===0 && status.search?.phase!=='disabled') || (window.sawDisabledStatus && status.requested!==0))window.zeroStatusRegressions.push(status);if(status.requested===0 && status.search?.phase==='disabled')window.sawDisabledStatus=true});const worker=navigator.serviceWorker.controller;for(let i=0;i<8;i++)worker.postMessage({type:'AGGR_OFFLINE_GET_STATUS'});const input=document.querySelector('#offline-items');input.value='0';input.dispatchEvent(new Event('change',{bubbles:true}));for(let i=0;i<8;i++)worker.postMessage({type:'AGGR_OFFLINE_GET_STATUS'})",vec![]).await?;
-    wait_for(client,"window.searchOfflineStatus?.requested===0 && window.searchOfflineStatus?.search?.phase==='disabled'").await?;
-    let empty=client.execute_async("const done=arguments[arguments.length-1];caches.keys().then(keys=>done(!keys.some(k=>k.includes(':offline-search-'))))",vec![]).await?;
-    anyhow::ensure!(
-        empty == true,
-        "disabling offline saving removes every protected index generation"
-    );
-    client
-        .execute_async(
-            "const done=arguments[arguments.length-1];setTimeout(done,250)",
-            vec![],
-        )
-        .await?;
-    anyhow::ensure!(
-        client
-            .execute("return window.zeroStatusRegressions", vec![])
-            .await?
-            == json!([]),
-        "concurrent read-only status replies must not resurrect ready search after N=0"
-    );
+    Ok(())
+}
+
+/// Click a link that a live result list may re-render underneath us: the element found a moment
+/// ago can be gone by the time the click lands, and the answer is simply to find it again.
+async fn click_steadily(client: &Client, selector: &str) -> Result<()> {
+    for attempt in 0..3 {
+        match client.find(Locator::Css(selector)).await?.click().await {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < 2 && error.to_string().contains("stale") => {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     Ok(())
 }
 
@@ -942,6 +902,14 @@ async fn canonical_facet_click(
         )
         .await?;
     let url = url::Url::parse(url.as_str().context("facet link URL")?)?;
+    // A facet either has a collection page of its own, which opens scoped to it, or it is a
+    // canonical feed query anyone can copy. Both land on the same articles.
+    if url.query().is_none() {
+        let path = url.path().to_string();
+        click_steadily(client, selector).await?;
+        wait_for(client, &format!("location.pathname==={} && document.querySelector('#q')?.value.trim()==={} && document.querySelectorAll('.rows .row').length > 0", json!(path), json!(format!("{kind}:{value}")))).await?;
+        return Ok(());
+    }
     anyhow::ensure!(
         url.path() == "/reader/"
             && url
@@ -949,7 +917,7 @@ async fn canonical_facet_click(
                 .any(|(key, value)| key == "q" && value == qualifier),
         "facet href must be a copyable canonical feed query: {url}"
     );
-    client.find(Locator::Css(selector)).await?.click().await?;
+    click_steadily(client, selector).await?;
     wait_for(client, &format!("location.pathname==='/reader/' && new URL(location.href).searchParams.get('q')==={} && document.querySelector('#q')?.value==={} && document.querySelector('#search-status')?.textContent==='{count} articles'",json!(qualifier),json!(qualifier))).await?;
     Ok(())
 }

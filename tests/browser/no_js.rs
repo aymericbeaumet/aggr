@@ -49,7 +49,7 @@ async fn no_javascript_contracts(client: &Client, fixture: &Fixture) -> Result<(
                 vec![]
             )
             .await?,
-        json!({"count":4,"visible":true,"top":2,"flat":true,"search":false,"preferences":"/reader/preferences/","overflow":false})
+        json!({"count":3,"visible":true,"top":2,"flat":true,"search":false,"preferences":"/reader/preferences/","overflow":false})
     );
     client
         .find(Locator::Css(".mobile-tabs a[data-route='browse/']"))
@@ -75,9 +75,9 @@ async fn no_javascript_contracts(client: &Client, fixture: &Fixture) -> Result<(
         "Browse category links submit the unified feed filter without JavaScript"
     );
     client
-        .goto(&format!("{}sources/example/", fixture.base))
+        .goto(&format!("{}sources/publisher.invalid/", fixture.base))
         .await?;
-    assert_eq!(client.execute("const root=document.querySelector('[data-search-root]');return [root.dataset.scopeKind,root.dataset.scopeValue]", vec![]).await?, json!(["source","example"]));
+    assert_eq!(client.execute("const root=document.querySelector('[data-search-root]');return [root.dataset.scopeKind,root.dataset.scopeValue,document.querySelector('#q').value]", vec![]).await?, json!(["source","publisher.invalid","source:publisher.invalid "]));
     client
         .find(Locator::Css("#q"))
         .await?
@@ -96,7 +96,10 @@ async fn no_javascript_contracts(client: &Client, fixture: &Fixture) -> Result<(
             .query_pairs()
             .map(|(key, value)| (key.into_owned(), value.into_owned()))
             .collect::<Vec<_>>(),
-        vec![("q".to_owned(), "source:example article".to_owned())],
+        vec![(
+            "q".to_owned(),
+            "source:publisher.invalid article".to_owned()
+        )],
         "archive search carries its scope in q without separate legacy facet parameters"
     );
     client
@@ -104,7 +107,7 @@ async fn no_javascript_contracts(client: &Client, fixture: &Fixture) -> Result<(
         .await?;
     let fallback = client
         .execute(
-            "return {base:new URL(window.AGGR.base,location.href).href,canonical:!!document.querySelector('link[rel=canonical]'),schema:!!document.querySelector('script[type=\"application/ld+json\"]')}",
+            "return {base:[...document.querySelectorAll('.empty a')].at(-1).href,canonical:!!document.querySelector('link[rel=canonical]'),schema:!!document.querySelector('script[type=\"application/ld+json\"]')}",
             vec![],
         )
         .await?;
