@@ -1,37 +1,48 @@
 # Licensing
 
 aggr is source-available under the unmodified
-[PolyForm Perimeter License 1.0.1](../LICENSE). The licensor is Aymeric Beaumet;
-the required copyright notice is in [NOTICE](../NOTICE).
+[Functional Source License, Version 1.1, ALv2 Future License](../LICENSE)
+(FSL-1.1-ALv2). The licensor is Aymeric Beaumet; the required copyright notice is
+in [NOTICE](../NOTICE).
 
 ## Using aggr
 
-You can run and modify aggr for your own use or your company's internal use without
-a license fee or trial deadline, provided you comply with the license. This includes
-commercial organizations. The license contains termination provisions for violations;
-it is not an unconditional promise of access to future versions or hosted services.
+You can run and modify aggr for any Permitted Purpose without a license fee or trial
+deadline, provided you comply with the license. The license names internal use and
+access, non-commercial education, non-commercial research, and professional services
+you provide to another licensee. This includes commercial organizations using aggr
+for themselves.
 
-The restriction is providing others a competing product or service, including a
-hosted reader marketed as a substitute for aggr. The restriction applies even when
-that competing offering is free. It is broader than a ban on paid resale, and is
-not a blanket ban on every commercial use or sale. Read the license's Noncompete
-and Competition sections for the actual test.
+A Permitted Purpose is any purpose other than a Competing Use: making aggr available
+to others in a commercial product or service that substitutes for it, substitutes for
+another product or service the licensor already offers using it, or offers the same or
+substantially similar functionality. A hosted reader marketed as a substitute for aggr
+is the clear case. Read the Permitted Purpose section for the actual test, and note
+that the Patents and Trademarks sections carry their own conditions.
 
-Because of this restriction, aggr is **source-available, not OSI open source**.
-The purpose is to keep personal and internal company use free while allowing the
-author to develop a commercial hosted service. For a separate commercial license,
-contact [hi@aymericbeaumet.com](mailto:hi@aymericbeaumet.com).
+Because of this restriction, aggr is **source-available, not OSI open source** on the
+day a version ships. It does not stay that way: the license irrevocably grants an
+additional Apache-2.0 license to each version, effective on the second anniversary of
+the date that version was made available. On or after that date you may use that
+version under Apache-2.0, competing use included, and nothing the licensor does later
+can withdraw it.
 
-This page explains the choice; [the license text](../LICENSE) governs. It follows
-the [published PolyForm Perimeter 1.0.1 text](https://polyformproject.org/licenses/perimeter/1.0.1)
-without custom restrictions or exceptions.
+The purpose is to keep personal and internal company use free, and to let the author
+develop a commercial hosted service, without the code ever becoming permanently
+closed. For a commercial license before a version's Apache-2.0 date, contact
+[hi@aymericbeaumet.com](mailto:hi@aymericbeaumet.com).
+
+This page explains the choice; [the license text](../LICENSE) governs. It is the
+[published FSL-1.1-ALv2 template](https://fsl.software/) with only its copyright
+notice filled in, and no custom restrictions or exceptions.
 
 ## Earlier releases and third-party material
 
-Versions published under MIT, including [v1.9.0](https://github.com/aymericbeaumet/aggr/blob/v1.9.0/LICENSE)
-and earlier releases, remain available under their original MIT terms. This change
-does not revoke those permissions or prevent someone from commercially using an
-earlier MIT version. Check the license shipped with the exact revision you use.
+Every version published so far, up to and including
+[v1.9.0](https://github.com/aymericbeaumet/aggr/blob/v1.9.0/LICENSE), was released
+under MIT and remains available under those terms. This change does not revoke those
+permissions or prevent someone from commercially using an earlier MIT version. Check
+the license shipped with the exact revision you use.
 
 Dependencies and vendored assets retain their own licenses. The browser client is
 first-party with no third-party code; the bundled font keeps its adjacent license
@@ -46,13 +57,12 @@ an archive.
 
 Original contributions use the standard MIT inbound license, with explicit
 acknowledgement as described in [CONTRIBUTING.md](../CONTRIBUTING.md). Contributors
-keep copyright, and their individual contributions remain MIT-licensed. This
-allows the maintainer to offer the combined project under Perimeter or a separate
+keep copyright, and their individual contributions remain MIT-licensed. This allows
+the maintainer to offer the combined project under FSL-1.1-ALv2 or a separate
 commercial license without requiring contributors to assign copyright.
 
 When distributing aggr, keep its license and required notice, together with the
-notices and terms for third-party material and MIT contributions. Release archives
+notices and terms for third-party material and MIT contributions. The license's
+Redistribution section requires a copy of or a link to its terms with any copy,
+modification or derivative, and that copyright notices stay in place. Release archives
 include `LICENSE`, `NOTICE`, and `LICENSE-CONTRIBUTIONS` alongside the binary.
-The generated JavaScript and component stylesheet also retain the required notice
-and the Perimeter license URL in a comment; rebuilding the client regenerates these
-comments and `client.LICENSE` from the repository's license files.

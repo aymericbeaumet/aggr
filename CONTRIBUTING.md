@@ -6,7 +6,7 @@ also need `make client-build` and the resulting embedded assets.
 
 ## Contribution license
 
-aggr is distributed under [PolyForm Perimeter 1.0.1](LICENSE). Original contributions
+aggr is distributed under [FSL-1.1-ALv2](LICENSE). Original contributions
 are accepted under the standard [MIT License](LICENSE-CONTRIBUTIONS), so the maintainer
 can include them in both this distribution and future commercial products or licenses.
 You keep your copyright. Your contribution itself remains available under MIT; this

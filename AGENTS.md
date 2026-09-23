@@ -48,7 +48,8 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   families newest first, measure the complete output, and fail if text and required assets cannot
   fit. Include publication cache markers and recheck restored output. Cache compressed publication
   copies separately from sync state; see `docs/build-budget.md`.
-- aggr is source-available under PolyForm Perimeter 1.0.1; prior MIT releases stay MIT.
+- aggr is source-available under FSL-1.1-ALv2: each version becomes Apache-2.0 two years after
+  its release. Prior MIT releases stay MIT.
   Preserve third-party notices and follow `CONTRIBUTING.md` for incoming contribution rights.
 - `VERSION` and `Cargo.toml` `version` must agree; releases are tags `vX.Y.Z`. The stable reusable
   workflow (`@v1`) selects the greatest published binary in its major channel at run time; binary

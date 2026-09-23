@@ -110,7 +110,9 @@ step and no dependencies. See [contributing](CONTRIBUTING.md) and
 
 ## License
 
-[PolyForm Perimeter 1.0.1](LICENSE): source-available, free for personal and internal company use
-with no trial period. Providing a competing product or service requires separate permission.
-This is not an OSI open-source license. Previously published MIT versions keep their MIT terms.
+[FSL-1.1-ALv2](LICENSE): source-available, free for personal and internal company use with no
+trial period. A competing product or service requires separate permission. This is not an OSI
+open-source license today, but it becomes one on a schedule: every version is additionally
+licensed under Apache-2.0 two years after its release. Previously published MIT versions keep
+their MIT terms.
 See [licensing](docs/licensing.md) for examples, contribution terms, and third-party notices.
