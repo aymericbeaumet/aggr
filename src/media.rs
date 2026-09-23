@@ -976,12 +976,21 @@ pub fn prepare_asset(candidate: &Candidate, bytes: Vec<u8>, limits: &MediaLimits
         bytes
     };
     let format = image::guess_format(&bytes).context("recognizing article image")?;
+    if format == ImageFormat::Avif {
+        return avif_asset(candidate, bytes, limits);
+    }
     let extension = match format {
         ImageFormat::Jpeg => "jpg",
         ImageFormat::Png => "png",
         ImageFormat::Gif => "gif",
         ImageFormat::WebP => "webp",
-        _ => bail!("unsupported article image format"),
+        // Every raster format that decodes without a system library: a publisher's choice of
+        // container is not a reason to lose the picture. The renditions below are WebP either way.
+        ImageFormat::Bmp => "bmp",
+        ImageFormat::Ico => "ico",
+        ImageFormat::Tiff => "tiff",
+        ImageFormat::Qoi => "qoi",
+        _ => bail!("unsupported article image format: {format:?}"),
     };
     let animated = is_animated(&bytes, format, limits)?;
     let mut reader = ImageReader::with_format(Cursor::new(bytes.as_slice()), format);
@@ -1040,6 +1049,137 @@ pub fn prepare_asset(candidate: &Candidate, bytes: Vec<u8>, limits: &MediaLimits
         placeholder: placeholder::from_image(&image)?,
         renditions,
     })
+}
+
+/// AVIF needs an AV1 decoder, which is a system library rather than a crate, and the picture is
+/// worth more than what decoding it would add. The response is archived exactly as it arrived and
+/// served as the master: every browser that a publisher chose AVIF for can read it. Its geometry
+/// comes from the container so the space is still reserved before it loads; what is lost is the
+/// derived WebP renditions and the inline preview, and the dominant colour stands in for those.
+fn avif_asset(candidate: &Candidate, bytes: Vec<u8>, limits: &MediaLimits) -> Result<Asset> {
+    let (width, height) = avif_dimensions(&bytes).context("reading AVIF image size")?;
+    validate_dimensions(width, height, limits)?;
+    // A flat stand-in keeps every promise the reader depends on: a valid inline preview that waits
+    // for no request, and a colour holding the space until the picture itself arrives. Only the
+    // likeness is missing, and the picture behind it is the publisher's own bytes.
+    let stand_in = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+        4,
+        4,
+        image::Rgb([122, 122, 126]),
+    ));
+    Ok(Asset {
+        source_url: candidate.url.to_string(),
+        source_hash: crate::model::sha1_hex(candidate.url.as_str().as_bytes()),
+        alt: candidate.alt.clone(),
+        master_hash: crate::model::sha1_hex(&bytes),
+        master_bytes: bytes,
+        master_extension: "avif",
+        width,
+        height,
+        dominant_color: dominant_color(&stand_in),
+        placeholder: placeholder::from_image(&stand_in)?,
+        renditions: Vec::new(),
+    })
+}
+
+/// The `ispe` box states an AVIF's stored size in its first full-box payload: version and flags,
+/// then two big-endian `u32`s. Walking the ISO base media boxes to it reads the size without
+/// decoding a single pixel.
+fn avif_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    fn walk(mut data: &[u8], depth: usize) -> Option<(u32, u32)> {
+        if depth > 8 {
+            return None;
+        }
+        while data.len() >= 8 {
+            let size = u32::from_be_bytes(data[0..4].try_into().ok()?) as usize;
+            let kind = &data[4..8];
+            // `0` runs to the end of the file and `1` carries a 64-bit size aggr does not need.
+            let size = if size == 0 { data.len() } else { size };
+            if size < 8 || size > data.len() {
+                return None;
+            }
+            let payload = &data[8..size];
+            if kind == b"ispe" && payload.len() >= 12 {
+                let width = u32::from_be_bytes(payload[4..8].try_into().ok()?);
+                let height = u32::from_be_bytes(payload[8..12].try_into().ok()?);
+                return (width > 0 && height > 0).then_some((width, height));
+            }
+            // Only the containers on the way to `ispe`, so no payload is mistaken for boxes.
+            if matches!(kind, b"meta" | b"iprp" | b"ipco") {
+                // `meta` is a full box: its version and flags come before its children.
+                let children = if kind == b"meta" { 4 } else { 0 };
+                if let Some(found) = payload
+                    .get(children..)
+                    .and_then(|rest| walk(rest, depth + 1))
+                {
+                    return Some(found);
+                }
+            }
+            data = &data[size..];
+        }
+        None
+    }
+    walk(bytes, 0)
+}
+
+#[cfg(test)]
+mod avif_tests {
+    use super::*;
+
+    fn box_bytes(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// `ftyp`, then `meta` as a full box holding `iprp` → `ipco` → `ispe`, which is where an AVIF
+    /// states the size aggr reserves space for.
+    fn avif(width: u32, height: u32) -> Vec<u8> {
+        let mut ispe = vec![0, 0, 0, 0];
+        ispe.extend_from_slice(&width.to_be_bytes());
+        ispe.extend_from_slice(&height.to_be_bytes());
+        let ipco = box_bytes(b"ipco", &box_bytes(b"ispe", &ispe));
+        let iprp = box_bytes(b"iprp", &ipco);
+        let mut meta = vec![0, 0, 0, 0];
+        meta.extend_from_slice(&iprp);
+        let mut out = box_bytes(b"ftyp", b"avif\0\0\0\0avifmif1");
+        out.extend_from_slice(&box_bytes(b"meta", &meta));
+        out
+    }
+
+    #[test]
+    fn an_avif_states_its_size_where_a_decoder_is_not_needed_to_read_it() {
+        assert_eq!(avif_dimensions(&avif(3904, 2574)), Some((3904, 2574)));
+        // Nothing to read: no `ispe`, a zero extent, and a box claiming more than it has.
+        assert_eq!(avif_dimensions(&box_bytes(b"ftyp", b"avif")), None);
+        assert_eq!(avif_dimensions(&avif(0, 2574)), None);
+        let mut truncated = avif(100, 100);
+        truncated[0..4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(avif_dimensions(&truncated), None);
+    }
+
+    #[test]
+    fn an_avif_is_archived_whole_rather_than_dropped() {
+        let bytes = avif(1200, 800);
+        let candidate = Candidate {
+            url: Url::parse("https://example.com/picture.avif").unwrap(),
+            alt: Some("A picture".into()),
+        };
+        let asset = avif_asset(&candidate, bytes.clone(), &MediaLimits::default()).unwrap();
+        assert_eq!(asset.master_bytes, bytes, "the publisher's own bytes");
+        assert_eq!(asset.master_extension, "avif");
+        assert_eq!((asset.width, asset.height), (1200, 800));
+        assert!(asset.renditions.is_empty(), "no decoder, no renditions");
+        assert!(
+            asset
+                .placeholder
+                .data_url
+                .starts_with("data:image/png;base64,"),
+            "the space is still held without a request: {}",
+            asset.placeholder.data_url
+        );
+    }
 }
 
 fn prepare_rendition(

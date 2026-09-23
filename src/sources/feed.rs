@@ -334,6 +334,9 @@ async fn discovery_ladder(
         {
             return Ok(discovered);
         }
+        if let Some(listed) = probe_listings(&body.final_url, source, ctx).await {
+            return Ok(listed);
+        }
     }
     match extracted {
         Ok((meta, items)) => Ok(Fetch::Changed {
@@ -468,6 +471,45 @@ async fn probe_feeds(
             },
             &body.bytes,
         ));
+    }
+    None
+}
+
+/// The pages a site keeps its writing on when its root keeps none: `qwen.ai` publishes nothing at
+/// `/` and everything at `/blog`, with no feed anywhere. A subscription should be the site, so the
+/// sections are read as listings once every feed endpoint has already failed — and only for a URL
+/// that names no section itself, since one that does has already said where to look.
+async fn probe_listings(page: &Url, source: &Source, ctx: &Context<'_>) -> Option<Fetch> {
+    if !is_origin_root(page) {
+        return None;
+    }
+    let root = page.join("/").ok()?;
+    for section in FEED_SECTIONS {
+        let Ok(candidate) = root.join(section) else {
+            continue;
+        };
+        let body = match request(&candidate, source, ctx, &Validators::default()).await {
+            Ok(Response::Ok(body)) => body,
+            _ => continue,
+        };
+        let page = String::from_utf8_lossy(&body.bytes);
+        let Ok((meta, items)) = crate::sources::html::extract(&page, &body.final_url) else {
+            continue;
+        };
+        if is_thin_listing(&items, &meta, &body.final_url) {
+            continue;
+        }
+        log::debug!("{}: reading the listing at {candidate}", source.slug);
+        return Some(Fetch::Changed {
+            validators: Validators {
+                etag: body.etag,
+                last_modified: body.last_modified,
+                body_hash: Some(sha1_hex(&body.bytes)),
+                resolved_url: Some(body.final_url.to_string()),
+            },
+            meta,
+            items,
+        });
     }
     None
 }
@@ -2108,6 +2150,50 @@ Second paragraph.</media:description></media:group>
         assert_eq!(
             validators.resolved_url.as_deref(),
             Some(configured.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_origin_that_publishes_nothing_is_read_from_the_section_that_does() {
+        let server = MockServer::start_async().await;
+        // qwen.ai: the root is a landing page with no feed and no entries, and everything the
+        // site publishes lives one section down.
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/");
+                then.status(200)
+                    .body("<title>Landing</title><p>Nothing here.</p>");
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/blog");
+                then.status(200).body(
+                    "<title>Blog</title><article><h2><a href=\"/blog/one\">One story</a></h2><time datetime=\"2026-09-02\"></time></article><article><h2><a href=\"/blog/two\">Another story</a></h2><time datetime=\"2026-09-03\"></time></article>",
+                );
+            })
+            .await;
+        let configured = Url::parse(&server.url("/")).unwrap();
+        let source = source(configured.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let state = crate::store::SourceState::default();
+        let cache = tempfile::tempdir().unwrap();
+        let ctx = Context {
+            client: &client,
+            state: &state,
+            cache_dir: cache.path(),
+        };
+        let Fetch::Changed {
+            items, validators, ..
+        } = fetch(&configured, &source, &ctx).await.unwrap()
+        else {
+            panic!("expected the section listing");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            validators.resolved_url.as_deref(),
+            Some(server.url("/blog").as_str()),
+            "the section that answered is what the source remembers"
         );
     }
 

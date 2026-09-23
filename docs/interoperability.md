@@ -112,6 +112,16 @@ captures that stored separators or generated links, across reader pages, search,
 without rewriting stored Markdown or HTML. Media remains at its post position; a video keeps its
 poster image only; playback is not retained.
 
+## Article images
+
+Every raster format that decodes in pure Rust is archived and resized: JPEG, PNG, GIF, WebP, BMP,
+ICO, TIFF and QOI, plus publisher SVG rasterized to a passive PNG master. AVIF needs an AV1
+decoder, which is a system library rather than a crate, so it is archived undecoded: the response
+is kept byte for byte as the master and served as-is, its size is read from the container's `ispe`
+box so the space is reserved before it loads, and it carries a flat stand-in preview instead of a
+ThumbHash. It gains no WebP renditions. A CDN that answers `auto=format` with AVIF regardless of
+`Accept` — Linear's, for one — is archived this way rather than skipped.
+
 ## HTTP extraction and native builds
 
 HTTP requests use reqwest with rustls first. A response explicitly marked

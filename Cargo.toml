@@ -30,7 +30,7 @@ glob = "0.3"
 hayro = { version = "0.7.1", features = ["embed-fonts"] }
 hex = "0.4"
 htmd = "0.5"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico", "tiff", "qoi"] }
 log = "0.4"
 minijinja = { version = "2", features = ["loader", "json"] }
 notify = "8"

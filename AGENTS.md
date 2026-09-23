@@ -147,6 +147,9 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   `check` whether items came from a feed or from cards read off a page.
 - A normal source URL is intentionally enough: keep HTML heuristics internal and remember the
   discovered feed endpoint. `type = "html"` and site-specific selectors are not public config.
+  An origin that publishes nothing itself is read from the section that does (`/blog`, `/news`,
+  `/posts`) once every feed endpoint has failed, so the subscription can be the site; a URL that
+  already names a section has said where to look and keeps it.
   A listing URL names a section, so probe conventional endpoints relative to it with or without a
   trailing slash, never at the root, and only on first resolution. A discovered feed with no
   entries loses to the listing that does have them.
@@ -294,7 +297,10 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - Reserve media geometry before loading or player activation, including failure and reduced-motion
   paths. Use validated dimensions or a stable fallback ratio; keep posters until players are ready.
   Generate ThumbHashes from decoded local images and embed their validated tiny PNG previews in
-  HTML; placeholders must not wait for JavaScript or a separate network request. Preserve intact
+  HTML; placeholders must not wait for JavaScript or a separate network request. Archive every
+  raster format that decodes without a system library. AVIF needs an AV1 decoder and is archived
+  undecoded instead: exact bytes, the size its `ispe` box states, and a flat stand-in preview, so
+  the picture and its geometry survive without a new build dependency. Preserve intact
   local image masters when repairing missing companions, and back off failed downloads.
   Parse `srcset` using URL and descriptor boundaries: CDN URLs may contain literal commas.
   Preserve exclamations before links as prose when converting HTML to Markdown; article footnotes
