@@ -20,6 +20,10 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   handlers and `data:`/`javascript:` URLs before storage; ammonia sanitizes before display;
   comrak renders with raw HTML off. Never serve stored HTML unsanitized.
 - No data leaves the user's repository except the fetches they configured.
+- Fetching is the only step that touches the network: after a sync the build is hermetic, a pure
+  function of the archive and the binary. Rendering must never make a request, so anything a page
+  needs — article text, images, previews, durations, discussions, the search index — is resolved
+  during the fetch and stored. A build that would need the network drops the feature instead.
 - The CLI and static generator are Rust; the reader is hand-written HTML, CSS and JavaScript with
   no build step and no dependencies. Site generation stays entirely Rust: never execute
   JavaScript/SSR or invoke a frontend compiler from the CLI or Cargo build. Never reintroduce a
@@ -185,6 +189,10 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   language; a publisher's own name for a language outranks the grammar used to colour it.
 - Preserve existing body, HTML, and preview companions when explicit refresh fills missing media;
   apply shared boundary cleanup during both fetch and rendering so old archives benefit safely.
+  The leading-metadata walk steps over a publisher's hero pictures rather than into them, so page
+  chrome below one is still reachable and the picture is never the price of reaching it. A follow
+  widget's label survives its button as a colon introducing nothing; a label above the list, quote,
+  picture or link it announces is doing its job and stays.
   Remove compact bylines only from a leading prose paragraph with a matching publication date.
 - Preserve explicitly captioned image figures before Readability classifies incidental IDs such as
   `replies.png` as boilerplate, and rename share-named wrappers that hold media but no share links.

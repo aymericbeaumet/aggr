@@ -560,6 +560,8 @@ enum LeadingMetadata {
     /// A category label or eyebrow above the opening: a lone short link, or a few words that
     /// introduce the heading right after them.
     Kicker,
+    /// A follow widget's label, left behind once the button it introduced was dropped.
+    Follow,
 }
 
 /// Remove the metadata lines readability promoted to the front of the article: a heading that
@@ -577,20 +579,34 @@ pub fn strip_leading_metadata(
     let mut rest = markdown.trim_start_matches('\n');
     let mut bylines = 0;
     let mut previous = None;
+    // A hero picture belongs to the article, so the walk steps over it rather than into it: the
+    // page's own chrome can sit below it, and dropping the picture to reach that would be a trade
+    // nobody asked for.
+    let mut kept = String::new();
+    let mut heroes = 0;
+    let mut stripped = false;
     while let Some((first, tail)) = rest.split_once("\n\n") {
         if first.lines().count() != 1 {
             break;
         }
         let tail = tail.trim_start_matches('\n');
         let plain = html_to_text(&render_markdown(first));
+        if previous.is_none() && heroes < MAX_HERO_PICTURES && hero_picture(first, &plain) {
+            heroes += 1;
+            kept.push_str(first);
+            kept.push_str("\n\n");
+            rest = tail;
+            continue;
+        }
         let Some(kind) =
             leading_metadata(first, &plain, title, published, source_slug, tail, previous)
         else {
             if let Some(without_stamp) = stamp_behind_lede(first, &plain, tail) {
-                return without_stamp;
+                return kept + &without_stamp;
             }
             break;
         };
+        stripped = true;
         if kind == LeadingMetadata::Byline {
             bylines += 1;
             if bylines > 3 {
@@ -608,7 +624,48 @@ pub fn strip_leading_metadata(
             }
         }
     }
-    rest.to_string()
+    if !stripped {
+        return markdown.to_string();
+    }
+    kept + rest
+}
+
+/// Hero pictures a publisher stacks above its opening, as many as the resource row allows.
+const MAX_HERO_PICTURES: usize = 3;
+
+/// A paragraph that is only a picture: it says nothing, and what it shows is the article's.
+fn hero_picture(block: &str, plain: &str) -> bool {
+    plain.trim().is_empty() && block.contains("![")
+}
+
+/// `Add Android Authority on Google:` — the label of a follow widget, left behind once the button
+/// it introduced was dropped. A colon that introduces nothing is what tells it from prose, so a
+/// line followed by the list or quote it announces stays.
+fn is_follow_prompt(text: &str, tail: &str) -> bool {
+    let text = text.trim();
+    if text.chars().count() > 80 || !text.ends_with(':') {
+        return false;
+    }
+    let lower = text.to_lowercase();
+    if ![
+        "add ",
+        "follow ",
+        "subscribe to ",
+        "subscribe ",
+        "join ",
+        "read ",
+    ]
+    .iter()
+    .any(|verb| lower.starts_with(verb))
+    {
+        return false;
+    }
+    // What follows tells the two apart: a label above the list, quote, picture or link it
+    // announces is doing its job, while one above ordinary prose lost whatever it introduced.
+    let next = tail.split("\n\n").next().unwrap_or_default().trim_start();
+    !next.starts_with(['-', '*', '+', '>', '#', '[', '!', '<'])
+        && !next.starts_with(|character: char| character.is_ascii_digit())
+        && !next.starts_with("http")
 }
 
 fn leading_metadata(
@@ -628,6 +685,9 @@ fn leading_metadata(
     }
     if matches!(previous, None | Some(LeadingMetadata::Kicker)) && is_kicker(block, plain, tail) {
         return Some(LeadingMetadata::Kicker);
+    }
+    if !block.trim_start().starts_with('#') && is_follow_prompt(plain, tail) {
+        return Some(LeadingMetadata::Follow);
     }
     // `Carlo Piovesan, Geertjan Wielenga` over `2026-09-18 | 9 min`: the authors line of a
     // metadata row is the byline, whatever follows it.
@@ -1785,6 +1845,42 @@ mod tests {
         ] {
             assert_eq!(
                 strip_article_metadata(body, title, Some(published), source),
+                body,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_follow_widget_under_the_hero_goes_without_taking_the_picture() {
+        // androidauthority.com: the hero picture, then the label of a follow widget whose button
+        // readability dropped, then the article.
+        let body = concat!(
+            "![samsung family hub fridge large](https://cdn.example/fridge.jpg)\n\n",
+            "Add Android Authority on Google:\n\n",
+            "TL;DR\n\n",
+            "- Samsung has halted a SmartThings update.\n",
+        );
+        assert_eq!(
+            strip_leading_metadata(body, "Samsung freezes its fridges", None, "hnrss-org"),
+            concat!(
+                "![samsung family hub fridge large](https://cdn.example/fridge.jpg)\n\n",
+                "TL;DR\n\n",
+                "- Samsung has halted a SmartThings update.\n",
+            )
+        );
+
+        // A colon that introduces what follows is prose, a heading is never chrome, and a picture
+        // with nothing behind it keeps the body exactly as it was.
+        for body in [
+            "Follow these steps:\n\n- First step.\n",
+            "Subscribe to the newsletter:\n\n> A quote follows.\n",
+            "## Add us on Google:\n\nArticle prose.\n",
+            "![A hero](https://cdn.example/a.jpg)\n\nArticle prose.\n",
+            "Read the docs and get started building today:\n\n[Docs](https://example.com)\n",
+        ] {
+            assert_eq!(
+                strip_leading_metadata(body, "A title", None, "blog"),
                 body,
                 "{body}"
             );

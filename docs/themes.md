@@ -236,6 +236,8 @@ remain importable. Files and links are size-bounded, allowlisted, and reviewed b
 application. Reading history and cached article contents are never exported. Resetting preferences also restores
 the site's offline article count, which can resize automatic downloads.
 Disabling single-key shortcuts leaves modifier shortcuts and native keyboard operation available.
+`j`/`k` and the arrows walk a list alike, so the vim keys are a preference rather than a
+requirement; an article page keeps the arrows for scrolling, which is what reading it needs.
 Cmd/Ctrl+K, or `/` where single-key shortcuts are on, focuses the shared global search field; a
 page without one lands on the feed with it focused. Escape closes suggestions and removes focus.
 Both modifiers are always handled; only the name shown differs, so the shortcut help marks a

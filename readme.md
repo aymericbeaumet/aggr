@@ -14,6 +14,10 @@ Source-available and free for personal and internal company use; see [the licens
 
 - **Own the archive.** Readable Markdown, original links, and capture dates live on a separate
   Git branch. Inspect, back up, or move the files with ordinary Git tools.
+- **Hermetic after a sync.** Fetching is the only step that reaches the network. Once a sync has
+  run, the site is a pure function of your repository and the binary: article text, images and the
+  search index are all built from files you already have, so a rebuild is reproducible, works
+  offline, and cannot be changed by a publisher editing or deleting the original.
 - **Run your own reader.** A small `aggr.toml` and a scheduled workflow fetch sources and publish
   static files. GitHub Pages is the ready-made path; other Git and static hosts work too.
 - **Keep reading.** Full-text search, mobile installation, keyboard navigation, and selected

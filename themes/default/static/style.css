@@ -530,7 +530,7 @@ body[data-kind="item"] .main {
 /* The whole heading is the way back to it, so it points like one; the marker beside it stays the
    visible affordance and the thing a reader can copy. */
 .body :is(h1, h2, h3, h4, h5, h6)[id] { cursor: pointer; }
-.body :is(h1, h2, h3, h4, h5, h6)[id] :is(a, button, code) { cursor: auto; }
+.body :is(h1, h2, h3, h4, h5, h6)[id] :is(a:not(.heading-anchor), button, code) { cursor: auto; }
 .body .heading-anchor { position: absolute; right: 100%; top: 0; margin-right: 0.3em; color: var(--muted); font-weight: 400; text-decoration: none; opacity: 0; cursor: pointer; }
 .body :is(h1, h2, h3, h4, h5, h6):hover > .heading-anchor, .body .heading-anchor:focus-visible { opacity: 1; }
 .body :is(h1, h2, h3, h4, h5, h6)[id]:target > .heading-anchor { opacity: 1; color: var(--accent-strong); }

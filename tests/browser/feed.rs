@@ -158,6 +158,17 @@ async fn selected_feed_external_shortcuts() -> Result<()> {
                 wait_for(&client, "!!document.querySelector('.search-results .row.is-selected')").await?;
                 key(&client, "Escape").await?;
             }
+            // The arrows walk the list wherever j and k do, so nobody needs the vim keys to read.
+            const CURSOR: &str = "const root=document.querySelector('.search-results:not([hidden])') || document.querySelector('[data-static-feed]');return [...root.querySelectorAll('.row')].findIndex(row=>row.classList.contains('is-selected'))";
+            let start = client.execute(CURSOR, vec![]).await?;
+            key(&client, "\u{e015}").await?;
+            let stepped = client.execute(CURSOR, vec![]).await?;
+            key(&client, "\u{e013}").await?;
+            let back = client.execute(CURSOR, vec![]).await?;
+            anyhow::ensure!(
+                stepped.as_i64() == start.as_i64().map(|index| index + 1) && back == start,
+                "ArrowDown and ArrowUp walk the list like j and k: {start} -> {stepped} -> {back}"
+            );
             key(&client, "j").await?;
             let targets = client.execute(r#"
               const root=document.querySelector('.search-results') || document.querySelector('[data-static-feed]');

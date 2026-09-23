@@ -77,7 +77,7 @@ separately.
 |---|---|
 | `Cmd+K` / `Ctrl+K`, or `/` | Focus global search; the help names whichever modifier this platform presses. |
 | `↑` / `↓`, then `Enter` in search | With suggestions open, choose and accept one; otherwise move the result cursor and open the selected result. `Escape` closes suggestions, then removes focus. |
-| `j` / `k` in article lists | Select the next / previous item; the first press selects the first item. |
+| `j` / `k`, or `↓` / `↑`, in article lists | Select the next / previous item; the first press selects the first item. Article pages keep the arrows for scrolling. |
 | `gg` / `G` | Select the first / last visible feed item; scroll to the top / bottom on article pages. |
 | `o` / `Enter` in article lists | Open the selected item. |
 | `j` / `k` in articles | Open the older / newer article. Moving past either end returns to the feed. |

@@ -501,6 +501,13 @@ function installKeyboard() {
       else selection.edge("last");
       return;
     }
+    // The arrows walk a list wherever j and k would: nobody should have to know vim to read the
+    // feed. An article page keeps them for scrolling, which is what reading it needs, and a list
+    // with nothing in it leaves them to the browser.
+    if (key === "ArrowDown" || key === "ArrowUp") {
+      if (KIND !== "item" && selection.move(key === "ArrowDown" ? 1 : -1)) event.preventDefault();
+      return;
+    }
     if (key === "j" || key === "k") {
       const direction = key === "j" ? 1 : -1;
       if (KIND === "item") {
