@@ -115,6 +115,10 @@ values from the current index instead of a validation error, including when open
 query URL. Invalid recognized qualifiers keep results hidden and show an explanation.
 Queries are limited to 4096 characters and 16 clauses, with explicit errors rather than truncation.
 
+The syntax reminder under the field is a pointer affordance for someone already typing: it appears
+only while the field has focus and the pointer is over it, and never on touch or from the keyboard
+alone. It overlays the page without moving the feed, and `aria-describedby` reaches it regardless.
+
 Completion replaces only the token at the cursor. It suggests qualifier names, source/category/tag/type
 values with contextual counts and date shortcuts. Articles appear exclusively in the result list;
 completing or submitting free text never opens an article suggestion. Value lists
@@ -123,10 +127,16 @@ and touch selection are supported; Escape closes open suggestions, and a further
 search field, never clearing the query. Composition input does not launch partial searches. Enter and Tab accept the
 highlighted stable option identity, even when labels coincide or asynchronous counts reorder values.
 Accepting a qualifier leaves the menu open on the values it accepts, so `sour` and Enter reach the
-sources in two keystrokes. The arrows always walk the results, suggestions or not, and the keyboard
-stays in the field; the first result is selected by default and Enter opens it once the token at the
-cursor has nothing left to complete. Leaving the field returns the list to the ordinary `j`/`k`/`o`
-shortcuts on the same selection.
+sources in two keystrokes. The arrows walk open suggestions and the results the rest of the time,
+with the keyboard staying in the field either way; the first result is selected by default and Enter
+opens it once the token at the cursor has nothing left to complete. Results are the feed filtered
+and share its one cursor: the first is selected as soon as they render, leaving the field returns
+them to the ordinary `j`/`k`/`o` shortcuts, and clearing the query hands the cursor back to the
+feed. The static feed waits hidden behind the results, so a cursor may only ever rest on a row
+whose container is on screen.
+Opening a result and coming back reloads the document, so the last rendered page is kept in
+`sessionStorage` under the site path and drawn before the index has reloaded; the live query still
+runs and replaces it, and a placeholder only appears when there is nothing to keep.
 Suggestions and counts honor every remaining clause after removing the edited token. While that
 context loads, unrelated archive-wide values remain hidden. Obsolete requests cannot replace a newer
 context, survive clearing/navigation, or apply to another index version.

@@ -166,6 +166,41 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
             .await?,
         json!({"checked":true,"decoration":"underline"})
     );
+    // Every alternative for one action reads as one mapping: the key column is sized to hold the
+    // widest of them, so none of them is folded onto a second line. A mapping that differs by
+    // platform names only the modifier this one has.
+    let mappings = client
+        .execute(
+            r#"
+      const keys = [...document.querySelectorAll('#shortcut-help .shortcut-list dt')];
+      const wrapped = keys.filter(key => {
+        const rects = key.getClientRects();
+        return rects.length > 1 || key.getBoundingClientRect().height > parseFloat(getComputedStyle(key).lineHeight) * 1.6;
+      }).map(key => key.textContent.trim());
+      const search = keys.find(key => key.textContent.includes('/'));
+      const shown = [...document.querySelectorAll('#shortcut-help [data-platform-key]')]
+        .filter(pair => pair.getClientRects().length > 0)
+        .map(pair => pair.dataset.platformKey);
+      return {wrapped, search: !!search, shown, platform: document.documentElement.dataset.platform};
+    "#,
+            vec![],
+        )
+        .await?;
+    assert_eq!(
+        mappings["wrapped"],
+        json!([]),
+        "shortcut alternatives share one line: {mappings}"
+    );
+    assert_eq!(mappings["search"], true, "the help lists / for search");
+    assert_eq!(
+        mappings["shown"].as_array().map(Vec::len),
+        Some(1),
+        "exactly one modifier is offered for a platform-specific mapping: {mappings}"
+    );
+    assert_eq!(
+        mappings["shown"][0], mappings["platform"],
+        "the modifier shown is the one this platform presses: {mappings}"
+    );
     key(client, "Escape").await?;
     let applied_preferences = client
         .execute(

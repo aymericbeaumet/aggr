@@ -17,7 +17,9 @@ const OPERATORS = [
 const DATE_SHORTCUTS = ["today", "yesterday", "last7d", "last30d", "year"];
 const MAX_CHARS = 4096;
 const MAX_CLAUSES = 16;
-const DEBOUNCE = 180;
+/** Typing pause before a query runs. Long enough to coalesce a burst, short enough to feel live:
+    the index is already warm, stale runs are discarded by generation, and repeats are cached. */
+const DEBOUNCE = 60;
 
 class QueryError extends Error {
   constructor(message, start = 0, end = start) {
@@ -1046,6 +1048,8 @@ export function mount(options) {
     if (pager) pager.hidden = true;
     showError("");
     syncLocation();
+    // The feed coming back needs its cursor as much as the results leaving did.
+    options.selection?.restore();
   }
 
   let catalogueFacets;
@@ -1069,9 +1073,10 @@ export function mount(options) {
     const token = ++generation;
     if (!active()) return reset();
 
-    document.body.setAttribute("data-searching", "");
-    if (staticFeed) staticFeed.hidden = true;
-    if (status) {
+    showResultsShell();
+    // Results already on screen answer the question better than a placeholder that replaces them,
+    // so only an empty list says it is working.
+    if (status && (!list || list.hidden)) {
       status.hidden = false;
       status.textContent = "Searching…";
     }
@@ -1102,6 +1107,7 @@ export function mount(options) {
       if (token !== generation) return;
       page = outcome.page;
       renderResults(outcome);
+      remember(outcome);
       syncLocation();
     } catch (failure) {
       if (token !== generation) return;
@@ -1112,6 +1118,42 @@ export function mount(options) {
           ? failure.message
           : "Search is unavailable right now. Try again in a moment.",
       );
+    }
+  }
+
+  /** Hand the page over to the results: the feed behind them is not what the reader asked for. */
+  function showResultsShell() {
+    document.body.setAttribute("data-searching", "");
+    if (staticFeed) staticFeed.hidden = true;
+  }
+
+  const SNAPSHOT_KEY = "aggr:search-snapshot:" + encodeURIComponent(new URL(base).pathname);
+  const MAX_SNAPSHOT = 512 * 1024;
+
+  /**
+   * Opening a result and coming back reloads the document, and rebuilding the index to answer a
+   * question already answered leaves the reader on an empty page meanwhile. The page they left is
+   * kept verbatim and drawn straight away; the live query still runs and replaces it.
+   */
+  function remember(outcome) {
+    const saved = JSON.stringify({ query: input.value, page: outcome.page, outcome });
+    if (saved.length > MAX_SNAPSHOT) return;
+    try {
+      sessionStorage.setItem(SNAPSHOT_KEY, saved);
+    } catch {
+      /* private mode, or no room: the query simply runs as before */
+    }
+  }
+
+  function restore() {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(SNAPSHOT_KEY) || "null");
+      if (!saved || saved.query !== input.value || saved.page !== page) return false;
+      showResultsShell();
+      renderResults(saved.outcome);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -1200,10 +1242,16 @@ export function mount(options) {
       return;
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      // The arrows walk the results, suggestions or not, and the keyboard stays in the field:
-      // the list is what the reader came for, and a menu that hijacked them would put the
-      // results out of reach for as long as a qualifier is half-typed. Enter and Tab take the
-      // suggestion; a pointer takes any of them.
+      // Open suggestions are what the arrows are for; the results keep them the rest of the time,
+      // and either way the keyboard stays in the field.
+      if (suggesting) {
+        event.preventDefault();
+        event.stopPropagation();
+        highlighted =
+          (highlighted + (event.key === "ArrowDown" ? 1 : -1) + suggestions.length) % suggestions.length;
+        renderMenu();
+        return;
+      }
       if (options.selection?.move(event.key === "ArrowDown" ? 1 : -1, false)) {
         event.preventDefault();
         event.stopPropagation();
@@ -1252,6 +1300,7 @@ export function mount(options) {
     const url = new URL(location.href);
     input.value = url.searchParams.get("q") || input.value;
     page = Number(url.searchParams.get("search-page")) || 1;
+    restore();
     void run();
   });
 
@@ -1264,7 +1313,10 @@ export function mount(options) {
   }
   // This module is fetched on the first sign of interest, so the reader may already have typed
   // by the time it arrives. A shared `?q=` link lands here too.
-  if (active()) void run();
+  if (active()) {
+    restore();
+    void run();
+  }
   // If they are still in the field, show them the suggestions for what they have typed rather
   // than waiting for another keystroke.
   if (document.activeElement === input) {

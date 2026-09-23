@@ -75,7 +75,7 @@ separately.
 
 | Keys | Action |
 |---|---|
-| `Cmd+K` / `Ctrl+K`, or `/` | Focus global search. |
+| `Cmd+K` / `Ctrl+K`, or `/` | Focus global search; the help names whichever modifier this platform presses. |
 | `↑` / `↓`, then `Enter` in search | With suggestions open, choose and accept one; otherwise move the result cursor and open the selected result. `Escape` closes suggestions, then removes focus. |
 | `j` / `k` in article lists | Select the next / previous item; the first press selects the first item. |
 | `gg` / `G` | Select the first / last visible feed item; scroll to the top / bottom on article pages. |

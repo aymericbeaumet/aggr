@@ -26,11 +26,32 @@ pub fn title(value: &str, fallback: &str) -> String {
         })
         .collect();
     let cleaned = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned = unwrap_emphasis(&cleaned);
     if cleaned.is_empty() {
         fallback.to_string()
     } else {
-        cleaned
+        cleaned.to_string()
     }
+}
+
+/// A publisher that writes its posts in Markdown can emit the markers with the headline, and a
+/// title emphasised from end to end is emphasising nothing: `**Know Who Spoke When**` is the
+/// title, asterisks and all. Markers around part of a title are the author's own — `` `zig cc` ``
+/// names a command, and `via ___ Supervision` is a blank to fill in — so only a pair wrapping the
+/// whole of it comes off, and only when the rest carries no more of them.
+fn unwrap_emphasis(title: &str) -> &str {
+    for marker in ["**", "__", "*", "_", "`"] {
+        let Some(inner) = title
+            .strip_prefix(marker)
+            .and_then(|rest| rest.strip_suffix(marker))
+        else {
+            continue;
+        };
+        if !inner.trim().is_empty() && !inner.contains(marker) {
+            return inner;
+        }
+    }
+    title
 }
 
 /// The display-only contract shared by static metadata and search result components.
@@ -233,6 +254,39 @@ mod tests {
     fn preserves_languages_punctuation_and_text_presentation() {
         let value = "Café 日本語 العربية हिन्दी #1 * 2 + 3 = 5 ∑ ∞ ↔ ↕ © ® ™ ❤︎";
         assert_eq!(title(value, "Untitled"), value);
+    }
+
+    #[test]
+    fn a_title_emphasised_end_to_end_keeps_only_its_words() {
+        // huggingface.co: the post is written in Markdown and the headline arrives with it.
+        assert_eq!(
+            title(
+                "**Know Who Spoke When: Build Real-Time, Multi-Speaker AI with NVIDIA Nemotron 3 Diarization**",
+                "Untitled",
+            ),
+            "Know Who Spoke When: Build Real-Time, Multi-Speaker AI with NVIDIA Nemotron 3 Diarization"
+        );
+        for (value, expected) in [
+            ("__Bold all through__", "Bold all through"),
+            ("*Whole thing*", "Whole thing"),
+            ("`one command`", "one command"),
+            // The author's own markers: a command mid-title, a blank to fill in, emphasis on two
+            // separate words, and a title that is nothing but markers.
+            (
+                "`zig cc`: a Powerful Drop-In Replacement for GCC/Clang",
+                "`zig cc`: a Powerful Drop-In Replacement for GCC/Clang",
+            ),
+            (
+                "Bootstrapping Labels via ___ Supervision",
+                "Bootstrapping Labels via ___ Supervision",
+            ),
+            ("*This* and *that*", "*This* and *that*"),
+            ("Using `make` to compile", "Using `make` to compile"),
+            ("**", "**"),
+            ("****", "****"),
+        ] {
+            assert_eq!(title(value, "Untitled"), expected, "{value}");
+        }
     }
 
     #[test]

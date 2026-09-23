@@ -116,7 +116,7 @@
   </a>
   {% endfor %}
 </nav>
-{% macro key_pair(first, second, separator='+') %}<span class="key-pair"><kbd>{{ first }}</kbd><small>{{ separator }}</small><kbd>{{ second }}</kbd></span>{% endmacro %}
+{% macro key_pair(first, second, separator='+', platform='') %}<span class="key-pair"{% if platform %} data-platform-key="{{ platform }}"{% endif %}><kbd>{{ first }}</kbd><small>{{ separator }}</small><kbd>{{ second }}</kbd></span>{% endmacro %}
 <dialog id="shortcut-help" class="shortcut-help" aria-labelledby="shortcut-help-title" aria-keyshortcuts="?" data-nosnippet>
   <form method="dialog">
     <header class="shortcut-help-head">
@@ -166,7 +166,7 @@
       <section aria-labelledby="shortcut-anywhere">
         <h3 id="shortcut-anywhere">Search and help</h3>
         <dl class="shortcut-list">
-          <div><dt class="key-alternatives">{{ key_pair('⌘', 'k') }}<small>or</small>{{ key_pair('Ctrl', 'k') }}</dt><dd>Global search</dd></div>
+          <div><dt class="key-alternatives">{{ key_pair('⌘', 'k', platform='apple') }}{{ key_pair('Ctrl', 'k', platform='other') }}<small>or</small><kbd>/</kbd></dt><dd>Global search</dd></div>
           <div><dt><kbd>?</kbd></dt><dd>Show this help</dd></div>
           <div><dt><kbd>Esc</kbd></dt><dd>Close this help</dd></div>
         </dl>

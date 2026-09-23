@@ -172,6 +172,10 @@ async fn search_articles_only_appear_as_results() -> Result<()> {
         client.find(Locator::Css("#q")).await?.send_keys("Article").await?;
         wait_for(&client,"document.querySelectorAll('.search-results .row').length>1").await?;
         anyhow::ensure!(client.execute("return document.querySelectorAll('.search-completion').length",vec![]).await?==0,"matching article titles must remain in results, never autocomplete");
+        // Results are the feed filtered: the cursor starts on the first one, and the static feed
+        // waiting hidden behind them never holds it.
+        let start=client.execute("const shown=[...document.querySelectorAll('.search-results .row')],hidden=[...document.querySelectorAll('[data-static-feed] .row')];return {selected:shown.findIndex(row=>row.classList.contains('is-selected')),stray:hidden.some(row=>row.classList.contains('is-selected'))}",vec![]).await?;
+        anyhow::ensure!(start["selected"]==0 && start["stray"]==false,"the first result is selected by default: {start}");
         // Without suggestions the arrows move the result cursor while typing continues in the field.
         key(&client,"ArrowDown").await?;
         let cursor=client.execute("const rows=[...document.querySelectorAll('.search-results .row')];return {selected:rows.findIndex(row=>row.classList.contains('is-selected')),focused:document.activeElement.id,url:rows[1]?.querySelector('[data-row-open]')?.href}",vec![]).await?;
@@ -183,20 +187,28 @@ async fn search_articles_only_appear_as_results() -> Result<()> {
         wait_for(&client,"document.body.dataset.kind==='item'").await?;
         anyhow::ensure!(client.execute("return location.href",vec![]).await?==cursor["url"],"Enter opens the selected result when no suggestion is offered");
         client.back().await?;
-        wait_for(&client,"document.body.dataset.kind==='river' && !!document.querySelector('#q') && new URL(location.href).searchParams.get('q')==='Article'").await?;
-        // Open suggestions never take the arrows away from the results, and a half-typed qualifier
-        // is completed in two steps: the name, then the values it accepts.
+        // Coming back shows the page that was left before the index has finished reloading.
+        wait_for(&client,"document.body.dataset.kind==='river' && document.querySelectorAll('.search-results .row').length>1 && !document.querySelector('[data-static-feed]:not([hidden])')").await?;
+        anyhow::ensure!(client.execute("return document.querySelector('#search-status')?.textContent!=='Searching…'",vec![]).await?==true,"returning to a search never shows an empty placeholder over kept results");
+        wait_for(&client,"!!document.querySelector('#q') && new URL(location.href).searchParams.get('q')==='Article'").await?;
+        // Out of the field, the results answer the ordinary feed shortcuts on the same cursor.
+        escape_search(&client).await?;
+        key(&client,"j").await?;
+        let stepped=client.execute("const rows=[...document.querySelectorAll('.search-results .row')];return {selected:rows.findIndex(row=>row.classList.contains('is-selected')),focused:document.activeElement.id}",vec![]).await?;
+        anyhow::ensure!(stepped["selected"].as_i64().unwrap_or(-1)>=1 && stepped["focused"]!="q","j walks the search results once the field is left: {stepped}");
+        key(&client,"k").await?;
+        anyhow::ensure!(client.execute("return [...document.querySelectorAll('.search-results .row')].findIndex(row=>row.classList.contains('is-selected'))",vec![]).await?==0,"k walks back up the search results");
+        // A half-typed qualifier is completed in two steps: the name, then the values it accepts.
         client.execute("const q=document.querySelector('#q');q.value='Article sour';q.setSelectionRange(12,12);q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
         wait_for(&client,"document.querySelector('.search-completion')?.dataset.completionId==='source:'").await?;
-        key(&client,"ArrowDown").await?;
-        let walked=client.execute("const rows=[...document.querySelectorAll('.search-results .row')];return {selected:rows.findIndex(row=>row.classList.contains('is-selected')),suggesting:document.querySelectorAll('.search-completion').length>0,focused:document.activeElement.id}",vec![]).await?;
-        anyhow::ensure!(walked["selected"]==1 && walked["suggesting"]==true && walked["focused"]=="q","suggestions leave the arrows to the results: {walked}");
         key(&client,"Enter").await?;
-        wait_for(&client,"document.querySelector('#q').value==='Article source:'").await?;
-        let values=client.execute("const rows=[...document.querySelectorAll('.search-completion')];return {count:rows.length,sources:rows.every(row=>row.dataset.completionId.startsWith('source:'))}",vec![]).await?;
-        anyhow::ensure!(values["count"].as_u64().unwrap_or(0)>0 && values["sources"]==true,"accepting a qualifier offers the values it accepts: {values}");
+        wait_for(&client,"document.querySelector('#q').value==='Article source:' && [...document.querySelectorAll('.search-completion')].some(row=>row.dataset.completionId.startsWith('source:'))").await?;
         client.execute("const q=document.querySelector('#q');q.value='source:';q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
-        wait_for(&client,"document.querySelector('.search-completion')?.dataset.completionId.startsWith('source:')").await?;
+        wait_for(&client,"document.querySelectorAll('.search-completion').length>1 && document.querySelector('.search-completion')?.dataset.completionId.startsWith('source:')").await?;
+        // Open suggestions take the arrows; the results keep them the rest of the time.
+        key(&client,"ArrowDown").await?;
+        let moved=client.execute("const rows=[...document.querySelectorAll('.search-completion')];return {highlighted:rows.findIndex(row=>row.getAttribute('aria-selected')==='true'),focused:document.activeElement.id}",vec![]).await?;
+        anyhow::ensure!(moved["highlighted"]==1 && moved["focused"]=="q","the arrows walk open suggestions: {moved}");
         client.find(Locator::Css(".nav-primary [data-feed-action]")).await?.click().await?;
         wait_for(&client,"!new URL(location.href).searchParams.has('q') && !document.querySelector('[data-static-feed]').hidden").await?;
         client.find(Locator::Css(".brand")).await?.click().await?;
@@ -417,7 +429,7 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         complete == true,
         "every index shard must exist before readiness"
     );
-    anyhow::ensure!(client.execute("return document.querySelector('#search-query-help').hidden && document.querySelector('#q').getAttribute('aria-expanded')==='false'", vec![]).await? == true, "query help and completion must start collapsed");
+    anyhow::ensure!(client.execute("return getComputedStyle(document.querySelector('#search-query-help')).display==='none' && document.querySelector('#q').getAttribute('aria-expanded')==='false'", vec![]).await? == true, "query help and completion must start collapsed");
     let before_help = client
         .execute(
             "return document.querySelector('[data-static-feed]').getBoundingClientRect().top",
@@ -428,25 +440,13 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         .execute("document.querySelector('#q').focus()", vec![])
         .await?;
     anyhow::ensure!(
-        client
-            .execute(
-                "return document.querySelector('#search-query-help').hidden",
-                vec![]
-            )
-            .await?
-            == true,
-        "keyboard focus must not open hover help"
+        client.execute("return getComputedStyle(document.querySelector('#search-query-help')).display==='none'", vec![]).await? == true,
+        "keyboard focus alone must not open the help"
     );
     client.execute("document.querySelector('.search-control').dispatchEvent(new PointerEvent('pointerenter',{pointerType:'touch'}))",vec![]).await?;
     anyhow::ensure!(
-        client
-            .execute(
-                "return document.querySelector('#search-query-help').hidden",
-                vec![]
-            )
-            .await?
-            == true,
-        "touch must not open hover help"
+        client.execute("return getComputedStyle(document.querySelector('#search-query-help')).display==='none'", vec![]).await? == true,
+        "touch must not open the help"
     );
     let hover=client.execute("const r=document.querySelector('#q').getBoundingClientRect();return {x:r.left+20,y:r.top+r.height/2}",vec![]).await?;
     emulate(
@@ -455,7 +455,25 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         json!({"type":"mouseMoved","x":hover["x"],"y":hover["y"]}),
     )
     .await?;
-    wait_for(client,"!document.querySelector('#search-query-help').hidden && document.querySelector('#search-query-help').getAttribute('role')==='tooltip'").await?;
+    wait_for(client,"getComputedStyle(document.querySelector('#search-query-help')).display!=='none' && document.querySelector('#search-query-help').getAttribute('role')==='tooltip'").await?;
+    // Hovering on the way past is not a question: without the field's attention the reminder stays
+    // out of the way, and comes back when the pointer returns to a focused field.
+    client
+        .execute("document.querySelector('#q').blur()", vec![])
+        .await?;
+    wait_for(
+        client,
+        "getComputedStyle(document.querySelector('#search-query-help')).display==='none'",
+    )
+    .await?;
+    client
+        .execute("document.querySelector('#q').focus()", vec![])
+        .await?;
+    wait_for(
+        client,
+        "getComputedStyle(document.querySelector('#search-query-help')).display!=='none'",
+    )
+    .await?;
     anyhow::ensure!(
         client
             .execute(
@@ -467,7 +485,7 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         "query help overlays the page without shifting the feed"
     );
     key(client, "Escape").await?;
-    wait_for(client,"document.querySelector('#search-query-help').hidden && document.querySelector('#q').getAttribute('aria-expanded')==='false'").await?;
+    wait_for(client,"getComputedStyle(document.querySelector('#search-query-help')).display==='none' && document.querySelector('#q').getAttribute('aria-expanded')==='false'").await?;
 
     // The first query occurs after going offline: no query or result fragment was warmed online.
     fixture.offline.store(true, Ordering::Relaxed);

@@ -201,7 +201,11 @@ function ageBands(root = document) {
 
 /** The keyboard cursor, remembered by article URL so a reordered list keeps the same row. */
 const selection = (() => {
-  const rows = () => $$(".rows:not([aria-busy='true']) .row:not([hidden])");
+  // Search results are the feed filtered, so one cursor serves both. The static feed stays in the
+  // document while a search is on screen and is hidden by its wrapper, not row by row: a row whose
+  // container is hidden is not on screen and must not hold the cursor.
+  const rows = () =>
+    $$(".rows:not([aria-busy='true']) .row:not([hidden])").filter((row) => !row.closest("[hidden]"));
   const link = (row) => (row ? $("[data-row-open]", row) : null);
 
   function key() {
@@ -227,7 +231,9 @@ const selection = (() => {
     const target = link(row);
     if (!target) return false;
     for (const entry of rows()) entry.classList.toggle("is-selected", entry === row);
-    write({ ...read(), url: target.href, y: window.scrollY });
+    // The row is the whole cursor. Reading the scroll offset here would flush the layout the
+    // classes above just invalidated, once per keystroke, for something nothing reads back.
+    write({ url: target.href });
     if (focus) target.focus({ preventScroll: true });
     if (scroll) row.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
     return true;
@@ -245,7 +251,7 @@ const selection = (() => {
       const all = rows();
       if (!all.length) return;
       const selected = link(all.find((row) => row.classList.contains("is-selected")));
-      write({ ...read(), ...(selected ? { url: selected.href } : {}), y: window.scrollY });
+      if (selected) write({ url: selected.href });
     },
     /** Reselect the remembered row, else the first one. Never steals focus on load. */
     restore() {
@@ -477,6 +483,13 @@ function installKeyboard() {
       openShortcutHelp();
       return;
     }
+    // Search from anywhere without a modifier. A page with no field of its own lands on the feed
+    // with it focused, the same as Cmd/Ctrl+K.
+    if (event.key === "/") {
+      event.preventDefault();
+      focusSearch();
+      return;
+    }
     if (event.key === "g") {
       gotoArmed = true;
       gotoTimer = setTimeout(() => (gotoArmed = false), 1200);
@@ -654,6 +667,61 @@ function installFootnoteTargets() {
   };
   paired();
   window.addEventListener("hashchange", paired);
+}
+
+/**
+ * A heading is a place in the article, so the whole of it is the way back to that place, not only
+ * the `#` beside it. The heading stays a heading rather than becoming a link: the reader's own
+ * selection, and any link the publisher wrote inside it, come first.
+ *
+ * The sticky stack is measured at the moment of the jump instead of being tracked. The header
+ * folds as the page scrolls, so its height is only knowable then, and a jump from the top lands a
+ * little low rather than under a header that is about to shrink.
+ */
+function installHeadingAnchors() {
+  const body = $(".body");
+  if (!body) return;
+
+  const clearance = () =>
+    [$(".top"), $(".itemhead")].reduce(
+      (total, element) => total + (element?.getBoundingClientRect().height || 0),
+      16,
+    );
+
+  const jump = (id, record) => {
+    const target = document.getElementById(id);
+    if (!target) return;
+    if (record && location.hash.slice(1) !== id) {
+      history.pushState(history.state, "", "#" + encodeURIComponent(id));
+    }
+    const top = window.scrollY + target.getBoundingClientRect().top - clearance();
+    window.scrollTo({ top: Math.max(0, top), behavior: "instant" });
+  };
+
+  body.addEventListener("click", (event) => {
+    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return;
+    }
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const heading = target.closest(".body :is(h1, h2, h3, h4, h5, h6)[id]");
+    if (!heading) return;
+    // Anything the publisher made clickable keeps its own behaviour; only the `#` is ours.
+    const link = target.closest("a");
+    if (link && !link.classList.contains("heading-anchor")) return;
+    if (!getSelection()?.isCollapsed) return;
+    event.preventDefault();
+    jump(heading.id, true);
+  });
+
+  // The browser scrolls a fragment into view against `scroll-padding-top`, which cannot know how
+  // tall the folding header is. Correct it once the page has settled, and on every later jump.
+  const settle = () => {
+    const id = decodeURIComponent(location.hash.slice(1));
+    if (id && document.getElementById(id)?.closest(".body")) jump(id, false);
+  };
+  window.addEventListener("hashchange", settle);
+  requestAnimationFrame(settle);
 }
 
 function installPreferences() {
@@ -1011,6 +1079,7 @@ function boot() {
   safely("keyboard", installKeyboard);
   safely("shortcut-help", installShortcutHelp);
   safely("footnotes", installFootnoteTargets);
+  safely("heading-anchors", installHeadingAnchors);
   // Every module this page can use is fetched now rather than on the first gesture: waiting for
   // intent puts the download in front of the person who just asked for the thing.
   safely("search", loadSearch);
@@ -1027,6 +1096,14 @@ function boot() {
     if (!document.hidden) dates.render();
   });
   window.addEventListener("pagehide", () => selection.save());
+
+  // Cmd and Ctrl are the same shortcut wearing the platform's own name; only the name differs,
+  // so this decides which one the help shows and nothing about how the keys are handled.
+  document.documentElement.dataset.platform = /mac|iphone|ipad|ipod/i.test(
+    navigator.userAgentData?.platform || navigator.platform || navigator.userAgent,
+  )
+    ? "apple"
+    : "other";
 
   // One readiness signal, for styles that only apply once enhancement is in place and for the
   // browser contract suite.

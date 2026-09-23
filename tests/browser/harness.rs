@@ -218,8 +218,14 @@ impl Fixture {
             } else {
                 "2026-09-05T12:00:00Z"
             };
+            // One article carries a section, so a heading anchor has somewhere to point.
+            let section = if index == 40 {
+                "## A section worth linking\n\nProse beneath the section heading.\n\n"
+            } else {
+                ""
+            };
             let markdown = format!(
-                "---\ntitle: {title}\nlink: {link}\nsource: example\npublished: {published}\nupdated: {updated}\nfirst_seen: {published}\ncontent: feed\nlabels: [reading, rust]\n{preview}{archived_image}---\n\n* * *\n\nA paragraph with [first link](https://example.invalid/one) and more prose before [a comparison grid](https://example.invalid/two) continues naturally.\n\n```bash\n$ z dotfiles\n$ pwd\n/private/dotfiles\n```\n\n![An article illustration]({base}body.png)\n\nThis entry explores archive topic {index}.\n\n{}\n",
+                "---\ntitle: {title}\nlink: {link}\nsource: example\npublished: {published}\nupdated: {updated}\nfirst_seen: {published}\ncontent: feed\nlabels: [reading, rust]\n{preview}{archived_image}---\n\n* * *\n\nA paragraph with [first link](https://example.invalid/one) and more prose before [a comparison grid](https://example.invalid/two) continues naturally.\n\n```bash\n$ z dotfiles\n$ pwd\n/private/dotfiles\n```\n\n![An article illustration]({base}body.png)\n\nThis entry explores archive topic {index}.\n\n{section}{}\n",
                 "Reading comfortably should not change the current page while a deployment arrives.\n\n".repeat(15)
             );
             std::fs::write(

@@ -236,7 +236,11 @@ remain importable. Files and links are size-bounded, allowlisted, and reviewed b
 application. Reading history and cached article contents are never exported. Resetting preferences also restores
 the site's offline article count, which can resize automatic downloads.
 Disabling single-key shortcuts leaves modifier shortcuts and native keyboard operation available.
-Cmd/Ctrl+K focuses the shared global search field; Escape closes suggestions and removes focus.
+Cmd/Ctrl+K, or `/` where single-key shortcuts are on, focuses the shared global search field; a
+page without one lands on the feed with it focused. Escape closes suggestions and removes focus.
+Both modifiers are always handled; only the name shown differs, so the shortcut help marks a
+platform-specific pair with `data-platform-key` and `<html data-platform>` settles which one it
+shows. A mapping that reads the same everywhere, such as `Ctrl+d`, carries no such marking.
 On feeds and search results, `gg` selects and focuses the first visible item and `G` the last,
 also scrolling to the corresponding page boundary. On article pages they scroll to the top and bottom instead.
 Explicit focus keeps the current scroll position when the entire input is visible; otherwise it
@@ -380,7 +384,10 @@ upscale badly as a hero. Small feed previews must not replace full article maste
 Reader headings carry stable ids. A publisher heading that is one link to its own anchor or to
 the article's own page becomes a plain heading with that anchor id; other ids come from the
 heading text. Hovering shows a `#` marker in the margin without moving the title, and a plain click
-updates the URL fragment and scrolls to the heading. Headings are never links in the reader;
+anywhere in the heading updates the URL fragment and scrolls to the heading, clear of the sticky
+header above it: the article header folds as the page moves, so its height is measured at the jump
+rather than tracked. A click carrying a modifier, landing on a link the publisher wrote inside the
+heading, or ending a text selection is left alone. Headings are never links in the reader;
 portable outputs keep the original Markdown.
 
 On screens of at least 2dppx, body pictures display at most two thirds of their intrinsic width

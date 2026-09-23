@@ -992,6 +992,73 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
+async fn a_heading_is_the_way_back_to_its_section() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fixture = Fixture::with_pwa(false)?;
+    let client = browser_client().await?;
+    let result = async {
+        client
+            .goto(&format!("{}items/example/2026-09-01-story-40/", fixture.base))
+            .await?;
+        wait_booted_with(&client, "!!document.querySelector('.body h2[id]')").await?;
+        // The whole heading follows its own anchor, and lands clear of the sticky stack above it
+        // rather than under the article header.
+        let jumped = client
+            .execute(
+                r#"
+      const heading = document.querySelector('.body h2[id]');
+      heading.click();
+      const header = document.querySelector('.itemhead').getBoundingClientRect();
+      const box = heading.getBoundingClientRect();
+      return {hash: decodeURIComponent(location.hash), id: '#' + heading.id, top: box.top, covered: header.bottom, scrolled: scrollY};
+    "#,
+                vec![],
+            )
+            .await?;
+        anyhow::ensure!(
+            jumped["hash"] == jumped["id"],
+            "clicking a heading follows its anchor: {jumped}"
+        );
+        anyhow::ensure!(
+            jumped["scrolled"].as_f64().unwrap_or(0.0) > 0.0
+                && jumped["top"].as_f64().unwrap_or(0.0)
+                    >= jumped["covered"].as_f64().unwrap_or(0.0) - 1.0,
+            "the heading jumped to clears the header above it: {jumped}"
+        );
+        // A link the publisher wrote inside a heading keeps its own behaviour, and a selection is
+        // not a click.
+        let guarded = client
+            .execute(
+                r#"
+      const heading = document.querySelector('.body h2[id]');
+      const before = location.hash;
+      location.hash = '';
+      history.replaceState(history.state, '', location.pathname);
+      const range = document.createRange();
+      range.selectNodeContents(heading);
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
+      heading.click();
+      const selected = location.hash;
+      getSelection().removeAllRanges();
+      return {before, selected};
+    "#,
+                vec![],
+            )
+            .await?;
+        anyhow::ensure!(
+            guarded["selected"] == "",
+            "selecting a heading's words is not a jump: {guarded}"
+        );
+        Ok(())
+    }
+    .await;
+    report_failure(&client, "heading-anchors", &result).await;
+    finish(client, result).await
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome WebDriver"]
 async fn interactive_originals_and_build_time_code_labels() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fixture = Fixture::with_pwa(false)?;

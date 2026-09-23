@@ -267,9 +267,16 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .shortcut-list dt, .shortcut-list dd { margin: 0; padding: 0.3rem 0; }
 .shortcut-list dd { color: var(--muted); overflow-wrap: anywhere; }
 .shortcut-list kbd { display: inline-block; min-width: 1.6em; margin-right: 0.15rem; padding: 0.08rem 0.3rem; text-align: center; color: var(--fg); background: var(--code); border: 1px solid var(--faint); border-radius: 3px; box-shadow: 0 1px 0 var(--faint); }
-.key-alternatives { display: inline-flex; align-items: center; flex-wrap: wrap; max-width: 15rem; gap: 0.15rem 0; }
+/* Alternatives for one action read as one mapping: they stay on a line and the key column, sized
+   to its widest content, grows to hold them rather than wrapping them into a second row. */
+.key-alternatives { display: inline-flex; align-items: center; flex-wrap: nowrap; white-space: nowrap; gap: 0.15rem 0; }
 .key-alternatives small { margin: 0 0.35rem 0 0.2rem; color: var(--muted); font-size: 0.78em; }
 .key-pair { display: inline-flex; align-items: center; white-space: nowrap; }
+/* A mapping that differs by platform shows the one the reader can actually press. The other
+   platform's is the fallback, so a page whose enhancement never ran still names a working key. */
+[data-platform-key="apple"] { display: none; }
+[data-platform="apple"] [data-platform-key="apple"] { display: inline-flex; }
+[data-platform="apple"] [data-platform-key="other"] { display: none; }
 .key-pair small { margin: 0 0.25rem 0 0.1rem; color: var(--muted); font-size: 0.78em; }
 
 /* content column */
@@ -520,7 +527,11 @@ body[data-kind="item"] .main {
 .body :is(h1, h2, h3, h4, h5, h6) { line-height: 1.3; margin: 1.75em 0 0.6em; text-wrap: pretty; break-after: avoid; }
 /* Headings are anchors, not links: a hover marker sits in the margin without moving the title. */
 .body :is(h1, h2, h3, h4, h5, h6)[id] { position: relative; cursor: pointer; }
-.body .heading-anchor { position: absolute; right: 100%; top: 0; margin-right: 0.3em; color: var(--muted); font-weight: 400; text-decoration: none; opacity: 0; }
+/* The whole heading is the way back to it, so it points like one; the marker beside it stays the
+   visible affordance and the thing a reader can copy. */
+.body :is(h1, h2, h3, h4, h5, h6)[id] { cursor: pointer; }
+.body :is(h1, h2, h3, h4, h5, h6)[id] :is(a, button, code) { cursor: auto; }
+.body .heading-anchor { position: absolute; right: 100%; top: 0; margin-right: 0.3em; color: var(--muted); font-weight: 400; text-decoration: none; opacity: 0; cursor: pointer; }
 .body :is(h1, h2, h3, h4, h5, h6):hover > .heading-anchor, .body .heading-anchor:focus-visible { opacity: 1; }
 .body :is(h1, h2, h3, h4, h5, h6)[id]:target > .heading-anchor { opacity: 1; color: var(--accent-strong); }
 .body .article-figure { margin: 1.5em 0; }
@@ -700,6 +711,9 @@ body[data-kind="item"] .main {
   .article-more { grid-template-columns: 1fr; }
   .shortcut-groups { grid-template-columns: max-content minmax(0, 1fr); }
   .shortcut-groups section:nth-child(odd) dd { padding-right: 0; }
+  /* One line of alternatives needs room it does not have here, and a dialog that fits the screen
+     is worth more than a mapping on one line. */
+  .key-alternatives { flex-wrap: wrap; white-space: normal; }
 }
 
 @media (max-width: 22.5rem) {
@@ -1064,10 +1078,12 @@ html[data-motion="off"]::view-transition-new(*) { animation: none; }
 /* A live query hides the static feed it replaces. */
 body[data-searching] [data-static-feed] { display: none; }
 
-/* The syntax reminder is a mouse affordance; touch and keyboard never open it. */
+/* The syntax reminder answers a question the reader is in the middle of asking, so it waits for
+   both halves of asking it: the field has their attention and the pointer is on it. Hovering on
+   the way past is not a question, and touch and keyboard never open it at all. */
 .search-query-help { display: none; }
 @media (hover: hover) and (pointer: fine) {
-  .search-control:hover .search-query-help { display: block; }
+  .search-control:has(#q:hover:focus) .search-query-help { display: block; }
 }
 
 .search-completions[hidden], .search-error[hidden], .search-clear[hidden] { display: none; }

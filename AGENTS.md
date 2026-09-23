@@ -244,6 +244,8 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   separating them from the reader body and keep them in portable exports.
 - Apply title presentation rules once in the build context and reuse them in every published
   representation, including feeds and Markdown; preserve stored originals and article bodies.
+  A publisher writing in Markdown can emit the markers with its headline: emphasis wrapping a whole
+  title comes off, while markers around part of one are the author's own and stay.
   A leading heading that restates the title is a duplicate: aggregators reword what they syndicate,
   so a longer title may differ by a word in four, while short ones must still match word for word.
   A document's own heading may also run the title through a subtitle or a year marker; a deeper
@@ -253,6 +255,10 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   pointing back at an article that already suggests them so browsing never closes a two-page loop.
 - A lead image must not repeat a body picture (compare ThumbHashes, not only URLs) and must be at
   least 640px wide. Reader headings are id anchors, never links; portable outputs keep links.
+- A publisher that flattens an embedded post writes it as loose paragraphs: the poster's avatar
+  linking to the post, their name, what they said, any post they quoted, and the provider's
+  counters. Read those back as the quote they were, nested quote included, and leave the avatars
+  and counters behind; the prose after them is the publisher's again.
 - Expand public social threads using only the original author's posts; preserve post/media order,
   strip terminal thread counters, and keep X links canonical even when xcancel supplies the data.
   Concatenate posts without separators, per-post links, or partial-thread notices: the metadata
