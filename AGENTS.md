@@ -35,8 +35,10 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   the full defaults. Retention bounds the current tree, never accumulated Git history.
 - Search-engine indexing is opt-in with `[site] indexing = true` in release builds; development
   and previews remain noindex. Preserve local search and instance discovery regardless.
-- Build budgets preserve all article text and leave archived media untouched. The budget is a
-  publishing limit: only a release build measures it, because measuring an over-budget archive
+- Build budgets preserve all article text and leave archived media untouched. A build that fits records what it
+  needed for everything but media, so the next one starts there instead of measuring the overflow
+  with a whole extra build; the exact retry still decides whether that guess was right. The budget
+  is a publishing limit: only a release build measures it, because measuring an over-budget archive
   costs a second complete build, and a development snapshot is never published. `dev --release`
   still applies it. Admit complete media
   families newest first, measure the complete output, and fail if text and required assets cannot

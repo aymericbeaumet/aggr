@@ -42,14 +42,17 @@ pub enum Namespace {
     RecordingDuration,
     /// Feed parser receipts that gate conditional GET after a parser change.
     FeedParsing,
+    /// What the last build that fit its limit admitted, so the next one starts there.
+    Budget,
 }
 
 impl Namespace {
     /// Test-only: unit tests pin the reusable workflow's cache list to this registry.
     #[cfg(test)]
-    pub const ALL: [Namespace; 10] = [
+    pub const ALL: [Namespace; 11] = [
         Namespace::Articles,
         Namespace::Render,
+        Namespace::Budget,
         Namespace::Discussions,
         Namespace::Pagefind,
         Namespace::ValidatedImages,
@@ -72,6 +75,7 @@ impl Namespace {
             Namespace::CaptureRetries => "capture-retries-v1",
             Namespace::RecordingDuration => "recording-duration-v1",
             Namespace::FeedParsing => "feed-parsing",
+            Namespace::Budget => "budget-v1",
         }
     }
 
@@ -331,6 +335,42 @@ struct RenderManifest {
     pages: usize,
     items: usize,
     stubs: usize,
+}
+
+/// Everything a fitting build published that was not optional media. A site larger than its limit
+/// converges in two complete builds: one to measure the overflow, one to fit. What the first one
+/// really measures is how much of the limit the text, pages and search index need, and that moves
+/// slowly — so it is worth carrying between runs, and the exact retry still decides whether it
+/// was right.
+#[derive(Serialize, Deserialize)]
+pub struct BudgetReceipt {
+    /// The limit this answer was measured against; another limit says nothing about this one.
+    pub limit: u64,
+    /// Output bytes that were not admitted media: article text, pages, feeds, the search index.
+    pub required: u64,
+}
+
+/// Room left for media under `limit`, from what a previous build needed for everything else.
+/// An archive grows between runs, so a twentieth of that measurement is held back: guessing a
+/// little low publishes marginally less media, while guessing high costs the whole second build
+/// this is here to avoid.
+pub fn budget_allowance(cache_root: &Path, limit: u64) -> Option<u64> {
+    let path = Namespace::Budget.dir(cache_root).join("allowance.json");
+    let receipt: BudgetReceipt = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if receipt.limit != limit {
+        return None;
+    }
+    let reserved = receipt.required.saturating_add(receipt.required / 20);
+    Some(limit.saturating_sub(reserved)).filter(|allowance| *allowance > 0)
+}
+
+pub fn store_budget_allowance(cache_root: &Path, receipt: &BudgetReceipt) -> Result<()> {
+    let root = Namespace::Budget.dir(cache_root);
+    std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+    write(
+        &root.join("allowance.json"),
+        &serde_json::to_vec(receipt).context("serialising the budget receipt")?,
+    )
 }
 
 /// Restore a matching site into `out`. If `out` already carries this key the operation is an

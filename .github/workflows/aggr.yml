@@ -57,8 +57,9 @@ jobs:
       # Derived state about bytes the site already publishes is safe to carry between runners and
       # invalidates itself: compressed media, image receipts and the Pagefind index are keyed by their inputs,
       # backoff markers carry their own timestamps, and feed-parser receipts name the parser
-      # version. Without it every run validates every image cold, re-indexes search, fetches
-      # every feed unconditionally and retries known-dead pages.
+      # version, and the budget receipt names the limit it was measured against. Without it every
+      # run validates every image cold, re-indexes search, fetches every feed unconditionally,
+      # retries known-dead pages, and builds an over-budget site twice to find what fits.
       #
       # Raw original-page responses (articles-v1) are private and never leave the runner. The
       # rendered site (render-v1) is not cached here either: its fingerprint changes whenever any
@@ -78,6 +79,7 @@ jobs:
             .aggr/cache/build-v1/capture-retries-v1
             .aggr/cache/build-v1/recording-duration-v1
             .aggr/cache/build-v1/feed-parsing
+            .aggr/cache/build-v1/budget-v1
           key: aggr-state-v1-${{ github.repository_id }}-${{ github.run_id }}
           restore-keys: |
             aggr-state-v1-${{ github.repository_id }}-
@@ -90,6 +92,9 @@ jobs:
           restore-keys: |
             aggr-media-v1-${{ github.repository_id }}-
 
+      # Every file in this cache is named by the SHA-256 of what it holds, so its name and size
+      # already commit to its content: the walk answers "did this change?" without reading a byte.
+      # Reading them would hash the whole cache twice on every run.
       - name: Fingerprint restored media cache
         id: media-cache-before
         run: |
@@ -106,11 +111,7 @@ jobs:
               name = path.relative_to(root).as_posix().encode()
               digest.update(len(name).to_bytes(8, "big"))
               digest.update(name)
-              content = hashlib.sha256()
-              with path.open("rb") as source:
-                  for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                      content.update(chunk)
-              digest.update(content.digest())
+              digest.update(path.stat().st_size.to_bytes(8, "big"))
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"fingerprint={digest.hexdigest()}\n")
               output.write(f"files={len(files)}\n")
@@ -170,6 +171,7 @@ jobs:
             .aggr/cache/build-v1/capture-retries-v1
             .aggr/cache/build-v1/recording-duration-v1
             .aggr/cache/build-v1/feed-parsing
+            .aggr/cache/build-v1/budget-v1
           key: aggr-state-v1-${{ github.repository_id }}-${{ github.run_id }}
 
       # Immutable cache entries must not accumulate identical media on scheduled no-op runs.

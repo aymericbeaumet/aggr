@@ -345,7 +345,13 @@ pub fn build(
     } else {
         config.site.build_max_bytes
     };
-    let mut attempt = budget::Attempt::new(limit);
+    // A build that already fit this limit measured what fits. Starting from that answer turns the
+    // usual two complete builds into one; the retry below still decides whether it was right.
+    let cache = info.pagefind_cache.as_deref();
+    let mut attempt = cache
+        .filter(|_| limit != u64::MAX)
+        .and_then(|cache| crate::cache::budget_allowance(cache, limit))
+        .map_or_else(|| budget::Attempt::new(limit), budget::Attempt::resuming);
     loop {
         let mut media_budget = budget::MediaBudget::new(attempt.allowance());
         let summary = build_once(
@@ -368,6 +374,15 @@ pub fn build(
                 "site size: {bytes} / {limit} bytes; {} media groups left at their publisher to fit",
                 media_budget.omitted
             );
+            if let Some(cache) = cache.filter(|_| limit != u64::MAX) {
+                let receipt = crate::cache::BudgetReceipt {
+                    limit,
+                    required: bytes.saturating_sub(media_budget.used),
+                };
+                if let Err(err) = crate::cache::store_budget_allowance(cache, &receipt) {
+                    log::debug!("not remembering the media allowance: {err:#}");
+                }
+            }
             return Ok(summary);
         }
         let Some(next) = attempt.next(bytes - limit, media_budget.used) else {
@@ -2465,6 +2480,30 @@ category = "Science"
         )
         .unwrap();
         assert_ne!(template, app_version("1.2.3", &layers).unwrap());
+    }
+
+    #[test]
+    fn a_build_that_fit_tells_the_next_one_where_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut config, sources, store) = fixture(dir.path(), 3, "");
+        let out = dir.path().join("out");
+        let cache = dir.path().join("cache");
+        let mut build_info = info(out.clone());
+        build_info.pagefind_cache = Some(cache.clone());
+
+        // Roomy: the first attempt fits, and what it admitted is remembered for the limit.
+        config.site.build_max_bytes = 1_000_000_000;
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        let remembered = crate::cache::budget_allowance(&cache, config.site.build_max_bytes);
+        assert!(remembered.is_some(), "a build that fit measured what fits");
+
+        // Another limit says nothing about this one, so nothing is carried across.
+        assert_eq!(crate::cache::budget_allowance(&cache, 4_096), None);
+
+        // A remembered allowance that no longer fits is corrected by the same exact retry, so an
+        // impossible limit still refuses rather than publishing something too large.
+        config.site.build_max_bytes = 1;
+        assert!(build(&config, &sources, &store, dir.path(), &build_info).is_err());
     }
 
     #[test]

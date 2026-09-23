@@ -68,6 +68,15 @@ bucket replaces its oldest receipt. Cache hits never rewrite timestamps. Warm hi
 the small inline PNG from its validated hash without decoding the master. The first validation
 remains a cold operation, and large cold images are deliberately validated one at a time.
 
+A site larger than its limit converges in two complete builds: one to measure the overflow, one to
+fit. What the first one really measures is how much of the limit everything that is not optional
+media needs, and that moves slowly, so a build that fits records it under `budget-v1` and the next
+one starts there. A twentieth of that measurement is held back because an archive grows between
+runs: guessing a little low publishes marginally less media, while guessing high costs the whole
+second build. The exact retry still decides whether the guess was right, so an impossible limit
+refuses as before. On a 3,000-item instance this took a release build from 239.6 s + 221.5 s to a
+single 294.9 s pass, publishing 39 fewer media groups out of 12,210.
+
 `build_max_bytes` is what a host will accept for a published site, so only a publishing build
 measures it. A development snapshot (`aggr dev` without `--release`) is served from a local cache
 and skips the check: when an archive is larger than the limit, measuring it costs a second complete
@@ -127,12 +136,15 @@ workflow's `actions/cache` paths to that list. Only derived state about bytes th
 publishes qualifies, because it invalidates itself: `deployment-media-v1` (validated compressed
 publication copies), `validated-images-v2` (content-keyed receipts),
 `pagefind-v1` (index keyed by its input fingerprint), `feed-parsing` (parser-version receipts that
-gate conditional GET), and the timestamped backoff markers in `discussions-v1`, `image-failures-v1`,
-`capture-retries-v1` and `recording-duration-v1`.
+gate conditional GET), `budget-v1` (what a fitting build needed for everything but media, under the
+limit it was measured against), and the timestamped backoff markers in `discussions-v1`,
+`image-failures-v1`, `capture-retries-v1` and `recording-duration-v1`.
 
 Compressed media uses its own `aggr-media-v1-…` Actions cache, separate from the smaller mutable
 state in `aggr-state-v1-…`. After restore and after a successful build, the workflow hashes the
-sorted relative file paths and exact contents of `deployment-media-v1`, reading in bounded chunks.
+sorted relative file paths and sizes of `deployment-media-v1`. Every file there is named by the
+SHA-256 of what it holds, so its name already commits to its content and the walk answers "did this
+change?" without reading a byte; reading them would hash the whole cache twice on every run.
 It saves a new media entry only when those bytes changed or no entry was restored; an empty cache
 is not uploaded. File timestamps and changes to source backoffs do not trigger media uploads.
 The smaller derived-state cache still saves after each successful build. Both restore the newest

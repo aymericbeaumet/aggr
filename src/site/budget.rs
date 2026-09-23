@@ -77,6 +77,15 @@ impl Attempt {
         }
     }
 
+    /// Start from what a previous build measured. It keeps its full set of adjustments, so a
+    /// remembered answer that no longer fits is corrected exactly as a first guess would be.
+    pub fn resuming(allowance: u64) -> Self {
+        Self::Media {
+            allowance,
+            adjustments: 2,
+        }
+    }
+
     pub fn allowance(self) -> u64 {
         match self {
             Self::Media { allowance, .. } => allowance,
