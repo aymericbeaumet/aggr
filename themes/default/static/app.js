@@ -227,10 +227,17 @@ const selection = (() => {
   };
   const write = (state) => storage.write(sessionStorage, key(), JSON.stringify(state));
 
+  // One cursor for the whole page: the list on screen may change under it, and a row left marked
+  // in a list that is no longer shown would put a second cursor behind the first.
+  const clear = () => {
+    for (const entry of $$(".row.is-selected")) entry.classList.remove("is-selected");
+  };
+
   function select(row, focus, scroll) {
     const target = link(row);
     if (!target) return false;
-    for (const entry of rows()) entry.classList.toggle("is-selected", entry === row);
+    clear();
+    row.classList.add("is-selected");
     // The row is the whole cursor. Reading the scroll offset here would flush the layout the
     // classes above just invalidated, once per keystroke, for something nothing reads back.
     write({ url: target.href });
@@ -259,7 +266,8 @@ const selection = (() => {
       if (!all.length) return;
       const wanted = read().url;
       const row = (wanted && all.find((entry) => link(entry)?.href === wanted)) || all[0];
-      for (const entry of all) entry.classList.toggle("is-selected", entry === row);
+      clear();
+      row.classList.add("is-selected");
     },
     /** `focus: false` walks the list while the keyboard stays where it is, e.g. in the search field. */
     move(direction, focus = true) {
@@ -349,6 +357,8 @@ function applyFeedPaging() {
   const status = $("[data-page-status]", pager);
   if (status) status.textContent = "page " + currentPage + " / " + totalPages;
   pager.hidden = totalPages <= 1;
+  // A different slice of the list is a different set of rows: the cursor belongs on one of them.
+  selection.restore();
 }
 
 /* ------------------------------------------------------------------ keyboard */
@@ -453,7 +463,10 @@ function installKeyboard() {
     const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
     if (!event.altKey && !event.metaKey && !inEditor && !(event.ctrlKey && event.shiftKey)) {
       const byLine = event.ctrlKey && (key === "e" || key === "y");
-      if ((byLine || ((key === "d" || key === "u") && !event.ctrlKey && single)) && !dialog) {
+      // Held with Ctrl, d and u are the shortcut the help offers to anyone who turned the
+      // single-key ones off; on their own they need those to be on.
+      const byHalfPage = (event.key === "d" || event.key === "u") && (event.ctrlKey || single);
+      if ((byLine || byHalfPage) && !dialog) {
         event.preventDefault();
         pageScroll(key, byLine);
         return;
@@ -508,8 +521,10 @@ function installKeyboard() {
       if (KIND !== "item" && selection.move(key === "ArrowDown" ? 1 : -1)) event.preventDefault();
       return;
     }
-    if (key === "j" || key === "k") {
-      const direction = key === "j" ? 1 : -1;
+    // Case carries meaning from here on: the upper-case letters belong to the external links
+    // below, so only the letter that was actually typed may claim one of these.
+    if (event.key === "j" || event.key === "k") {
+      const direction = event.key === "j" ? 1 : -1;
       if (KIND === "item") {
         const article = $("article.item");
         const url = direction === 1 ? article?.dataset.nextUrl : article?.dataset.previousUrl;
@@ -521,7 +536,7 @@ function installKeyboard() {
       if (selection.move(direction)) event.preventDefault();
       return;
     }
-    if ((key === "o" || event.key === "Enter") && KIND !== "item") {
+    if ((event.key === "o" || event.key === "Enter") && KIND !== "item") {
       const link = selection.link(selection.selected());
       if (link) {
         event.preventDefault();
@@ -631,6 +646,85 @@ function installSearchIntent() {
   }
 }
 
+/* ------------------------------------------------------------------ tap feedback */
+
+/**
+ * Touch has no hover to fall back on, and `:active` waits to find out whether a touch was really
+ * a scroll. A tab says it was hit the moment it is touched; the stylesheet does the rest.
+ */
+function installTapFeedback() {
+  const tabs = $(".mobile-tabs");
+  if (!tabs) return;
+  const clear = () => {
+    for (const pressed of $$("[data-pressed]", tabs)) pressed.removeAttribute("data-pressed");
+  };
+  tabs.addEventListener(
+    "pointerdown",
+    (event) => {
+      const target = event.target;
+      const link = target instanceof Element ? target.closest("a") : null;
+      clear();
+      if (link) link.setAttribute("data-pressed", "");
+    },
+    { passive: true },
+  );
+  for (const name of ["pointerup", "pointercancel", "pointerleave"])
+    tabs.addEventListener(name, clear, { passive: true });
+  window.addEventListener("pagehide", clear);
+}
+
+/* ------------------------------------------------------------------ pictures */
+
+/**
+ * Every picture is painted over the placeholder the build inlined behind it, and falls back to its
+ * alt text when it never arrives. Two capturing listeners cover the whole document, including the
+ * rows search adds later, so no page has to load a module to show a picture honestly.
+ */
+function installPictureStates() {
+  const frame = (image) =>
+    image.closest(".article-picture, .article-lead, .preview-media, .audio-cover, .media-frame");
+  // A picture that arrives after a failure, or fails after arriving, must not keep both marks:
+  // the same source is retried whenever a reader comes back to a page that had no network.
+  const mark = (box, loaded) => {
+    box.classList.toggle("is-loaded", loaded);
+    box.classList.toggle("is-error", !loaded);
+  };
+  const settle = (event, loaded) => {
+    const target = event.target;
+    if (!(target instanceof HTMLImageElement)) return;
+    const box = frame(target);
+    if (box) mark(box, loaded);
+  };
+  document.addEventListener("load", (event) => settle(event, true), true);
+  document.addEventListener("error", (event) => settle(event, false), true);
+  // A picture the browser had already finished with never fires either event here.
+  for (const image of $$("img")) {
+    if (!(image instanceof HTMLImageElement) || !image.complete) continue;
+    const box = frame(image);
+    if (box) mark(box, image.naturalWidth > 0);
+  }
+}
+
+/* ------------------------------------------------------------------ on-screen keyboard */
+
+/**
+ * The on-screen keyboard shrinks the visual viewport, but the floating tab bar belongs to the
+ * layout viewport: left alone it sits on top of the keyboard, over the results someone is typing
+ * to find. It steps aside while an editor holds the keyboard, and the page itself does not move.
+ */
+function installKeyboardInset() {
+  const viewport = window.visualViewport;
+  if (!viewport || !$(".mobile-tabs")) return;
+  const sync = () =>
+    document.documentElement.classList.toggle(
+      "is-keyboard-open",
+      window.innerHeight - viewport.height > 120 && editing(document.activeElement),
+    );
+  viewport.addEventListener("resize", sync, { passive: true });
+  for (const name of ["focusin", "focusout"])
+    document.addEventListener(name, sync, { passive: true });
+}
+
 /* ------------------------------------------------------------------ media */
 
 /** Players and their timing readouts only exist on article pages that carry media, where they
@@ -722,7 +816,8 @@ function installHeadingAnchors() {
   });
 
   // The browser scrolls a fragment into view against `scroll-padding-top`, which cannot know how
-  // tall the folding header is. Correct it once the page has settled, and on every later jump.
+  // tall the folding header is without measuring it on every frame. Correct it once the page has
+  // settled, and on every later jump.
   const settle = () => {
     const id = decodeURIComponent(location.hash.slice(1));
     if (id && document.getElementById(id)?.closest(".body")) jump(id, false);
@@ -1092,6 +1187,9 @@ function boot() {
   safely("search", loadSearch);
   safely("preferences", installPreferences);
   safely("search-intent", installSearchIntent);
+  safely("keyboard-inset", installKeyboardInset);
+  safely("pictures", installPictureStates);
+  safely("tap-feedback", installTapFeedback);
   safely("media", loadMedia);
   safely("service-worker", registerWorker);
 

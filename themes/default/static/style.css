@@ -430,12 +430,12 @@ body[data-kind="item"] .main {
 .itemhead::before { content: ""; position: absolute; z-index: -1; inset: 0; background: var(--bg); box-shadow: 0 1px 0 var(--faint); }
 .itemhead-progress { position: absolute; left: 0; bottom: -1px; width: 100%; height: 1px; background: color-mix(in srgb, var(--warm) 52%, var(--faint)); transform: scaleX(0); will-change: transform; transform-origin: left; pointer-events: none; }
 .itemhead-fade { position: absolute; top: calc(100% + 1px); left: 0; width: 100%; height: 3rem; background: linear-gradient(to bottom, var(--bg), color-mix(in srgb, var(--bg) 65%, transparent) 45%, transparent); opacity: var(--header-progress, 0); pointer-events: none; }
-.itemhead h1 { max-width: none; --title-scale: calc(1 - 0.4 * var(--header-progress, 0)); height: calc(var(--header-title-height) * var(--title-scale)); font-size: clamp(1.65rem, 4vw, 2.25rem); line-height: 1.2; margin: 0 0 calc(var(--header-title-gap, 0.65rem) * (1 - var(--header-progress, 0)) + 0.2rem * var(--header-progress, 0)); letter-spacing: -0.025em; overflow-wrap: anywhere; text-wrap: pretty; }
+.itemhead h1 { max-width: none; font-size: clamp(1.65rem, 4vw, 2.25rem); line-height: 1.2; margin: 0 0 calc(var(--header-title-gap, 0.65rem) * (1 - var(--header-progress, 0)) + 0.2rem * var(--header-progress, 0)); letter-spacing: -0.025em; overflow-wrap: anywhere; text-wrap: pretty; }
 .itemhead-title { display: block; transform: scale(var(--title-scale)); transform-origin: top left; }
 .itemhead-title-term { display: inline-block; width: max-content; max-width: 100%; vertical-align: top; }
 .itemhead h1:focus { outline: none; }
 .tag { color: inherit; background: none; border: 0; padding: 0; border-radius: 0; font-weight: 400; }
-.item-tags { height: calc(var(--item-tags-height) * (1 - var(--header-progress, 0))); overflow: hidden; opacity: calc(1 - var(--header-progress, 0)); margin-top: calc(0.45rem * (1 - var(--header-progress, 0))); font-size: 0.875rem; line-height: 1.2; color: var(--muted); }
+.item-tags { overflow: hidden; opacity: calc(1 - var(--header-progress, 0)); margin-top: calc(0.45rem * (1 - var(--header-progress, 0))); font-size: 0.875rem; line-height: 1.2; color: var(--muted); }
 .item-tags-inner { display: flex; flex-wrap: wrap; gap: 0.3rem 0.45rem; }
 .article-resources { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.45rem 1rem; margin: -0.25rem 0 1.5rem; font-size: 0.8125rem; line-height: 1.5; }
 .article-resources-label { color: var(--muted); }
@@ -946,6 +946,9 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
     padding: 4px max(20px, calc(env(safe-area-inset-right) + 4px)) calc(12px + var(--mobile-safe-area)) max(20px, calc(env(safe-area-inset-left) + 4px));
     color: var(--muted); pointer-events: none;
   }
+  /* The keyboard covers the bottom of the screen; the bar would float on top of it, over the
+     results being typed for. It keeps its box so nothing else moves. */
+  html.is-keyboard-open .mobile-tabs { visibility: hidden; }
   .mobile-tabs::before {
     content: ""; position: absolute; z-index: -1;
     inset: 0 max(16px, env(safe-area-inset-right)) calc(8px + var(--mobile-safe-area)) max(16px, env(safe-area-inset-left));
@@ -1053,10 +1056,14 @@ html[data-motion="off"]::view-transition-new(*) { animation: none; }
     animation-timeline: scroll(root block);
     animation-range: 0 10rem;
   }
-  /* The title interpolates its size instead of being measured, and the tags collapse with the
-     grid-rows idiom so they leave the accessibility tree as they disappear. */
-  body[data-kind="item"] .itemhead h1 { height: auto; font-size: calc(clamp(1.65rem, 4vw, 2.25rem) * (1 - 0.4 * var(--header-progress, 0))); }
-  body[data-kind="item"] .item-tags { height: auto; display: grid; grid-template-rows: calc(1 - var(--header-progress, 0)) fr; }
+  /* The title is scaled rather than re-typeset: shrinking its font would re-wrap the lines, and
+     the header would jump by a whole line in the middle of the fold. Both it and the tags give up
+     their box against their own natural height, so nothing here has to count lines. */
+  body[data-kind="item"] .itemhead-title { display: block; transform-origin: left top; transform: scale(calc(1 - 0.4 * var(--header-progress, 0))); }
+  @supports (height: calc-size(auto, size)) {
+    body[data-kind="item"] .itemhead h1 { height: calc-size(auto, size * (1 - 0.4 * var(--header-progress, 0))); overflow: hidden; }
+    body[data-kind="item"] .item-tags { height: calc-size(auto, size * (1 - var(--header-progress, 0))); }
+  }
   body[data-kind="item"] .item-tags-inner { min-height: 0; overflow: hidden; }
 }
 

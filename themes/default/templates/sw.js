@@ -48,6 +48,11 @@ async function fromNetwork(request, timeout) {
   }
 }
 
+/** The last good copy of this page, else the page that explains why there is none. */
+async function lastKnown(request) {
+  return (await caches.match(request, { ignoreSearch: true })) || (await caches.match(OFFLINE));
+}
+
 /** Pages: fresh when the network answers, the last copy when it does not. */
 async function pageResponse(request) {
   try {
@@ -56,13 +61,15 @@ async function pageResponse(request) {
       var cache = await caches.open(PAGES);
       await cache.put(request, response.clone());
       void trim(PAGES, PAGE_LIMIT);
+      return response;
     }
+    // A host in trouble is no better than a host that cannot be reached: an error body must not
+    // replace a page that was read before. Its own 404 and 410 are answers, and stand.
+    if (response && response.status >= 500) return (await lastKnown(request)) || response;
     return response;
   } catch (error) {
-    var cached = await caches.match(request, { ignoreSearch: true });
-    if (cached) return cached;
-    var offline = await caches.match(OFFLINE);
-    if (offline) return offline;
+    var offered = await lastKnown(request);
+    if (offered) return offered;
     throw error;
   }
 }

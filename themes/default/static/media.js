@@ -574,19 +574,24 @@ function enhanceVideoFacade(preview) {
     );
     player.appendChild(frame);
 
-    // Twitch refuses to render below 400×300, so scale a smaller column down instead of
-    // letting the player widen the article.
-    if (provider === "twitch" && "ResizeObserver" in window) {
-      const observer = new ResizeObserver((entries) => {
-        for (const entry of entries) {
-          const width = entry.contentRect.width;
-          const scale = width && width < 400 ? width / 400 : 1;
-          frame.style.width = scale < 1 ? "400px" : "100%";
-          frame.style.transform = scale < 1 ? "scale(" + scale + ")" : "";
-          frame.style.transformOrigin = "top left";
-        }
-      });
-      observer.observe(player);
+    // Twitch refuses to render below 400×300. A narrow column gets a player laid out at that
+    // size and scaled down to fit, rather than a player that widens the article or a refusal.
+    if (provider === "twitch") {
+      const fit = (width, height) => {
+        const scale = width && width < 400 ? width / 400 : 1;
+        frame.style.width = scale < 1 ? "400px" : "100%";
+        frame.style.height =
+          scale < 1 ? Math.max(300, Math.ceil((400 * height) / width)) + "px" : "100%";
+        frame.style.transform = scale < 1 ? "scale(" + scale + ")" : "";
+        frame.style.transformOrigin = "top left";
+      };
+      const box = player.getBoundingClientRect();
+      fit(box.width, box.height);
+      if ("ResizeObserver" in window) {
+        new ResizeObserver((entries) => {
+          for (const entry of entries) fit(entry.contentRect.width, entry.contentRect.height);
+        }).observe(player);
+      }
     }
   }
 
@@ -594,26 +599,7 @@ function enhanceVideoFacade(preview) {
   preview.addEventListener("keydown", activate);
 }
 
-/* ------------------------------------------------------------------ images */
-
-/**
- * Reveal a broken image's alt text. Everything else about image loading is handled by the
- * placeholder the build already inlined behind the picture.
- */
-function installImageFallbacks() {
-  document.addEventListener(
-    "error",
-    (event) => {
-      const target = event.target;
-      if (!(target instanceof HTMLImageElement)) return;
-      target.closest(".article-picture, .article-lead, .preview-media")?.classList.add("is-error");
-    },
-    true,
-  );
-}
-
 export function mount() {
-  installImageFallbacks();
   for (const card of $$("[data-audio-component]")) enhanceAudio(card);
   for (const video of $$(".native-video video")) enhanceNativeVideo(video);
   for (const preview of $$("[data-video-embed]")) enhanceVideoFacade(preview);

@@ -311,7 +311,11 @@ function complete(query, cursor, facets, now = Date.now(), catalogue = facets) {
         return {
           id: kind + ":" + facet.value,
           label: facet.label,
-          detail: alias === undefined ? kind + " · " + facet.value : kind,
+          // Name what the clause will actually say, unless the label already says it.
+          detail:
+            alias === undefined && facet.label !== facet.value
+              ? kind + " · " + facet.value
+              : kind,
           count: facet.count,
           insert: facetInsertion(kind, facet, alias, excluded),
           start,
@@ -454,17 +458,32 @@ function renderMetadata(display, base, original, dates) {
     const link = element(
       "a",
       {
-        class: "domain",
-        href: facetPage(base, "source", display.source_slug || ""),
+        href: facetPage(base, "source", display.source_query || display.source_slug || ""),
         title: display.source_title || display.source_display,
       },
       [element("span", { class: "source-resolved", text: display.source_display })],
     );
-    if (display.is_aggregated) {
-      link.append(" ");
-      link.appendChild(element("em", { text: "via " + display.feed_display }));
+    const domain = element("span", { class: "domain" }, [link]);
+    // The feeds that carried this article are links of their own, exactly as `_metadata.html`
+    // renders them: whoever published it and whoever passed it on are both worth following.
+    const feeds = display.feed_sources || [];
+    if (feeds.length) {
+      const via = element("em", {}, [document.createTextNode("via ")]);
+      feeds.forEach((feed, index) => {
+        if (index) via.append(", ");
+        via.appendChild(
+          element("a", {
+            class: "source-feed",
+            href: facetPage(base, "source", feed.query_value || feed.slug),
+            title: feed.name,
+            text: feed.display,
+          }),
+        );
+      });
+      domain.append(" ");
+      domain.appendChild(via);
     }
-    fields.push(field([link]));
+    fields.push(field([domain]));
   }
   if (display.category)
     fields.push(
@@ -884,8 +903,8 @@ export function mount(options) {
     error.hidden = !message;
   }
 
-  function closeMenu() {
-    menuOpen = false;
+  /** Take the menu off screen without giving up on it: it may have something to say later. */
+  function hideMenu() {
     if (listbox) {
       listbox.hidden = true;
       // Drop the options too: a hidden list still answers queries and reads to assistive
@@ -896,9 +915,17 @@ export function mount(options) {
     input.removeAttribute("aria-activedescendant");
   }
 
+  /** Dismiss the menu: Escape, leaving the field, or accepting a complete clause. */
+  function closeMenu() {
+    menuOpen = false;
+    hideMenu();
+  }
+
   function renderMenu() {
     if (!listbox) return;
-    if (!menuOpen || !suggestions.length) return closeMenu();
+    // Nothing to show yet is not the same as nothing to show: the vocabulary a qualifier needs
+    // arrives after it is typed, and the menu has to be there when it does.
+    if (!menuOpen || !suggestions.length) return hideMenu();
     listbox.replaceChildren(
       ...suggestions.map((suggestion, index) => {
         const detail =
@@ -975,12 +1002,15 @@ export function mount(options) {
     }
   }
 
+  const menuShape = (entries) => entries.map((entry) => entry.id).join("\u0000");
+
   function renderSuggestions() {
     if (!listbox) return;
     const facets =
       context && catalogueFacets
         ? { ...catalogueFacets, [context.field]: context.values }
         : catalogueFacets;
+    const before = menuShape(suggestions);
     try {
       suggestions = complete(
         input.value,
@@ -990,9 +1020,14 @@ export function mount(options) {
         catalogueFacets,
       );
     } catch {
-      suggestions = [];
+      // A fragment the completer cannot read is not the same as nothing to suggest: leaving the
+      // menu as it was keeps the reader's place in it.
+      return renderMenu();
     }
-    highlighted = 0;
+    // Counts and context arrive after the menu is already on screen. Re-rendering the same
+    // choices must not move the one the reader has arrowed to.
+    highlighted =
+      before === menuShape(suggestions) ? Math.min(highlighted, Math.max(0, suggestions.length - 1)) : 0;
     renderMenu();
   }
 
@@ -1010,11 +1045,12 @@ export function mount(options) {
     input.value = accepted.query;
     input.setSelectionRange(accepted.cursor, accepted.cursor);
     // A qualifier is half an answer: taking `source:` should offer the sources it accepts rather
-    // than closing on an unfinished clause. A clause that is already complete suggests nothing,
-    // so the menu closes on its own.
-    menuOpen = true;
+    // than closing on an unfinished clause. A clause that is already complete is an answer, and
+    // the menu gets out of the way of reading it.
+    menuOpen = suggestion.insert.endsWith(":");
     schedule(0);
-    suggest();
+    if (menuOpen) suggest();
+    else closeMenu();
   }
 
   /** Keep `?q=` and `?search-page=` shareable without adding a history entry per keystroke. */
@@ -1215,7 +1251,13 @@ export function mount(options) {
     menuOpen = true;
     suggest();
   });
-  input.addEventListener("blur", () => setTimeout(closeMenu, 120));
+  // Leaving the field closes its menu; leaving the window does not. Coming back to a tab should
+  // find the search exactly as it was left, suggestions included.
+  input.addEventListener("blur", () =>
+    setTimeout(() => {
+      if (document.activeElement !== input) closeMenu();
+    }, 120),
+  );
   input.addEventListener("keyup", (event) => {
     if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) suggest();
   });
@@ -1270,6 +1312,12 @@ export function mount(options) {
   });
 
   clear?.addEventListener("click", () => {
+    // A collection page is itself a scope. Clearing the field there asks for everything, which is
+    // the whole feed rather than this page with its own list still under an empty search.
+    if (scope) {
+      location.assign(base);
+      return;
+    }
     input.value = "";
     edited = true;
     clear.hidden = true;

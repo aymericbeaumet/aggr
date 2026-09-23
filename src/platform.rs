@@ -22,6 +22,9 @@ struct Platform {
     /// Whether the account path is an opaque identifier. Those read better as the publisher's own
     /// name, which [`opaque`] lets the display layer substitute.
     opaque: bool,
+    /// First segments that name one entry in the catalogue rather than whoever publishes it. An
+    /// episode belongs to a show; it is not an account of its own.
+    entries: &'static [&'static str],
 }
 
 const fn platform(host: &'static str, prefixes: &'static [&'static str]) -> Platform {
@@ -29,6 +32,7 @@ const fn platform(host: &'static str, prefixes: &'static [&'static str]) -> Plat
         host,
         prefixes,
         opaque: false,
+        entries: &[],
     }
 }
 
@@ -38,6 +42,7 @@ const fn catalogue(host: &'static str) -> Platform {
         host,
         prefixes: &[],
         opaque: true,
+        entries: &["episode", "episodes"],
     }
 }
 
@@ -115,6 +120,11 @@ pub fn account_path(url: &Url) -> Option<String> {
     // A catalogue path is one opaque identifier however many segments it takes, and the locale
     // or section in front of it is part of reaching that entry.
     if platform.opaque {
+        // A link to one episode names the episode, not a publisher: the show it belongs to is
+        // elsewhere, and the host alone is the most that link can honestly claim.
+        if platform.entries.contains(first) {
+            return None;
+        }
         return Some(segments.join("/"));
     }
     if platform.prefixes.is_empty() {
