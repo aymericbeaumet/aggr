@@ -37,7 +37,8 @@
 <meta property="og:type" content="{{ 'article' if item else 'website' }}">
 <meta property="og:site_name" content="{{ site.title }}">
 <meta property="og:title" content="{{ page.title }}">
-{% if page.description %}<meta property="og:description" content="{{ page.description }}">{% endif %}
+{% set shared = (item.excerpt if item and item.excerpt else page.description) %}
+{% if shared %}<meta property="og:description" content="{{ shared }}">{% endif %}
 {% if page.canonical_url %}<meta property="og:url" content="{{ page.canonical_url }}">{% endif %}
 <meta property="og:locale" content="{{ site.og_locale }}">
 {% set lead_image = site.base_url and item and item.article_preview %}
@@ -48,7 +49,7 @@
 {% endif %}
 <meta name="twitter:card" content="{{ 'summary_large_image' if lead_image else 'summary' }}">
 <meta name="twitter:title" content="{{ page.title }}">
-{% if page.description %}<meta name="twitter:description" content="{{ page.description }}">{% endif %}
+{% if shared %}<meta name="twitter:description" content="{{ shared }}">{% endif %}
 {% if site.base_url %}
 {% if lead_image %}<meta name="twitter:image" content="{{ site.base_url }}{{ item.article_preview.url | site_path }}">{% if item.preview and item.preview.alt %}<meta name="twitter:image:alt" content="{{ item.preview.alt }}">{% endif %}
 {% elif item and item.preview %}<meta name="twitter:image" content="{{ site.base_url }}{{ item.preview.url }}">{% if item.preview.alt %}<meta name="twitter:image:alt" content="{{ item.preview.alt }}">{% endif %}

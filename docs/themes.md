@@ -97,6 +97,12 @@ HTML templates escape values automatically. `item.body_html` is already sanitize
 rendered with `|safe`; do not apply that filter to arbitrary source text or serve stored HTML
 without sanitizing it.
 
+A link shared into a chat or a social app unfurls from `og:`/`twitter:` metadata: the title, the
+article's own excerpt, and the lead image when the article has one, else its thumbnail, else the
+site icon. Those image and URL tags need an absolute root, so they are emitted only when the build
+knows one (`[site] url` or `--base-url`); `description` keeps the archival framing that tells a
+crawler this is a preserved copy.
+
 ## Optional article previews
 
 `item.preview` is absent when no local preview exists. Search display metadata exposes the same

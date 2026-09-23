@@ -3924,6 +3924,24 @@ same_as = ["https://social.example/@ada"]
             item.contains("Archived readable snapshot of Post 1 from blog.example, first captured 2026-09-02 and preserved by Demo &lt;site&gt;."),
             "{item}"
         );
+        // A link shared into a chat unfurls as the article, not as a notice about the archive:
+        // crawlers keep the archival framing, a reader gets the words.
+        let unfurled = |property: &str| {
+            item.split_once(&format!("<meta {property} content=\""))
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(value, _)| value.to_string())
+                .unwrap_or_default()
+        };
+        for property in [
+            "property=\"og:description\"",
+            "name=\"twitter:description\"",
+        ] {
+            let shared = unfurled(property);
+            assert!(
+                !shared.starts_with("Archived readable snapshot") && !shared.is_empty(),
+                "{property}: {shared}"
+            );
+        }
 
         let schema_start = "<script type=\"application/ld+json\">";
         let schema = home

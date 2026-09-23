@@ -250,6 +250,10 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   Keep upstream or configured labels distinct from categories; do not invent tags for unlabelled items.
   Model, code, and paper buttons are resource links, not topic tags; retain their destinations when
   separating them from the reader body and keep them in portable exports.
+- A shared link unfurls as the article: `og:`/`twitter:` descriptions carry the excerpt, while the
+  archival framing stays in `description` for crawlers. An aggregator's machine summary
+  (`Article URL: … Points: …`) describes the submission rather than the article and is dropped
+  however the body was captured, so it never stands in for an excerpt.
 - Apply title presentation rules once in the build context and reuse them in every published
   representation, including feeds and Markdown; preserve stored originals and article bodies.
   A publisher writing in Markdown can emit the markers with its headline: emphasis wrapping a whole

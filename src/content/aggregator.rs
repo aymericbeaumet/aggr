@@ -7,15 +7,10 @@ use comrak::nodes::NodeValue;
 use crate::model::{ContentKind, FrontMatter};
 
 pub fn normalize_aggregator_metadata(body: &str, front: &mut FrontMatter) -> String {
-    if front.content == ContentKind::Extracted {
-        return body.to_string();
-    }
-    let Some(cleaned) = clean_feed_body(body, &front.link) else {
-        return body.to_string();
-    };
-    for (key, value) in cleaned.metadata {
-        front.extra.entry(key).or_insert(value);
-    }
+    // An aggregator's summary describes the submission rather than the article — `Article URL: …
+    // Points: …` is machine metadata whichever way the body was captured — so it is dropped before
+    // the extracted-body shortcut below, or it would survive on exactly the articles that read
+    // best and stand in for their excerpt wherever one is shown.
     if front.summary.as_deref().is_some_and(|summary| {
         parse_metadata(
             &summary.split_whitespace().collect::<Vec<_>>().join(" "),
@@ -24,6 +19,15 @@ pub fn normalize_aggregator_metadata(body: &str, front: &mut FrontMatter) -> Str
         .is_some()
     }) {
         front.summary = None;
+    }
+    if front.content == ContentKind::Extracted {
+        return body.to_string();
+    }
+    let Some(cleaned) = clean_feed_body(body, &front.link) else {
+        return body.to_string();
+    };
+    for (key, value) in cleaned.metadata {
+        front.extra.entry(key).or_insert(value);
     }
     cleaned.body
 }
@@ -193,16 +197,18 @@ mod tests {
             front.summary.as_deref(),
             Some("A meaningful description of the document.")
         );
+        // An extracted body is the article's own and is left alone, but the aggregator's summary
+        // describes the submission whichever way the body arrived, so it goes either way.
         front.content = ContentKind::Extracted;
-        front.summary = Some(summary);
+        front.summary = Some(summary.clone());
         assert_eq!(
             normalize_aggregator_metadata(&bookkeeping(), &mut front),
             bookkeeping()
         );
-        assert!(front.summary.is_some());
+        assert!(front.summary.is_none());
         front.content = ContentKind::None;
-        let summary_body = front.summary.clone().unwrap();
-        assert!(normalize_aggregator_metadata(&summary_body, &mut front).is_empty());
+        front.summary = Some(summary.clone());
+        assert!(normalize_aggregator_metadata(&summary, &mut front).is_empty());
         assert!(front.summary.is_none());
     }
 
