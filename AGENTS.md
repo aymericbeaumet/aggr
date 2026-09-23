@@ -216,7 +216,11 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   Publisher-feed reconciliation enriches media in place and records canonical dedupe aliases; keep article paths
   and hand-edited content, reject ambiguous matches, and leave repeats unchanged.
 - Canonical publisher IDs are normalized article hostnames: lowercase/punycode, without trailing dots
-  or conventional `www.`, paths, ports, or cross-domain provider aliases. Preserve other subdomains.
+  or conventional `www.`, ports, or cross-domain provider aliases. Preserve other subdomains. A host
+  shared between publishers identifies none of them, so there the account path is part of the ID,
+  the page (`sources/youtube.com/@channel/`) and the filter value: the label a reader clicks and the
+  source they land on are the same publisher. An article URL settles the account where it names one;
+  where it does not, the source's own resolved metadata does, and only for that article's host.
   Preserve configured/persisted feed identities and profile names as provenance; never migrate
   stored source IDs to publisher IDs. Canonical articles carry deduplicated publisher/feed
   memberships and stay unique globally. Visible labels use a canonical name: a hostname alone, plus
@@ -229,8 +233,10 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   subscription. Grouping an item under its publisher host must not overwrite its label with the
   bare host. A derived source slug
   is that same canonical name, disambiguated by the differing feed path when two sources collide. Exact source IDs win manual alias collisions. See [client development](docs/client.md).
-  A readable alias never replaces a source in a query: its hostname is already the readable name.
-  Public source IDs and filter values use normalized hostnames only; group same-host subscriptions
+  A readable alias never replaces a source in a query: its canonical name is already readable.
+  The source directory lists whole sites and feeds: an account nobody configured keeps its page and
+  its filter value but is not listed (`sources[].listed`).
+  Public source IDs and filter values use canonical publisher names only; group same-publisher subscriptions
   while preserving their archived IDs, article paths, and individual OPML endpoints. Display names
   must never replace hostnames in generated queries.
   Keep upstream or configured labels distinct from categories; do not invent tags for unlabelled items.
@@ -238,6 +244,13 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   separating them from the reader body and keep them in portable exports.
 - Apply title presentation rules once in the build context and reuse them in every published
   representation, including feeds and Markdown; preserve stored originals and article bodies.
+  A leading heading that restates the title is a duplicate: aggregators reword what they syndicate,
+  so a longer title may differ by a word in four, while short ones must still match word for word.
+  A document's own heading may also run the title through a subtitle or a year marker; a deeper
+  heading has to match outright, and a heading holding a destination stays whatever it says.
+- Article suggestions are resolved once, and every one of them is meant to be shown: never filter
+  them again downstream. They skip the chronological neighbours the page already links, and avoid
+  pointing back at an article that already suggests them so browsing never closes a two-page loop.
 - A lead image must not repeat a body picture (compare ThumbHashes, not only URLs) and must be at
   least 640px wide. Reader headings are id anchors, never links; portable outputs keep links.
 - Expand public social threads using only the original author's posts; preserve post/media order,

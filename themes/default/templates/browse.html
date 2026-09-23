@@ -7,7 +7,7 @@
   </header>
   <div class="page-body browse-directory">
     <div class="browse-groups">
-      {% for directory_kind, directory_title, entries in [['categories', 'Categories', categories], ['sources', 'Sources', sources], ['tags', 'Tags', tags]] %}
+      {% for directory_kind, directory_title, entries in [['categories', 'Categories', categories], ['sources', 'Sources', sources | selectattr('listed')], ['tags', 'Tags', tags]] %}
       {% if page.kind == 'browse' or page.kind == directory_kind %}
       <section class="browse-group browse-group-{{ directory_kind }}" id="{{ directory_kind }}" aria-labelledby="{{ directory_kind ~ '-title' if page.kind == 'browse' else 'page-title' }}">
         {% if page.kind == 'browse' %}<h2 id="{{ directory_kind }}-title">{{ directory_title }}</h2>{% endif %}

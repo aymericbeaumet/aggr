@@ -2,16 +2,24 @@
 
 use url::Url;
 
+/// Markup a gate is recognised by, each naming itself in the body that carries it.
+const GATE_MARKERS: &[&str] = &["paywall", "subscription-wall"];
+
 pub fn is_subscription_wall(body: &str, original: &Url) -> bool {
+    let ft = matches!(original.host_str(), Some("ft.com" | "www.ft.com"))
+        && original.path().starts_with("/content/");
+    // Every build re-reads every stored article through here. An archived article that names no
+    // gate cannot hold one, so it is worth one substring scan to skip flattening and parsing it.
+    if !ft && !GATE_MARKERS.iter().any(|marker| body.contains(marker)) {
+        return false;
+    }
     let text = super::html_to_text(body)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
     let text = text.trim_start_matches(['#', '*', ' ']);
-    if matches!(original.host_str(), Some("ft.com" | "www.ft.com"))
-        && original.path().starts_with("/content/")
-    {
+    if ft {
         return text.starts_with("save ")
             && text
                 .chars()

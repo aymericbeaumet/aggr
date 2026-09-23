@@ -58,10 +58,6 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consumption: Option<Consumption>,
     pub discussions: Vec<Discussion>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub points: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub comments: Option<Comments>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -76,13 +72,6 @@ pub struct Discussion {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct Comments {
-    pub url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub count: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -185,16 +174,6 @@ impl From<&super::context::ItemCtx> for Metadata {
                     score: discussion.score,
                 })
                 .collect(),
-            points: count(item.extra.get("points")),
-            comments: item
-                .extra
-                .get("comments_url")
-                .and_then(serde_yaml_ng::Value::as_str)
-                .filter(|url| public_url(url))
-                .map(|url| Comments {
-                    url: url.to_owned(),
-                    count: count(item.extra.get("num_comments")),
-                }),
         }
     }
 }

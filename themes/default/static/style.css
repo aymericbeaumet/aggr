@@ -350,8 +350,10 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 }
 .row:has([data-row-open]), .article-more-card { cursor: pointer; }
 :is(.row, .article-more-card):where(:hover):not(:has(a:not(.title):hover, button:hover, input:hover, select:hover, textarea:hover, label:hover, summary:hover, [role="button"]:hover, [role="link"]:hover, [contenteditable]:hover)) .title { text-decoration: underline; }
-/* The whole row opens its article: one stretched link, with native modifier and middle clicks. */
-.row:has([data-row-open]) { position: relative; }
+/* The whole row opens its article: one stretched link, with native modifier and middle clicks.
+   Both cards below stretch their link the same way, and both must contain it: an overlay with no
+   positioned ancestor of its own covers the article it sits under instead of its own card. */
+.row:has([data-row-open]), .article-more-card { position: relative; }
 .row [data-row-open]::after, .article-more-card .article-more-link::after { content: ""; position: absolute; inset: 0; z-index: 0; }
 .row :is(.meta, .preview-media), .row a:not(.title), .article-more-card .meta { position: relative; z-index: 1; }
 .row.is-selected .title,

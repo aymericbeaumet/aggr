@@ -555,6 +555,100 @@ mod tests {
     }
 
     #[test]
+    fn every_stretched_link_is_contained_by_the_card_it_covers() {
+        // From disk: the embedded copy is only as fresh as the last compile.
+        let css =
+            std::fs::read_to_string(repository_path("themes/default/static/style.css")).unwrap();
+        let css = css.as_str();
+        let class = regex::Regex::new(r"\.([a-z][a-z0-9_-]*)").unwrap();
+        // Only the element a rule applies to is positioned, never the ancestors that select it.
+        let positioned: BTreeSet<String> = rules(css)
+            .filter(|(_, block)| block.contains("position: relative"))
+            .flat_map(|(prelude, _)| selectors(&prelude))
+            .flat_map(|selector| {
+                class
+                    .captures_iter(&subject(&selector))
+                    .map(|capture| capture[1].to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        // An overlay filling `inset: 0` fills its nearest positioned ancestor. Without one of its
+        // own it covers whatever surrounds it — the article body reads as the last card's link,
+        // underlining on hover and navigating on click.
+        let overlays: Vec<_> = rules(css)
+            .filter(|(_, block)| block.contains("position: absolute") && block.contains("inset: 0"))
+            // Each selector in a group stands on its own: one of them being contained says
+            // nothing about the others.
+            .flat_map(|(prelude, _)| selectors(&prelude))
+            .filter(|selector| selector.contains("::after"))
+            .filter(|selector| {
+                !class
+                    .captures_iter(selector)
+                    .any(|capture| positioned.contains(&capture[1]))
+            })
+            .collect();
+        assert!(
+            overlays.is_empty(),
+            "stretched links with nothing to contain them: {overlays:?}"
+        );
+    }
+
+    /// The compound a selector applies to: whatever follows its last top-level combinator.
+    fn subject(selector: &str) -> String {
+        let mut depth = 0usize;
+        let mut start = 0usize;
+        for (index, character) in selector.char_indices() {
+            match character {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth = depth.saturating_sub(1),
+                ' ' | '>' | '+' | '~' if depth == 0 => start = index + character.len_utf8(),
+                _ => {}
+            }
+        }
+        selector[start..].to_string()
+    }
+
+    /// A selector group split into its selectors, ignoring the commas inside `:is()` and friends.
+    fn selectors(prelude: &str) -> Vec<String> {
+        let mut selectors = vec![String::new()];
+        let mut depth = 0usize;
+        for character in prelude.chars() {
+            match character {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    selectors.push(String::new());
+                    continue;
+                }
+                _ => {}
+            }
+            let last = selectors.len() - 1;
+            selectors[last].push(character);
+        }
+        selectors
+            .into_iter()
+            .map(|selector| selector.trim().to_string())
+            .filter(|selector| !selector.is_empty())
+            .collect()
+    }
+
+    /// `(prelude, declarations)` for every rule in `css`, comments removed.
+    fn rules(css: &str) -> impl Iterator<Item = (String, String)> {
+        let css = regex::Regex::new(r"(?s)/\*.*?\*/")
+            .unwrap()
+            .replace_all(css, "")
+            .into_owned();
+        css.split('}')
+            .filter_map(|rule| {
+                let (prelude, block) = rule.split_once('{')?;
+                (!prelude.trim_start().starts_with('@'))
+                    .then(|| (prelude.trim().to_string(), block.to_string()))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
     fn embedded_theme_allows_native_vertical_overscroll() {
         let file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(file.data.as_ref()).unwrap();

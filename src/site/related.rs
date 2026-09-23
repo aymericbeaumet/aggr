@@ -23,7 +23,8 @@ pub struct Recommendation {
 /// Resolve navigation for items sorted newest first. Suggestions follow the same weighted-index
 /// model used by established static-site generators: shared labels dominate, then category and
 /// uncommon title terms. An inverted index keeps this proportional to matching
-/// features rather than comparing every pair of articles.
+/// features rather than comparing every pair of articles. Every suggestion is meant to be shown,
+/// so this is the only place that decides what an article may point at.
 pub fn resolve(items: &[ItemCtx], bodies: &[&str]) -> Vec<Recommendation> {
     assert_eq!(items.len(), bodies.len());
     let identities = identities(items, bodies);
@@ -52,68 +53,77 @@ pub fn resolve(items: &[ItemCtx], bodies: &[&str]) -> Vec<Recommendation> {
         }
     }
 
-    items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            let previous = preceding[index];
-            let next = following[index];
-            let eligible = |candidate: usize, articles: &[usize]| {
-                identities[candidate] != identities[index]
-                    && !articles
-                        .iter()
-                        .any(|&other| identities[other] == identities[candidate])
-                    && [previous, next].into_iter().flatten().all(|adjacent| {
-                        adjacent == candidate || identities[adjacent] != identities[candidate]
-                    })
-            };
-            let mut scores = BTreeMap::<usize, u64>::new();
-            for feature in &features[index] {
-                let candidates = &postings[feature.as_str()];
-                let weight = feature_weight(feature, items.len(), candidates.len());
-                for &candidate in candidates {
-                    if identities[candidate] != identities[index] {
-                        *scores.entry(candidate).or_default() += weight;
-                    }
+    // Newest first, so a suggestion is settled before the articles it points back at are resolved.
+    let mut inbound = vec![BTreeSet::<usize>::new(); items.len()];
+    let mut recommendations = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let previous = preceding[index];
+        let next = following[index];
+        // Chronological neighbours are already one keystroke away, and an article that suggests
+        // this one is a page the reader can come back from: suggesting either only closes a loop
+        // instead of opening new reading. Reciprocity yields last so a small archive still fills.
+        let suggesting = std::mem::take(&mut inbound[index]);
+        let eligible = |candidate: usize, articles: &[usize], reciprocal: bool| {
+            identities[candidate] != identities[index]
+                && !articles
+                    .iter()
+                    .any(|&other| identities[other] == identities[candidate])
+                && [previous, next]
+                    .into_iter()
+                    .flatten()
+                    .all(|adjacent| identities[adjacent] != identities[candidate])
+                && (reciprocal || !suggesting.contains(&candidate))
+        };
+        let mut scores = BTreeMap::<usize, u64>::new();
+        for feature in &features[index] {
+            let candidates = &postings[feature.as_str()];
+            let weight = feature_weight(feature, items.len(), candidates.len());
+            for &candidate in candidates {
+                if identities[candidate] != identities[index] {
+                    *scores.entry(candidate).or_default() += weight;
                 }
             }
-            // Seed only a bounded recent pool rather than comparing every article with every
-            // other article. Recency decays smoothly with a seven-day half-life; a separate
-            // cross-source bonus keeps suggestions diverse while build cost stays linear.
-            for (candidate, candidate_item) in items.iter().enumerate().take(CROSS_SOURCE_POOL) {
-                if identities[candidate] == identities[index] {
-                    continue;
-                }
-                let score = scores.entry(candidate).or_default();
-                *score += newest.map_or(0, |newest| recency_bonus(newest, candidate_item.date));
-                if candidate_item.source != item.source {
-                    *score += CROSS_SOURCE_BONUS;
-                }
+        }
+        // Seed only a bounded recent pool rather than comparing every article with every
+        // other article. Recency decays smoothly with a seven-day half-life; a separate
+        // cross-source bonus keeps suggestions diverse while build cost stays linear.
+        for (candidate, candidate_item) in items.iter().enumerate().take(CROSS_SOURCE_POOL) {
+            if identities[candidate] == identities[index] {
+                continue;
             }
-            let mut ranked: Vec<_> = scores.into_iter().collect();
-            ranked.sort_by(|(a_index, a_score), (b_index, b_score)| {
-                b_score
-                    .cmp(a_score)
-                    .then_with(|| items[*b_index].date.cmp(&items[*a_index].date))
-                    .then_with(|| items[*a_index].path.cmp(&items[*b_index].path))
-            });
-            let mut articles = Vec::with_capacity(RECOMMENDATION_COUNT);
-            for (candidate, _) in ranked {
-                if articles.len() == RECOMMENDATION_COUNT {
-                    break;
-                }
-                if eligible(candidate, &articles) {
-                    articles.push(candidate);
-                }
+            let score = scores.entry(candidate).or_default();
+            *score += newest.map_or(0, |newest| recency_bonus(newest, candidate_item.date));
+            if candidate_item.source != item.source {
+                *score += CROSS_SOURCE_BONUS;
             }
-            fill_fallback(&mut articles, items, index, eligible);
-            Recommendation {
-                previous,
-                next,
-                articles,
+        }
+        let mut ranked: Vec<_> = scores.into_iter().collect();
+        ranked.sort_by(|(a_index, a_score), (b_index, b_score)| {
+            b_score
+                .cmp(a_score)
+                .then_with(|| items[*b_index].date.cmp(&items[*a_index].date))
+                .then_with(|| items[*a_index].path.cmp(&items[*b_index].path))
+        });
+        let mut articles = Vec::with_capacity(RECOMMENDATION_COUNT);
+        for (candidate, _) in &ranked {
+            if articles.len() == RECOMMENDATION_COUNT {
+                break;
             }
-        })
-        .collect()
+            if eligible(*candidate, &articles, false) {
+                articles.push(*candidate);
+            }
+        }
+        fill_fallback(&mut articles, items, index, eligible);
+        for &article in &articles {
+            inbound[article].insert(index);
+        }
+        recommendations.push(Recommendation {
+            previous,
+            next,
+            articles,
+        });
+    }
+    recommendations
 }
 
 fn root(parents: &mut [usize], mut index: usize) -> usize {
@@ -175,16 +185,19 @@ fn fill_fallback(
     articles: &mut Vec<usize>,
     items: &[ItemCtx],
     current: usize,
-    eligible: impl Fn(usize, &[usize]) -> bool,
+    eligible: impl Fn(usize, &[usize], bool) -> bool,
 ) {
-    for prefer_other_source in [true, false] {
-        for candidate in 0..items.len() {
-            if articles.len() == RECOMMENDATION_COUNT {
-                return;
-            }
-            let other_source = items[candidate].source != items[current].source;
-            if other_source == prefer_other_source && eligible(candidate, articles) {
-                articles.push(candidate);
+    for reciprocal in [false, true] {
+        for prefer_other_source in [true, false] {
+            for candidate in 0..items.len() {
+                if articles.len() == RECOMMENDATION_COUNT {
+                    return;
+                }
+                let other_source = items[candidate].source != items[current].source;
+                if other_source == prefer_other_source && eligible(candidate, articles, reciprocal)
+                {
+                    articles.push(candidate);
+                }
             }
         }
     }
@@ -395,7 +408,9 @@ mod tests {
         assert_eq!(recommendations[0].next, Some(1));
         assert_eq!(recommendations[1].previous, Some(0));
         assert_eq!(recommendations[1].next, Some(2));
-        assert_eq!(recommendations[0].articles, vec![2, 1, 3]);
+        // The next article is already offered as its own card, so only the two remaining
+        // articles are left to suggest.
+        assert_eq!(recommendations[0].articles, vec![2, 3]);
         assert_eq!(resolve(&items), recommendations);
     }
 
@@ -411,19 +426,34 @@ mod tests {
         assert_eq!(resolve(&items)[0].articles, vec![2, 3, 4]);
     }
 
+    /// An archive of articles with nothing in common: its own source, category and label each.
+    fn unrelated_items(count: u32) -> Vec<ItemCtx> {
+        (0..count)
+            .map(|index| {
+                let source = format!("source-{index}");
+                let label = format!("label-{index}");
+                item(
+                    &format!("Article {index}"),
+                    &source,
+                    &source,
+                    &[&label],
+                    23 - index,
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn unrelated_articles_still_receive_three_distinct_suggestions() {
-        let items = vec![
-            item("Alpha", "a", "one", &["red"], 12),
-            item("Bravo", "b", "two", &["blue"], 11),
-            item("Charlie", "c", "three", &["green"], 10),
-            item("Delta", "d", "four", &["yellow"], 9),
-            item("Echo", "e", "five", &["purple"], 8),
-        ];
-
-        for (current, recommendation) in resolve(&items).into_iter().enumerate() {
+        for (current, recommendation) in resolve(&unrelated_items(20)).into_iter().enumerate() {
             assert_eq!(recommendation.articles.len(), 3);
             assert!(!recommendation.articles.contains(&current));
+            for adjacent in [recommendation.previous, recommendation.next]
+                .into_iter()
+                .flatten()
+            {
+                assert!(!recommendation.articles.contains(&adjacent));
+            }
             assert_eq!(
                 recommendation
                     .articles
@@ -432,6 +462,25 @@ mod tests {
                     .len(),
                 3
             );
+        }
+    }
+
+    #[test]
+    fn suggestions_never_point_back_at_an_article_already_suggesting_them() {
+        // A label no other article carries makes these two each other's strongest match.
+        let mut items = unrelated_items(20);
+        items[1].labels = vec!["enigma".into()];
+        items[6].labels = vec!["enigma".into()];
+        let recommendations = resolve(&items);
+        assert!(recommendations[1].articles.contains(&6));
+        assert!(!recommendations[6].articles.contains(&1));
+        for (current, recommendation) in recommendations.iter().enumerate() {
+            for article in &recommendation.articles {
+                assert!(
+                    !recommendations[*article].articles.contains(&current),
+                    "{current} and {article} suggest each other"
+                );
+            }
         }
     }
 

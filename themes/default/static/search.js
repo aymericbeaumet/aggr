@@ -550,20 +550,6 @@ function renderMetadata(display, base, original, dates) {
         }),
       ]),
     );
-  if (display.points !== undefined)
-    fields.push(field([element("span", { text: display.points + " points" })]));
-  if (display.comments)
-    fields.push(
-      field([
-        element("a", {
-          href: safeURL(display.comments.url, base),
-          title: display.comments.url,
-          target: "_blank",
-          rel: "noopener noreferrer",
-          text: display.comments.count !== undefined ? display.comments.count + " comments" : "comments",
-        }),
-      ]),
-    );
   return element("div", { class: "meta" }, fields);
 }
 
@@ -1021,7 +1007,10 @@ export function mount(options) {
     const accepted = acceptCompletion(input.value, suggestion);
     input.value = accepted.query;
     input.setSelectionRange(accepted.cursor, accepted.cursor);
-    closeMenu();
+    // A qualifier is half an answer: taking `source:` should offer the sources it accepts rather
+    // than closing on an unfinished clause. A clause that is already complete suggests nothing,
+    // so the menu closes on its own.
+    menuOpen = true;
     schedule(0);
     suggest();
   }
@@ -1211,15 +1200,10 @@ export function mount(options) {
       return;
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      if (suggesting) {
-        event.preventDefault();
-        event.stopPropagation();
-        highlighted =
-          (highlighted + (event.key === "ArrowDown" ? 1 : -1) + suggestions.length) % suggestions.length;
-        renderMenu();
-        return;
-      }
-      // Without suggestions the arrows walk the results, and the keyboard stays in the field.
+      // The arrows walk the results, suggestions or not, and the keyboard stays in the field:
+      // the list is what the reader came for, and a menu that hijacked them would put the
+      // results out of reach for as long as a qualifier is half-typed. Enter and Tab take the
+      // suggestion; a pointer takes any of them.
       if (options.selection?.move(event.key === "ArrowDown" ? 1 : -1, false)) {
         event.preventDefault();
         event.stopPropagation();

@@ -47,7 +47,6 @@ use page::{ListPage, Pages, SharedCtx, SimplePage, archive_modified_at, default_
 use render::{Layers, Renderer};
 
 const EXCERPT_CHARS: usize = 240;
-const RECOMMENDATION_CARD_COUNT: usize = 1;
 
 fn is_visible_item(item: &Item) -> bool {
     !item.front.hidden
@@ -530,19 +529,22 @@ fn build_once(
     let mut source_ctxs = source_contexts(sources, store, &status, &stored_items)?;
     let stored_sources = source_index::capture_sources(&stored_items);
     let (mut all_items, duplicate_redirects) = visible_archive(stored_items, sources);
-    for item in &mut all_items {
-        item.body = content::normalize_subscription_metadata(&item.body, &mut item.front);
-        item.body = content::normalize_aggregator_metadata(&item.body, &mut item.front);
-        let (body, boundary_labels) = content::normalize_article_body(
-            &item.body,
-            &item.front.title,
-            item.front.published,
-            &item.front.source,
-        );
+    // Cleanup added since an item was captured reaches it here, so every build pays for every
+    // stored body. Each item is independent, which is what makes the archive's share of a rebuild
+    // scale with the machine instead of with one core.
+    let normalized = parallel::map(&all_items, |item| {
+        let mut front = item.front.clone();
+        let body = content::normalize_subscription_metadata(&item.body, &mut front);
+        let body = content::normalize_aggregator_metadata(&body, &mut front);
+        let (body, boundary_labels) =
+            content::normalize_article_body(&body, &front.title, front.published, &front.source);
+        front.labels = crate::model::normalize_labels(front.labels.iter().chain(&boundary_labels));
+        let body = crate::threads::clean_archived_thread(&body, &front.link);
+        Ok((body, front))
+    })?;
+    for (item, (body, front)) in all_items.iter_mut().zip(normalized) {
         item.body = body;
-        item.front.labels =
-            crate::model::normalize_labels(item.front.labels.iter().chain(&boundary_labels));
-        item.body = crate::threads::clean_archived_thread(&item.body, &item.front.link);
+        item.front = front;
     }
     all_items.sort_by(|a, b| {
         b.created_at()
@@ -692,15 +694,15 @@ fn build_once(
     let recommendations = related::resolve(&archive_items, &recommendation_text);
     let article_links: Vec<_> = archive_items.iter().map(ArticleLinkCtx::from).collect();
     for (item, recommendation) in archive_items.iter_mut().zip(recommendations) {
-        let previous = recommendation.previous;
-        let next = recommendation.next;
-        item.previous_article = previous.map(|index| article_links[index].clone());
-        item.next_article = next.map(|index| article_links[index].clone());
+        item.previous_article = recommendation
+            .previous
+            .map(|index| article_links[index].clone());
+        item.next_article = recommendation
+            .next
+            .map(|index| article_links[index].clone());
         item.recommended_articles = recommendation
             .articles
             .into_iter()
-            .filter(|index| Some(*index) != previous && Some(*index) != next)
-            .take(RECOMMENDATION_CARD_COUNT)
             .map(|index| article_links[index].clone())
             .collect();
     }
@@ -2089,6 +2091,12 @@ url = "https://duckdb.org/news.xml"
                 "Maharship article",
                 "https://maharship.com/posts/example",
             ),
+            (
+                "lobsters",
+                "repo",
+                "A repository",
+                "https://github.com/timgordontg/engrim",
+            ),
         ] {
             store
                 .write_item(crate::store::NewItem {
@@ -2110,7 +2118,7 @@ url = "https://duckdb.org/news.xml"
         }
         let out = dir.path().join("out");
         let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
-        assert_eq!(summary.items, 2, "one canonical item per original URL");
+        assert_eq!(summary.items, 3, "one canonical item per original URL");
         let feed = std::fs::read_to_string(out.join("sources/lobste.rs/index.html")).unwrap();
         assert!(
             feed.contains("DuckDB article"),
@@ -2149,7 +2157,7 @@ url = "https://duckdb.org/news.xml"
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(out.join("search-catalog.json")).unwrap())
                 .unwrap();
-        assert_eq!(manifest["docs"], 2);
+        assert_eq!(manifest["docs"], 3);
         let facets = manifest["facets"]["source"].as_array().unwrap();
         let subscriptions = std::fs::read_to_string(out.join("sources.opml")).unwrap();
         assert!(subscriptions.contains("https://duckdb.org/feed.xml"));
@@ -2159,7 +2167,15 @@ url = "https://duckdb.org/news.xml"
                 .iter()
                 .find(|facet| facet["value"] == "lobste.rs")
                 .unwrap()["count"],
-            2
+            3
+        );
+        assert_eq!(
+            facets
+                .iter()
+                .find(|facet| facet["value"] == "github.com/timgordontg")
+                .unwrap()["count"],
+            1,
+            "the account is its own filter value"
         );
         assert_eq!(
             facets
@@ -2193,9 +2209,17 @@ url = "https://duckdb.org/news.xml"
         let browse = std::fs::read_to_string(out.join("sources/index.html")).unwrap();
         assert!(browse.contains("source%3A%22maharship.com%22"));
         assert!(browse.contains("source%3A%22lobste.rs%22"));
+        // An account nobody configured filters and archives under its own name, but the directory
+        // lists whole sites and feeds rather than everyone who ever appeared on one.
+        assert!(
+            out.join("sources/github.com/timgordontg/index.html")
+                .is_file(),
+            "the account keeps its own page"
+        );
+        assert!(!browse.contains("github.com%2Ftimgordontg"), "{browse}");
         assert_eq!(
             store.items().unwrap().len(),
-            3,
+            4,
             "build leaves stored captures intact"
         );
     }
@@ -2613,7 +2637,7 @@ category = "Science"
     }
 
     #[test]
-    fn item_pages_show_next_then_one_distinct_recommendation() {
+    fn item_pages_show_next_then_three_distinct_recommendations() {
         let dir = tempfile::tempdir().unwrap();
         let (config, sources, store) = fixture(dir.path(), 6, "max_age_days = 30\npwa = false\n");
         let out = dir.path().join("out");
@@ -2626,7 +2650,7 @@ category = "Science"
             "{newest}"
         );
         assert!(!newest.contains("data-previous-url="), "{newest}");
-        assert_eq!(newest.matches("class=\"article-more-link").count(), 2);
+        assert_eq!(newest.matches("class=\"article-more-link").count(), 4);
         assert_eq!(newest.matches("article-more-neighbor").count(), 0);
         assert!(!newest.contains("article-navigation-link"), "{newest}");
         assert!(!newest.contains("article-more-label"), "{newest}");
@@ -2635,7 +2659,7 @@ category = "Science"
             std::fs::read_to_string(out.join("items/blog/2026-09-05-post-4/index.html")).unwrap();
         assert!(second.contains("data-previous-url=\"items/blog/2026-09-06-post-5/\""));
         assert!(second.contains("data-next-url=\"items/blog/2026-09-04-post-3/\""));
-        assert_eq!(second.matches("class=\"article-more-link").count(), 2);
+        assert_eq!(second.matches("class=\"article-more-link").count(), 4);
         assert_eq!(second.matches("article-more-neighbor").count(), 0);
         assert!(!second.contains("article-navigation-link"), "{second}");
 
@@ -2672,10 +2696,11 @@ category = "Science"
                 day - 1
             )))
             .unwrap();
-            let expected = if day == 1 { 1 } else { 2 };
+            // Every page offers the whole set; the oldest article has no next card.
+            let expected = if day == 1 { 3 } else { 4 };
             assert_eq!(page.matches("class=\"article-more-link").count(), expected);
             assert!(
-                page.matches("class=\"article-more-link").count() <= 2,
+                page.matches("class=\"article-more-link").count() <= 4,
                 "day {day} exceeds the continuation-card limit"
             );
         }

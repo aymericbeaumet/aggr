@@ -122,6 +122,11 @@ are scrollable without an arbitrary cutoff; completed values stop suggesting the
 and touch selection are supported; Escape closes open suggestions, and a further Escape blurs the
 search field, never clearing the query. Composition input does not launch partial searches. Enter and Tab accept the
 highlighted stable option identity, even when labels coincide or asynchronous counts reorder values.
+Accepting a qualifier leaves the menu open on the values it accepts, so `sour` and Enter reach the
+sources in two keystrokes. The arrows always walk the results, suggestions or not, and the keyboard
+stays in the field; the first result is selected by default and Enter opens it once the token at the
+cursor has nothing left to complete. Leaving the field returns the list to the ordinary `j`/`k`/`o`
+shortcuts on the same selection.
 Suggestions and counts honor every remaining clause after removing the edited token. While that
 context loads, unrelated archive-wide values remain hidden. Obsolete requests cannot replace a newer
 context, survive clearing/navigation, or apply to another index version.

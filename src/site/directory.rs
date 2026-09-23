@@ -48,6 +48,7 @@ pub(super) fn source_contexts(
             );
             Ok(SourceCtx {
                 page: format!("sources/{}/", source.slug),
+                listed: true,
                 slug: source.slug.clone(),
                 query_value: source.slug.clone(),
                 name,
@@ -82,6 +83,7 @@ pub(super) fn source_contexts(
         let name = display::title(state.title.as_deref().unwrap_or(&fallback), &fallback);
         contexts.push(SourceCtx {
             page: format!("sources/{slug}/"),
+            listed: true,
             slug: slug.to_string(),
             query_value: slug.to_string(),
             name,

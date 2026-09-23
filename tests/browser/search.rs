@@ -184,6 +184,17 @@ async fn search_articles_only_appear_as_results() -> Result<()> {
         anyhow::ensure!(client.execute("return location.href",vec![]).await?==cursor["url"],"Enter opens the selected result when no suggestion is offered");
         client.back().await?;
         wait_for(&client,"document.body.dataset.kind==='river' && !!document.querySelector('#q') && new URL(location.href).searchParams.get('q')==='Article'").await?;
+        // Open suggestions never take the arrows away from the results, and a half-typed qualifier
+        // is completed in two steps: the name, then the values it accepts.
+        client.execute("const q=document.querySelector('#q');q.value='Article sour';q.setSelectionRange(12,12);q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
+        wait_for(&client,"document.querySelector('.search-completion')?.dataset.completionId==='source:'").await?;
+        key(&client,"ArrowDown").await?;
+        let walked=client.execute("const rows=[...document.querySelectorAll('.search-results .row')];return {selected:rows.findIndex(row=>row.classList.contains('is-selected')),suggesting:document.querySelectorAll('.search-completion').length>0,focused:document.activeElement.id}",vec![]).await?;
+        anyhow::ensure!(walked["selected"]==1 && walked["suggesting"]==true && walked["focused"]=="q","suggestions leave the arrows to the results: {walked}");
+        key(&client,"Enter").await?;
+        wait_for(&client,"document.querySelector('#q').value==='Article source:'").await?;
+        let values=client.execute("const rows=[...document.querySelectorAll('.search-completion')];return {count:rows.length,sources:rows.every(row=>row.dataset.completionId.startsWith('source:'))}",vec![]).await?;
+        anyhow::ensure!(values["count"].as_u64().unwrap_or(0)>0 && values["sources"]==true,"accepting a qualifier offers the values it accepts: {values}");
         client.execute("const q=document.querySelector('#q');q.value='source:';q.dispatchEvent(new Event('input',{bubbles:true}))",vec![]).await?;
         wait_for(&client,"document.querySelector('.search-completion')?.dataset.completionId.startsWith('source:')").await?;
         client.find(Locator::Css(".nav-primary [data-feed-action]")).await?.click().await?;
@@ -748,7 +759,7 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
                         html.split_once("<footer class=\"article-footer\"")
                             .map(|(_, footer)| {
                                 footer.contains("class=\"preview-image\"")
-                                    && footer.matches("class=\"article-more-card").count() == 2
+                                    && footer.matches("class=\"article-more-card").count() == 4
                             })
                     })
                     .unwrap_or(false)
@@ -776,7 +787,7 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         .await?;
         let layout=client.execute("const cards=[...document.querySelectorAll('.article-more-card')].map(card=>card.getBoundingClientRect());return {count:cards.length,sameRow:Math.abs(cards[0].top-cards[1].top)<=1,separateColumns:cards[1].left>=cards[0].right,stacked:cards[1].top>=cards[0].bottom,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth+1}",vec![]).await?;
         anyhow::ensure!(
-            layout["count"] == 2 && layout["overflow"] == false,
+            layout["count"] == 4 && layout["overflow"] == false,
             "recommendation cards fit the viewport at {width}px: {layout}"
         );
         anyhow::ensure!(

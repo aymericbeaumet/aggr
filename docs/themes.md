@@ -29,8 +29,9 @@ Preview and development builds always request `noindex`. Local search and feeds 
 regardless of this setting; see [public hosting](hosting.md#publication-and-search-indexing).
 
 Items and recommendation links also expose `metadata`, the precomputed display view shared with search:
-source identity, category, publication/update dates, reading statistics, resolved discussions, and
-optional points/comments. The default
+source identity, category, publication/update dates, reading statistics, and resolved discussions.
+An aggregator's score and comment count stay in the stored front matter as provenance; the reader
+shows the discussion link instead. The default
 metadata partial uses this shared view; values must still be escaped normally.
 Source filter links use `metadata.source_query`; `metadata.source_slug` remains the stable index
 identifier. Source directory entries and `metadata.feed_sources` expose these as
@@ -292,18 +293,25 @@ Feed rows, search results, and article headers all begin their metadata with a
 publisher source link followed by optional italic `via` and separate feed links. `via` and commas
 remain outside the links. `item.publisher_source` identifies the publisher; `item.source` retains the
 stored origin, and `item.source_memberships` contains deduplicated `{ slug, query_value, name, display }` memberships.
-`metadata.source_slug` is the canonical publisher hostname; `metadata.source_query` and
+`metadata.source_slug` is the canonical publisher; `metadata.source_query` and
 `metadata.feed_sources[].query_value` supply the escaped search-link values.
 One canonical article appears in every matching source listing without duplication in global feeds.
-Subscriptions on the same hostname share one source collection, including the publisher when its
-hostname matches. Archived source IDs and article paths remain unchanged.
+Subscriptions on the same publisher share one source collection, including the publisher when its
+name matches. Archived source IDs and article paths remain unchanged.
+A host shared between publishers identifies none of them, so there the account is part of the
+publisher: `youtube.com/@channel` reads, filters and archives under that name, at the nested page
+`sources/youtube.com/@channel/`. An article URL settles this where it names an account; a YouTube
+watch URL does not, and the source's own resolved metadata supplies it. `sources[].listed` is
+false for an account nobody configured, so the directory stays the list of whole sites and feeds
+while every source keeps its page and its search value.
 Inferred publishers expose `sources[].engine = "publisher"` and are excluded from subscription OPML. The navigation bar
 omits individual source details; feed entries retain them. Only `.source-resolved` uses the palette's
 orange; `via` keeps the muted metadata color.
 Source names and article titles share `site::display::title` cleanup through the build context:
 HTML, search, RSS, Atom, JSON Feed, Markdown, plain text, and reStructuredText all use those display
 titles. Stored originals and article-body emoji remain intact. Canonical publisher names and IDs
-use the normalized article hostname without paths or ports; distinct subdomains remain distinct.
+use the normalized article hostname without ports, plus the account path on a shared host;
+distinct subdomains remain distinct.
 Publisher URLs point to the origin root. Visible publisher and `via` labels use canonical hostnames
 in feed rows, article metadata, recommendations, and search results. Subscription paths and
 channel/show names remain in stored provenance and descriptive titles, not these labels.
@@ -329,6 +337,9 @@ Navigation and discovery exclude aliases of the current article and repeated ful
 Identity combines normalized original URLs, retained page paths, and exact whitespace-normalized
 body matches of at least 64 words. Similar titles, shared topics, and short teasers do not establish
 identity; a product page and its announcement can remain separate suggestions.
+`item.recommended_articles` is already complete: it holds up to three suggestions that are neither
+the previous nor the next article, and that do not point back at an article suggesting this one, so
+a theme renders the list as it comes instead of filtering it again.
 
 Canvas applications with interactive controls can offer the live original inside a reserved
 viewer, alongside safely retained prose. The original loads automatically when the article opens and

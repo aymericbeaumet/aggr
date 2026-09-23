@@ -521,7 +521,7 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
                 <= 1.0,
         "article content and continuation cards must share the same measure: {article}"
     );
-    assert_eq!(article["moreCount"], 2);
+    assert_eq!(article["moreCount"], 4);
     assert_eq!(
         article["moreHeadings"],
         json!(["Coming next", "Discover more"])
@@ -1078,6 +1078,15 @@ async fn recommendation_cards_and_navigation_layout() -> Result<()> {
             anyhow::ensure!(second["top"].as_f64()>first["bottom"].as_f64(), "recommendations stack vertically at every viewport width: {layout}");
             anyhow::ensure!(layout["unusedHeight"].as_f64().unwrap().abs()<1.0, "text-only recommendations fit their content without reserving absent previews: {layout}");
             anyhow::ensure!(layout["headingMargin"].as_f64().unwrap()>=if width>600 {36.0} else {28.0}, "article header needs a little breathing room: {layout}");
+            // A card's stretched link must stop at the card. Reaching past it makes the article
+            // body read and click as whichever recommendation happens to be painted last.
+            let body=client.execute(r#"
+              const prose=document.querySelector('.body');
+              const box=prose.getBoundingClientRect();
+              const over=document.elementFromPoint(box.left+box.width/2,box.top+Math.min(box.height/2,300));
+              return {inside:prose.contains(over),card:!!over.closest('.article-more-card'),link:!!over.closest('a')};
+            "#,vec![]).await?;
+            anyhow::ensure!(body["inside"]==true && body["card"]==false && body["link"]==false, "the article body belongs to the article, not to a recommendation: {body}");
             anyhow::ensure!(layout["padding"].as_array().unwrap().iter().all(|value|value=="12.8px"), "card padding stays compact: {layout}");
             wait_booted(&client).await?;
             for index in [0, 1] {

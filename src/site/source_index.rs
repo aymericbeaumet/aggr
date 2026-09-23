@@ -13,7 +13,7 @@ pub(super) fn capture_sources(items: &[Item]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Publisher identity comes from the actual host, never an account path, port, or provider alias.
+/// The host itself, never an account path, port, or provider alias.
 fn publisher_host(url: &url::Url) -> Option<String> {
     if !matches!(url.scheme(), "http" | "https") {
         return None;
@@ -22,11 +22,24 @@ fn publisher_host(url: &url::Url) -> Option<String> {
     Some(host.strip_prefix("www.").unwrap_or(host).to_string())
 }
 
+/// Who published this URL. A host that carries many publishers does not identify any of them, so
+/// there the account path is part of the identity: `youtube.com/@channel` writes on its own
+/// account, and reads, filters and archives under that name rather than under all of YouTube.
+fn publisher_identity(url: &url::Url) -> Option<String> {
+    let host = publisher_host(url)?;
+    Some(match crate::platform::account_path(url) {
+        Some(account) => format!("{host}/{account}"),
+        None => host,
+    })
+}
+
+/// The publisher's own page: their account on a shared host, otherwise the site root.
 fn publisher_root(article: &str) -> Option<url::Url> {
     let mut url = url::Url::parse(article).ok()?;
     let host = publisher_host(&url)?;
+    let account = crate::platform::account_path(&url);
     url.set_host(Some(&host)).ok()?;
-    url.set_path("/");
+    url.set_path(&account.map_or_else(|| "/".to_string(), |account| format!("/{account}")));
     url.set_query(None);
     url.set_fragment(None);
     let _ = url.set_username("");
@@ -34,14 +47,37 @@ fn publisher_root(article: &str) -> Option<url::Url> {
     Some(url)
 }
 
+/// The publisher page behind one article. An article's own URL is the first authority, but a
+/// shared host does not always put the account in it: a YouTube watch URL names a video and
+/// nothing else. The source's resolved metadata knows the account, and is trusted only for the
+/// host the article is already on.
+fn publisher_page(item: &ItemCtx) -> Option<url::Url> {
+    let article = publisher_root(&item.link)?;
+    if crate::platform::account_path(&article).is_some() {
+        return Some(article);
+    }
+    Some(
+        publisher_root(&item.source_url)
+            .filter(|resolved| publisher_host(resolved) == publisher_host(&article))
+            .filter(|resolved| crate::platform::account_path(resolved).is_some())
+            .unwrap_or(article),
+    )
+}
+
+/// A configured source identifies the same publisher its articles do, so an endpoint that names an
+/// account settles the source's identity even when another of its URLs only names the host.
 fn source_host(source: &SourceCtx) -> Option<String> {
-    source
+    let urls: Vec<_> = source
         .url
         .iter()
         .chain(source.feed_url.iter())
         .chain(source.site_url.iter())
         .filter_map(|value| url::Url::parse(value).ok())
-        .find_map(|url| publisher_host(&url))
+        .collect();
+    urls.iter()
+        .filter(|url| crate::platform::account_path(url).is_some())
+        .find_map(publisher_identity)
+        .or_else(|| urls.iter().find_map(publisher_identity))
 }
 
 /// The label an item's publisher reads by. Grouping is by host, but the canonical name a source's
@@ -85,8 +121,8 @@ pub(super) fn resolve(
     }
     let mut publishers = BTreeMap::<String, String>::new();
     for item in items.iter() {
-        if let Some(root) = publisher_root(&item.link)
-            && let Some(host) = publisher_host(&root)
+        if let Some(root) = publisher_page(item)
+            && let Some(host) = publisher_identity(&root)
         {
             let root = root.to_string();
             publishers
@@ -173,6 +209,13 @@ pub(super) fn resolve(
                 count: 0,
                 latest: None,
                 error: None,
+                // An account nobody configured reached the archive because someone linked to it.
+                // It reads and filters under its own name, but the directory stays the list of
+                // whole sites and feeds rather than of everyone who ever appeared on one.
+                listed: url::Url::parse(root)
+                    .ok()
+                    .and_then(|root| crate::platform::account_path(&root))
+                    .is_none(),
             });
         }
     }
@@ -187,8 +230,8 @@ pub(super) fn resolve(
             .iter()
             .filter_map(|source| feed_ids.get(source).cloned())
             .collect();
-        if let Some(root) = publisher_root(&item.link)
-            && let Some(host) = publisher_host(&root)
+        if let Some(root) = publisher_page(item)
+            && let Some(host) = publisher_identity(&root)
         {
             item.publisher_source = host.clone();
             item.source_display = publisher_label(&item.source_display, &host);
@@ -261,6 +304,7 @@ mod tests {
             latest: None,
             error: None,
             page: "sources/configured/".into(),
+            listed: true,
         }
     }
 
@@ -292,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn publisher_identity_uses_only_the_actual_host_across_paths_and_ports() {
+    fn publisher_identity_keeps_the_account_and_drops_the_port() {
         let mut items = vec![
             article("configured", "alice", "https://social.example/@alice/1"),
             article("configured", "bob", "https://social.example/@bob/2"),
@@ -301,11 +345,16 @@ mod tests {
         let links: Vec<_> = items.iter().map(|item| item.link.clone()).collect();
         let mut sources = vec![source("https://feeds.example/rss")];
         resolve(&mut items, &mut sources, &[], &[]);
-        for item in &items {
-            assert_eq!(item.publisher_source, "social.example");
-            assert_eq!(item.metadata.source_slug, "social.example");
-            assert_eq!(item.source_display, "social.example");
-            assert!(!item.source_url.contains('@'));
+        for (item, account) in items.iter().zip(["@alice", "@bob", "@alice"]) {
+            let publisher = format!("social.example/{account}");
+            assert_eq!(item.publisher_source, publisher);
+            assert_eq!(item.metadata.source_slug, publisher);
+            assert_eq!(item.source_display, publisher);
+            assert!(
+                item.source_url.ends_with(&format!("/{account}")),
+                "{}",
+                item.source_url
+            );
             assert!(
                 item.source_memberships
                     .iter()
@@ -319,18 +368,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             links
         );
+        // Two accounts on one host are two publishers, and neither is listed as a site to follow.
+        let accounts: Vec<_> = sources
+            .iter()
+            .filter(|source| source.slug.starts_with("social.example"))
+            .map(|source| (source.slug.as_str(), source.count, source.listed))
+            .collect();
         assert_eq!(
-            sources
-                .iter()
-                .find(|source| source.slug == "social.example")
-                .unwrap()
-                .count,
-            3
+            accounts,
+            [
+                ("social.example/@alice", 2, false),
+                ("social.example/@bob", 1, false)
+            ]
         );
     }
 
     #[test]
-    fn platform_publishers_keep_their_account_label_while_grouping_by_host() {
+    fn platform_publishers_are_identified_by_their_account() {
         let channel = SourceCtx {
             query_value: "youtube-com-veritasium".into(),
             slug: "youtube-com-veritasium".into(),
@@ -353,11 +407,17 @@ mod tests {
         assert_eq!(item.metadata.source_display, "youtube.com/@veritasium");
         assert_eq!(item.source_title, "Veritasium");
         assert!(!item.is_aggregated);
-        // The account names the publisher; the collection it joins is still the whole host.
-        assert_eq!(item.publisher_source, "youtube.com");
-        assert_eq!(item.metadata.source_slug, "youtube.com");
-        assert_eq!(item.source_url, "https://youtube.com/");
-        assert!(sources.iter().any(|source| source.slug == "youtube.com"));
+        // A watch URL names a video, never its channel: the configured source supplies the account.
+        assert_eq!(item.publisher_source, "youtube.com/@veritasium");
+        assert_eq!(item.metadata.source_slug, "youtube.com/@veritasium");
+        assert_eq!(item.source_url, "https://youtube.com/@veritasium");
+        // Configured sources stay in the directory whether or not they are an account.
+        let channel = sources
+            .iter()
+            .find(|source| source.slug == "youtube.com/@veritasium")
+            .unwrap();
+        assert_eq!(channel.page, "sources/youtube.com/@veritasium/");
+        assert!(channel.listed);
     }
 
     #[test]
@@ -405,7 +465,13 @@ mod tests {
         ] {
             let root = publisher_root(url).unwrap();
             assert_eq!(publisher_host(&root).as_deref(), Some(expected), "{url}");
-            assert_eq!(root.path(), "/");
+            // The root is the publisher's page: the site itself, or their account on a shared host.
+            let account = crate::platform::account_path(&url::Url::parse(url).unwrap());
+            assert_eq!(
+                root.path(),
+                account.map_or("/".into(), |account| format!("/{account}")),
+                "{url}"
+            );
             assert!(root.query().is_none());
             assert!(root.fragment().is_none());
         }
@@ -413,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_account_feeds_aggregate_under_one_host_without_changing_archive_ids() {
+    fn configured_account_feeds_stay_separate_publishers_without_changing_archive_ids() {
         let mut alice = source("https://social.example/@alice/rss");
         alice.slug = "alice-feed".into();
         alice.name = "Alice".into();
@@ -426,21 +492,26 @@ mod tests {
             article("bob-feed", "b", "https://social.example/@bob/2"),
         ];
         resolve(&mut items, &mut sources, &[], &[]);
-        for (item, feed) in items.iter().zip(["alice-feed", "bob-feed"]) {
-            assert_eq!(item.publisher_source, "social.example");
+        for ((item, feed), account) in items
+            .iter()
+            .zip(["alice-feed", "bob-feed"])
+            .zip(["@alice", "@bob"])
+        {
+            let publisher = format!("social.example/{account}");
+            assert_eq!(item.publisher_source, publisher);
             assert_eq!(item.source, feed);
             assert!(item.metadata.feed_sources.is_empty());
             assert_eq!(item.source_memberships.len(), 1);
-            assert_eq!(item.metadata.source_query, "social.example");
+            assert_eq!(item.metadata.source_query, publisher);
         }
-        assert_eq!(
-            sources
+        for account in ["@alice", "@bob"] {
+            let source = sources
                 .iter()
-                .find(|source| source.slug == "social.example")
-                .unwrap()
-                .count,
-            2
-        );
+                .find(|source| source.slug == format!("social.example/{account}"))
+                .unwrap();
+            assert_eq!(source.count, 1);
+            assert!(source.listed, "a configured feed is a source you follow");
+        }
     }
 
     #[test]
@@ -503,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn source_labels_use_canonical_hosts_even_for_a_single_path_based_feed() {
+    fn source_labels_use_canonical_publishers_even_for_a_single_path_based_feed() {
         for url in [
             "https://hnrss.org/frontpage",
             "https://hnrss.org:8443/newest?points=100",
@@ -516,7 +587,7 @@ mod tests {
                 "https://publisher.example/post",
             )];
             resolve(&mut items, &mut sources, &[], &[]);
-            let expected = publisher_host(&url::Url::parse(url).unwrap()).unwrap();
+            let expected = source_host(&source(url)).unwrap();
             let item = &items[0];
             assert_eq!(item.source_display, "publisher.example");
             assert_eq!(item.feed_display, expected);

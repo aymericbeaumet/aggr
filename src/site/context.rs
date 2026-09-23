@@ -375,6 +375,10 @@ pub struct SourceCtx {
     pub error: Option<SourceErrorCtx>,
     /// Site path of the per-source page.
     pub page: String,
+    /// Whether the source directory names this source. Every source has a page and a facet; an
+    /// account discovered on a shared host belongs to whoever linked it, not to the reader's
+    /// list of what they follow.
+    pub listed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1467,6 +1471,7 @@ mod tests {
             latest: Some(now),
             error: None,
             page: "sources/example/".into(),
+            listed: true,
         });
         assert_eq!(context.source_name, "Daily News");
         assert_eq!(context.source_title, "example.com · via Daily News");

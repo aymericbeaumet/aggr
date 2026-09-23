@@ -580,8 +580,9 @@ mod tests {
         for (key, value) in metadata.as_object().unwrap() {
             assert_eq!(&display[key], value, "shared field {key}");
         }
-        assert_eq!(display["points"], 0);
-        assert_eq!(display["comments"]["count"], 12);
+        // Aggregator scores are stored provenance, not something the reader is shown.
+        assert!(display.get("points").is_none());
+        assert!(display.get("comments").is_none());
         assert!(!document.meta["aggr_display"].contains("publisher"));
         assert!(!document.content.contains("comments?a="));
 
@@ -594,9 +595,8 @@ mod tests {
         assert!(rendered.contains("Publisher &quot;quoted&quot;"));
         assert!(rendered.contains("</a> <em>via <a class=\"source-feed\""));
         assert!(rendered.contains("title=\"The feed\">feed.example/news</a></em>"));
-        assert!(rendered.contains("0 points</span>"));
-        assert!(rendered.contains("12 comments</a>"));
-        assert!(rendered.contains("a=1&amp;b=2"));
+        assert!(!rendered.contains("points"), "{rendered}");
+        assert!(!rendered.contains("comments"), "{rendered}");
         assert!(rendered.contains("matching discussion found, score 12"));
         assert!(!rendered.contains(" · "));
         assert!(!rendered.contains("rust</a>"));

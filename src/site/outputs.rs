@@ -1836,6 +1836,7 @@ mod tests {
             latest: Some(at(8)),
             error: None,
             page: format!("sources/{slug}/"),
+            listed: true,
         };
         vec![
             SourceCtx {

@@ -39,18 +39,53 @@ pub(super) fn protect_markdown_code(
     transform: impl FnOnce(&str) -> String,
 ) -> String {
     let ranges = markdown_code_ranges(markdown);
-    let mut protected = markdown.to_string();
-    for (index, range) in ranges.iter().enumerate().rev() {
-        protected.replace_range(range.clone(), &format!("\u{e010}{index}\u{e011}"));
+    if ranges.is_empty() {
+        return transform(markdown);
     }
-    let mut transformed = transform(&protected);
+    // Both halves walk the document once. Swapping each placeholder in turn rescans and reallocates
+    // the whole body per code span, which an article with many of them pays for over and over.
+    let mut protected = String::with_capacity(markdown.len());
+    let mut position = 0;
     for (index, range) in ranges.iter().enumerate() {
-        transformed = transformed.replace(
-            &format!("\u{e010}{index}\u{e011}"),
-            &markdown[range.clone()],
-        );
+        if range.start < position {
+            continue;
+        }
+        protected.push_str(&markdown[position..range.start]);
+        protected.push_str(&format!("\u{e010}{index}\u{e011}"));
+        position = range.end;
     }
-    transformed
+    protected.push_str(&markdown[position..]);
+    restore_protected_code(&transform(&protected), markdown, &ranges)
+}
+
+/// Put every `\u{e010}index\u{e011}` marker back, leaving anything that is not one alone.
+fn restore_protected_code(
+    transformed: &str,
+    markdown: &str,
+    ranges: &[std::ops::Range<usize>],
+) -> String {
+    let mut out = String::with_capacity(markdown.len());
+    let mut rest = transformed;
+    while let Some(start) = rest.find('\u{e010}') {
+        out.push_str(&rest[..start]);
+        let marker = &rest[start + '\u{e010}'.len_utf8()..];
+        let code = marker.find('\u{e011}').and_then(|end| {
+            let range = ranges.get(marker[..end].parse::<usize>().ok()?)?;
+            Some((markdown.get(range.clone())?, end))
+        });
+        match code {
+            Some((code, end)) => {
+                out.push_str(code);
+                rest = &marker[end + '\u{e011}'.len_utf8()..];
+            }
+            None => {
+                out.push('\u{e010}');
+                rest = marker;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Shared cleanup for every feed and extracted article, both on storage and when building older
@@ -713,6 +748,44 @@ fn is_title_heading(block: &str, plain: &str, title: &str) -> bool {
         || heading
             .strip_prefix("title:")
             .is_some_and(|rest| same_title(rest.trim(), &expected))
+        // A headline the page states in full while the feed shortened it, or the other way round:
+        // `Devin Fusion` against `Devin Fusion: Frontier Performance at 60% Lower Cost`. Only a
+        // document's own title carries a subtitle like that, so a deeper heading has to match
+        // outright; a section named after the article is still a section. A heading holding a
+        // destination is worth more than the repetition costs, so it stays either way.
+        || (marks <= 2 && !block.contains("](") && !block.contains("<a ")
+            && restates_title(&heading, &expected))
+}
+
+/// Whether one title runs through the other word for word, with at most a subtitle, a prefix such
+/// as `Introducing`, or a year marker around it. One shared word is a coincidence, not a title.
+fn restates_title(heading: &str, title: &str) -> bool {
+    let (heading, title) = (title_words(heading), title_words(title));
+    let (short, long) = if heading.len() <= title.len() {
+        (heading, title)
+    } else {
+        (title, heading)
+    };
+    short.len() >= 2 && long.windows(short.len()).any(|window| window == short)
+}
+
+/// A title as words to compare, without the punctuation around them, the articles that carry no
+/// meaning, or the original year an aggregator appended to a republished story.
+fn title_words(text: &str) -> Vec<&str> {
+    let mut words: Vec<&str> = text.split_whitespace().collect();
+    if words.last().is_some_and(|word| {
+        word.len() == 6
+            && word.starts_with('(')
+            && word.ends_with(')')
+            && word[1..5].bytes().all(|byte| byte.is_ascii_digit())
+    }) {
+        words.pop();
+    }
+    words
+        .into_iter()
+        .map(|word| word.trim_matches(|character: char| !character.is_alphanumeric()))
+        .filter(|word| !word.is_empty() && !matches!(*word, "the" | "a" | "an"))
+        .collect()
 }
 
 /// The page's own title as a plain paragraph (a `<header>` that styles a `<p>` as the heading):
@@ -754,7 +827,10 @@ fn stamp_follows(tail: &str) -> bool {
 
 /// Two normalised titles that name the same article. An aggregator (Hacker News) shortens words
 /// when it edits a title (`repositories` → `repos`), so a word that is a prefix of its partner,
-/// three characters or longer, still matches.
+/// three characters or longer, still matches. A publisher rarely writes its own headline exactly
+/// as the feed sends it either (`breaks Enigma message` → `breaking an Enigma message`), so a
+/// longer title may also differ by a word in four. Short titles must still match word for word:
+/// one word out of three carries most of their meaning.
 fn same_title(a: &str, b: &str) -> bool {
     if a == b {
         return true;
@@ -763,11 +839,33 @@ fn same_title(a: &str, b: &str) -> bool {
         a.split_whitespace().collect(),
         b.split_whitespace().collect(),
     );
-    a.len() == b.len()
-        && !a.is_empty()
-        && a.iter().zip(&b).all(|(x, y)| {
-            x == y || (x.len().min(y.len()) >= 3 && (x.starts_with(y) || y.starts_with(x)))
-        })
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let budget = a.len().max(b.len()) / 4;
+    a.len().abs_diff(b.len()) <= budget && title_edits(&a, &b, budget) <= budget
+}
+
+/// Words to insert, drop or replace to turn one title into the other, giving up past `budget`.
+fn title_edits(a: &[&str], b: &[&str], budget: usize) -> usize {
+    let same_word = |x: &str, y: &str| {
+        x == y || x.len().min(y.len()) >= 3 && (x.starts_with(y) || y.starts_with(x))
+    };
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0; b.len() + 1];
+    for (index, x) in a.iter().enumerate() {
+        current[0] = index + 1;
+        for (offset, y) in b.iter().enumerate() {
+            current[offset + 1] = (previous[offset] + usize::from(!same_word(x, y)))
+                .min(previous[offset + 1] + 1)
+                .min(current[offset] + 1);
+        }
+        if current.iter().all(|edits| *edits > budget) {
+            return budget + 1;
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
 }
 
 /// `plain` without a trailing reading-time estimate (`11 min read`, `5-minute read`,
@@ -1690,6 +1788,77 @@ mod tests {
                 body,
                 "{body}"
             );
+        }
+    }
+
+    #[test]
+    fn a_reworded_heading_still_repeats_the_title() {
+        // cryptocellar.org via Hacker News: the same headline, written `breaks Enigma message` by
+        // the submitter and `breaking an Enigma message` by the page itself.
+        let title =
+            "OpenAI GPT–6 Astra breaks Enigma message that has resisted solution since 2005";
+        let source = "hnrss-org";
+        let body = "## OpenAI GPT–6 Astra breaking an Enigma message that has resisted solution since 2005.\n\nOn 15 September 2026, Carter Leffer contacted me.\n";
+        let expected = "On 15 September 2026, Carter Leffer contacted me.\n";
+        assert_eq!(strip_article_metadata(body, title, None, source), expected);
+        assert_eq!(
+            strip_article_metadata(expected, title, None, source),
+            expected
+        );
+
+        // A feed that drops a year marker or gains a word, a publisher that adds its own subtitle,
+        // and a heading that is a section of its own: a quarter of the words may differ, a title
+        // may run through the middle of a document heading, and short titles still match outright.
+        for (title, heading, stripped) in [
+            (
+                "We built our house for LAN parties (2024)",
+                "## We built our house for LAN parties",
+                true,
+            ),
+            (
+                "MCP was always a bad idea?",
+                "## Why MCP Was Always a Bad Idea",
+                true,
+            ),
+            ("The DeepWiki MCP Server", "## DeepWiki MCP Server", true),
+            (
+                "Devin Fusion",
+                "## Devin Fusion: Frontier Performance at 60% Lower Cost",
+                true,
+            ),
+            (
+                "The LLMentalist Effect (2023)",
+                "## The LLMentalist Effect: how a chat model replicates a con",
+                true,
+            ),
+            (
+                "GPT-6 Astra: A new generation of intelligence",
+                "# A new generation of intelligence",
+                true,
+            ),
+            // A section named after the article is still a section, and a heading whose link the
+            // body would otherwise lose is worth more than the repetition costs.
+            ("Pixtral Large", "### Pixtral Large in short:", false),
+            (
+                "Kimi Vendor Verifier",
+                "## Rebuilding Trust: Kimi Vendor Verifier [GitHub](https://github.com/x)",
+                false,
+            ),
+            (
+                "Jean-Pierre Serre turns 100",
+                "## Jean-Pierre Albert Achille Serre",
+                false,
+            ),
+            (
+                "Chopping up books when they are too big",
+                "## Chop up your books",
+                false,
+            ),
+            ("What Zig felt like, coming from Rust", "## Intro", false),
+        ] {
+            let body = format!("{heading}\n\nArticle prose.\n");
+            let cleaned = strip_article_metadata(&body, title, None, source);
+            assert_eq!(cleaned != body, stripped, "{heading}");
         }
     }
 
