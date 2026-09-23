@@ -45,7 +45,7 @@ jobs:
     env:
       AGGR_CONFIG: ${{ inputs.config }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `@v1` is the stable workflow contract. Its major-channel input resolves the greatest
       # published v1.x.y binary at run time, independently of workflow changes.
@@ -123,7 +123,7 @@ jobs:
       # cannot enable Pages; this step reads the configured URL (including a custom domain).
       - id: pages
         if: inputs.pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       # Build starts with a sync. The Pages URL wins over `[site] url`; without Pages the config
       # must name the host.
@@ -182,7 +182,7 @@ jobs:
           key: aggr-media-v1-${{ github.repository_id }}-${{ github.run_id }}
 
       - if: inputs.pages
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
@@ -194,4 +194,4 @@ jobs:
 
       - id: deploy
         if: inputs.pages
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

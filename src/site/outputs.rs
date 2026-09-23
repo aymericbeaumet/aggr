@@ -1869,7 +1869,7 @@ mod tests {
                 Ok((_, Event::Eof)) => break,
                 Ok((ResolveResult::Unknown(prefix), _)) => panic!(
                     "undeclared namespace prefix {:?} at byte {}\n{xml}",
-                    String::from_utf8_lossy(&prefix),
+                    prefix,
                     reader.buffer_position()
                 ),
                 Ok(_) => {}

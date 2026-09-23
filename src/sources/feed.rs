@@ -646,8 +646,8 @@ fn normalize_podcast_durations(bytes: &[u8]) -> Cow<'_, [u8]> {
         };
         match event {
             Event::Start(element)
-                if element.local_name().as_ref() == b"duration"
-                    && matches!(namespace, ResolveResult::Bound(namespace) if namespace.as_ref() == b"http://www.itunes.com/dtds/podcast-1.0.dtd") =>
+                if element.local_name().as_ref() == "duration"
+                    && matches!(namespace, ResolveResult::Bound(namespace) if namespace.as_ref() == "http://www.itunes.com/dtds/podcast-1.0.dtd") =>
             {
                 let start = reader.buffer_position() as usize;
                 let Some((end, text)) = podcast_duration_text(&mut reader) else {
@@ -689,10 +689,10 @@ fn podcast_duration_text(
     loop {
         let position = reader.buffer_position() as usize;
         match reader.read_event().ok()? {
-            Event::Text(value) if depth == 1 => text.push_str(&value.decode().ok()?),
-            Event::CData(value) if depth == 1 => text.push_str(&value.decode().ok()?),
+            Event::Text(value) if depth == 1 => text.push_str(value.as_ref()),
+            Event::CData(value) if depth == 1 => text.push_str(value.as_ref()),
             Event::GeneralRef(value) if depth == 1 => {
-                let escaped = format!("&{};", value.decode().ok()?);
+                let escaped = format!("&{};", value.as_ref());
                 text.push_str(&quick_xml::escape::unescape(&escaped).ok()?);
             }
             Event::Start(_) => {
