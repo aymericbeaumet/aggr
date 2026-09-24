@@ -8,7 +8,10 @@ disappears. No application server or separate database service to administer.
 
 Source-available and free for personal and internal company use; see [the license](#license).
 
-![Placeholder: aggr on desktop and mobile](docs/images/reader-placeholder.svg)
+<p>
+  <img alt="The aggr reader on a desktop browser: a numbered feed of articles with their source, category, age and reading time" src="docs/images/reader-desktop.png" width="61%">
+  <img alt="The same reader on a phone: the same articles, with feed, browse and preferences tabs along the bottom" src="docs/images/reader-mobile.png" width="20%">
+</p>
 
 ## Why aggr?
 
@@ -20,12 +23,11 @@ Source-available and free for personal and internal company use; see [the licens
   offline, and cannot be changed by a publisher editing or deleting the original.
 - **Run your own reader.** A small `aggr.toml` and a scheduled workflow fetch sources and publish
   static files. GitHub Pages is the ready-made path; other Git and static hosts work too.
-- **Keep reading.** Full-text search, mobile installation, keyboard navigation, and selected
-  offline articles. New deployments update open feeds without interrupting an article.
+- **Keep reading.** Full-text search, mobile installation, keyboard navigation, and every page
+  you have opened still readable with no network. New deployments update open feeds without
+  interrupting an article.
 - **Follow other instances.** Copy selected articles from another aggr repository into your own
   independent archive, preserving their original links.
-
-![Placeholder: an open feed receiving a new item](docs/images/updates-placeholder.svg)
 
 Fetching runs on a schedule; the open reader checks for completed deployments every 15 seconds.
 This is automatic updating, not a real-time delivery guarantee.
@@ -70,7 +72,19 @@ optional media. A no-op sync creates no commit. One broken source does not stop 
 Data history is append-only: retention removes files from the current tree, but older commits
 remain available. It does not shrink the accumulated Git history.
 
-![Placeholder: the aggr branch containing Markdown articles](docs/images/archive-placeholder.svg)
+```text
+items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.md
+items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.html
+items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.preview-202cd0284a4a.webp
+---
+title: Announcing a Maintainer in Residence
+link: https://blog.rust-lang.org/2026/09/22/maintainer-in-residence/
+source: blog-rust-lang-org
+published: 2026-09-22T00:00:00Z
+first_seen: 2026-09-24T00:01:38Z
+content: extracted
+---
+```
 
 [Inspect real stored files](https://github.com/aymericbeaumet/aggr-instance/tree/aggr) or read the
 [Git contract](docs/git-model.md). In a September 2026 snapshot, the 50-source demo held 2,314
@@ -82,7 +96,8 @@ See [the measurements and hosting limits](docs/benchmarks.md) before choosing yo
 
 - Reading state and preferences stay in each browser; there is no cross-device read-state sync.
 - Captures preserve readable content, not complete websites. Failed extraction can leave a feed
-  summary or metadata; offline downloads do not include external images or embedded audio/video.
+  summary or metadata; reading offline covers the pages you have opened, not the whole archive, and
+  never the video or audio they embed.
 - Public hosting republishes captured content. Search-engine indexing is opt-in, but `noindex`
   is not access control or permission to republish. Original links and attribution remain visible.
   See [publication and privacy](docs/hosting.md#publication-and-search-indexing).

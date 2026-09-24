@@ -239,8 +239,7 @@ links and code remain unchanged. Superscripts use zero line height to avoid stre
 Transfer actions share one versioned `{ "version": 1, "preferences": { … } }` JSON contract. Links
 carry base64url JSON in `#aggr-state=…`, not a server-visible query; older `aggr-state` query links
 remain importable. Files and links are size-bounded, allowlisted, and reviewed before explicit
-application. Reading history and cached article contents are never exported. Resetting preferences also restores
-the site's offline article count, which can resize automatic downloads.
+application. Reading history and cached article contents are never exported.
 Disabling single-key shortcuts leaves modifier shortcuts and native keyboard operation available.
 `j`/`k` and the arrows walk a list alike, so the vim keys are a preference rather than a
 requirement; an article page keeps the arrows for scrolling, which is what reading it needs.
@@ -287,12 +286,12 @@ service workers so a previous deployment cannot mask a local snapshot. Loading, 
 removing dev snapshots runs on blocking workers, so large asset trees cannot stop HTTP responses
 while the previous in-memory snapshot remains available.
 
-The worker coalesces offline-count changes, cancels superseded downloads, and uses six independent
-slots without delaying activation. Failed replacements retain older complete articles within N. Shared
-images reuse one request; verified content revisions avoid downloading unchanged resources across
-builds. The offline fallback lists only fully saved articles on the current device. Downloads run
-in ordinary secure browser tabs as well as installed PWAs; `pwa = false` disables both. Browser
-storage eviction or quota limits can still remove/prevent downloads, so check the reported count.
+The worker keeps the pages a reader has opened and the content-addressed assets they used, each
+in a bounded cache, and serves `offline.html` for anything it has never seen. It downloads nothing
+ahead of the reader. A host answering with a server error is treated like a host that cannot be
+reached, so an error body never replaces a page that was read before. Caching works in ordinary
+secure browser tabs as well as installed PWAs; `pwa = false` disables both. Browser storage
+eviction can still drop what was kept.
 
 Validate custom themes at narrow widths, with enlarged text, both color schemes, reduced motion,
 and JavaScript disabled. Mobile uses the persistent bottom navigation bar; the desktop header
