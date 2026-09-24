@@ -1093,6 +1093,11 @@ function installFeedUpdates() {
   async function swap() {
     if (swapping || !wanted) return;
     swapping = true;
+    // The build this fetch is for. A check that finishes mid-flight moves `wanted` on, and
+    // recording that newer version against these older rows would mark it applied and leave the
+    // reader stale until some third build arrived.
+    const target = wanted;
+    const targetEntries = entries;
     try {
       const response = await fetch(location.href, { cache: "no-store" });
       if (!response.ok) return;
@@ -1105,7 +1110,7 @@ function installFeedUpdates() {
       const current = $("[data-feed-pager]");
       if (pager && current) current.replaceWith(document.importNode(pager, true));
       // The numbered shortcuts point at the newest entries, which are the ones that just changed.
-      if (Array.isArray(entries)) AGGR.entries = entries;
+      if (Array.isArray(targetEntries)) AGGR.entries = targetEntries;
       dates.render();
       applyFeedPaging();
       markNewEntries();
@@ -1113,8 +1118,10 @@ function installFeedUpdates() {
       // Only now are the rows on screen this build's. Recording the version before the swap
       // landed meant one failed refresh made every later check believe it was already applied,
       // and the reader kept stale rows until some other build shipped.
-      content = wanted;
-      wanted = null;
+      content = target;
+      // Anything newer that arrived while this was in flight is still owed a pass.
+      if (wanted === target) wanted = null;
+      else pending = true;
     } catch {
       // Offline, aborted, or a broken response: `content` stays where it was, so the next check
       // reports the same new version and asks for it again.
@@ -1172,7 +1179,12 @@ function markNewEntries() {
     const fresh = new Set(urls.slice(0, boundary === -1 ? urls.length : boundary));
     for (const row of rows) row.classList.toggle("is-new", fresh.has(row.dataset.url || ""));
   }
-  if (urls[0]) storage.write(sessionStorage, key, urls[0]);
+  // Marking reads the whole list, but only the slice holding the newest entry can say it has been
+  // seen. A reader who opened a later slice, or followed a link straight to one, has not looked
+  // at what sits above it, and acknowledging those rows would hide them on the way back.
+  const pager = $("[data-feed-pager]");
+  const newest = !rows[0].hidden && positiveInteger(pager?.dataset.staticPage, 1) === 1;
+  if (urls[0] && newest) storage.write(sessionStorage, key, urls[0]);
 }
 
 /* ------------------------------------------------------------------ service worker */
