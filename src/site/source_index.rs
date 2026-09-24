@@ -36,15 +36,23 @@ fn same_platform(left: &url::Url, right: &url::Url) -> bool {
 /// there the account path is part of the identity: `youtube.com/@channel` writes on its own
 /// account, and reads, filters and archives under that name rather than under all of YouTube.
 ///
-/// Identity resolves a platform's aliases, where [`publisher_host`] deliberately does not. An
-/// account is one publisher however a link reached it, so `twitter.com/alice` and `x.com/alice`
-/// belong to the same collection and filter rather than splitting into two that each look
-/// half-followed. Only the link itself keeps the host it was written with.
+/// An account exists across a platform's aliases, so identity resolves them where
+/// [`publisher_host`] deliberately does not: `twitter.com/alice` and `x.com/alice` belong to one
+/// collection and filter rather than splitting into two that each look half-followed.
+///
+/// A catalogue identifier is the exception. `open.spotify.com/show/<id>` names that show only in
+/// the URL space that issued it, so moving it to the platform's own domain would read, filter and
+/// link as something that does not exist. Those keep the host they were written with.
 fn publisher_identity(url: &url::Url) -> Option<String> {
-    let host = crate::platform::host(url)?;
-    Some(match crate::platform::account_path(url) {
+    let account = crate::platform::account_path(url);
+    let host = if account.is_some() && crate::platform::opaque(url) {
+        publisher_host(url)?
+    } else {
+        crate::platform::host(url)?.to_string()
+    };
+    Some(match account {
         Some(account) => format!("{host}/{account}"),
-        None => host.to_string(),
+        None => host,
     })
 }
 
@@ -348,6 +356,30 @@ mod tests {
                 now: chrono::Utc::now(),
             },
         )
+    }
+
+    #[test]
+    fn aliases_share_an_identity_unless_their_path_belongs_to_one_host() {
+        for (url, expected) in [
+            // The same account, reached two ways, is one publisher.
+            ("https://twitter.com/alice/status/1", "x.com/alice"),
+            ("https://x.com/alice/status/2", "x.com/alice"),
+            ("https://m.youtube.com/watch?v=1", "youtube.com"),
+            ("https://youtu.be/1", "youtube.com"),
+            // A catalogue identifier only names its show where it was issued.
+            (
+                "https://open.spotify.com/show/opaque123",
+                "open.spotify.com/show/opaque123",
+            ),
+            ("https://pca.st/abc123", "pca.st/abc123"),
+        ] {
+            let parsed = url::Url::parse(url).unwrap();
+            assert_eq!(
+                publisher_identity(&parsed).as_deref(),
+                Some(expected),
+                "{url}"
+            );
+        }
     }
 
     #[test]
