@@ -126,12 +126,28 @@ content = "heavy"
 # Preview failures never prevent an article from being retained. Enabled mirrored previews reuse
 # their existing local bytes without contacting the publisher.
 previews = true
-# Archive article images and repair missing copies during ordinary sync/build/dev, including
-# retained items absent from the latest feed. Existing local masters are reused. Failed image
-# requests warn and retry after a one-hour backoff; exact raster originals remain the fallback.
-# SVG diagrams are converted to safe local PNGs with no external resources.
-# Responsive copies use lossless encoding; every local image gets an inline ThumbHash preview.
-images = true
+# What to do with article images. "remote" downloads nothing and leaves them at the publisher;
+# "original" archives the publisher's exact bytes and derives lossless responsive copies;
+# "compact" archives one bounded JPEG instead and derives none. `true` and `false` remain
+# accepted spellings of "original" and "remote".
+# Images are most of an archive's size, so "compact" is the difference between gigabytes and
+# hundreds of megabytes. It cannot be undone: the publisher's bytes are not kept, and changing
+# the mode later does not re-download what earlier runs already stored.
+# Tune the reduction with a table; quality is 1-100 and max_axis is 320-8192:
+#   images = { mode = "compact", quality = 72, max_axis = 1600 }
+# Transparency is compacted to PNG rather than flattened onto a JPEG background. An animated GIF
+# larger than max_axis is resized and re-encoded as a GIF, keeping its frames, timing and loop;
+# one that already fits usually keeps its exact bytes, because re-encoding a frame-differenced
+# animation tends to cost more than it saves. The smaller result always wins.
+# What compaction cannot re-encode without losing more than size keeps its exact bytes under every
+# mode: colour-managed and high-depth originals, AVIF (which aggr archives without decoding),
+# animated WebP and APNG (which aggr cannot write), and animations beyond 400 frames.
+# Archiving also repairs missing copies during ordinary sync/build/dev, including retained items
+# absent from the latest feed. Existing local masters are reused. Failed image requests warn and
+# retry after a one-hour backoff; exact raster originals remain the fallback. SVG diagrams are
+# converted to safe local PNGs with no external resources. Every local image gets an inline
+# ThumbHash preview.
+images = "original"
 
 # Each table's `url` names one or more resources: websites, RSS/Atom/JSON feeds, aggr TOML,
 # OPML subscriptions, or newline-separated URL lists. Resources can be local paths or remote
@@ -153,7 +169,8 @@ images = true
 # html = false               # skip the raw HTML sibling for this source; `[store] html = false` skips it everywhere
 # content = "heavy"          # override `[fetch] content` with `"heavy"` or `"light"`
 # previews = false           # override `[fetch] previews` for this source
-# images = false             # override `[fetch] images` for this source
+# images = "compact"         # override `[fetch] images` for this source; takes the same values,
+#                             # including `{ mode = "compact", quality = 60 }`
 
 # Group URLs with shared options. Use another table when the options differ.
 # [[sources]]

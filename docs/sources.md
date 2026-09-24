@@ -170,21 +170,47 @@ thread; unavailable continuations are logged. See [public threads](interoperabil
 
 ## Article images
 
-Article-image archiving is on by default. The explicit form, including a per-source opt-out, is:
+`images` chooses what happens to an article's pictures, globally and per source:
+
+| Value | What is archived |
+| --- | --- |
+| `"remote"` | Nothing. The reader loads the publisher's URL, which is not guaranteed offline. |
+| `"original"` | The publisher's exact bytes, plus lossless responsive renditions. The default. |
+| `"compact"` | One bounded JPEG master and no renditions. |
+
+`true` and `false` remain accepted spellings of `"original"` and `"remote"`.
 
 ```toml
 [fetch]
-images = true
+images = "original"
 
 [[sources]]
 url = "https://blog.rust-lang.org"
 
 [[sources]]
 url = "https://example.com/feed.xml"
-images = false # leave this source's body images at their publisher URLs
+images = "remote" # leave this source's body images at their publisher URLs
+
+[[sources]]
+url = "https://heavy.example/feed.xml"
+images = { mode = "compact", quality = 60, max_axis = 1280 }
 ```
 
-For every accepted JPEG, PNG, GIF, or WebP image, aggr keeps the exact publisher response as the
+A compact master is resized to fit `max_axis` with the same high-quality filter the renditions
+use, then encoded as JPEG at `quality`; transparency is kept as PNG rather than flattened onto a
+background, and an animation stays an animation. `quality` accepts 1-100 and `max_axis` accepts
+320-8192, defaulting to 72 and 1600 —
+the same bounds a release build applies to older articles' published media, so a compact archive
+already holds the image the site would publish. The reduced copy is kept only when it is actually
+smaller than the response it replaces.
+
+Compaction is what makes an archive small, because images are nearly all of its bytes. It is also
+the one image setting that cannot be undone: the publisher's exact bytes are not kept anywhere, so
+a later `"original"` run cannot restore what a compact run stored. Changing any of these values
+affects newly archived images only; images already in the archive are left exactly as they are.
+
+Under `"original"`, for every accepted JPEG, PNG, GIF, or WebP image, aggr keeps the exact
+publisher response as the
 master. When the bounded media budget permits it, safe static 8-bit images also get responsive
 320, 640, 960, 1280, and 1600-pixel renditions where useful, plus a full-width rendition. These
 are resized once with a high-quality filter, encoded as lossless WebP, then decoded and
@@ -195,7 +221,22 @@ master. Masters above 32 megapixels skip the full-width encode and pair bounded 
 with the original as the largest candidate; an existing WebP master is not duplicated.
 
 Animated GIF/WebP, images with an ICC color profile, and high-bit-depth images keep only their
-exact master. SVG diagrams become passive local PNGs with a bundled font; scripts, external images,
+exact master, with no renditions.
+
+Under `"compact"`, an animated GIF wider or taller than `max_axis` is resized and re-encoded as a
+GIF, keeping its frames, their timing, and the loop the original asked for. An animation that
+already fits usually keeps its exact bytes: publishers' GIFs are frame-differenced, and
+re-encoding composites every frame again, which tends to cost more than it saves. The comparison
+is made per image and the smaller result wins, so compaction never grows an animation. Animations
+longer than 400 frames are left alone rather than spend a re-encode on every frame.
+
+Expect little from `"compact"` on a long animation that is heavy in bytes but modest in
+dimensions; what shrinks it is a smaller `max_axis`, not a lower `quality`, which JPEG uses and
+GIF does not. The images a compact archive cannot reduce at all, and therefore still stores as
+publisher bytes, are colour-managed and high-bit-depth originals, animated WebP and APNG, which
+aggr can decode but not write, and AVIF, which it archives without decoding.
+
+SVG diagrams become passive local PNGs with a bundled font; scripts, external images,
 and embedded resources are ignored, and original SVG markup is never published. Other unsupported or
 invalid media also keeps its safe publisher URL. Image work is failure isolated: a timeout,
 decode error, size rejection, or failed download never prevents the article from being saved.
@@ -222,9 +263,10 @@ guaranteed offline.
 
 Enabling image archiving also fills missing media in retained captures. Exact raster masters and
 responsive renditions increase the append-only data branch and Git history, and normal retention
-cannot reclaim historical objects. Before publishing an archive, make sure storing and
+cannot reclaim historical objects; `"compact"` bounds how fast that grows, but cannot shrink what
+earlier runs already committed. Before publishing an archive, make sure storing and
 redistributing a source's images is compatible with its terms and your local law. Use
-`images = false` for sources whose media you should not retain.
+`images = "remote"` for sources whose media you should not retain.
 
 ## Previews
 

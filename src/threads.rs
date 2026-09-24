@@ -1158,7 +1158,7 @@ mod tests {
             html: true,
             content: crate::config::ContentMode::Heavy,
             previews: true,
-            images: true,
+            images: crate::config::ImagePolicy::Original,
             engine: crate::config::Engine::Feed {
                 url: Url::parse(url).unwrap(),
             },

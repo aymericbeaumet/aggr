@@ -187,9 +187,26 @@ media_full_quality_days = 30
 ```
 
 Omitted media falls back to publisher URLs and is not guaranteed offline. Compression and
-publication omission do not reduce Git storage. If you do not need to preserve certain sources'
-images at all, use their `images = false` option deliberately; changing it later does not erase
-previously stored images. See [source preservation](sources.md#article-images).
+publication omission do not reduce Git storage; both settings above shape the published site, not
+the archive behind it.
+
+Git storage is decided by `[fetch] images`, because images are nearly all of an archive's bytes.
+In the archive measured above, lossless WebP renditions alone outweighed every master combined.
+
+```toml
+[fetch]
+images = { mode = "compact", quality = 72, max_axis = 1600 }
+```
+
+`"compact"` archives one bounded copy per image and no renditions, which removes both the
+rendition bytes and most of each master. Measured on the twelve largest masters in this archive,
+the six stills went from 90,710,039 bytes with their renditions to 7,555,854 (-91.7%). The six
+animated GIFs did not move: all were already inside the 1600-pixel bound, and re-encoding a
+frame-differenced animation is larger, so each kept its exact bytes. Animations are therefore the
+part of an archive `"compact"` does least for. `"remote"` stores no images at all. Neither applies
+retroactively: they change what later runs archive, and previously stored images are untouched.
+Compaction also discards the publisher's exact bytes for good, so choose it for sources you want
+to read rather than preserve. See [source preservation](sources.md#article-images).
 
 Record current-tree bytes, Git object storage, generated-site bytes and deployment duration as
 separate series, with source count, imported item count, version and cache conditions. Do not

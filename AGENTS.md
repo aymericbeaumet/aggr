@@ -268,6 +268,15 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - Article suggestions are resolved once, and every one of them is meant to be shown: never filter
   them again downstream. They skip the chronological neighbours the page already links, and avoid
   pointing back at an article that already suggests them so browsing never closes a two-page loop.
+- `[fetch] images` names `remote`, `original` or `compact`, globally or per source; `true`/`false`
+  stay accepted spellings of the last two, and `compact` carries its own `quality`/`max_axis`.
+  Compacting replaces the master and drops renditions; an oversized animated GIF is re-encoded as
+  a bounded GIF keeping frames, timing and loop, and the smaller of the two always wins, so an
+  already-differenced animation keeps its exact bytes. Colour-managed, high-depth, AVIF, animated
+  WebP and APNG input keeps exact bytes under every mode. Archive and deployment
+  compaction share one transform in `media/compact.rs`; add new source files to the render
+  fingerprint in `cache.rs` and to `compressed_media.rs`'s `implementation_key`. Image settings
+  apply to newly archived images only and never rewrite what earlier runs stored.
 - A lead image must not repeat a body picture (compare ThumbHashes, not only URLs) and must be at
   least 640px wide. Reader headings are id anchors, never links; portable outputs keep links.
 - A publisher that flattens an embedded post writes it as loose paragraphs: the poster's avatar

@@ -5,14 +5,18 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use anyhow::{Context, Result, ensure};
-use image::{DynamicImage, ImageDecoder as _, ImageEncoder as _, ImageFormat, ImageReader};
+use image::{DynamicImage, ImageDecoder as _, ImageFormat, ImageReader};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::media::compact::{self, CompactPolicy};
 use crate::media::{Asset, MediaLimits, placeholder};
 
 const MAX_AXIS: u32 = 1600;
-const JPEG_QUALITY: u8 = 72;
+const DEPLOYMENT_POLICY: CompactPolicy = CompactPolicy {
+    max_axis: MAX_AXIS,
+    jpeg_quality: 72,
+};
 const POLICY: &str = "deployment-media-v1";
 const MAX_RECEIPT_BYTES: usize = 16 * 1024;
 const CACHE_LOCK_STRIPES: usize = 64;
@@ -111,6 +115,7 @@ fn implementation_key() -> &'static str {
         for source in [
             POLICY,
             include_str!("compressed_media.rs"),
+            include_str!("../media/compact.rs"),
             include_str!("../media/placeholder.rs"),
             include_str!("../../Cargo.lock"),
         ] {
@@ -292,47 +297,7 @@ pub(super) fn compact(mut asset: Asset) -> Result<Asset> {
     let mut decoded = DynamicImage::from_decoder(decoder)
         .context("decoding archived image for deployment compression")?;
     decoded.apply_orientation(orientation);
-    let reduced = if decoded.width() > MAX_AXIS || decoded.height() > MAX_AXIS {
-        decoded.resize(MAX_AXIS, MAX_AXIS, image::imageops::FilterType::Lanczos3)
-    } else {
-        decoded
-    };
-    let rgba = reduced.to_rgba8();
-    let transparent = rgba.pixels().any(|pixel| pixel.0[3] != 255);
-    let mut bytes = Vec::new();
-    let extension = if transparent {
-        image::codecs::png::PngEncoder::new_with_quality(
-            &mut bytes,
-            image::codecs::png::CompressionType::Best,
-            image::codecs::png::FilterType::Adaptive,
-        )
-        .write_image(
-            rgba.as_raw(),
-            rgba.width(),
-            rgba.height(),
-            image::ExtendedColorType::Rgba8,
-        )
-        .context("encoding transparent deployment image")?;
-        "png"
-    } else {
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, JPEG_QUALITY)
-            .encode_image(&DynamicImage::ImageRgb8(reduced.to_rgb8()))
-            .context("encoding deployment JPEG")?;
-        "jpg"
-    };
-    if bytes.len() < asset.master_bytes.len() {
-        let published =
-            image::load_from_memory(&bytes).context("verifying compressed deployment image")?;
-        asset.width = published.width();
-        asset.height = published.height();
-        asset.placeholder = placeholder::from_image(&published)?;
-        asset.master_hash = crate::model::sha1_hex(&bytes);
-        asset.master_bytes = bytes;
-        asset.master_extension = extension;
-    }
-    // Old lossless responsive copies can outweigh the smaller master; the browser can scale
-    // this bounded deployment image itself. Its source URL remains the article rewrite key.
-    asset.renditions.clear();
+    compact::apply(&mut asset, &decoded, DEPLOYMENT_POLICY)?;
     Ok(asset)
 }
 
@@ -370,7 +335,7 @@ fn preserve_animation(bytes: &[u8], format: ImageFormat) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageBuffer, Rgba};
+    use image::{ImageBuffer, ImageEncoder as _, Rgba};
 
     fn asset(bytes: Vec<u8>) -> Asset {
         let image = image::load_from_memory(&bytes).unwrap();

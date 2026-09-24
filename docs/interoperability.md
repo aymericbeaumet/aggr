@@ -120,7 +120,9 @@ decoder, which is a system library rather than a crate, so it is archived undeco
 is kept byte for byte as the master and served as-is, its size is read from the container's `ispe`
 box so the space is reserved before it loads, and it carries a flat stand-in preview instead of a
 ThumbHash. It gains no WebP renditions. A CDN that answers `auto=format` with AVIF regardless of
-`Accept` — Linear's, for one — is archived this way rather than skipped.
+`Accept` — Linear's, for one — is archived this way rather than skipped. Having no decoder also
+means AVIF cannot be compacted: under `images = "compact"` it keeps its exact bytes, as
+colour-managed and high-bit-depth images do.
 
 ## HTTP extraction and native builds
 

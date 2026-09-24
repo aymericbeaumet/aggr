@@ -1,8 +1,11 @@
-//! Bounded, lossless local copies of article-body images.
+//! Bounded local copies of article-body images.
 //!
-//! Original bytes remain the master. Responsive renditions are resized once from the oriented
-//! decode and encoded as lossless WebP, then decoded again to prove pixel equality before use.
+//! Under `images = "original"` the publisher's bytes remain the master, and responsive renditions
+//! are resized once from the oriented decode and encoded as lossless WebP, then decoded again to
+//! prove pixel equality before use. Under `images = "compact"` one bounded, lossy master replaces
+//! both; see [`compact`]. `images = "remote"` never reaches this module.
 
+pub mod compact;
 pub mod placeholder;
 pub(crate) mod srcset;
 mod stored_cache;
@@ -28,6 +31,7 @@ use crate::config::{FetchConfig, Source};
 use crate::http;
 use crate::model::{ArticleImage, ImageFile};
 
+pub use compact::CompactPolicy;
 pub(crate) use stored_cache::StoredAssetCache;
 
 const MIN_AXIS: u32 = 1;
@@ -893,11 +897,12 @@ impl Fetcher {
             drop(download_permit);
             let decoding_candidate = candidate.clone();
             let limits = self.limits.clone();
+            let compact = source.images.compaction();
             let task = tokio::task::spawn_blocking(move || {
                 // A timed-out blocking task cannot be cancelled. Keep its shared slot until its
                 // decoder really exits so subsequent articles remain bounded.
                 let _permit = permit;
-                prepare_asset(&decoding_candidate, body.bytes, &limits)
+                prepare_asset_with_policy(&decoding_candidate, body.bytes, &limits, compact)
             });
             let result = tokio::time::timeout(self.limits.decode_timeout, task).await;
             let mut asset = match result {
@@ -963,9 +968,23 @@ fn fit_asset_to_budget(asset: &mut Asset, remaining: usize) -> Option<usize> {
     Some(used)
 }
 
-/// Validate and decode one response, keeping raster bytes (or a passive SVG raster) as the master and deriving only
-/// pixel-lossless WebP renditions that fit the configured limits.
+/// Validate and decode one response, keeping raster bytes (or a passive SVG raster) as the master
+/// and deriving only pixel-lossless WebP renditions that fit the configured limits. Every archive
+/// path carries a source's policy, so this full-fidelity shorthand belongs to tests.
+#[cfg(test)]
 pub fn prepare_asset(candidate: &Candidate, bytes: Vec<u8>, limits: &MediaLimits) -> Result<Asset> {
+    prepare_asset_with_policy(candidate, bytes, limits, None)
+}
+
+/// Archive one response, reducing the master to `compact` when a source asks for a compact
+/// archive. Compaction needs the same intact 8-bit decode that renditions do, so an animated,
+/// colour-managed or high-depth image keeps its exact bytes under either policy.
+pub fn prepare_asset_with_policy(
+    candidate: &Candidate,
+    bytes: Vec<u8>,
+    limits: &MediaLimits,
+    compact: Option<CompactPolicy>,
+) -> Result<Asset> {
     if bytes.len() > limits.max_file_bytes {
         bail!("image exceeds file limit");
     }
@@ -1012,6 +1031,13 @@ pub fn prepare_asset(candidate: &Candidate, bytes: Vec<u8>, limits: &MediaLimits
     let (width, height) = image.dimensions();
     validate_dimensions(width, height, limits)?;
 
+    // Both policies need the same intact decode; a compact master simply replaces the renditions
+    // it would otherwise have derived, so nothing is encoded twice. An animation has no still to
+    // replace and is reduced as an animation instead.
+    let reducible = !animated && !has_icc && safe_for_renditions(original_color);
+    let compact_animation = compact.is_some() && animated && !has_icc && format == ImageFormat::Gif;
+    let compact = compact.filter(|_| reducible || compact_animation);
+
     let rendition_widths = limits
         .rendition_widths
         .iter()
@@ -1019,7 +1045,7 @@ pub fn prepare_asset(candidate: &Candidate, bytes: Vec<u8>, limits: &MediaLimits
         .filter(|width| *width > 0 && *width < image.width())
         .collect::<BTreeSet<_>>();
     let mut renditions = Vec::with_capacity(rendition_widths.len() + 1);
-    if !animated && !has_icc && safe_for_renditions(original_color) {
+    if reducible && compact.is_none() {
         // Avoid full-resolution RGBA copies and encoding for very large originals. Their exact
         // master is the widest source alongside bounded lossless renditions.
         let large = u64::from(width) * u64::from(height) > MAX_FULL_WIDTH_PIXELS;
@@ -1036,7 +1062,7 @@ pub fn prepare_asset(candidate: &Candidate, bytes: Vec<u8>, limits: &MediaLimits
         }
         renditions.extend(full_width);
     }
-    Ok(Asset {
+    let mut asset = Asset {
         source_url: candidate.url.to_string(),
         source_hash: crate::model::sha1_hex(candidate.url.as_str().as_bytes()),
         alt: candidate.alt.clone(),
@@ -1048,7 +1074,15 @@ pub fn prepare_asset(candidate: &Candidate, bytes: Vec<u8>, limits: &MediaLimits
         dominant_color: dominant_color(&image),
         placeholder: placeholder::from_image(&image)?,
         renditions,
-    })
+    };
+    if let Some(policy) = compact {
+        if compact_animation {
+            compact::apply_animation(&mut asset, policy, limits)?;
+        } else {
+            compact::apply(&mut asset, &image, policy)?;
+        }
+    }
+    Ok(asset)
 }
 
 /// AVIF needs an AV1 decoder, which is a system library rather than a crate, and the picture is
@@ -2194,6 +2228,225 @@ mod tests {
                 .iter()
                 .all(|rendition| rendition.width < restored.width)
         );
+    }
+
+    #[test]
+    fn a_compact_archive_stores_one_bounded_master_and_no_renditions() {
+        let source = DynamicImage::ImageRgba8(ImageBuffer::from_fn(2400, 1500, |x, y| {
+            Rgba([(x % 251) as u8, (y % 239) as u8, ((x + y) % 241) as u8, 255])
+        }));
+        let bytes = png(&source);
+        let asset = prepare_asset_with_policy(
+            &candidate("https://example.com/photo.png"),
+            bytes.clone(),
+            &MediaLimits::default(),
+            Some(CompactPolicy::archive()),
+        )
+        .unwrap();
+
+        assert!(asset.renditions.is_empty());
+        assert_eq!(asset.master_extension, "jpg");
+        assert_eq!((asset.width, asset.height), (1600, 1000));
+        assert!(
+            asset.master_bytes.len() < bytes.len() / 4,
+            "compact master kept {} of {} bytes",
+            asset.master_bytes.len(),
+            bytes.len()
+        );
+
+        // Every derived value describes the bytes that were stored, not the ones that arrived.
+        assert_eq!(
+            asset.master_hash,
+            crate::model::sha1_hex(&asset.master_bytes)
+        );
+        assert_eq!(
+            asset.placeholder,
+            placeholder::from_image(&image::load_from_memory(&asset.master_bytes).unwrap())
+                .unwrap()
+        );
+        let metadata = asset.metadata("article");
+        assert!(metadata.is_valid_for("article") && metadata.variants.is_empty());
+        assert_eq!(asset.files("article").len(), 1);
+        assert_eq!(
+            validate_stored(&asset.master_bytes, &metadata.original, StoredKind::Master).unwrap(),
+            "jpg"
+        );
+    }
+
+    #[test]
+    fn a_compact_master_keeps_transparency_in_a_png() {
+        let source = DynamicImage::ImageRgba8(ImageBuffer::from_fn(2000, 1200, |x, y| {
+            Rgba([
+                (x % 251) as u8,
+                (y % 239) as u8,
+                40,
+                if (x + y) % 7 == 0 { 0 } else { 255 },
+            ])
+        }));
+        let bytes = png(&source);
+        let asset = prepare_asset_with_policy(
+            &candidate("https://example.com/diagram.png"),
+            bytes.clone(),
+            &MediaLimits::default(),
+            Some(CompactPolicy::archive()),
+        )
+        .unwrap();
+
+        assert_eq!(asset.master_extension, "png");
+        assert_eq!((asset.width, asset.height), (1600, 960));
+        assert!(asset.master_bytes.len() < bytes.len());
+        assert!(asset.renditions.is_empty());
+        let decoded = image::load_from_memory(&asset.master_bytes).unwrap();
+        assert!(
+            decoded.to_rgba8().pixels().any(|pixel| pixel.0[3] != 255),
+            "a compact copy dropped the transparency it was asked to keep"
+        );
+    }
+
+    #[test]
+    fn a_compact_animation_is_resized_and_still_animates() {
+        // A small policy keeps the quantizer's work proportionate; the path it exercises is the
+        // same one `archive()` takes on a publisher's animation.
+        let policy = CompactPolicy {
+            max_axis: 320,
+            jpeg_quality: 72,
+        };
+        let frame = |shift: u32| {
+            ImageBuffer::from_fn(900, 500, move |x, y| {
+                Rgba([
+                    ((x + shift) % 251) as u8,
+                    (y % 239) as u8,
+                    ((x + y) % 241) as u8,
+                    255,
+                ])
+            })
+        };
+        let mut animation = Vec::new();
+        image::codecs::gif::GifEncoder::new(&mut animation)
+            .encode_frames([
+                image::Frame::new(frame(0)),
+                image::Frame::new(frame(97)),
+                image::Frame::new(frame(194)),
+            ])
+            .unwrap();
+
+        let asset = prepare_asset_with_policy(
+            &candidate("https://example.com/animation.gif"),
+            animation.clone(),
+            &MediaLimits::default(),
+            Some(policy),
+        )
+        .unwrap();
+
+        assert_eq!(asset.master_extension, "gif");
+        assert!(asset.renditions.is_empty());
+        assert_eq!(asset.width, policy.max_axis);
+        assert!(
+            asset.master_bytes.len() < animation.len(),
+            "compact animation kept {} of {} bytes",
+            asset.master_bytes.len(),
+            animation.len()
+        );
+
+        // It has to still be the animation it replaced, not its first frame.
+        let decoder =
+            image::codecs::gif::GifDecoder::new(Cursor::new(asset.master_bytes.as_slice()))
+                .unwrap();
+        assert!(matches!(
+            decoder.loop_count(),
+            image::metadata::LoopCount::Infinite
+        ));
+        let frames = decoder.into_frames().collect_frames().unwrap();
+        assert_eq!(frames.len(), 3);
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.buffer().width() == asset.width)
+        );
+        assert_eq!(
+            validate_stored(
+                &asset.master_bytes,
+                &asset.metadata("article").original,
+                StoredKind::Master
+            )
+            .unwrap(),
+            "gif"
+        );
+    }
+
+    #[test]
+    fn an_animation_already_within_bounds_is_never_replaced_by_a_larger_one() {
+        // Publishers' animations are usually frame-differenced already. Re-encoding one that does
+        // not need resizing composites every frame again and can easily cost more than it saves,
+        // so the exact original has to win that comparison.
+        let frame = |shift: u32| {
+            ImageBuffer::from_fn(240, 160, move |x, y| {
+                Rgba([((x + shift) % 251) as u8, (y % 239) as u8, 80, 255])
+            })
+        };
+        let mut animation = Vec::new();
+        image::codecs::gif::GifEncoder::new(&mut animation)
+            .encode_frames([image::Frame::new(frame(0)), image::Frame::new(frame(120))])
+            .unwrap();
+
+        let asset = prepare_asset_with_policy(
+            &candidate("https://example.com/small.gif"),
+            animation.clone(),
+            &MediaLimits::default(),
+            Some(CompactPolicy::archive()),
+        )
+        .unwrap();
+
+        assert_eq!(asset.master_extension, "gif");
+        assert!(
+            asset.master_bytes.len() <= animation.len(),
+            "compaction grew an animation from {} to {} bytes",
+            animation.len(),
+            asset.master_bytes.len()
+        );
+        if asset.master_bytes.len() == animation.len() {
+            assert_eq!(asset.master_bytes, animation);
+        }
+    }
+
+    #[test]
+    fn compaction_never_costs_an_image_what_it_cannot_re_encode() {
+        // An APNG is an animation aggr cannot write, so it keeps the bytes it arrived with.
+        let mut apng = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut apng, 900, 500);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_animated(2, 0).unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&vec![0x33; 900 * 500 * 4]).unwrap();
+            writer.write_image_data(&vec![0xcc; 900 * 500 * 4]).unwrap();
+            writer.finish().unwrap();
+        }
+        let asset = prepare_asset_with_policy(
+            &candidate("https://example.com/animated.png"),
+            apng.clone(),
+            &MediaLimits::default(),
+            Some(CompactPolicy::archive()),
+        )
+        .unwrap();
+        assert_eq!(asset.master_bytes, apng);
+        assert_eq!(asset.master_extension, "png");
+        assert_eq!((asset.width, asset.height), (900, 500));
+
+        let managed = png_with_icc(&ImageBuffer::from_fn(1800, 1200, |x, y| {
+            Rgba([(x % 251) as u8, (y % 239) as u8, 60, 255])
+        }));
+        let asset = prepare_asset_with_policy(
+            &candidate("https://example.com/managed.png"),
+            managed.clone(),
+            &MediaLimits::default(),
+            Some(CompactPolicy::archive()),
+        )
+        .unwrap();
+        assert_eq!(asset.master_bytes, managed);
+        assert_eq!(asset.master_extension, "png");
+        assert_eq!((asset.width, asset.height), (1800, 1200));
     }
 
     #[test]

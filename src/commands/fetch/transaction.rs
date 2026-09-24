@@ -414,7 +414,7 @@ mod tests {
         configured.content = ContentMode::Light;
         configured.html = false;
         configured.previews = false;
-        configured.images = false;
+        configured.images = crate::config::ImagePolicy::Remote;
         configured.engine = Engine::Feed {
             url: Url::parse(&server.url("/feed.json")).unwrap(),
         };

@@ -98,7 +98,7 @@ mod tests {
         let config = crate::config::Config::parse(MINIMAL_CONFIG).unwrap();
         assert_eq!(config.sources.len(), 2);
         assert_eq!(config.fetch.max_items_per_source, 10);
-        assert!(config.fetch.images);
+        assert!(config.fetch.images.archives());
         assert_eq!(config.store.max_items, None);
         assert_eq!(config.site.build_max_bytes, 1_000_000_000);
     }

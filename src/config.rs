@@ -240,8 +240,8 @@ pub struct FetchConfig {
     pub content: ContentMode,
     /// Download a small local preview; explicit refresh fills missing previews on old items.
     pub previews: bool,
-    /// Archive safe article-body raster images and derive lossless responsive renditions.
-    pub images: bool,
+    /// How safe article-body raster images are archived, if at all.
+    pub images: ImagePolicy,
 }
 
 impl Default for FetchConfig {
@@ -256,7 +256,7 @@ impl Default for FetchConfig {
             allow_remote_source_chains: false,
             content: ContentMode::Heavy,
             previews: true,
-            images: true,
+            images: ImagePolicy::Original,
         }
     }
 }
@@ -268,6 +268,128 @@ pub enum ContentMode {
     Heavy,
     Light,
 }
+
+/// What aggr does with an article's images: leave them at the publisher, archive exactly what the
+/// publisher served, or archive one bounded copy of it. The level a compact copy is reduced to
+/// belongs to that mode alone, so no other mode can be given one.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ImagePolicy {
+    /// `"remote"` (or `false`): nothing is downloaded and the reader loads the publisher's URL.
+    Remote,
+    /// `"original"` (or `true`): the publisher's exact bytes, plus lossless responsive renditions.
+    #[default]
+    Original,
+    /// `"compact"`: one bounded JPEG master and no renditions. Images dominate an archive's size,
+    /// so this is the difference between gigabytes and hundreds of megabytes; what it gives up is
+    /// the publisher's exact bytes, which no later run can recover.
+    Compact(crate::media::CompactPolicy),
+}
+
+impl ImagePolicy {
+    /// Whether article images are archived at all under this policy.
+    pub fn archives(self) -> bool {
+        self != Self::Remote
+    }
+
+    /// The bounds a newly archived image is reduced to, if any.
+    pub fn compaction(self) -> Option<crate::media::CompactPolicy> {
+        match self {
+            Self::Compact(policy) => Some(policy),
+            Self::Remote | Self::Original => None,
+        }
+    }
+}
+
+/// `images` is one key with three shapes: a boolean, a mode name, or a compact mode with the
+/// level it is reduced to. Each shape is visited directly so a mistyped key reports itself
+/// instead of collapsing into "matched no variant".
+impl<'de> Deserialize<'de> for ImagePolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Tuned {
+            mode: String,
+            quality: Option<u8>,
+            max_axis: Option<u32>,
+        }
+
+        struct Policy;
+
+        impl<'de> serde::de::Visitor<'de> for Policy {
+            type Value = ImagePolicy;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "\"remote\", \"original\", \"compact\", a boolean, or a table naming a mode",
+                )
+            }
+
+            // The booleans that configurations already carry keep meaning what they meant.
+            fn visit_bool<E: serde::de::Error>(self, archive: bool) -> Result<Self::Value, E> {
+                Ok(if archive {
+                    ImagePolicy::Original
+                } else {
+                    ImagePolicy::Remote
+                })
+            }
+
+            fn visit_str<E: serde::de::Error>(self, mode: &str) -> Result<Self::Value, E> {
+                resolve(mode, None, None).map_err(E::custom)
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let tuned = Tuned::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                resolve(&tuned.mode, tuned.quality, tuned.max_axis)
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+
+        fn resolve(
+            mode: &str,
+            quality: Option<u8>,
+            max_axis: Option<u32>,
+        ) -> Result<ImagePolicy, String> {
+            let leveled = quality.is_some() || max_axis.is_some();
+            match mode {
+                "remote" | "original" if leveled => Err(format!(
+                    "images mode {mode:?} has nothing to tune; \"quality\" and \"max_axis\" belong to \"compact\""
+                )),
+                "remote" => Ok(ImagePolicy::Remote),
+                "original" => Ok(ImagePolicy::Original),
+                "compact" => {
+                    let default = crate::media::CompactPolicy::archive();
+                    let jpeg_quality = quality.unwrap_or(default.jpeg_quality);
+                    let max_axis = max_axis.unwrap_or(default.max_axis);
+                    if !(1..=100).contains(&jpeg_quality) {
+                        return Err(format!("images quality {jpeg_quality} is outside 1-100"));
+                    }
+                    if !(MIN_COMPACT_AXIS..=MAX_COMPACT_AXIS).contains(&max_axis) {
+                        return Err(format!(
+                            "images max_axis {max_axis} is outside {MIN_COMPACT_AXIS}-{MAX_COMPACT_AXIS}"
+                        ));
+                    }
+                    Ok(ImagePolicy::Compact(crate::media::CompactPolicy {
+                        max_axis,
+                        jpeg_quality,
+                    }))
+                }
+                other => Err(format!(
+                    "unknown images mode {other:?}; expected \"remote\", \"original\" or \"compact\""
+                )),
+            }
+        }
+
+        deserializer.deserialize_any(Policy)
+    }
+}
+
+/// A compact master still has to be worth reading on a wide screen, and still has to stay inside
+/// the decoder bounds every archived image is held to.
+const MIN_COMPACT_AXIS: u32 = 320;
+const MAX_COMPACT_AXIS: u32 = 8_192;
 
 /// One normalized source candidate, expanded from a `[[sources]]` group.
 /// Engine-specific options are validated when it resolves to a Source.
@@ -298,7 +420,7 @@ pub struct SourceConfig {
     /// Override `[fetch] previews` for new items from this source.
     pub previews: Option<bool>,
     /// Override `[fetch] images` for new items from this source.
-    pub images: Option<bool>,
+    pub images: Option<ImagePolicy>,
     /// Repository source: data branch of that repository.
     pub branch: Option<String>,
     /// Repository source: only take items from these of its sources (all when empty).
@@ -324,7 +446,7 @@ pub struct Source {
     pub html: bool,
     pub content: ContentMode,
     pub previews: bool,
-    pub images: bool,
+    pub images: ImagePolicy,
     pub engine: Engine,
 }
 
@@ -626,7 +748,7 @@ fn resolve_source(
     raw: &SourceConfig,
     default_content: ContentMode,
     default_previews: bool,
-    default_images: bool,
+    default_images: ImagePolicy,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Source> {
     let inferred;
@@ -1067,7 +1189,7 @@ images = false
             sources[3].headers,
             [("Authorization".into(), "Bearer secret".into())]
         );
-        assert!(!sources[3].images);
+        assert!(!sources[3].images.archives());
         assert!(sources.iter().all(|s| s.content == ContentMode::Light));
     }
 
@@ -1537,13 +1659,90 @@ images = false
     #[test]
     fn article_images_are_local_by_default_and_sources_can_opt_out() {
         let config = Config::parse("[[sources]]\nurl = 'https://example.com/feed'\n").unwrap();
-        assert!(config.fetch.images);
-        assert!(config.sources().unwrap()[0].images);
+        assert_eq!(config.fetch.images, ImagePolicy::Original);
+        assert_eq!(config.sources().unwrap()[0].images, ImagePolicy::Original);
         let config = Config::parse("[fetch]\nimages = false\n[[sources]]\nurl = 'https://a.example/feed'\n[[sources]]\nurl = 'https://b.example/feed'\nimages = true\n").unwrap();
         let sources = config.sources().unwrap();
-        assert!(!sources[0].images);
-        assert!(sources[1].images);
+        assert_eq!(sources[0].images, ImagePolicy::Remote);
+        assert_eq!(sources[1].images, ImagePolicy::Original);
         assert!(Config::parse("[[sources]]\nurl = './other.toml'\nimages = true\n").is_ok());
+    }
+
+    #[test]
+    fn images_name_a_mode_and_a_compact_archive_carries_its_level() {
+        let config = Config::parse(
+            "[fetch]\nimages = \"compact\"\n[[sources]]\nurl = 'https://a.example/feed'\n[[sources]]\nurl = 'https://b.example/feed'\nimages = \"original\"\n[[sources]]\nurl = 'https://c.example/feed'\nimages = \"remote\"\n",
+        )
+        .unwrap();
+        let default = crate::media::CompactPolicy::archive();
+        assert_eq!(config.fetch.images, ImagePolicy::Compact(default));
+        let sources = config.sources().unwrap();
+        assert_eq!(sources[0].images, ImagePolicy::Compact(default));
+        assert_eq!(sources[1].images, ImagePolicy::Original);
+        assert_eq!(sources[2].images, ImagePolicy::Remote);
+        assert_eq!(sources[0].images.compaction(), Some(default));
+        assert_eq!(ImagePolicy::Original.compaction(), None);
+        assert!(!ImagePolicy::Remote.archives() && ImagePolicy::Original.archives());
+
+        // The booleans that existing configurations carry keep meaning what they meant.
+        let config = Config::parse(
+            "[fetch]\nimages = false\n[[sources]]\nurl = 'https://a.example/feed'\nimages = true\n",
+        )
+        .unwrap();
+        assert_eq!(config.fetch.images, ImagePolicy::Remote);
+        assert_eq!(config.sources().unwrap()[0].images, ImagePolicy::Original);
+    }
+
+    #[test]
+    fn a_compact_level_is_tunable_per_source_and_refuses_what_it_cannot_honor() {
+        let config = Config::parse(
+            "[fetch]\nimages = { mode = \"compact\", quality = 55 }\n[[sources]]\nurl = 'https://a.example/feed'\n[[sources]]\nurl = 'https://b.example/feed'\nimages = { mode = \"compact\", quality = 90, max_axis = 2400 }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.fetch.images.compaction(),
+            Some(crate::media::CompactPolicy {
+                max_axis: crate::media::CompactPolicy::archive().max_axis,
+                jpeg_quality: 55,
+            })
+        );
+        let sources = config.sources().unwrap();
+        assert_eq!(
+            sources[1].images.compaction(),
+            Some(crate::media::CompactPolicy {
+                max_axis: 2400,
+                jpeg_quality: 90,
+            })
+        );
+
+        // Each rejection names the key it is talking about.
+        for (toml, expected) in [
+            ("images = \"tiny\"", "unknown images mode"),
+            ("images = { mode = \"compact\", quality = 0 }", "1-100"),
+            ("images = { mode = \"compact\", quality = 200 }", "1-100"),
+            ("images = { mode = \"compact\", max_axis = 16 }", "max_axis"),
+            (
+                "images = { mode = \"compact\", max_axis = 90000 }",
+                "max_axis",
+            ),
+            (
+                "images = { mode = \"original\", quality = 60 }",
+                "nothing to tune",
+            ),
+            (
+                "images = { mode = \"compact\", qualty = 60 }",
+                "unknown field",
+            ),
+        ] {
+            let error = Config::parse(&format!("[fetch]\n{toml}\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "{toml} reported {error:?}, which does not mention {expected:?}"
+            );
+        }
+        assert!(Config::parse("[fetch]\nimages = 3\n").is_err());
     }
 
     #[test]

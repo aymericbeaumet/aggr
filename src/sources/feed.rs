@@ -1377,7 +1377,7 @@ Second paragraph.</media:description></media:group>
             headers: vec![],
             html: true,
             previews: false,
-            images: true,
+            images: crate::config::ImagePolicy::Original,
             content: crate::config::ContentMode::Light,
             engine: crate::config::Engine::Feed { url },
         }

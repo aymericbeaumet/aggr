@@ -108,7 +108,7 @@ pub(super) async fn repair_archived_images(
     options: &Options,
     mut transaction: Option<&mut SourceTransaction>,
 ) -> Result<usize> {
-    if !source.images {
+    if !source.images.archives() {
         return Ok(0);
     }
     let Some(archives) = options
@@ -582,7 +582,7 @@ pub(super) async fn repair_feed_captures(
         if existing.front.content == ContentKind::Extracted && !placeholder && !subscription_wall {
             continue;
         }
-        if source.images
+        if source.images.archives()
             && let Some(html) = raw.content_html.as_deref()
             && let Ok(base) = url::Url::parse(&raw.link)
         {
@@ -1672,7 +1672,7 @@ mod tests {
         let configured = Source {
             public_url: Some("https://open.spotify.com/show/1sz1NhoHqbpXbzNlpOnFoz".into()),
             content: ContentMode::Light,
-            images: false,
+            images: crate::config::ImagePolicy::Remote,
             engine: Engine::Feed {
                 url: Url::parse(&server.url("/feed")).unwrap(),
             },

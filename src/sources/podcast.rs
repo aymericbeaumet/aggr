@@ -1069,7 +1069,7 @@ mod tests {
             headers: vec![],
             html: true,
             previews: false,
-            images: false,
+            images: crate::config::ImagePolicy::Remote,
             content: crate::config::ContentMode::Light,
             engine: crate::config::Engine::Feed { url },
         }

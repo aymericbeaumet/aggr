@@ -21,7 +21,7 @@ pub(crate) fn source() -> Source {
         html: true,
         content: ContentMode::Heavy,
         previews: false,
-        images: true,
+        images: crate::config::ImagePolicy::Original,
         engine: crate::config::Engine::Feed {
             url: Url::parse("https://blog.example/feed").unwrap(),
         },
@@ -533,7 +533,7 @@ async fn slow_first_article_does_not_block_later_downloads_or_change_filenames()
     let store = Arc::new(Store::open(root.path()));
     let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
     let configured = Source {
-        images: false,
+        images: crate::config::ImagePolicy::Remote,
         engine: Engine::Feed {
             url: Url::parse(&server.url("/feed")).unwrap(),
         },

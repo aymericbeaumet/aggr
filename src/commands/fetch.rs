@@ -551,7 +551,7 @@ async fn fetch_one_inner(
                         known,
                         options.dry_run,
                         source.previews,
-                        source.images,
+                        source.images.archives(),
                     )
                     .await;
                     if source.previews
@@ -607,7 +607,7 @@ async fn fetch_one_inner(
                         let has_stored_images = stored
                             .as_ref()
                             .is_some_and(|item| !item.front.images.is_empty());
-                        if source.images
+                        if source.images.archives()
                             && (!known || options.refresh && !has_stored_images)
                             && raw.images.is_empty()
                             && let Ok(base) = url::Url::parse(&raw.link)
@@ -618,7 +618,7 @@ async fn fetch_one_inner(
                         {
                             raw.images.push(poster);
                         }
-                        if source.images
+                        if source.images.archives()
                             && let Some(html) = raw.content_html.as_deref()
                             && let Ok(base) = url::Url::parse(&raw.link)
                         {
@@ -1052,7 +1052,7 @@ async fn heavy_content(
             Ok(Some(post)) => {
                 let mut enriched = raw.clone();
                 enriched.content_html = post.content_html;
-                if source.previews || source.images {
+                if source.previews || source.images.archives() {
                     enriched.preview_candidates = post.preview_candidates;
                 }
                 return (enriched, ContentKind::Extracted);
@@ -1121,7 +1121,7 @@ async fn heavy_content(
         }
         // Decoding and parsing the page is CPU work: do it once, off the runtime, and take every
         // page-derived fact from that single document.
-        let wants_candidates = source.previews || source.images;
+        let wants_candidates = source.previews || source.images.archives();
         let audio = raw
             .extra
             .get("audio_url")
@@ -1279,7 +1279,7 @@ async fn heavy_content(
                     .extra
                     .insert(crate::site::interactive::METADATA_KEY.into(), true.into());
             }
-            if source.previews || source.images {
+            if source.previews || source.images.archives() {
                 enriched.preview_candidates =
                     preview::ordered_article_candidates(&preview_candidates, page_candidates, None);
             }
@@ -1324,7 +1324,7 @@ async fn heavy_content(
             enriched.labels =
                 crate::model::normalize_labels(enriched.labels.iter().chain(&extracted.labels));
             enriched.content_html = Some(extracted.html);
-            if source.previews || source.images {
+            if source.previews || source.images.archives() {
                 enriched.preview_candidates = preview::ordered_article_candidates(
                     &preview_candidates,
                     page_candidates,

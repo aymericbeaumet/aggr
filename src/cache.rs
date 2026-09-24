@@ -259,6 +259,7 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("discussions", "discussions.rs"),
         source!("media", "media.rs"),
         source!("platform", "platform.rs"),
+        source!("media-compact", "media/compact.rs"),
         source!("media-stored-cache", "media/stored_cache.rs"),
         source!("media-placeholder", "media/placeholder.rs"),
         source!("media-srcset", "media/srcset.rs"),
