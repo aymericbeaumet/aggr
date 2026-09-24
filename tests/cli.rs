@@ -530,6 +530,98 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
 }
 
 #[test]
+fn a_compact_archive_stores_one_bounded_master_and_no_renditions() {
+    let server = MockServer::start();
+    let source = server.url("/photo.png");
+    let feed = serde_json::json!({
+        "version": "https://jsonfeed.org/version/1.1",
+        "title": "Image feed",
+        "items": [{
+            "id": "illustrated",
+            "title": "Illustrated article",
+            "url": server.url("/articles/illustrated"),
+            "date_published": "2026-09-04T10:00:00Z",
+            "content_html": format!(
+                "<p>Before.</p><img src=\"{source}\" alt=\"A useful diagram\"><p>After.</p>"
+            ),
+        }],
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.json");
+        then.status(200)
+            .header("content-type", "application/feed+json")
+            .json_body(feed);
+    });
+    // Detail the reduction has to throw away: a flat colour would compress to nothing either way.
+    let master = {
+        let image = image::RgbImage::from_fn(1200, 800, |x, y| {
+            image::Rgb([(x % 251) as u8, (y % 239) as u8, ((x + y) % 241) as u8])
+        });
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    };
+    let image_mock = server.mock(|when, then| {
+        when.method(GET).path("/photo.png");
+        then.status(200)
+            .header("content-type", "image/png")
+            .body(master.clone());
+    });
+    let repo = TestRepo::new();
+    repo.write_raw_config(&format!(
+        "[fetch]\ncontent = \"light\"\nimages = {{ mode = \"compact\", quality = 60, max_axis = 320 }}\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+        server.url("/feed.json")
+    ));
+
+    repo.aggr().arg("sync").assert().success();
+    image_mock.assert_calls(1);
+    let (path, front) = item_front(&repo, "aggr", "illustrated-article");
+    let archived = &front["images"][0];
+
+    // One bounded master, reduced to the configured axis, and nothing beside it.
+    // An image with no responsive copies omits the key rather than writing an empty list.
+    assert_eq!(
+        archived["variants"].as_sequence().map_or(0, Vec::len),
+        0,
+        "a compact archive keeps no responsive copies: {archived:?}"
+    );
+    assert_eq!(archived["original"]["width"].as_u64(), Some(320));
+    let directory = Path::new(&path).parent().unwrap();
+    let stored = directory.join(archived["original"]["file"].as_str().unwrap());
+    let bytes = repo.origin_bytes("aggr", stored.to_str().unwrap());
+    assert_eq!(
+        image::guess_format(&bytes).unwrap(),
+        image::ImageFormat::Jpeg
+    );
+    assert!(
+        bytes.len() < master.len() / 10,
+        "compact master kept {} of {} bytes",
+        bytes.len(),
+        master.len()
+    );
+    // The publisher's URL is still what the article was rewritten from.
+    assert!(repo.origin_show("aggr", &path).contains(&source));
+
+    // The reader still gets a picture, sized from the bytes that were actually stored.
+    repo.aggr().arg("build").assert().success();
+    let source_slug = path.split('/').nth(1).unwrap();
+    let item_slug = Path::new(&path).file_stem().unwrap();
+    let page = std::fs::read_to_string(
+        repo.clone
+            .join("_site/items")
+            .join(source_slug)
+            .join(item_slug)
+            .join("index.html"),
+    )
+    .unwrap();
+    assert!(
+        page.contains("<picture class=\"article-picture\""),
+        "{page}"
+    );
+    assert!(page.contains("--image-ratio:320 / "), "{page}");
+}
+
+#[test]
 fn previews_mirror_local_bytes_and_retention_preserves_historical_blobs() {
     let server = MockServer::start();
     let mut feed = server.mock(|when, then| {
