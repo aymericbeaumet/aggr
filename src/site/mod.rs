@@ -296,6 +296,70 @@ pub fn base_path(base_url: Option<&str>) -> String {
     }
 }
 
+/// How many of a source's articles must carry the same picture before it stops being any one
+/// article's picture. Two posts can honestly share an illustration; three is a house style.
+const SHARED_PICTURE_ARTICLES: usize = 3;
+
+/// Every published address of the pictures a source repeats across its articles: its thumbnail,
+/// the full-size original, and each responsive variant of it.
+///
+/// Feeds that set one social card for the whole site, or open every post with the same banner,
+/// otherwise fill a feed with the same thumbnail and put that picture above every article instead
+/// of the writing.
+fn shared_source_pictures(
+    items: &[ItemCtx],
+    article_images: &BTreeMap<String, Vec<content::LocalImage>>,
+) -> std::collections::BTreeSet<String> {
+    let mut previews: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    let mut pictures: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for item in items {
+        if let Some(preview) = &item.preview {
+            *previews
+                .entry((item.source.as_str(), preview.url.as_str()))
+                .or_default() += 1;
+        }
+        let images = article_images
+            .get(&item.path)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        // One article using a picture twice is still one article.
+        let mut seen = std::collections::BTreeSet::new();
+        for image in images
+            .iter()
+            .filter(|image| seen.insert(image.original.as_str()))
+        {
+            *pictures
+                .entry((item.source.as_str(), image.original.as_str()))
+                .or_default() += 1;
+        }
+    }
+    let repeated = |counts: &BTreeMap<(&str, &str), usize>, source: &str, url: &str| {
+        counts
+            .get(&(source, url))
+            .is_some_and(|count| *count >= SHARED_PICTURE_ARTICLES)
+    };
+    let mut shared = std::collections::BTreeSet::new();
+    for item in items {
+        if let Some(preview) = &item.preview
+            && repeated(&previews, &item.source, &preview.url)
+        {
+            shared.insert(preview.url.clone());
+        }
+        for image in article_images
+            .get(&item.path)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            if !repeated(&pictures, &item.source, &image.original) {
+                continue;
+            }
+            shared.insert(image.original.clone());
+            shared.extend(image.variants.iter().map(|variant| variant.url.clone()));
+        }
+    }
+    shared
+}
+
 /// Relative reference from a generated page back to the output root. Directory routes end in
 /// `/`; standalone root files such as `offline.html` do not add a level.
 pub fn relative_root(path: &str) -> String {
@@ -677,6 +741,19 @@ fn build_once(
             archive_items.push(ctx);
         }
     }
+    // A picture that comes back on article after article from the same source is that source's
+    // own — a logo, a banner, a default social card. It illustrates nothing, so it is not shown
+    // as an article's thumbnail or above its opening paragraph. The archive still keeps it.
+    let shared_pictures = shared_source_pictures(&archive_items, &article_images);
+    for ctx in &mut archive_items {
+        if ctx
+            .preview
+            .as_ref()
+            .is_some_and(|preview| shared_pictures.contains(&preview.url))
+        {
+            ctx.preview = None;
+        }
+    }
     phase("media and item metadata");
 
     let subscriptions = source_ctxs.clone();
@@ -937,7 +1014,9 @@ fn build_once(
                     .get(&item.path)
                     .map(Vec::as_slice)
                     .unwrap_or_default(),
-            );
+            )
+            // The source's own picture is not this article's opening image.
+            .filter(|lead| !shared_pictures.contains(&lead.url));
         }
         let dimensions = if portable_html.contains("<img ") {
             let retained_html = store.read_html(item)?;
@@ -2725,6 +2804,69 @@ category = "Science"
             !oldest.contains("<footer class=\"article-footer\""),
             "{oldest}"
         );
+    }
+
+    #[test]
+    fn a_picture_every_article_shares_belongs_to_the_source_not_the_article() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 4, "pwa = false\n");
+        let picture = |red: u8| {
+            let mut bytes = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 75)
+                .encode_image(&image::DynamicImage::ImageRgb8(
+                    image::RgbImage::from_pixel(160, 80, image::Rgb([red, 40, 40])),
+                ))
+                .unwrap();
+            bytes
+        };
+        let house = picture(10);
+        let own = picture(200);
+        for (index, mut item) in store.items().unwrap().into_iter().enumerate() {
+            // Three of the four posts open with the same house picture; the fourth has its own.
+            let bytes = if index < 3 { &house } else { &own };
+            let (directory, stem) = item.path.rsplit_once('/').unwrap();
+            let hash = crate::model::sha1_hex(bytes);
+            item.front.preview = Some(crate::model::Preview {
+                file: format!("{stem}.preview-{}.jpg", &hash[..12]),
+                width: 160,
+                height: 80,
+                alt: Some("Preview".into()),
+                color: None,
+            });
+            store
+                .write_item(crate::store::NewItem {
+                    dir: directory,
+                    stem,
+                    front: &item.front,
+                    body: &item.body,
+                    html: None,
+                    preview: Some(bytes),
+                    images: &[],
+                })
+                .unwrap();
+        }
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let feed = scraper::Html::parse_document(
+            &std::fs::read_to_string(out.join("index.html")).unwrap(),
+        );
+        let preview = scraper::Selector::parse(".preview-image").unwrap();
+        for (url, expected) in [
+            ("items/blog/2026-09-01-post-0/", false),
+            ("items/blog/2026-09-02-post-1/", false),
+            ("items/blog/2026-09-03-post-2/", false),
+            ("items/blog/2026-09-04-post-3/", true),
+        ] {
+            let row = feed
+                .select(&scraper::Selector::parse(&format!(".row[data-url='{url}']")).unwrap())
+                .next()
+                .unwrap_or_else(|| panic!("{url} is missing from the feed"));
+            assert_eq!(
+                row.select(&preview).next().is_some(),
+                expected,
+                "{url} keeps only a picture of its own"
+            );
+        }
     }
 
     #[test]

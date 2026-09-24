@@ -481,14 +481,29 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         json!({"features":[{"name":"hover","value":"hover"},{"name":"pointer","value":"fine"}]}),
     )
     .await?;
-    let hover=client.execute("const r=document.querySelector('#q').getBoundingClientRect();return {x:r.left+20,y:r.top+r.height/2}",vec![]).await?;
+    // The pointer can only rest on the field if the field is on screen: a small window puts it
+    // below the fold, and a move to a point outside the viewport hovers nothing.
+    let hover=client.execute("const q=document.querySelector('#q');q.scrollIntoView({block:'center'});const r=q.getBoundingClientRect();return {x:Math.round(r.left+20),y:Math.round(r.top+r.height/2),inside:r.top>=0&&r.bottom<=innerHeight&&r.left>=0&&r.right<=innerWidth}",vec![]).await?;
+    anyhow::ensure!(
+        hover["inside"] == true,
+        "the search field must be on screen before the pointer can rest on it: {hover}"
+    );
     emulate(
         client,
         "Input.dispatchMouseEvent",
         json!({"type":"mouseMoved","x":hover["x"],"y":hover["y"]}),
     )
     .await?;
-    wait_for(client,"getComputedStyle(document.querySelector('#search-query-help')).display!=='none' && document.querySelector('#search-query-help').getAttribute('role')==='tooltip'").await?;
+    let pointer = client
+        .execute(
+            "const field=document.querySelector('#q'),help=document.querySelector('#search-query-help');return {hovered:field.matches(':hover'),focused:field.matches(':focus'),fine:matchMedia('(hover: hover) and (pointer: fine)').matches,display:getComputedStyle(help).display,role:help.getAttribute('role')}",
+            vec![],
+        )
+        .await?;
+    anyhow::ensure!(
+        pointer["display"] != "none" && pointer["role"] == "tooltip",
+        "a pointer resting on a focused field asks for the reminder: {pointer}"
+    );
     // Hovering on the way past is not a question: without the field's attention the reminder stays
     // out of the way, and comes back when the pointer returns to a focused field.
     client
