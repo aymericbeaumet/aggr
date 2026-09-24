@@ -13,6 +13,16 @@ use anyhow::{Context as _, Result, bail};
 #[derive(Debug)]
 pub struct Guard {
     _file: File,
+    record: PathBuf,
+}
+
+impl Drop for Guard {
+    /// The record says who holds the lock, so it goes when the lock does. Leaving it behind let a
+    /// later conflict name a process that had already exited, and the wrong subcommand with it.
+    /// This runs before `_file` is dropped, so the lock is never free while a stale record stands.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.record);
+    }
 }
 
 impl Guard {
@@ -58,16 +68,23 @@ impl Guard {
                 return Err(err).with_context(|| format!("locking {}", path.display()));
             }
         }
+        let record = format!("{} {subject}", std::process::id());
         if !read_only {
-            let record = format!("{} {subject}", std::process::id());
             file.set_len(0)?;
             file.rewind()?;
             write!(file, "{record}")?;
             file.flush()?;
-            std::fs::write(record_path(path), record)
-                .with_context(|| format!("recording the holder of {}", path.display()))?;
         }
-        Ok(Some(Self { _file: file }))
+        // `inspect` holds the lock just as firmly as `acquire` does, so it owes a newcomer the
+        // same answer about who is holding it. Only the locked file's own body is left alone,
+        // because a read-only handle cannot write to it.
+        let record_path = record_path(path);
+        std::fs::write(&record_path, record)
+            .with_context(|| format!("recording the holder of {}", path.display()))?;
+        Ok(Some(Self {
+            _file: file,
+            record: record_path,
+        }))
     }
 }
 
@@ -116,6 +133,22 @@ mod tests {
         );
         assert!(Guard::inspect(&path, "clean", target).is_err());
         drop(first);
+        // A released lock leaves nobody to name. Keeping the record let the next conflict report
+        // a process that had already exited, under whatever subcommand ran last.
+        assert!(!record_path(&path).exists());
+
+        // `inspect` holds the lock too, so it has to say so: a newcomer was told the last
+        // `acquire` still held it, naming a dead PID and the wrong subcommand.
+        let inspected = Guard::inspect(&path, "clean", target).unwrap().unwrap();
+        assert_eq!(
+            format!("{:#}", Guard::acquire(&path, "build", target).unwrap_err()),
+            format!(
+                "another `aggr clean` is already running for /repo (PID {})",
+                std::process::id()
+            )
+        );
+        drop(inspected);
+
         Guard::acquire(&path, "build", target).unwrap();
         assert!(
             Guard::inspect(&temp.path().join("absent.lock"), "clean", target)

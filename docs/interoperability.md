@@ -115,7 +115,10 @@ poster image only; playback is not retained.
 ## Article images
 
 Every raster format that decodes in pure Rust is archived and resized: JPEG, PNG, GIF, WebP, BMP,
-ICO, TIFF and QOI, plus publisher SVG rasterized to a passive PNG master. AVIF needs an AV1
+ICO, TIFF and QOI, plus publisher SVG rasterized to a passive PNG master. A master is stored only
+as JPEG, PNG, GIF or WebP, so BMP, ICO, TIFF and QOI keep their picture and lose their container,
+re-encoded losslessly as PNG. Nothing is given up: those four reach no mainstream browser, and a
+stored master aggr cannot serve would be a picture nobody could read. AVIF needs an AV1
 decoder, which is a system library rather than a crate, so it is archived undecoded: the response
 is kept byte for byte as the master and served as-is, its size is read from the container's `ispe`
 box so the space is reserved before it loads, and it carries a flat stand-in preview instead of a

@@ -1031,6 +1031,24 @@ pub fn prepare_asset_with_policy(
     let (width, height) = image.dimensions();
     validate_dimensions(width, height, limits)?;
 
+    // A container aggr can decode but neither serve nor store keeps its picture and loses its
+    // wrapper: `validate_stored` accepts only JPEG, PNG, GIF and WebP masters, and BMP, ICO, TIFF
+    // and QOI reach no mainstream browser anyway. PNG is lossless, so nothing is given up but the
+    // container, exactly as publisher SVG already becomes a passive raster.
+    let (bytes, extension) = if matches!(extension, "bmp" | "ico" | "tiff" | "qoi") {
+        let mut encoded = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut encoded), ImageFormat::Png)
+            .context("re-encoding an unservable article image as PNG")?;
+        ensure!(
+            encoded.len() <= limits.max_file_bytes,
+            "re-encoded article image exceeds file limit"
+        );
+        (encoded, "png")
+    } else {
+        (bytes, extension)
+    };
+
     // Both policies need the same intact decode; a compact master simply replaces the renditions
     // it would otherwise have derived, so nothing is encoded twice. An animation has no still to
     // replace and is reduced as an animation instead.
@@ -2228,6 +2246,48 @@ mod tests {
                 .iter()
                 .all(|rendition| rendition.width < restored.width)
         );
+    }
+
+    #[test]
+    fn a_container_no_browser_reads_is_archived_as_a_png_that_can_be_stored() {
+        // These decode in pure Rust and were accepted as masters, but `validate_stored` takes only
+        // JPEG, PNG, GIF and WebP, so archiving one failed on write and the picture was lost.
+        for (label, format) in [
+            ("bmp", ImageFormat::Bmp),
+            ("tiff", ImageFormat::Tiff),
+            ("qoi", ImageFormat::Qoi),
+        ] {
+            let source = DynamicImage::ImageRgba8(ImageBuffer::from_fn(80, 60, |x, y| {
+                Rgba([(x % 251) as u8, (y % 239) as u8, 60, 255])
+            }));
+            let mut encoded = Cursor::new(Vec::new());
+            source.write_to(&mut encoded, format).unwrap();
+
+            let asset = prepare_asset(
+                &candidate(&format!("https://example.com/diagram.{label}")),
+                encoded.into_inner(),
+                &MediaLimits::default(),
+            )
+            .unwrap();
+
+            assert_eq!(asset.master_extension, "png", "{label}");
+            assert_eq!((asset.width, asset.height), (80, 60), "{label}");
+            let metadata = asset.metadata("article");
+            assert_eq!(
+                validate_stored(&asset.master_bytes, &metadata.original, StoredKind::Master)
+                    .unwrap(),
+                "png",
+                "{label} could not be stored"
+            );
+            // The picture itself survives the change of container.
+            assert_eq!(
+                image::load_from_memory(&asset.master_bytes)
+                    .unwrap()
+                    .to_rgba8(),
+                source.to_rgba8(),
+                "{label} lost pixels"
+            );
+        }
     }
 
     #[test]
