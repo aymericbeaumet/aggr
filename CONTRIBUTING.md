@@ -1,8 +1,8 @@
 # Contributing
 
 For development commands and client ownership, see [client development](docs/client.md)
-and [AGENTS.md](AGENTS.md). Run `make check` before submitting a change. Frontend changes
-also need `make client-build` and the resulting embedded assets.
+and [AGENTS.md](AGENTS.md). Run `make check` before submitting a change. The browser client
+has no build step: edit the files under `themes/default/static/` and reload.
 
 ## Contribution license
 

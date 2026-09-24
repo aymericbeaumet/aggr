@@ -13,13 +13,11 @@ pub(super) fn capture_sources(items: &[Item]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The host itself, never an account path, port, or provider alias.
+/// The host itself, never an account path, port, or provider alias. Platform identity has one
+/// home: spelling the rule again here let `youtu.be` stay `youtu.be`, so a channel's own videos
+/// failed to match it and landed under a bare short-link publisher instead.
 fn publisher_host(url: &url::Url) -> Option<String> {
-    if !matches!(url.scheme(), "http" | "https") {
-        return None;
-    }
-    let host = url.host_str()?.trim_end_matches('.');
-    Some(host.strip_prefix("www.").unwrap_or(host).to_string())
+    crate::platform::host(url).map(str::to_string)
 }
 
 /// Who published this URL. A host that carries many publishers does not identify any of them, so
@@ -336,6 +334,34 @@ mod tests {
     }
 
     #[test]
+    fn a_video_shared_as_a_short_link_still_reads_under_its_channel() {
+        let channel = SourceCtx {
+            query_value: "youtube-com-veritasium".into(),
+            slug: "youtube-com-veritasium".into(),
+            name: "Veritasium".into(),
+            site_url: Some("https://www.youtube.com/channel/UC123".into()),
+            feed_url: Some("https://www.youtube.com/feeds/videos.xml?channel_id=UC123".into()),
+            ..source("https://www.youtube.com/@veritasium")
+        };
+        let mut items = vec![article(
+            "youtube-com-veritasium",
+            "enigma",
+            "https://youtu.be/abc",
+        )];
+        items[0].set_source(&channel);
+        let mut sources = vec![channel];
+        resolve(&mut items, &mut sources, &[], &[]);
+
+        // `youtu.be` is YouTube's own short link, so the channel is the same publisher and still
+        // settles the identity. Treating it as a separate host filed the video under a bare
+        // `youtu.be` publisher page and filter of its own.
+        let item = &items[0];
+        assert_eq!(item.publisher_source, "youtube.com/@veritasium");
+        assert_eq!(item.metadata.source_slug, "youtube.com/@veritasium");
+        assert_eq!(item.source_url, "https://youtube.com/@veritasium");
+    }
+
+    #[test]
     fn publisher_identity_keeps_the_account_and_drops_the_port() {
         let mut items = vec![
             article("configured", "alice", "https://social.example/@alice/1"),
@@ -448,16 +474,18 @@ mod tests {
     }
 
     #[test]
-    fn hostname_normalization_keeps_subdomains_and_actual_provider_domains() {
+    fn hostname_normalization_keeps_subdomains_and_canonicalizes_provider_aliases() {
         for (url, expected) in [
             ("https://WWW.DuckDB.org./news/article", "duckdb.org"),
             ("https://news.example.co.uk/article", "news.example.co.uk"),
             ("https://alice.github.io/article", "alice.github.io"),
             ("https://bob.github.io/article", "bob.github.io"),
-            ("https://twitter.com/alice/status/1", "twitter.com"),
+            // A subdomain is usually a different publisher, but a platform's own short, mobile
+            // and regional aliases are the same one, and have to read under a single name.
+            ("https://twitter.com/alice/status/1", "x.com"),
             ("https://x.com/bob/status/1", "x.com"),
-            ("https://m.youtube.com/watch?v=123", "m.youtube.com"),
-            ("https://youtu.be/123", "youtu.be"),
+            ("https://m.youtube.com/watch?v=123", "youtube.com"),
+            ("https://youtu.be/123", "youtube.com"),
             ("https://mastodon.social/@alice/1", "mastodon.social"),
             ("https://www.reddit.com/r/rust/comments/1", "reddit.com"),
             ("http://127.0.0.1:8080/article", "127.0.0.1"),

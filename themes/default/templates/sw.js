@@ -27,7 +27,7 @@ function immutable(pathname) {
   if (rest.indexOf("assets/") !== 0) return false;
   var name = rest.split("/").pop() || "";
   var stem = name.indexOf(".") === -1 ? name : name.slice(0, name.lastIndexOf("."));
-  if (/^(images|previews)\//.test(rest.slice("assets/".length)) && /^[0-9a-f]{40}$/.test(stem)) return true;
+  if (/^(images|previews|documents)\//.test(rest.slice("assets/".length)) && /^[0-9a-f]{40}$/.test(stem)) return true;
   return /-[0-9a-f]{12}$/.test(stem);
 }
 

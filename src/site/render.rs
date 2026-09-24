@@ -757,10 +757,12 @@ mod tests {
         assert!(css.contains("var(--image-placeholder, var(--code))"));
         assert!(css.contains("inline-size: min(100%, var(--image-width, 100%))"));
         assert!(css.contains("aspect-ratio: var(--image-ratio)"));
-        // Content-addressed media is safe to serve from the cache without revalidating.
+        // Content-addressed media is safe to serve from the cache without revalidating. Published
+        // PDFs are content-addressed the same way, so they belong with the images and previews
+        // rather than in the bounded page cache a later visit can evict them from.
         let worker_file = DefaultTheme::get("templates/sw.js").unwrap();
         let worker = std::str::from_utf8(worker_file.data.as_ref()).unwrap();
-        assert!(worker.contains("(images|previews)"));
+        assert!(worker.contains("(images|previews|documents)"));
         assert!(worker.contains("assetResponse(request, ASSETS, ASSET_LIMIT)"));
     }
 
