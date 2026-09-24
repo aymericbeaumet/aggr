@@ -1077,7 +1077,7 @@ pub fn prepare_asset_with_policy(
     };
     if let Some(policy) = compact {
         if compact_animation {
-            compact::apply_animation(&mut asset, policy, limits)?;
+            compact::apply_animation(&mut asset, policy, limits);
         } else {
             compact::apply(&mut asset, &image, policy)?;
         }
@@ -2372,6 +2372,38 @@ mod tests {
             .unwrap(),
             "gif"
         );
+    }
+
+    #[test]
+    fn a_long_animation_stops_at_its_budget_instead_of_decoding_every_frame() {
+        // Frames are held one at a time, but the work itself still has to end: a small, densely
+        // compressed GIF can carry far more pixels than any single image is allowed to decode.
+        let frame = |shade: u8| ImageBuffer::from_pixel(240, 160, Rgba([shade, 40, 90, 255]));
+        let mut animation = Vec::new();
+        image::codecs::gif::GifEncoder::new(&mut animation)
+            .encode_frames([
+                image::Frame::new(frame(10)),
+                image::Frame::new(frame(200)),
+                image::Frame::new(frame(120)),
+            ])
+            .unwrap();
+
+        // Enough to decode one 240x160 frame, not enough for all three.
+        let limits = MediaLimits {
+            max_pixels: 50_000,
+            ..MediaLimits::default()
+        };
+        let asset = prepare_asset_with_policy(
+            &candidate("https://example.com/long.gif"),
+            animation.clone(),
+            &limits,
+            Some(CompactPolicy::archive()),
+        )
+        .unwrap();
+
+        assert_eq!(asset.master_bytes, animation);
+        assert_eq!(asset.master_extension, "gif");
+        assert!(asset.renditions.is_empty());
     }
 
     #[test]

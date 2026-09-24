@@ -69,11 +69,11 @@ jobs:
           ARCHIVE: aggr-${{ matrix.name }}
         run: |
           mkdir dist
-          cp LICENSE NOTICE LICENSE-CONTRIBUTIONS target/release/
+          cp LICENSE target/release/
           if [[ "$ARCHIVE" == aggr-windows-* ]]; then
-            (cd target/release && 7z a "../../dist/$ARCHIVE.zip" aggr.exe LICENSE NOTICE LICENSE-CONTRIBUTIONS)
+            (cd target/release && 7z a "../../dist/$ARCHIVE.zip" aggr.exe LICENSE)
           else
-            tar -C target/release -czf "dist/$ARCHIVE.tar.gz" aggr LICENSE NOTICE LICENSE-CONTRIBUTIONS
+            tar -C target/release -czf "dist/$ARCHIVE.tar.gz" aggr LICENSE
           fi
       - uses: actions/upload-artifact@v7
         with:

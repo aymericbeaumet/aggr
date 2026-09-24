@@ -101,16 +101,15 @@ pub fn apply(asset: &mut Asset, image: &DynamicImage, policy: CompactPolicy) -> 
 /// The same reduction for an animation, which has to stay an animation: its frames are resized
 /// and re-encoded, keeping their timing and the loop the original asked for. GIF is the only
 /// animated format aggr can write, so animated WebP and APNG keep their exact bytes.
-pub fn apply_animation(
-    asset: &mut Asset,
-    policy: CompactPolicy,
-    limits: &MediaLimits,
-) -> Result<()> {
-    if let Some(compacted) = compact_gif(&asset.master_bytes, policy, limits)? {
-        replace(asset, compacted);
+pub fn apply_animation(asset: &mut Asset, policy: CompactPolicy, limits: &MediaLimits) {
+    match compact_gif(&asset.master_bytes, policy, limits) {
+        Ok(Some(compacted)) => replace(asset, compacted),
+        // Smaller is a bonus, never a condition: anything that goes wrong reducing an animation
+        // leaves the archive holding the exact bytes it already had.
+        Ok(None) => {}
+        Err(error) => log::debug!("keeping the exact animation: {error:#}"),
     }
     asset.renditions.clear();
-    Ok(())
 }
 
 fn replace(asset: &mut Asset, compacted: Compacted) {
@@ -148,47 +147,86 @@ fn compact_gif(
         image::metadata::LoopCount::Infinite => image::codecs::gif::Repeat::Infinite,
     };
 
-    let mut frames = Vec::new();
+    // Frames are encoded as they are decoded. Holding the whole animation first would let a small,
+    // densely compressed GIF expand into gigabytes of RGBA before anything bounded it.
+    let mut bytes = Vec::new();
     let mut first = None;
-    for frame in decoder.into_frames() {
-        if frames.len() == MAX_ANIMATION_FRAMES {
-            return Ok(None);
+    let mut frames = 0_usize;
+    let mut pixels = 0_u64;
+    {
+        let mut encoder = image::codecs::gif::GifEncoder::new_with_speed(
+            Bounded {
+                out: &mut bytes,
+                limit: limits.max_file_bytes,
+            },
+            ANIMATION_SPEED,
+        );
+        encoder
+            .set_repeat(repeat)
+            .context("setting archived animation loop")?;
+        for frame in decoder.into_frames() {
+            if frames == MAX_ANIMATION_FRAMES {
+                return Ok(None);
+            }
+            let frame = frame.context("decoding archived animation frame")?;
+            let delay = frame.delay();
+            let buffer = DynamicImage::ImageRgba8(frame.into_buffer());
+            let resized = if buffer.width() > policy.max_axis || buffer.height() > policy.max_axis {
+                buffer.resize(
+                    policy.max_axis,
+                    policy.max_axis,
+                    image::imageops::FilterType::Lanczos3,
+                )
+            } else {
+                buffer
+            };
+            pixels += u64::from(resized.width()) * u64::from(resized.height());
+            if pixels > limits.max_pixels {
+                return Ok(None);
+            }
+            if first.is_none() {
+                first = Some(resized.clone());
+            }
+            frames += 1;
+            // A frame that will not fit the file limit, and any other encoder refusal, leaves the
+            // exact original in place rather than failing the image.
+            if encoder
+                .encode_frame(image::Frame::from_parts(resized.to_rgba8(), 0, 0, delay))
+                .is_err()
+            {
+                return Ok(None);
+            }
         }
-        let frame = frame.context("decoding archived animation frame")?;
-        let delay = frame.delay();
-        let buffer = DynamicImage::ImageRgba8(frame.into_buffer());
-        let resized = if buffer.width() > policy.max_axis || buffer.height() > policy.max_axis {
-            buffer.resize(
-                policy.max_axis,
-                policy.max_axis,
-                image::imageops::FilterType::Lanczos3,
-            )
-        } else {
-            buffer
-        };
-        if first.is_none() {
-            first = Some(resized.clone());
-        }
-        frames.push(image::Frame::from_parts(resized.to_rgba8(), 0, 0, delay));
     }
     let Some(decoded) = first else {
         return Ok(None);
     };
-
-    let mut bytes = Vec::new();
-    {
-        let mut encoder =
-            image::codecs::gif::GifEncoder::new_with_speed(&mut bytes, ANIMATION_SPEED);
-        encoder
-            .set_repeat(repeat)
-            .context("setting archived animation loop")?;
-        encoder
-            .encode_frames(frames)
-            .context("encoding compact animation")?;
-    }
     Ok(Some(Compacted {
         bytes,
         extension: "gif",
         decoded,
     }))
+}
+
+/// A sink that refuses to grow past a limit, so an encoder cannot allocate an unbounded result
+/// before anyone gets to compare it with the original.
+struct Bounded<'a> {
+    out: &'a mut Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for Bounded<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.out.len().saturating_add(buf.len()) > self.limit {
+            return Err(std::io::Error::other(
+                "compact animation exceeds the file limit",
+            ));
+        }
+        self.out.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

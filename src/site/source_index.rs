@@ -13,11 +13,23 @@ pub(super) fn capture_sources(items: &[Item]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The host itself, never an account path, port, or provider alias. Platform identity has one
-/// home: spelling the rule again here let `youtu.be` stay `youtu.be`, so a channel's own videos
-/// failed to match it and landed under a bare short-link publisher instead.
+/// The host itself, never an account path or port. A platform's aliases keep their own name here,
+/// because the path beside them is written in that alias's URL space: `pca.st/<code>` is a real
+/// link and `pocketcasts.com/<code>` is not. Use [`same_platform`] to tell aliases apart from
+/// genuinely different publishers.
 fn publisher_host(url: &url::Url) -> Option<String> {
-    crate::platform::host(url).map(str::to_string)
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?.trim_end_matches('.');
+    Some(host.strip_prefix("www.").unwrap_or(host).to_string())
+}
+
+/// Whether two URLs are published by the same platform, reading short, mobile and regional
+/// aliases as the platform they belong to. A video shared as `youtu.be` is on YouTube, so the
+/// channel that published it is allowed to settle its identity.
+fn same_platform(left: &url::Url, right: &url::Url) -> bool {
+    crate::platform::host(left) == crate::platform::host(right)
 }
 
 /// Who published this URL. A host that carries many publishers does not identify any of them, so
@@ -56,7 +68,7 @@ fn publisher_page(item: &ItemCtx) -> Option<url::Url> {
     }
     Some(
         publisher_root(&item.source_url)
-            .filter(|resolved| publisher_host(resolved) == publisher_host(&article))
+            .filter(|resolved| same_platform(resolved, &article))
             .filter(|resolved| crate::platform::account_path(resolved).is_some())
             .unwrap_or(article),
     )
@@ -474,18 +486,19 @@ mod tests {
     }
 
     #[test]
-    fn hostname_normalization_keeps_subdomains_and_canonicalizes_provider_aliases() {
+    fn hostname_normalization_keeps_subdomains_and_actual_provider_domains() {
         for (url, expected) in [
             ("https://WWW.DuckDB.org./news/article", "duckdb.org"),
             ("https://news.example.co.uk/article", "news.example.co.uk"),
             ("https://alice.github.io/article", "alice.github.io"),
             ("https://bob.github.io/article", "bob.github.io"),
-            // A subdomain is usually a different publisher, but a platform's own short, mobile
-            // and regional aliases are the same one, and have to read under a single name.
-            ("https://twitter.com/alice/status/1", "x.com"),
+            // An alias keeps its own name, because the path beside it is only a link there.
+            ("https://twitter.com/alice/status/1", "twitter.com"),
             ("https://x.com/bob/status/1", "x.com"),
-            ("https://m.youtube.com/watch?v=123", "youtube.com"),
-            ("https://youtu.be/123", "youtube.com"),
+            ("https://m.youtube.com/watch?v=123", "m.youtube.com"),
+            ("https://youtu.be/123", "youtu.be"),
+            // A short link's opaque code is a link on the short host and nowhere else.
+            ("https://pca.st/abc123", "pca.st"),
             ("https://mastodon.social/@alice/1", "mastodon.social"),
             ("https://www.reddit.com/r/rust/comments/1", "reddit.com"),
             ("http://127.0.0.1:8080/article", "127.0.0.1"),
