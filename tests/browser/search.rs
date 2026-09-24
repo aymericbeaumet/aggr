@@ -473,6 +473,14 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         client.execute("return getComputedStyle(document.querySelector('#search-query-help')).display==='none'", vec![]).await? == true,
         "touch must not open the help"
     );
+    // The reminder belongs to a real pointer, so say that this session has one: a headless
+    // browser does not always claim it.
+    emulate(
+        client,
+        "Emulation.setEmulatedMedia",
+        json!({"features":[{"name":"hover","value":"hover"},{"name":"pointer","value":"fine"}]}),
+    )
+    .await?;
     let hover=client.execute("const r=document.querySelector('#q').getBoundingClientRect();return {x:r.left+20,y:r.top+r.height/2}",vec![]).await?;
     emulate(
         client,

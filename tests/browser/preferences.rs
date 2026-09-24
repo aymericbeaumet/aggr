@@ -169,7 +169,9 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
       const keys = [...document.querySelectorAll('#shortcut-help .shortcut-list dt')];
       // Every alternative of one mapping starts on the same line as the first.
       const wrapped = keys.filter(key => {
-        const parts = [...key.querySelectorAll('kbd, small')];
+        // Platform-specific mappings ship both modifiers and hide one, and a hidden key has no
+        // box to compare against.
+        const parts = [...key.querySelectorAll('kbd, small')].filter(part => part.getClientRects().length > 0);
         if (parts.length < 2) return false;
         const boxes = parts.map(part => part.getBoundingClientRect());
         return boxes.some(box => box.top >= boxes[0].bottom - 1);

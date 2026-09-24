@@ -633,12 +633,18 @@ pub(crate) async fn key(client: &Client, key: &str) -> Result<()> {
         "ArrowDown" => "\u{e015}",
         key => key,
     };
-    client
-        .active_element()
-        .await?
-        .send_keys(key)
-        .await
-        .with_context(|| format!("sending key {key:?}"))?;
+    // The element holding the keyboard can be replaced as a list re-renders underneath it, so a
+    // refused keystroke is worth finding the focus again for.
+    for attempt in 0..2 {
+        match client.active_element().await?.send_keys(key).await {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt == 0 => {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let _ = error;
+            }
+            Err(error) => return Err(error).with_context(|| format!("sending key {key:?}")),
+        }
+    }
     Ok(())
 }
 
