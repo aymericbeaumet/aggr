@@ -101,15 +101,19 @@ pub fn apply(asset: &mut Asset, image: &DynamicImage, policy: CompactPolicy) -> 
 /// The same reduction for an animation, which has to stay an animation: its frames are resized
 /// and re-encoded, keeping their timing and the loop the original asked for. GIF is the only
 /// animated format aggr can write, so animated WebP and APNG keep their exact bytes.
-pub fn apply_animation(asset: &mut Asset, policy: CompactPolicy, limits: &MediaLimits) {
-    match compact_gif(&asset.master_bytes, policy, limits) {
-        Ok(Some(compacted)) => replace(asset, compacted),
-        // Smaller is a bonus, never a condition: anything that goes wrong reducing an animation
-        // leaves the archive holding the exact bytes it already had.
-        Ok(None) => {}
-        Err(error) => log::debug!("keeping the exact animation: {error:#}"),
+/// Refusing to reduce an animation keeps the exact original; failing to read one is an error, and
+/// the caller drops the image as it drops any other it could not decode. Compaction walks every
+/// frame, so it is the first thing to notice a GIF whose later frames are corrupt.
+pub fn apply_animation(
+    asset: &mut Asset,
+    policy: CompactPolicy,
+    limits: &MediaLimits,
+) -> Result<()> {
+    if let Some(compacted) = compact_gif(&asset.master_bytes, policy, limits)? {
+        replace(asset, compacted);
     }
     asset.renditions.clear();
+    Ok(())
 }
 
 fn replace(asset: &mut Asset, compacted: Compacted) {

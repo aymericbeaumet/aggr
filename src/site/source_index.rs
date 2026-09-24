@@ -35,11 +35,16 @@ fn same_platform(left: &url::Url, right: &url::Url) -> bool {
 /// Who published this URL. A host that carries many publishers does not identify any of them, so
 /// there the account path is part of the identity: `youtube.com/@channel` writes on its own
 /// account, and reads, filters and archives under that name rather than under all of YouTube.
+///
+/// Identity resolves a platform's aliases, where [`publisher_host`] deliberately does not. An
+/// account is one publisher however a link reached it, so `twitter.com/alice` and `x.com/alice`
+/// belong to the same collection and filter rather than splitting into two that each look
+/// half-followed. Only the link itself keeps the host it was written with.
 fn publisher_identity(url: &url::Url) -> Option<String> {
-    let host = publisher_host(url)?;
+    let host = crate::platform::host(url)?;
     Some(match crate::platform::account_path(url) {
         Some(account) => format!("{host}/{account}"),
-        None => host,
+        None => host.to_string(),
     })
 }
 

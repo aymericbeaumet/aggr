@@ -1077,7 +1077,7 @@ pub fn prepare_asset_with_policy(
     };
     if let Some(policy) = compact {
         if compact_animation {
-            compact::apply_animation(&mut asset, policy, limits);
+            compact::apply_animation(&mut asset, policy, limits)?;
         } else {
             compact::apply(&mut asset, &image, policy)?;
         }
@@ -2375,6 +2375,35 @@ mod tests {
     }
 
     #[test]
+    fn an_animation_that_breaks_after_its_opening_frames_is_refused() {
+        // Animation detection reads two frames, so damage further in survives it. Compaction walks
+        // the whole thing and is the first to see the break: the image is dropped the way any
+        // undecodable image is, rather than archived as an animation that stops halfway.
+        let frame = |shade: u8| ImageBuffer::from_pixel(240, 160, Rgba([shade, 40, 90, 255]));
+        let mut animation = Vec::new();
+        image::codecs::gif::GifEncoder::new(&mut animation)
+            .encode_frames([
+                image::Frame::new(frame(10)),
+                image::Frame::new(frame(200)),
+                image::Frame::new(frame(120)),
+            ])
+            .unwrap();
+        let truncated = animation[..animation.len() * 4 / 5].to_vec();
+
+        let error = prepare_asset_with_policy(
+            &candidate("https://example.com/broken.gif"),
+            truncated,
+            &MediaLimits::default(),
+            Some(CompactPolicy::archive()),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("animation"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
     fn a_long_animation_stops_at_its_budget_instead_of_decoding_every_frame() {
         // Frames are held one at a time, but the work itself still has to end: a small, densely
         // compressed GIF can carry far more pixels than any single image is allowed to decode.
@@ -2388,9 +2417,9 @@ mod tests {
             ])
             .unwrap();
 
-        // Enough to decode one 240x160 frame, not enough for all three.
+        // Enough to decode a frame and to admit two, not enough to admit all three.
         let limits = MediaLimits {
-            max_pixels: 50_000,
+            max_pixels: 80_000,
             ..MediaLimits::default()
         };
         let asset = prepare_asset_with_policy(
