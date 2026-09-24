@@ -309,7 +309,16 @@ const SHARED_PICTURE_ARTICLES: usize = 3;
 fn shared_source_pictures(
     items: &[ItemCtx],
     article_images: &BTreeMap<String, Vec<content::LocalImage>>,
+    bodies: &BTreeMap<&str, &str>,
 ) -> std::collections::BTreeSet<String> {
+    // A picture the article shows itself is the article's own business, however many other
+    // articles also show it. Only the pictures chosen for it — its thumbnail and the opening
+    // image taken from what came with it — are counted here.
+    let standalone = |path: &str, image: &content::LocalImage| {
+        bodies
+            .get(path)
+            .is_none_or(|body| !body.contains(image.source.as_str()))
+    };
     let mut previews: BTreeMap<(&str, &str), usize> = BTreeMap::new();
     let mut pictures: BTreeMap<(&str, &str), usize> = BTreeMap::new();
     for item in items {
@@ -326,6 +335,7 @@ fn shared_source_pictures(
         let mut seen = std::collections::BTreeSet::new();
         for image in images
             .iter()
+            .filter(|image| standalone(&item.path, image))
             .filter(|image| seen.insert(image.original.as_str()))
         {
             *pictures
@@ -350,7 +360,8 @@ fn shared_source_pictures(
             .map(Vec::as_slice)
             .unwrap_or_default()
         {
-            if !repeated(&pictures, &item.source, &image.original) {
+            if !standalone(&item.path, image) || !repeated(&pictures, &item.source, &image.original)
+            {
                 continue;
             }
             shared.insert(image.original.clone());
@@ -744,7 +755,12 @@ fn build_once(
     // A picture that comes back on article after article from the same source is that source's
     // own — a logo, a banner, a default social card. It illustrates nothing, so it is not shown
     // as an article's thumbnail or above its opening paragraph. The archive still keeps it.
-    let shared_pictures = shared_source_pictures(&archive_items, &article_images);
+    let portable_bodies: BTreeMap<&str, &str> = all_items
+        .iter()
+        .zip(&prepared_bodies)
+        .map(|(item, prepared)| (item.path.as_str(), prepared.portable_html()))
+        .collect();
+    let shared_pictures = shared_source_pictures(&archive_items, &article_images, &portable_bodies);
     for ctx in &mut archive_items {
         if ctx
             .preview

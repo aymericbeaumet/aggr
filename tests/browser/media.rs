@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use fantoccini::Client;
 use serde_json::{Value, json};
+use sha1::{Digest as _, Sha1};
 
 use crate::harness::{
     Fixture, browser_client_with_load_strategy, browser_client_with_preferences, emulate, finish,
@@ -69,15 +70,6 @@ async fn media_loading_keeps_reserved_space() -> Result<()> {
     }
     let items = archive.join("items/example/2026/09");
     let companions = std::fs::read_dir(&items)?.collect::<std::io::Result<Vec<_>>>()?;
-    let preview = companions
-        .iter()
-        .find(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("2026-09-01-story-45.preview-")
-        })
-        .context("fixture preview")?;
     let original = companions
         .iter()
         .find(|entry| {
@@ -88,11 +80,19 @@ async fn media_loading_keeps_reserved_space() -> Result<()> {
         })
         .context("fixture archived image")?;
     for index in [35, 41] {
-        let preview_name = preview
-            .file_name()
-            .to_string_lossy()
-            .replace("story-45", &format!("story-{index}"));
-        std::fs::copy(preview.path(), items.join(&preview_name))?;
+        // Each item gets a thumbnail of its own: one picture shared by three articles of the same
+        // source is that source's, and the build leaves it off them.
+        let mut thumbnail = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut thumbnail, 75).encode_image(
+            &image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                240,
+                160,
+                image::Rgb([index as u8, 93, 118]),
+            )),
+        )?;
+        let digest = hex::encode(Sha1::digest(&thumbnail));
+        let preview_name = format!("2026-09-01-story-{index}.preview-{}.jpg", &digest[..12]);
+        std::fs::write(items.join(&preview_name), &thumbnail)?;
         let mut metadata = format!(
             "preview:\n  file: {preview_name}\n  width: 240\n  height: 160\n  color: '#315d76'\n"
         );
@@ -300,11 +300,10 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                 let before_scripts = media_box(client, selector).await?;
                 if matches!(label, "PDF" | "lead image" | "archived image") {
                     let placeholder=client.execute("const frame=document.querySelector('.document-frame,.article-lead,.article-picture');const background=getComputedStyle(frame,'::before').backgroundImage;const matched=background.match(/url\\([\"']?(.*?)[\"']?\\)/);window.expectedPlaceholderHref=matched?.[1];return window.expectedPlaceholderHref||null",vec![]).await?;
-                    let placeholder = url::Url::parse(
-                        placeholder
-                            .as_str()
-                            .context("computed media placeholder URL")?,
-                    )?;
+                    let placeholder =
+                        url::Url::parse(placeholder.as_str().with_context(|| {
+                            format!("computed media placeholder URL for the {label} at {width}px")
+                        })?)?;
                     anyhow::ensure!(
                         placeholder.as_str().starts_with("data:image/png;base64,"),
                         "{label} must show an inline ThumbHash preview before scripts or image requests complete"

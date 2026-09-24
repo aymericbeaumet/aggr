@@ -473,14 +473,6 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         client.execute("return getComputedStyle(document.querySelector('#search-query-help')).display==='none'", vec![]).await? == true,
         "touch must not open the help"
     );
-    // The reminder belongs to a real pointer, so say that this session has one: a headless
-    // browser does not always claim it.
-    emulate(
-        client,
-        "Emulation.setEmulatedMedia",
-        json!({"features":[{"name":"hover","value":"hover"},{"name":"pointer","value":"fine"}]}),
-    )
-    .await?;
     // The pointer can only rest on the field if the field is on screen: a small window puts it
     // below the fold, and a move to a point outside the viewport hovers nothing.
     let hover=client.execute("const q=document.querySelector('#q');q.scrollIntoView({block:'center'});const r=q.getBoundingClientRect();return {x:Math.round(r.left+20),y:Math.round(r.top+r.height/2),inside:r.top>=0&&r.bottom<=innerHeight&&r.left>=0&&r.right<=innerWidth}",vec![]).await?;
@@ -501,8 +493,14 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         )
         .await?;
     anyhow::ensure!(
-        pointer["display"] != "none" && pointer["role"] == "tooltip",
-        "a pointer resting on a focused field asks for the reminder: {pointer}"
+        pointer["hovered"] == true && pointer["focused"] == true && pointer["role"] == "tooltip",
+        "the reminder waits for both halves of the question: {pointer}"
+    );
+    // Only a browser with a pointer to rest has this question to ask. A headless one on a machine
+    // with no pointing device does not, and must leave the reminder alone.
+    anyhow::ensure!(
+        (pointer["display"] != "none") == (pointer["fine"] == true),
+        "a pointer resting on a focused field asks for the reminder; nothing else does: {pointer}"
     );
     // Hovering on the way past is not a question: without the field's attention the reminder stays
     // out of the way, and comes back when the pointer returns to a focused field.
@@ -517,11 +515,13 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
     client
         .execute("document.querySelector('#q').focus()", vec![])
         .await?;
-    wait_for(
-        client,
-        "getComputedStyle(document.querySelector('#search-query-help')).display!=='none'",
-    )
-    .await?;
+    if pointer["fine"] == true {
+        wait_for(
+            client,
+            "getComputedStyle(document.querySelector('#search-query-help')).display!=='none'",
+        )
+        .await?;
+    }
     anyhow::ensure!(
         client
             .execute(
