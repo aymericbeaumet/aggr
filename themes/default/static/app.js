@@ -1094,10 +1094,11 @@ function installFeedUpdates() {
     if (swapping || !wanted) return;
     swapping = true;
     // The build this fetch is for. A check that finishes mid-flight moves `wanted` on, and
-    // recording that newer version against these older rows would mark it applied and leave the
-    // reader stale until some third build arrived.
+    // recording that newer version against these rows would mark it applied and leave the reader
+    // stale until some third build arrived. Only the version is pinned: the page comes back as
+    // whatever is live when it is fetched, so its shortcuts are the newest ones known, not the
+    // ones that were current when this pass started.
     const target = wanted;
-    const targetEntries = entries;
     try {
       const response = await fetch(location.href, { cache: "no-store" });
       if (!response.ok) return;
@@ -1110,7 +1111,7 @@ function installFeedUpdates() {
       const current = $("[data-feed-pager]");
       if (pager && current) current.replaceWith(document.importNode(pager, true));
       // The numbered shortcuts point at the newest entries, which are the ones that just changed.
-      if (Array.isArray(targetEntries)) AGGR.entries = targetEntries;
+      if (Array.isArray(entries)) AGGR.entries = entries;
       dates.render();
       applyFeedPaging();
       markNewEntries();
