@@ -34,29 +34,19 @@ pub struct SearchFacet {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SearchFile {
+struct IndexFile {
     pub url: String,
     pub size: u64,
     pub digest: String,
 }
 
+/// What the reader needs to reach the index: its immutable base and the facet vocabulary.
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchManifest {
+pub struct SearchCatalogue {
     pub version: String,
     pub base: String,
     pub docs: usize,
-    pub total_bytes: u64,
-    pub files: Vec<SearchFile>,
     pub facets: BTreeMap<String, Vec<SearchFacet>>,
-}
-
-#[derive(Serialize)]
-struct SearchCatalog<'a> {
-    version: &'a str,
-    base: &'a str,
-    docs: usize,
-    facets: &'a BTreeMap<String, Vec<SearchFacet>>,
 }
 
 #[derive(Serialize)]
@@ -92,13 +82,22 @@ impl SearchDocument {
 
         let mut filters = BTreeMap::new();
         let day = item.date.format("%Y-%m-%d").to_string();
-        filters.insert("source".into(), vec![item.source.clone()]);
+        filters.insert(
+            "source".into(),
+            item.source_memberships
+                .iter()
+                .map(|source| source.slug.clone())
+                .collect(),
+        );
         filters.insert("type".into(), vec![item.item_type.as_str().into()]);
         filters.insert("published-day".into(), vec![day.clone()]);
         let mut facet_labels = BTreeMap::from([
             (
                 "source".into(),
-                BTreeMap::from([(item.source.clone(), item.source_name.clone())]),
+                item.source_memberships
+                    .iter()
+                    .map(|source| (source.slug.clone(), source.name.clone()))
+                    .collect(),
             ),
             ("published-day".into(), BTreeMap::from([(day.clone(), day)])),
         ]);
@@ -163,7 +162,7 @@ impl SearchDocument {
 /// synchronous, so isolate its small runtime on a thread; this also works when `aggr build` is
 /// already running inside the CLI's multithreaded Tokio runtime.
 #[cfg(test)]
-fn build(out: &Path, documents: &[SearchDocument], language: &str) -> Result<SearchManifest> {
+fn build(out: &Path, documents: &[SearchDocument], language: &str) -> Result<SearchCatalogue> {
     build_cached(out, documents, language, None)
 }
 
@@ -174,22 +173,22 @@ pub fn build_cached(
     documents: &[SearchDocument],
     language: &str,
     cache_root: Option<&Path>,
-) -> Result<SearchManifest> {
+) -> Result<SearchCatalogue> {
     let fingerprint = fingerprint(documents, language)?;
     if let Some(cache_root) = cache_root
         && restore(cache_root, &fingerprint, out)?
     {
         log::debug!("restored Pagefind index from cache");
-        return publish_manifest(out, documents);
+        return publish(out, documents);
     }
     build_uncached(out, documents, language)?;
     if let Some(cache_root) = cache_root {
         store(cache_root, &fingerprint, out)?;
     }
-    publish_manifest(out, documents)
+    publish(out, documents)
 }
 
-fn publish_manifest(out: &Path, documents: &[SearchDocument]) -> Result<SearchManifest> {
+fn publish(out: &Path, documents: &[SearchDocument]) -> Result<SearchCatalogue> {
     let mut facets: BTreeMap<String, BTreeMap<String, SearchFacet>> = BTreeMap::new();
     for document in documents {
         for (kind, values) in &document.filters {
@@ -224,7 +223,7 @@ fn publish_manifest(out: &Path, documents: &[SearchDocument]) -> Result<SearchMa
             continue;
         }
         let bytes = std::fs::read(entry.path()).context("reading search index resource")?;
-        files.push(SearchFile {
+        files.push(IndexFile {
             url: entry
                 .path()
                 .strip_prefix(&root)?
@@ -250,33 +249,19 @@ fn publish_manifest(out: &Path, documents: &[SearchDocument]) -> Result<SearchMa
     std::fs::create_dir_all(&root).context("creating versioned search directory")?;
     std::fs::rename(&staged_index, out.join(&base))
         .context("publishing immutable search resources")?;
-    for file in &mut files {
-        file.url = format!("{base}{}", file.url);
-    }
-    let manifest = SearchManifest {
+    let catalogue = SearchCatalogue {
         version,
         base,
         docs: documents.len(),
-        total_bytes: files.iter().map(|file| file.size).sum(),
-        files,
         facets,
     };
-    let json = serde_json::to_vec(&manifest)?;
-    crate::cache::write(
-        &out.join(&manifest.base).join("search-manifest.json"),
-        &json,
-    )?;
-    crate::cache::write(&out.join("search-manifest.json"), &json)?;
+    // Network-first at the site root, so a cached page always discovers the live index version
+    // rather than trusting one baked into its HTML.
     crate::cache::write(
         &out.join("search-catalog.json"),
-        &serde_json::to_vec(&SearchCatalog {
-            version: &manifest.version,
-            base: &manifest.base,
-            docs: manifest.docs,
-            facets: &manifest.facets,
-        })?,
+        &serde_json::to_vec(&catalogue)?,
     )?;
-    Ok(manifest)
+    Ok(catalogue)
 }
 
 fn build_uncached(out: &Path, documents: &[SearchDocument], language: &str) -> Result<()> {
@@ -398,6 +383,13 @@ mod tests {
             link: "https://secret.example/path?token=noise".into(),
             domain: "secret.example".into(),
             source: "blog".into(),
+            publisher_source: "blog".into(),
+            source_memberships: vec![crate::site::context::SourceMembershipCtx {
+                query_value: "blog".into(),
+                slug: "blog".into(),
+                name: "Blog".into(),
+                display: "secret.example".into(),
+            }],
             source_name: "Blog".into(),
             source_display: "secret.example".into(),
             source_title: "Blog".into(),
@@ -445,6 +437,7 @@ mod tests {
             next_article: None,
             recommended_articles: Vec::new(),
             body_html: None,
+            has_margin_notes: false,
         }
     }
 
@@ -453,6 +446,18 @@ mod tests {
             item,
             crate::content::PreparedMarkdown::new(markdown).plain_text(),
         )
+    }
+
+    #[test]
+    fn display_queries_are_readable_while_index_filters_keep_stable_source_ids() {
+        let mut item = item();
+        item.source_memberships[0].query_value = "Publisher display".into();
+        let document = SearchDocument::new(&item, "Article text");
+        assert_eq!(document.filters["source"], vec!["blog"]);
+        let opaque = hex::decode(&document.meta["aggr_display"]).unwrap();
+        let display: serde_json::Value = serde_json::from_slice(&opaque).unwrap();
+        assert_eq!(display["source_slug"], "blog");
+        assert_eq!(display["source_query"], "Publisher display");
     }
 
     #[test]
@@ -554,6 +559,13 @@ mod tests {
         item.source_title = "Publisher \"quoted\"".into();
         item.is_aggregated = true;
         item.feed_display = "feed.example/news".into();
+        item.source_memberships
+            .push(crate::site::context::SourceMembershipCtx {
+                query_value: "feed".into(),
+                slug: "feed".into(),
+                name: "The feed".into(),
+                display: "feed.example/news".into(),
+            });
         item.extra.insert("points".into(), 0.into());
         item.extra.insert("num_comments".into(), "12".into());
         item.extra.insert(
@@ -568,8 +580,9 @@ mod tests {
         for (key, value) in metadata.as_object().unwrap() {
             assert_eq!(&display[key], value, "shared field {key}");
         }
-        assert_eq!(display["points"], 0);
-        assert_eq!(display["comments"]["count"], 12);
+        // Aggregator scores are stored provenance, not something the reader is shown.
+        assert!(display.get("points").is_none());
+        assert!(display.get("comments").is_none());
         assert!(!document.meta["aggr_display"].contains("publisher"));
         assert!(!document.content.contains("comments?a="));
 
@@ -580,10 +593,10 @@ mod tests {
             .unwrap();
         assert!(rendered.contains("publisher&lt;&amp;&gt;"));
         assert!(rendered.contains("Publisher &quot;quoted&quot;"));
-        assert!(rendered.contains("<em>via feed.example/news</em>"));
-        assert!(rendered.contains("0 points</span>"));
-        assert!(rendered.contains("12 comments</a>"));
-        assert!(rendered.contains("a=1&amp;b=2"));
+        assert!(rendered.contains("</a> <em>via <a class=\"source-feed\""));
+        assert!(rendered.contains("title=\"The feed\">feed.example/news</a></em>"));
+        assert!(!rendered.contains("points"), "{rendered}");
+        assert!(!rendered.contains("comments"), "{rendered}");
         assert!(rendered.contains("matching discussion found, score 12"));
         assert!(!rendered.contains(" · "));
         assert!(!rendered.contains("rust</a>"));
@@ -712,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_manifest_versions_every_index_file_and_counts_facets_without_article_bodies() {
+    fn catalogue_versions_the_index_and_counts_facets_without_article_bodies() {
         let dir = tempfile::tempdir().unwrap();
         let stage = |loader: &str| {
             let root = dir.path().join("pagefind");
@@ -731,47 +744,35 @@ mod tests {
             document(&item(), "Secret article body"),
             document(&second, "Other article body"),
         ];
-        let manifest = publish_manifest(dir.path(), &documents).unwrap();
-        assert_eq!(manifest.docs, 2);
-        assert_eq!(manifest.total_bytes, 14);
-        assert_eq!(manifest.files.len(), 2);
-        assert_eq!(manifest.facets["source"][0].value, "blog");
-        assert_eq!(manifest.facets["source"][0].label, "Blog");
-        assert_eq!(manifest.facets["source"][0].count, 2);
-        assert_eq!(manifest.facets["type"][0].value, "article");
-        assert_eq!(manifest.facets["type"][0].count, 1);
-        assert_eq!(manifest.facets["type"][1].value, "podcast");
-        assert_eq!(manifest.facets["type"][1].count, 1);
+        let catalogue = publish(dir.path(), &documents).unwrap();
+        assert_eq!(catalogue.docs, 2);
+        assert_eq!(catalogue.facets["source"][0].value, "blog");
+        assert_eq!(catalogue.facets["source"][0].label, "Blog");
+        assert_eq!(catalogue.facets["source"][0].count, 2);
+        assert_eq!(catalogue.facets["type"][0].value, "article");
+        assert_eq!(catalogue.facets["type"][0].count, 1);
+        assert_eq!(catalogue.facets["type"][1].value, "podcast");
+        assert_eq!(catalogue.facets["type"][1].count, 1);
         assert!(
-            manifest.facets["tag"]
+            catalogue.facets["tag"]
                 .iter()
                 .any(|facet| facet.value == "rust-friends"
                     && facet.label == "Rust & friends"
                     && facet.count == 1)
         );
-        for file in &manifest.files {
-            let bytes = std::fs::read(dir.path().join(&file.url)).unwrap();
-            assert_eq!(file.digest, hex::encode(sha2::Sha256::digest(&bytes)));
-            assert_eq!(file.size, bytes.len() as u64);
-        }
-        let json = std::fs::read_to_string(dir.path().join("search-manifest.json")).unwrap();
+
+        // The catalogue is vocabulary only: it must never carry article text.
+        let json = std::fs::read_to_string(dir.path().join("search-catalog.json")).unwrap();
         assert!(!json.contains("Secret article body"));
-        let full: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let catalog: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(dir.path().join("search-catalog.json")).unwrap())
-                .unwrap();
-        assert_eq!(catalog.as_object().unwrap().len(), 4);
+        let published: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(published.as_object().unwrap().len(), 4);
         for field in ["version", "base", "docs", "facets"] {
-            assert_eq!(catalog[field], full[field], "{field}");
+            assert!(published.get(field).is_some(), "{field}");
         }
-        assert!(catalog.get("files").is_none());
-        assert!(catalog.get("totalBytes").is_none());
-        assert!(
-            dir.path()
-                .join(&manifest.base)
-                .join("search-manifest.json")
-                .is_file()
-        );
+        // The offline verification manifest went with the offline archive.
+        assert!(!dir.path().join("search-manifest.json").exists());
+
+        // The index is republished under an immutable directory, with no unversioned alias.
         assert!(!dir.path().join("pagefind/pagefind.js").exists());
         assert!(!dir.path().join("pagefind/fragment").exists());
         assert_eq!(
@@ -780,12 +781,13 @@ mod tests {
                 .count(),
             1
         );
+
         stage("loader");
-        let identical = publish_manifest(dir.path(), &documents).unwrap();
-        assert_eq!(manifest.version, identical.version);
+        let identical = publish(dir.path(), &documents).unwrap();
+        assert_eq!(catalogue.version, identical.version);
         stage("new loader");
-        let changed = publish_manifest(dir.path(), &documents).unwrap();
-        assert_ne!(manifest.version, changed.version);
+        let changed = publish(dir.path(), &documents).unwrap();
+        assert_ne!(catalogue.version, changed.version);
         assert_eq!(
             std::fs::read_to_string(dir.path().join(&changed.base).join("pagefind.js")).unwrap(),
             "new loader"

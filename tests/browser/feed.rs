@@ -63,41 +63,36 @@ async fn feed_row_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
           const row = document.querySelector('.row');
           const title = row.querySelector('[data-row-open]');
           const rank = row.querySelector('.rank');
-          const before = {row:row.getBoundingClientRect().left, title:title.getBoundingClientRect().left, rank:rank.getBoundingClientRect().left, background:getComputedStyle(row).backgroundColor};
-          const forwarded = [];
-          const capture = event => {
-            forwarded.push({type:event.type, button:event.button, ctrl:event.ctrlKey, shift:event.shiftKey});
-            event.preventDefault();
-            event.stopPropagation();
-          };
-          title.addEventListener('click', capture);
-          title.addEventListener('auxclick', capture);
-          const surface=getComputedStyle(rank).display==='none' ? row : rank;
-          surface.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,ctrlKey:true,shiftKey:true}));
-          surface.dispatchEvent(new MouseEvent('auxclick', {bubbles:true,cancelable:true,button:1}));
-          const range = document.createRange();
-          range.selectNodeContents(title);
-          getSelection().removeAllRanges();
-          getSelection().addRange(range);
-          surface.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true}));
-          getSelection().removeAllRanges();
-          title.removeEventListener('click', capture);
-          title.removeEventListener('auxclick', capture);
-          const after = {row:row.getBoundingClientRect().left, title:title.getBoundingClientRect().left, rank:rank.getBoundingClientRect().left, background:getComputedStyle(row).backgroundColor};
-          const marker = getComputedStyle(row, '::before');
-          const original = row.querySelector('.u-bookmark-of'), field = original.parentElement;
-          const linkRect = original.getBoundingClientRect(), fieldRect = field.getBoundingClientRect();
-          const separator = getComputedStyle(field, '::before');
-          const hit = document.elementFromPoint((fieldRect.left + linkRect.left) / 2, linkRect.top + linkRect.height / 2);
-          return {forwarded, before, after, marker:{width:marker.width,opacity:marker.opacity,transition:marker.transitionDuration,display:marker.display}, separator:{outsideLink:!hit.closest('a'),balanced:separator.marginLeft===separator.marginRight,content:separator.content}, article:title.href, category:row.querySelector('.category a').href};
+          const box = node => node.getBoundingClientRect();
+          const at = (x, y) => document.elementFromPoint(x, y);
+          const middle = node => { const r = box(node); return at(r.left + r.width / 2, r.top + r.height / 2); };
+          const before = {row:box(row).left, title:box(title).left, rank:box(rank).left, background:getComputedStyle(row).backgroundColor};
+          // The row is one stretched link, so empty row space belongs to the article's own anchor.
+          // Modifier and middle clicks are then the browser's, not something script has to forward.
+          const rowBox = box(row);
+          const blank = [at(rowBox.left + 2, rowBox.top + 2)];
+          if (getComputedStyle(rank).display !== 'none') blank.push(middle(rank));
+          const category = row.querySelector('.category a'), original = row.querySelector('.u-bookmark-of');
+          const reachable = [category, original].every(link => middle(link)?.closest('a') === link);
+          row.classList.add('is-selected');
+          const after = {row:box(row).left, title:box(title).left, rank:box(rank).left, background:getComputedStyle(row).backgroundColor};
+          const selected = getComputedStyle(row, '::before');
+          const marker = {width:selected.width, opacity:selected.opacity, transition:selected.transitionDuration, display:selected.display};
+          const field = original.parentElement;
+          const linkRect = box(original), fieldRect = box(field);
+          const rule = getComputedStyle(field, '::before');
+          const separator = {balanced:rule.marginLeft === rule.marginRight, content:rule.content};
+          const hit = at((fieldRect.left + linkRect.left) / 2, linkRect.top + linkRect.height / 2);
+          row.classList.remove('is-selected');
+          return {stretched:blank.every(probe => probe === title), reachable, before, after, marker, separator:{outsideLink:!hit.closest('a'), ...separator}, article:title.href, category:category.href};
         "#, vec![]).await?;
         assert_eq!(
-            row_actions["forwarded"],
-            json!([
-                {"type":"click","button":0,"ctrl":true,"shift":true},
-                {"type":"click","button":1,"ctrl":false,"shift":false}
-            ]),
-            "background activation preserves link modifiers without navigating selected text"
+            row_actions["stretched"], true,
+            "empty row space opens the article: {row_actions}"
+        );
+        assert_eq!(
+            row_actions["reachable"], true,
+            "metadata links stay above the stretched link: {row_actions}"
         );
         assert_eq!(
             row_actions["before"], row_actions["after"],
@@ -106,7 +101,7 @@ async fn feed_row_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
         assert_eq!(
             row_actions["marker"],
             json!({"width":"3px","opacity":"1","transition":"0s","display":if mobile {"none"} else {"block"}}),
-            "the instant 3px selection marker is shown only on desktop"
+            "the instant 3px selection marker is shown only on desktop: {row_actions}"
         );
         assert_eq!(
             row_actions["separator"],
@@ -125,12 +120,10 @@ async fn feed_row_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
         .await?;
         client.goto(&fixture.base).await?;
         wait_booted_with(client, "!!document.querySelector('.row .rank')").await?;
+        // The driver refuses a click the stretched link would intercept, which is the contract
+        // above; here the link itself stands in for every point of the row it covers.
         client
-            .find(Locator::Css(if mobile {
-                ".row [data-row-open]"
-            } else {
-                ".row .rank"
-            }))
+            .find(Locator::Css(".row [data-row-open]"))
             .await?
             .click()
             .await?;
@@ -158,9 +151,20 @@ async fn selected_feed_external_shortcuts() -> Result<()> {
                 wait_for(&client, "!!document.querySelector('.search-results .row.is-selected')").await?;
                 key(&client, "Escape").await?;
             }
+            // The arrows walk the list wherever j and k do, so nobody needs the vim keys to read.
+            const CURSOR: &str = "const root=document.querySelector('.search-results:not([hidden])') || document.querySelector('[data-static-feed]');return [...root.querySelectorAll('.row')].findIndex(row=>row.classList.contains('is-selected'))";
+            let start = client.execute(CURSOR, vec![]).await?;
+            key(&client, "\u{e015}").await?;
+            let stepped = client.execute(CURSOR, vec![]).await?;
+            key(&client, "\u{e013}").await?;
+            let back = client.execute(CURSOR, vec![]).await?;
+            anyhow::ensure!(
+                stepped.as_i64() == start.as_i64().map(|index| index + 1) && back == start,
+                "ArrowDown and ArrowUp walk the list like j and k: {start} -> {stepped} -> {back}"
+            );
             key(&client, "j").await?;
             let targets = client.execute(r#"
-              const root=document.querySelector('.search-results') || document.querySelector('[data-static-feed]');
+              const root=document.querySelector('.search-results:not([hidden])') || document.querySelector('[data-static-feed]');
               const row=root.querySelector('.row.is-selected'), original=row.querySelector('.u-bookmark-of').href;
               const networks=window.AGGR.discussions.filter(network=>network.shortcut);
               window.__opened=[];window.open=url=>{window.__opened.push(url);return {}};
@@ -202,10 +206,11 @@ async fn feed_boundary_shortcuts_select_rows_and_article_boundaries_scroll() -> 
             }
             for (keys, edge) in [("G", "last"), ("gg", "first")] {
                 key(&client, keys).await?;
-                let state = client.execute("const root=document.querySelector('.search-results') || document.querySelector('[data-static-feed]');const rows=[...root.querySelectorAll('.row:not([hidden])')];const expected=arguments[0]==='first'?rows[0]:rows.at(-1);return {count:rows.length,selected:expected.classList.contains('is-selected'),focused:expected.querySelector('[data-row-open]')===document.activeElement}", vec![json!(edge)]).await?;
+                let state = client.execute("const root=document.querySelector('.search-results:not([hidden])') || document.querySelector('[data-static-feed]');const rows=[...root.querySelectorAll('.row:not([hidden])')];const expected=arguments[0]==='first'?rows[0]:rows.at(-1);const box=expected.getBoundingClientRect();const header=document.querySelector('.top').getBoundingClientRect().bottom;const tabs=document.querySelector('.mobile-tabs')?.getBoundingClientRect();const floor=tabs&&tabs.height>0?tabs.top:innerHeight;return {count:rows.length,selected:expected.classList.contains('is-selected'),focused:expected.querySelector('[data-row-open]')===document.activeElement,visible:box.top>=header-1&&box.bottom<=floor+1}", vec![json!(edge)]).await?;
                 anyhow::ensure!(state["count"].as_u64().unwrap_or(0)>1 && state["selected"]==true && state["focused"]==true, "{keys} must select and focus the {edge} visible feed row (search={search}): {state}");
-                let boundary = if edge == "first" { "scrollY === 0" } else { "Math.abs(document.documentElement.scrollHeight - innerHeight - scrollY) < 2" };
-                anyhow::ensure!(client.execute(&format!("return {boundary}"), vec![]).await? == true, "{keys} must also reach the {edge} scroll boundary (search={search})");
+                // The cursor is the row, not the scroll offset: the {edge} row has to end up on
+                // screen below the sticky header, whatever else the page keeps above or below it.
+                anyhow::ensure!(state["visible"]==true, "{keys} must bring the {edge} row into view (search={search}): {state}");
             }
         }
         client.goto(&format!("{}items/example/2026-09-01-story-45/", fixture.base)).await?;
@@ -256,5 +261,45 @@ async fn shift_modifier_highlights_hovered_links() -> Result<()> {
         Ok(())
     }.await;
     report_failure(&client, "shift-hover", &result).await;
+    finish(client, result).await
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome WebDriver"]
+async fn a_new_deployment_reaches_a_feed_that_is_already_open() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fixture = Fixture::with_pwa(false)?;
+    let client = browser_client().await?;
+    let result = async {
+        client.goto(&fixture.base).await?;
+        wait_booted_with(&client, "document.querySelectorAll('[data-row-open]').length === 3").await?;
+        let before = client
+            .execute("return document.querySelector('[data-row-open]').href", vec![])
+            .await?;
+        fixture.deploy_content_update(7)?;
+        // Coming back to the window is when a reader expects to be caught up, so that is when the
+        // page asks the build what it has published since.
+        client
+            .execute("window.dispatchEvent(new Event('focus'))", vec![])
+            .await?;
+        wait_for(
+            &client,
+            "document.querySelector('[data-row-open]')?.textContent.includes('Freshly delivered article 7')",
+        )
+        .await?;
+        let swapped = client.execute(r#"
+          const rows=[...document.querySelectorAll('.row')];
+          return {rows:rows.length, selected:rows.filter(row=>row.classList.contains('is-selected')).length,
+            dated:!!document.querySelector('.row time[datetime]')?.textContent.trim(),
+            previous:rows.some(row=>row.querySelector('[data-row-open]')?.href===arguments[0])};
+        "#, vec![before]).await?;
+        anyhow::ensure!(
+            swapped["selected"] == 1 && swapped["dated"] == true && swapped["previous"] == true,
+            "the swapped list keeps one cursor, its dates, and the articles that were already there: {swapped}"
+        );
+        Ok(())
+    }
+    .await;
+    report_failure(&client, "feed-updates", &result).await;
     finish(client, result).await
 }

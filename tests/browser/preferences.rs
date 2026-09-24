@@ -24,7 +24,7 @@ async fn preference_controls_transfer_and_import() -> Result<()> {
 async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
     phone_session(client).await?;
     // The bootstrap's validation rules are covered by web/src/preferences/bootstrap.test.ts; the
-    // browser confirms the inline script runs before paint: the stored theme is on <html> while the
+    // browser confirms the shared script runs before paint: the stored theme is on <html> while the
     // head is still parsing and the app has not loaded, and an invalid stored value has already
     // fallen back to its default.
     client.goto(&fixture.base).await?;
@@ -46,7 +46,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
               theme: document.documentElement.dataset.theme,
               density: document.documentElement.dataset.density,
               headParsing: document.body === null && document.readyState === 'loading',
-              appLoaded: typeof window.swup !== 'undefined'
+              appLoaded: document.documentElement.dataset.aggrReady === 'true'
             };
           }).observe(document, {attributes: true, subtree: true});
         "#}),
@@ -59,7 +59,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
             .execute("return window.__aggrBootstrap || null", vec![])
             .await?,
         json!({"theme":"dark","density":"compact","headParsing":true,"appLoaded":false}),
-        "the inline preferences script must apply stored values before paint and fall back for invalid ones"
+        "the shared preferences script must apply stored values before paint and fall back for invalid ones"
     );
     client
         .execute(
@@ -81,7 +81,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
         .await?;
     wait_for(
         client,
-        "document.querySelectorAll('[data-preference]').length === 18",
+        "document.querySelectorAll('[data-preference]').length === 17",
     )
     .await?;
     let preference_controls = client
@@ -102,7 +102,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     assert_eq!(
         preference_controls["ids"],
         json!([
-            "theme-mode",
+            "theme",
             "motion",
             "font-family",
             "text-size",
@@ -118,19 +118,12 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
             "feed-page-size",
             "date-format",
             "scroll-amount",
-            "single-key-shortcuts",
-            "offline-items"
+            "single-key-shortcuts"
         ])
     );
     assert_eq!(
         preference_controls["groups"],
-        json!([
-            "Appearance",
-            "Reading",
-            "Feed",
-            "Keyboard",
-            "Offline reading"
-        ])
+        json!(["Appearance", "Reading", "Feed", "Keyboard"])
     );
     assert_eq!(
         preference_controls["defaults"]["single-key-shortcuts"],
@@ -139,7 +132,8 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     assert_eq!(preference_controls["defaults"]["feed-page-size"], "50");
     assert_eq!(preference_controls["install"], false);
     assert_eq!(preference_controls["config"], false);
-    assert_eq!(preference_controls["shortcutLink"], "A");
+    // Opening a dialog is a button's job, not a link's: there is no page to go to.
+    assert_eq!(preference_controls["shortcutLink"], "BUTTON");
     client
         .execute(
             "document.querySelector('#show-shortcuts').scrollIntoView({block:'center'})",
@@ -166,12 +160,52 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
             .await?,
         json!({"checked":true,"decoration":"underline"})
     );
+    // Every alternative for one action reads as one mapping: the key column is sized to hold the
+    // widest of them, so none of them is folded onto a second line. A mapping that differs by
+    // platform names only the modifier this one has.
+    let mappings = client
+        .execute(
+            r#"
+      const keys = [...document.querySelectorAll('#shortcut-help .shortcut-list dt')];
+      // Every alternative of one mapping starts on the same line as the first.
+      const wrapped = keys.filter(key => {
+        // Platform-specific mappings ship both modifiers and hide one, and a hidden key has no
+        // box to compare against.
+        const parts = [...key.querySelectorAll('kbd, small')].filter(part => part.getClientRects().length > 0);
+        if (parts.length < 2) return false;
+        const boxes = parts.map(part => part.getBoundingClientRect());
+        return boxes.some(box => box.top >= boxes[0].bottom - 1);
+      }).map(key => key.textContent.trim());
+      const search = keys.find(key => key.textContent.includes('/'));
+      const shown = [...document.querySelectorAll('#shortcut-help [data-platform-key]')]
+        .filter(pair => pair.getClientRects().length > 0)
+        .map(pair => pair.dataset.platformKey);
+      return {wrapped, search: !!search, shown, platform: document.documentElement.dataset.platform};
+    "#,
+            vec![],
+        )
+        .await?;
+    assert_eq!(
+        mappings["wrapped"],
+        json!([]),
+        "shortcut alternatives share one line: {mappings}"
+    );
+    assert_eq!(mappings["search"], true, "the help lists / for search");
+    assert_eq!(
+        mappings["shown"].as_array().map(Vec::len),
+        Some(1),
+        "exactly one modifier is offered for a platform-specific mapping: {mappings}"
+    );
+    assert_eq!(
+        mappings["shown"][0], mappings["platform"],
+        "the modifier shown is the one this platform presses: {mappings}"
+    );
     key(client, "Escape").await?;
     let applied_preferences = client
         .execute(
             r#"
       const values = {
-        'theme-mode':'dark', motion:'off', 'text-size':'large', 'reading-width':'wide',
+        theme:'dark', motion:'off', 'text-size':'large', 'reading-width':'wide',
         density:'comfortable', thumbnails:'hide', 'date-format':'iso'
       };
       Object.keys(values).forEach(function (id) {
@@ -250,7 +284,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
         .await?;
     wait_for(
         client,
-        "document.querySelectorAll('[data-preference]').length === 18",
+        "document.querySelectorAll('[data-preference]').length === 17",
     )
     .await?;
     client
@@ -295,17 +329,17 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     );
 
     let ignored_transfer = client.execute(r#"
-      const url=new URL('preferences/',document.baseURI);
+      const url=new URL('preferences/',new URL(window.AGGR.base,location.href));
       url.searchParams.set('aggr-state',btoa(JSON.stringify({version:1,preferences:{theme:'light'}})));
       return url.href;
     "#,vec![]).await?.as_str().context("query-string transfer URL")?.to_owned();
     client.goto(&ignored_transfer).await?;
     wait_for(
         client,
-        "document.querySelector('#theme-mode') && document.querySelector('#preferences-import')",
+        "document.querySelector('#theme') && document.querySelector('#preferences-import')",
     )
     .await?;
-    anyhow::ensure!(client.execute("return document.documentElement.dataset.theme==='dark' && document.querySelector('#theme-mode').value==='dark' && document.querySelector('#preferences-import').hidden",vec![]).await?==true,"query-string preference transfers are ignored without opening a review or changing settings");
+    anyhow::ensure!(client.execute("return document.documentElement.dataset.theme==='dark' && document.querySelector('#theme').value==='dark' && document.querySelector('#preferences-import').hidden",vec![]).await?==true,"query-string preference transfers are ignored without opening a review or changing settings");
 
     let valid_preferences = fixture.directory.path().join("valid-preferences.json");
     let invalid_preferences = fixture.directory.path().join("invalid-preferences.json");
@@ -358,7 +392,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     client.goto(&copied_link).await?;
     wait_for(
         client,
-        "!document.querySelector('#preferences-import').hidden && document.querySelectorAll('#preferences-import-summary li').length === 18",
+        "!document.querySelector('#preferences-import').hidden && document.querySelectorAll('#preferences-import-summary li').length === 17",
     )
     .await?;
     assert_eq!(

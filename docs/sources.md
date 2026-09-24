@@ -47,11 +47,60 @@ All forms reduce to the same source model before validation and discovery, using
 global defaults, `${ENV}` expansion, collection expansion, and deduplication. Sources are expanded
 in declaration order, with the first declaration of an equivalent endpoint winning.
 
+## Source names in URLs
+
+Each source gets a directory under `sources/`, named after its `slug`. Set `slug` to choose it;
+otherwise it comes from the source's `name`, and failing that from its canonical name: the
+publisher's domain, since everything under one domain is normally the same publisher.
+
+```toml
+[[sources]]
+url = "https://www.example.com/blog/feed.xml"   # -> sources/example-com/
+```
+
+Some hosts carry thousands of unrelated publishers, so there the account's path is part of who is
+publishing and stays in the name. That list lives in `src/platform.rs` and covers YouTube, X,
+GitHub, GitLab, Codeberg, Reddit, Medium, Bluesky, Twitch, Vimeo and SoundCloud, the podcast
+catalogues (Spotify, Apple Podcasts, Pocket Casts, Overcast, Castbox), and the `@handle` convention
+on any host. Each platform is named by its own domain, so a short, mobile or regional alias resolves
+to it: `youtu.be` and `m.youtube.com` are `youtube.com`, `open.spotify.com` is `spotify.com`, and
+`pca.st` is `pocketcasts.com`.
+
+```toml
+[[sources]]
+url = "https://www.youtube.com/@SomeChannel"    # -> sources/youtube-com-somechannel/
+url = "https://open.spotify.com/show/abc123"    # -> sources/spotify-com-show-abc123/
+```
+
+A catalogue names its shows with identifiers nobody reads, so the reader sees the show's own title
+in that slot (`spotify.com/underscore`) while the identity underneath stays the real path.
+
+Two feeds from one publisher arrive at the same name, so the path that differs is added to tell
+them apart (`example-com` and `example-com-notes`). Set `slug` yourself when you want a specific
+name; the same slug written twice is an error rather than something aggr renames for you.
+
+The same canonical name labels each item's publisher in the reader, read from the article's own URL
+rather than from whichever subscription carried it: a repository release reads
+`github.com/torvalds` whether you follow the repository or found it on Hacker News. A YouTube watch
+URL is the one link that cannot carry its account, so aggr takes the channel from the page it
+already downloads and keeps it with the item; items archived before that read `youtube.com` until
+they are fetched again.
+
 ## How a URL is resolved
 
 aggr tries the URL as a feed, follows RSS/Atom/JSON Feed discovery metadata, probes the
 conventional endpoints under that section (`feed.xml`, `rss.xml`, `atom.xml`, `index.xml`, `feed`,
-`rss`), and finally falls back to conservative article discovery on the page itself. A section URL
+`rss`), the nested shapes some sites use instead (`feed/rss`, `feed/atom`, `rss/all.rss`), and
+finally falls back to conservative article discovery on the page itself. A page that redirects to
+another origin leaves the subscribed origin's endpoints in the probe set: a status page moving to a
+status app does not move the feed. At an origin root that has answered nothing, the sections a site
+keeps its writing under (`/blog`, `/posts`, `/news`) are the last thing tried.
+
+A listing that is only the page it came from is not accepted as a listing. A single-page app
+answers every path with its own shell, so card extraction reports one "article" that is the page
+itself; before believing that, aggr probes the conventional endpoints and prefers any feed that
+parses. `aggr check` says which it was, so a feed that quietly became a shell reads as
+`2 item(s) (extracted)` rather than as health. A section URL
 is treated as a directory, so `https://example.com/blog` and `https://example.com/blog/` probe the
 same endpoints. A discovered feed that publishes no entries is skipped in favour of the listing.
 The endpoint that answered is remembered, so the probe happens once per source.
@@ -121,21 +170,47 @@ thread; unavailable continuations are logged. See [public threads](interoperabil
 
 ## Article images
 
-Article-image archiving is on by default. The explicit form, including a per-source opt-out, is:
+`images` chooses what happens to an article's pictures, globally and per source:
+
+| Value | What is archived |
+| --- | --- |
+| `"remote"` | Nothing. The reader loads the publisher's URL, which is not guaranteed offline. |
+| `"original"` | The publisher's exact bytes, plus lossless responsive renditions. The default. |
+| `"compact"` | One bounded JPEG master and no renditions. |
+
+`true` and `false` remain accepted spellings of `"original"` and `"remote"`.
 
 ```toml
 [fetch]
-images = true
+images = "original"
 
 [[sources]]
 url = "https://blog.rust-lang.org"
 
 [[sources]]
 url = "https://example.com/feed.xml"
-images = false # leave this source's body images at their publisher URLs
+images = "remote" # leave this source's body images at their publisher URLs
+
+[[sources]]
+url = "https://heavy.example/feed.xml"
+images = { mode = "compact", quality = 60, max_axis = 1280 }
 ```
 
-For every accepted JPEG, PNG, GIF, or WebP image, aggr keeps the exact publisher response as the
+A compact master is resized to fit `max_axis` with the same high-quality filter the renditions
+use, then encoded as JPEG at `quality`; transparency is kept as PNG rather than flattened onto a
+background, and an animation stays an animation. `quality` accepts 1-100 and `max_axis` accepts
+320-8192, defaulting to 72 and 1600 —
+the same bounds a release build applies to older articles' published media, so a compact archive
+already holds the image the site would publish. The reduced copy is kept only when it is actually
+smaller than the response it replaces.
+
+Compaction is what makes an archive small, because images are nearly all of its bytes. It is also
+the one image setting that cannot be undone: the publisher's exact bytes are not kept anywhere, so
+a later `"original"` run cannot restore what a compact run stored. Changing any of these values
+affects newly archived images only; images already in the archive are left exactly as they are.
+
+Under `"original"`, for every accepted JPEG, PNG, GIF, or WebP image, aggr keeps the exact
+publisher response as the
 master. When the bounded media budget permits it, safe static 8-bit images also get responsive
 320, 640, 960, 1280, and 1600-pixel renditions where useful, plus a full-width rendition. These
 are resized once with a high-quality filter, encoded as lossless WebP, then decoded and
@@ -146,7 +221,22 @@ master. Masters above 32 megapixels skip the full-width encode and pair bounded 
 with the original as the largest candidate; an existing WebP master is not duplicated.
 
 Animated GIF/WebP, images with an ICC color profile, and high-bit-depth images keep only their
-exact master. SVG diagrams become passive local PNGs with a bundled font; scripts, external images,
+exact master, with no renditions.
+
+Under `"compact"`, an animated GIF wider or taller than `max_axis` is resized and re-encoded as a
+GIF, keeping its frames, their timing, and the loop the original asked for. An animation that
+already fits usually keeps its exact bytes: publishers' GIFs are frame-differenced, and
+re-encoding composites every frame again, which tends to cost more than it saves. The comparison
+is made per image and the smaller result wins, so compaction never grows an animation. Animations
+longer than 400 frames are left alone rather than spend a re-encode on every frame.
+
+Expect little from `"compact"` on a long animation that is heavy in bytes but modest in
+dimensions; what shrinks it is a smaller `max_axis`, not a lower `quality`, which JPEG uses and
+GIF does not. The images a compact archive cannot reduce at all, and therefore still stores as
+publisher bytes, are colour-managed and high-bit-depth originals, animated WebP and APNG, which
+aggr can decode but not write, and AVIF, which it archives without decoding.
+
+SVG diagrams become passive local PNGs with a bundled font; scripts, external images,
 and embedded resources are ignored, and original SVG markup is never published. Other unsupported or
 invalid media also keeps its safe publisher URL. Image work is failure isolated: a timeout,
 decode error, size rejection, or failed download never prevents the article from being saved.
@@ -173,9 +263,10 @@ guaranteed offline.
 
 Enabling image archiving also fills missing media in retained captures. Exact raster masters and
 responsive renditions increase the append-only data branch and Git history, and normal retention
-cannot reclaim historical objects. Before publishing an archive, make sure storing and
+cannot reclaim historical objects; `"compact"` bounds how fast that grows, but cannot shrink what
+earlier runs already committed. Before publishing an archive, make sure storing and
 redistributing a source's images is compatible with its terms and your local law. Use
-`images = false` for sources whose media you should not retain.
+`images = "remote"` for sources whose media you should not retain.
 
 ## Previews
 

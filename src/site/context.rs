@@ -23,6 +23,8 @@ pub struct SiteCtx {
     pub base_path: String,
     /// Absolute URL of the site root when known (feed and canonical links).
     pub base_url: Option<String>,
+    /// Search-engine indexing is enabled only for explicitly opted-in release builds.
+    pub indexing: bool,
     pub repository: Option<String>,
     pub data_branch: String,
     /// Canonical identity shared by every generated aggr instance.
@@ -33,6 +35,8 @@ pub struct SiteCtx {
     pub pwa: bool,
     /// Typed initial browser settings, keyed with the same names as preference exports.
     pub preferences: serde_json::Value,
+    /// Validation rules and grouped form fields, both derived from the typed settings table.
+    pub preference_schema: crate::config::preferences::PreferenceSchema,
     /// Browser-facing GitHub page for the source config when the build commit is known.
     pub config_page_url: Option<String>,
     /// Raw source config URL used by machine-readable discovery metadata.
@@ -187,6 +191,10 @@ pub struct ItemCtx {
     pub link: String,
     pub domain: String,
     pub source: String,
+    /// Canonical publisher collection, independent of the stored capture's source.
+    pub publisher_source: String,
+    /// Publisher and every feed that supplied this canonical article, once per source.
+    pub source_memberships: Vec<SourceMembershipCtx>,
     pub source_name: String,
     /// Publisher host, retaining the channel/profile path on shared platforms.
     pub source_display: String,
@@ -253,6 +261,8 @@ pub struct ItemCtx {
     /// Rendered Markdown; only filled on the item's own page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_html: Option<String>,
+    /// Whether `body_html` carries footnote copies for the wide-viewport margin column.
+    pub has_margin_notes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -349,6 +359,8 @@ const MIN_LEAD_WIDTH: u32 = 640;
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceCtx {
     pub slug: String,
+    /// Canonical hostname used in generated source queries, identical to the public slug.
+    pub query_value: String,
     pub name: String,
     pub url: Option<String>,
     /// Feed endpoint resolved by the fetch pipeline, when a public one is known.
@@ -363,6 +375,18 @@ pub struct SourceCtx {
     pub error: Option<SourceErrorCtx>,
     /// Site path of the per-source page.
     pub page: String,
+    /// Whether the source directory names this source. Every source has a page and a facet; an
+    /// account discovered on a shared host belongs to whoever linked it, not to the reader's
+    /// list of what they follow.
+    pub listed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceMembershipCtx {
+    pub slug: String,
+    pub query_value: String,
+    pub name: String,
+    pub display: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -433,8 +457,10 @@ pub fn domain_of(link: &str) -> String {
     url::Url::parse(link)
         .ok()
         .and_then(|url| {
-            url.host_str()
-                .map(|host| host.trim_start_matches("www.").to_string())
+            url.host_str().map(|host| {
+                let host = host.trim_end_matches('.');
+                host.strip_prefix("www.").unwrap_or(host).to_string()
+            })
         })
         .unwrap_or_default()
 }
@@ -460,19 +486,11 @@ fn publisher_url(link: &str) -> String {
         .unwrap_or_default()
 }
 
-fn source_host(url: &url::Url) -> &str {
-    match url
-        .host_str()
-        .unwrap_or_default()
-        .trim_start_matches("www.")
-    {
-        "youtu.be" | "m.youtube.com" => "youtube.com",
-        "twitter.com" => "x.com",
-        host => host,
-    }
+pub(super) fn source_host(url: &url::Url) -> &str {
+    crate::platform::host(url).unwrap_or_default()
 }
 
-fn profile_url(value: &str) -> Option<url::Url> {
+pub(super) fn profile_url(value: &str) -> Option<url::Url> {
     let mut url = url::Url::parse(value).ok()?;
     if !matches!(url.scheme(), "http" | "https") {
         return None;
@@ -480,13 +498,7 @@ fn profile_url(value: &str) -> Option<url::Url> {
     let mut path = url.path().trim_end_matches('/').to_string();
     if source_host(&url) == "youtube.com" {
         if path == "/feeds/videos.xml" {
-            path = url
-                .query_pairs()
-                .find_map(|(key, value)| match key.as_ref() {
-                    "channel_id" => Some(format!("/channel/{value}")),
-                    "user" => Some(format!("/user/{value}")),
-                    _ => None,
-                })?;
+            path = crate::platform::youtube_channel(&url)?;
         } else if !(path.starts_with("/@")
             || path.starts_with("/channel/")
             || path.starts_with("/user/")
@@ -524,27 +536,27 @@ fn profile_url(value: &str) -> Option<url::Url> {
     Some(url)
 }
 
+/// How a source reads: its domain, plus the account path only where one host is shared between
+/// publishers. See [`crate::platform`] for which hosts those are.
 fn url_label(url: &url::Url) -> String {
-    format!("{}{}", source_host(url), url.path().trim_end_matches('/'))
+    crate::platform::canonical_name(url).unwrap_or_else(|| source_host(url).to_string())
 }
 
+/// A catalogue names its publishers with identifiers nobody reads, so show the publisher's own
+/// title in that slot instead. This is a label, not a destination: links keep their real URL.
 fn source_profile_label(url: &url::Url, title: &str) -> String {
-    let host = source_host(url);
-    let path = url.path();
-    let provider = match host {
-        "open.spotify.com" | "spotify.com" if path.starts_with("/show/") => "spotify.com",
-        "podcasts.apple.com" if path.contains("/podcast/") => "podcasts.apple.com",
-        "pca.st" | "pocketcasts.com" | "play.pocketcasts.com" => "pocketcasts.com",
-        "overcast.fm" if path.starts_with("/itunes") => "overcast.fm",
-        "castbox.fm" if path.contains("/channel/") => "castbox.fm",
-        _ => return url_label(url),
-    };
-    let name = slug::slugify(title.split(['|', ':']).next().unwrap_or(title));
-    if name.is_empty() || title.contains("://") || title == host {
+    if !crate::platform::opaque(url) {
         return url_label(url);
     }
-    // This is a publisher label, not a synthesized destination: links keep their real URL.
-    format!("{provider}/{name}")
+    let name = slug::slugify(title.split(['|', ':']).next().unwrap_or(title));
+    if name.is_empty() || title.contains("://") || title == source_host(url) {
+        return url_label(url);
+    }
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    format!("{}{port}/{name}", source_host(url))
 }
 
 pub fn profile_label(value: &str) -> String {
@@ -554,11 +566,32 @@ pub fn profile_label(value: &str) -> String {
         .unwrap_or_else(|| domain_of(value))
 }
 
+/// The profile of the account an article names for itself: the one in its own path, or the one
+/// its page named at capture when the path cannot carry it (a YouTube watch URL). Catalogues are
+/// excluded because their paths are entry identifiers, not accounts.
+fn article_profile(article: Option<&url::Url>, captured: Option<&str>) -> Option<url::Url> {
+    let article = article?;
+    let named = captured
+        .and_then(|value| url::Url::parse(value).ok())
+        .filter(|profile| source_host(profile) == source_host(article))
+        .unwrap_or_else(|| article.clone());
+    if crate::platform::opaque(&named) {
+        return None;
+    }
+    let account = crate::platform::account_path(&named)?;
+    let mut profile = named;
+    profile.set_path(&account);
+    profile.set_query(None);
+    profile.set_fragment(None);
+    Some(profile)
+}
+
 fn source_identity(
     article: &str,
     title: &str,
     configured: Option<&str>,
     website: Option<&str>,
+    captured: Option<&str>,
 ) -> SourceIdentity {
     let title = super::display::title(title, &domain_of(configured.or(website).unwrap_or(article)));
     let configured_profile = configured.and_then(profile_url);
@@ -577,7 +610,13 @@ fn source_identity(
                 .is_some_and(|article| source_host(article) == source_host(profile))
         });
     let is_aggregated = profile.is_some() && matching_profile.is_none();
-    let display = matching_profile
+    // The publisher belongs to the article, so an account it names reads the same however the
+    // article was found. Only where nothing names one does the subscription that carried it, and
+    // then its host, stand in.
+    let publisher = article_profile(article_url.as_ref(), captured);
+    let display = publisher
+        .as_ref()
+        .or(matching_profile)
         .map(|url| source_profile_label(url, &title))
         .unwrap_or_else(|| domain_of(article));
     SourceIdentity {
@@ -586,7 +625,9 @@ fn source_identity(
         } else {
             title
         },
-        url: matching_profile
+        url: publisher
+            .as_ref()
+            .or(matching_profile)
             .map(ToString::to_string)
             .unwrap_or_else(|| publisher_url(article)),
         display,
@@ -615,6 +656,9 @@ impl ItemCtx {
             &self.source_name,
             source.url.as_deref(),
             source.site_url.as_deref(),
+            self.extra
+                .get(crate::platform::PUBLISHER_KEY)
+                .and_then(serde_yaml_ng::Value::as_str),
         );
         self.source_display = identity.display;
         self.source_title = identity.title;
@@ -636,6 +680,13 @@ impl ItemCtx {
             link: item.front.link.clone(),
             domain: domain_of(&item.front.link),
             source: item.front.source.clone(),
+            publisher_source: item.front.source.clone(),
+            source_memberships: vec![SourceMembershipCtx {
+                query_value: item.front.source.clone(),
+                slug: item.front.source.clone(),
+                name: source_name.clone(),
+                display: domain_of(&item.front.link),
+            }],
             source_name: source_name.clone(),
             source_display: domain_of(&item.front.link),
             source_title: source_name.clone(),
@@ -702,6 +753,7 @@ impl ItemCtx {
             next_article: None,
             recommended_articles: Vec::new(),
             body_html: None,
+            has_margin_notes: false,
         };
         context.metadata = super::display::Metadata::from(&context);
         context
@@ -974,12 +1026,14 @@ mod tests {
             og_locale: "en".into(),
             base_path: crate::site::base_path(base_url),
             base_url: base_url.map(str::to_string),
+            indexing: false,
             repository: None,
             data_branch: "aggr".into(),
             network_url: "",
             instance_type_url: "",
             pwa: false,
             preferences: serde_json::json!({}),
+            preference_schema: crate::config::preferences::ReaderPreferences::default().schema(),
             config_page_url: None,
             config_url: None,
             has_categories: false,
@@ -1191,6 +1245,7 @@ mod tests {
                 "The channel title",
                 Some(configured),
                 Some(website),
+                None,
             );
             assert_eq!(identity.display, expected, "{configured}");
             assert_eq!(identity.title, "The channel title");
@@ -1201,17 +1256,78 @@ mod tests {
     }
 
     #[test]
+    fn a_platform_article_names_its_own_account_whoever_linked_it() {
+        // The same article read from its publisher's own feed and from an aggregator.
+        for (configured, website) in [
+            (
+                Some("https://github.com/torvalds/linux/releases.atom"),
+                None,
+            ),
+            (
+                Some("https://hnrss.org/frontpage"),
+                Some("https://news.ycombinator.com/"),
+            ),
+        ] {
+            let identity = source_identity(
+                "https://github.com/torvalds/linux/releases/tag/v7.0",
+                "Whatever the feed calls itself",
+                configured,
+                website,
+                None,
+            );
+            assert_eq!(identity.display, "github.com/torvalds", "{configured:?}");
+            assert_eq!(
+                identity.url, "https://github.com/torvalds",
+                "{configured:?}"
+            );
+        }
+        // A watch URL cannot carry its channel, so the account its page named stands in.
+        let captured = source_identity(
+            "https://www.youtube.com/watch?v=abc",
+            "Hacker News: Front Page",
+            Some("https://hnrss.org/frontpage"),
+            Some("https://news.ycombinator.com/"),
+            Some("https://www.youtube.com/@veritasium"),
+        );
+        assert_eq!(captured.display, "youtube.com/@veritasium");
+        assert_eq!(captured.url, "https://www.youtube.com/@veritasium");
+        assert!(captured.is_aggregated);
+        assert_eq!(captured.feed_display, "hnrss.org");
+        // Captured metadata is untrusted: an account on another host is another publisher.
+        let foreign = source_identity(
+            "https://www.youtube.com/watch?v=abc",
+            "Hacker News: Front Page",
+            Some("https://hnrss.org/frontpage"),
+            None,
+            Some("https://evil.example/@someone"),
+        );
+        assert_eq!(foreign.display, "youtube.com");
+        // A catalogue path is an entry identifier, so the show title still names the publisher.
+        let podcast = source_identity(
+            "https://open.spotify.com/episode/abc",
+            "Underscore_",
+            Some("https://open.spotify.com/show/1sz1"),
+            None,
+            None,
+        );
+        assert_eq!(podcast.display, "spotify.com/underscore");
+    }
+
+    #[test]
     fn aggregators_preserve_the_article_publisher_and_feed_provenance() {
         let identity = source_identity(
             "https://www.edge.org/conversation/impedance-matching",
             "Hacker News: Front Page",
             Some("https://hnrss.org/frontpage"),
             Some("https://news.ycombinator.com/"),
+            None,
         );
         assert_eq!(identity.display, "edge.org");
         assert_eq!(identity.url, "https://www.edge.org/");
         assert_eq!(identity.title, "edge.org · via Hacker News: Front Page");
-        assert_eq!(identity.feed_display, "hnrss.org/frontpage");
+        // hnrss.org is one publisher's service, not a platform, so its feed path is transport
+        // detail; the configured name is what tells its feeds apart.
+        assert_eq!(identity.feed_display, "hnrss.org");
         assert!(identity.is_aggregated);
     }
 
@@ -1237,7 +1353,7 @@ mod tests {
                 "pocketcasts.com/a-show",
             ),
         ] {
-            let identity = source_identity(article, title, Some(configured), None);
+            let identity = source_identity(article, title, Some(configured), None, None);
             assert_eq!(identity.display, expected);
             assert_eq!(identity.feed_display, expected);
             assert_eq!(identity.url, configured);
@@ -1248,9 +1364,44 @@ mod tests {
             "Underscore_",
             Some("https://open.spotify.com/show/abc123"),
             Some("https://publisher.example/"),
+            None,
         );
         assert_eq!(identity.display, "publisher.example");
         assert_eq!(identity.feed_display, "spotify.com/underscore");
+    }
+
+    #[test]
+    fn source_labels_preserve_nondefault_ports_without_changing_configured_titles() {
+        for (url, expected) in [
+            ("http://localhost:8080/feed", "localhost:8080"),
+            ("http://localhost:9090/feed", "localhost:9090"),
+            (
+                "https://example.test:8443/@alice/rss",
+                "example.test:8443/@alice",
+            ),
+            ("http://[::1]:8080/feed", "[::1]:8080"),
+            ("https://example.test:443/feed", "example.test"),
+        ] {
+            assert_eq!(profile_label(url), expected, "{url}");
+        }
+        let identity = source_identity(
+            "http://localhost:8080/article",
+            "My configured publisher",
+            Some("http://localhost:8080/feed"),
+            None,
+            None,
+        );
+        assert_eq!(identity.title, "My configured publisher");
+        assert_eq!(identity.display, "localhost:8080");
+        let podcast = source_identity(
+            "https://open.spotify.com:8443/episode/123",
+            "My Podcast",
+            Some("https://open.spotify.com:8443/show/abc"),
+            None,
+            None,
+        );
+        assert_eq!(podcast.title, "My Podcast");
+        assert_eq!(podcast.display, "spotify.com:8443/my-podcast");
     }
 
     #[test]
@@ -1260,6 +1411,7 @@ mod tests {
             "Alice",
             Some("https://example.social/api/feed?user=alice"),
             Some("https://example.social/@alice"),
+            None,
         );
         assert_eq!(identity.display, "example.social/@alice");
         assert_eq!(identity.url, "https://example.social/@alice");
@@ -1306,6 +1458,7 @@ mod tests {
         assert_eq!(context.feed_display, "Example");
         assert_eq!(context.language, None, "unknown until the source says");
         context.set_source(&SourceCtx {
+            query_value: "example".into(),
             slug: "example".into(),
             name: "☀ Daily News 🗞️".into(),
             url: Some("https://news.example/feed.xml".into()),
@@ -1318,6 +1471,7 @@ mod tests {
             latest: Some(now),
             error: None,
             page: "sources/example/".into(),
+            listed: true,
         });
         assert_eq!(context.source_name, "Daily News");
         assert_eq!(context.source_title, "example.com · via Daily News");

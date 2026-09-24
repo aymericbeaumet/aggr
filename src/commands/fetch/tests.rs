@@ -21,7 +21,7 @@ pub(crate) fn source() -> Source {
         html: true,
         content: ContentMode::Heavy,
         previews: false,
-        images: true,
+        images: crate::config::ImagePolicy::Original,
         engine: crate::config::Engine::Feed {
             url: Url::parse("https://blog.example/feed").unwrap(),
         },
@@ -208,12 +208,15 @@ pub(super) fn options() -> Options {
         existing_paths: Arc::default(),
         dry_run: false,
         refresh: false,
-        reprocess: false,
         html: true,
         html_max_bytes: 1000,
         article_concurrency: 4,
-        preparation_limit: Arc::new(Semaphore::new(PREPARATION_SLOTS)),
-        persist_limit: Arc::new(Semaphore::new(PREPARATION_SLOTS)),
+        preparation_limit: Arc::new(Semaphore::new(preparation_slots(
+            StatePolicy::PersistentBranch,
+        ))),
+        persist_limit: Arc::new(Semaphore::new(preparation_slots(
+            StatePolicy::PersistentBranch,
+        ))),
         recording_limit: Arc::new(Semaphore::new(RECORDING_PROBE_SLOTS)),
         max_items_per_source: 200,
         preview_fetcher: Arc::new(preview::Fetcher::new().unwrap()),
@@ -294,7 +297,7 @@ async fn recording_probes_and_article_preparation_never_wait_for_each_other() {
 
     // Every preparation slot is busy with slow articles from other sources: the probe for
     // the archived episode must still run and record its duration.
-    let preparations = (0..PREPARATION_SLOTS)
+    let preparations = (0..preparation_slots(StatePolicy::PersistentBranch))
         .map(|_| {
             test_options
                 .preparation_limit
@@ -377,6 +380,7 @@ fn one_parse_yields_every_page_derived_fact() {
     );
     let analysis = analyze_page(page.clone(), &page_url, &page_url, Some(audio), true);
     assert_eq!(analysis.duration, Some(1671));
+    assert_eq!(analysis.publisher, None);
     assert!(analysis.interactive);
     assert_eq!(
         preview::ordered_article_candidates(&[], analysis.candidates, None)
@@ -406,9 +410,29 @@ fn one_parse_yields_every_page_derived_fact() {
         false,
     );
     assert_eq!(plain.duration, None);
+    assert_eq!(plain.publisher, None);
     assert!(!plain.interactive);
     assert!(preview::ordered_article_candidates(&[], plain.candidates, None).is_empty());
     assert!(plain.activity_alternates.is_empty());
+}
+
+#[test]
+fn a_watch_page_names_the_channel_its_own_url_cannot() {
+    let page = r#"<script>var ytInitialPlayerResponse = {"videoDetails":{"videoId":"abc","channelId":"UC123"},"microformat":{"playerMicroformatRenderer":{"ownerProfileUrl":"http://www.youtube.com/@Veritasium","lengthSeconds":"600"}}};</script>"#;
+    let watch = Url::parse("https://www.youtube.com/watch?v=abc").unwrap();
+    let analysis = analyze_page(page.into(), &watch, &watch, None, false);
+    assert_eq!(
+        analysis.publisher.as_deref(),
+        Some("https://www.youtube.com/@Veritasium")
+    );
+    assert_eq!(analysis.duration, Some(600));
+
+    // A URL that already names its account has nothing to ask the page for.
+    let profile = Url::parse("https://www.youtube.com/@Veritasium/videos").unwrap();
+    assert_eq!(
+        analyze_page(page.into(), &profile, &profile, None, false).publisher,
+        None
+    );
 }
 
 #[tokio::test]
@@ -509,7 +533,7 @@ async fn slow_first_article_does_not_block_later_downloads_or_change_filenames()
     let store = Arc::new(Store::open(root.path()));
     let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
     let configured = Source {
-        images: false,
+        images: crate::config::ImagePolicy::Remote,
         engine: Engine::Feed {
             url: Url::parse(&server.url("/feed")).unwrap(),
         },
@@ -673,12 +697,13 @@ async fn heavy_downloads_the_article_while_light_keeps_feed_content() {
         .mock_async(|when, then| {
             when.method(GET).path("/post");
             then.status(200).header("etag", "\"article-v1\"").body(
-                "<html><title>Post</title><article><h1>Post</h1><p>The complete original article has substantially more useful text than its feed excerpt.</p><p>This second paragraph makes it readable.</p></article></html>",
+                "<html><head><title>Post</title><meta property='article:tag' content='MCP'><meta property='article:tag' content='AI'></head><article><h1>Post</h1><p>The complete original article has substantially more useful text than its feed excerpt.</p><p>This second paragraph makes it readable.</p></article></html>",
             );
         })
         .await;
     let raw = RawItem {
         title: "Post".into(),
+        labels: vec!["existing".into(), "MCP".into()],
         link: server.url("/post"),
         content_html: Some("<p>short feed excerpt</p>".into()),
         ..Default::default()
@@ -693,6 +718,7 @@ async fn heavy_downloads_the_article_while_light_keeps_feed_content() {
     let failures = ArticleFailures::default();
     let (heavy, kind) = heavy_content(&raw, &source(), &client, cache.path(), &failures).await;
     assert_eq!(kind, ContentKind::Extracted);
+    assert_eq!(heavy.labels, ["ai", "existing", "mcp"]);
     assert!(
         heavy
             .content_html
@@ -711,6 +737,7 @@ async fn heavy_downloads_the_article_while_light_keeps_feed_content() {
         .await;
     let (cached, kind) = heavy_content(&raw, &source(), &client, cache.path(), &failures).await;
     assert_eq!(kind, ContentKind::Extracted);
+    assert_eq!(cached.labels, ["ai", "existing", "mcp"]);
     assert!(
         cached
             .content_html
@@ -1171,4 +1198,82 @@ fn binary_links_are_pdfs_and_image_files_whatever_their_case() {
     ] {
         assert!(!is_binary_link(&Url::parse(link).unwrap()), "{link}");
     }
+}
+
+#[tokio::test]
+async fn mirrored_document_is_retained_when_image_options_are_disabled() {
+    let raw = RawItem {
+        link: "https://publisher.invalid/paper.pdf".into(),
+        ..Default::default()
+    };
+    let hydrated =
+        hydrate_new_mirror_companions_with(raw, false, false, false, false, |mut raw| async {
+            raw.document = Some(crate::document::Asset {
+                source_url: raw.link.clone(),
+                bytes: b"%PDF-1.7\nfixture".to_vec(),
+            });
+            raw
+        })
+        .await;
+    assert!(hydrated.document.is_some());
+}
+
+#[tokio::test]
+async fn known_subscription_wall_tries_archives_after_publisher_denies_a_fresh_cache() {
+    crate::http::install_crypto_provider();
+    let publisher = MockServer::start();
+    let archives = MockServer::start();
+    let denied = publisher.mock(|when, then| {
+        when.method(GET).path("/article");
+        then.status(403);
+    });
+    let available = archives.mock(|when, then| {
+        when.method(GET)
+            .path("/available")
+            .query_param("url", publisher.url("/article"))
+            .header_missing("authorization");
+        then.status(200)
+            .json_body(serde_json::json!({"archived_snapshots":{}}));
+    });
+    let lookup = archives.mock(|when, then| {
+        when.method(GET)
+            .path("/lookup")
+            .header_missing("authorization");
+        then.status(404);
+    });
+    let configured = source();
+    let client = http::Client::new(&crate::config::FetchConfig {
+        retries: 0,
+        ..Default::default()
+    })
+    .unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let failures = ArticleFailures::default();
+    let mut raw = RawItem {
+        title: "Article".into(),
+        link: publisher.url("/article"),
+        summary: Some("A meaningful publisher summary.".into()),
+        ..Default::default()
+    };
+    let (_, kind) = heavy_content(&raw, &configured, &client, cache.path(), &failures).await;
+    assert_eq!(kind, ContentKind::None);
+    available.assert_calls(0);
+    lookup.assert_calls(0);
+    raw.extra
+        .insert("subscription_required".into(), true.into());
+    let (enriched, kind) = super::archive::with_test_endpoints(
+        archives.url("/available").parse().unwrap(),
+        archives.url("/lookup").parse().unwrap(),
+        heavy_content(&raw, &configured, &client, cache.path(), &failures),
+    )
+    .await;
+    assert_eq!(kind, ContentKind::None);
+    assert_eq!(
+        enriched.extra["subscription_required"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(enriched.summary, raw.summary);
+    available.assert_calls(1);
+    lookup.assert_calls(1);
+    denied.assert_calls(1);
 }

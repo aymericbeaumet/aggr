@@ -9,7 +9,7 @@ use url::Url;
 
 use super::markdown::normalize_image_sources;
 use super::resources::{ResourceLink, leading_resources};
-use super::scan::{attribute_value, parse_tag, set_attribute};
+use super::scan::{attribute_value, element_bounds, parse_tag, set_attribute, skip_element};
 use super::strip::{decode_entities, html_to_text, sanitize};
 use super::{escape_html, highlight};
 
@@ -113,7 +113,9 @@ impl PreparedMarkdown {
     pub fn new(markdown: &str) -> Self {
         let mut plugins = comrak::options::Plugins::default();
         plugins.render.codefence_syntax_highlighter = Some(&CodeHighlighter);
-        let html = add_link_navigation_attributes(&render_markdown_html(markdown, &plugins));
+        let html = add_link_navigation_attributes(&superscript_citations(&render_markdown_html(
+            markdown, &plugins,
+        )));
         let (resources, resource_range) = leading_resources(&html)
             .map(|(resources, range)| (resources, Some(range)))
             .unwrap_or_default();
@@ -242,6 +244,11 @@ pub fn anchor_headings(html: &str, article_url: Option<&Url>) -> String {
             out.push_str(&open);
         }
         out.push_str(inner);
+        // A real link, so following it updates the fragment and scrolls without JavaScript. The
+        // heading text itself stays unlinked; only this marker is interactive.
+        out.push_str(&format!(
+            "<a class=\"heading-anchor\" href=\"#{unique}\" aria-label=\"Link to this section\">#</a>"
+        ));
         out.push_str(&closing);
         position = start + open_end + inner_len + closing.len();
     }
@@ -693,6 +700,45 @@ fn write_code_tag(
     output.write_char('>')
 }
 
+/// Archived publisher references can retain their original destinations without local endnotes.
+fn superscript_citations(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        let Some(tag) = parse_tag(&html[start..]) else {
+            out.push('<');
+            position = start + 1;
+            continue;
+        };
+        let Some(length) = tag.end else {
+            position = start;
+            break;
+        };
+        let after = start + length;
+        if !tag.closing && matches!(tag.name.as_str(), "pre" | "code" | "sup") {
+            position = skip_element(html, after, &tag.name);
+            out.push_str(&html[start..position]);
+            continue;
+        }
+        if !tag.closing
+            && tag.name == "a"
+            && super::markdown::is_numbered_citation(html, start)
+            && let Some((_, _, end)) = element_bounds(html, start, "a")
+        {
+            out.push_str("<sup class=\"citation-ref\">");
+            out.push_str(&html[start..end]);
+            out.push_str("</sup>");
+            position = end;
+        } else {
+            out.push_str(&html[start..after]);
+            position = after;
+        }
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
 /// Article links open separately, while fragment links such as footnote references and backrefs
 /// must navigate within the current document.
 fn add_link_navigation_attributes(html: &str) -> String {
@@ -714,6 +760,123 @@ fn add_link_navigation_attributes(html: &str) -> String {
     out
 }
 
+/// Point the site-relative URLs of a rendered body (`src="assets/…"`, `srcset`, `poster`, `href`)
+/// at the page that embeds it, by prefixing `root` (`../../../` for an article page, `/repo/` for a
+/// fallback document). Fragments, query-only, root-relative and absolute references are untouched,
+/// so footnote links keep pointing into the current document and remote media stays remote.
+pub fn rebase_site_paths(html: &str, root: &str) -> String {
+    const ATTRIBUTES: [&str; 4] = ["src", "srcset", "poster", "href"];
+    let mut out = String::with_capacity(html.len() + 64);
+    let mut position = 0;
+    while let Some(start) = html[position..].find('<').map(|offset| position + offset) {
+        out.push_str(&html[position..start]);
+        let Some(tag) = parse_tag(&html[start..]) else {
+            out.push('<');
+            position = start + 1;
+            continue;
+        };
+        let Some(length) = tag.end else {
+            position = start;
+            break;
+        };
+        let raw = &html[start..start + length];
+        if tag.closing || !ATTRIBUTES.iter().any(|name| raw.contains(name)) {
+            out.push_str(raw);
+        } else {
+            out.push_str(&rebase_tag_attributes(raw, root, &ATTRIBUTES));
+        }
+        position = start + length;
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
+/// Rewrite the listed double-quoted attributes inside one opening tag.
+fn rebase_tag_attributes(tag: &str, root: &str, attributes: &[&str]) -> String {
+    let mut out = String::with_capacity(tag.len() + 32);
+    let mut position = 0;
+    while position < tag.len() {
+        let next = attributes
+            .iter()
+            .filter_map(|name| {
+                tag[position..]
+                    .find(&format!(" {name}=\""))
+                    .map(|offset| (position + offset, *name))
+            })
+            .min_by_key(|(at, _)| *at);
+        let Some((at, name)) = next else {
+            break;
+        };
+        let value_start = at + name.len() + 3;
+        let Some(value_len) = tag[value_start..].find('"') else {
+            break;
+        };
+        let value = &tag[value_start..value_start + value_len];
+        out.push_str(&tag[position..value_start]);
+        if name == "srcset" {
+            out.push_str(&rebase_srcset(value, root));
+        } else {
+            out.push_str(&rebase_site_url(value, root));
+        }
+        position = value_start + value_len;
+    }
+    out.push_str(&tag[position..]);
+    out
+}
+
+/// `url` prefixed with `root` when it is a site-relative path; other references are returned as
+/// they are.
+pub fn rebase_site_url(url: &str, root: &str) -> String {
+    if is_site_relative(url) {
+        format!("{root}{url}")
+    } else {
+        url.to_string()
+    }
+}
+
+/// Every site-relative candidate of a `srcset` prefixed with `root`. Candidates are URLs (no
+/// whitespace) followed by an optional descriptor, separated by commas.
+pub fn rebase_srcset(srcset: &str, root: &str) -> String {
+    let mut candidates = Vec::new();
+    let mut rest = srcset.trim();
+    while !rest.is_empty() {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',');
+        if rest.is_empty() {
+            break;
+        }
+        let url_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let url = rest[..url_end].trim_end_matches(',');
+        rest = &rest[url_end..];
+        let descriptor_end = rest.find(',').unwrap_or(rest.len());
+        let descriptor = rest[..descriptor_end].trim();
+        rest = &rest[descriptor_end..];
+        let rebased = rebase_site_url(url, root);
+        candidates.push(if descriptor.is_empty() {
+            rebased
+        } else {
+            format!("{rebased} {descriptor}")
+        });
+    }
+    candidates.join(", ")
+}
+
+/// A path meant to be joined onto the site root: not a fragment, a query, an absolute path or a
+/// URL with a scheme (`https:`, `data:`, `mailto:`).
+fn is_site_relative(url: &str) -> bool {
+    if url.is_empty() || url.starts_with(['#', '/', '?']) {
+        return false;
+    }
+    !url.split_once(':').is_some_and(|(scheme, _)| {
+        scheme
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
+}
+
 /// First `max_chars` chars of the Markdown's plain text, cut on a word boundary with `…`.
 pub fn excerpt(markdown: &str, max_chars: usize) -> String {
     PreparedMarkdown::new(markdown).excerpt(max_chars)
@@ -733,10 +896,343 @@ fn text_excerpt(text: &str, max_chars: usize) -> String {
     out
 }
 
+/// The rendered body of every same-page footnote, keyed by its `id`.
+fn footnote_definitions(html: &str) -> std::collections::BTreeMap<String, String> {
+    let mut notes = std::collections::BTreeMap::new();
+    let Some(section) = html.find("<section class=\"footnotes\"") else {
+        return notes;
+    };
+    let end = html[section..]
+        .find("</section>")
+        .map(|offset| section + offset)
+        .unwrap_or(html.len());
+    let list = &html[section..end];
+    let mut position = 0;
+    while let Some(offset) = list[position..].find("<li id=\"") {
+        let start = position + offset;
+        let Some(open_end) = list[start..].find('>').map(|index| start + index + 1) else {
+            break;
+        };
+        let Some(id) = attribute_value(&list[start..open_end], "id").map(str::to_string) else {
+            position = open_end;
+            continue;
+        };
+        let Some(close) = list[open_end..].find("</li>").map(|index| open_end + index) else {
+            break;
+        };
+        notes.insert(id, list[open_end..close].trim().to_string());
+        position = close + "</li>".len();
+    }
+    notes
+}
+
+/// Strip the back-reference link and every `id` from a cloned footnote body: the copy must not
+/// duplicate fragment targets that already exist in the footnote list.
+fn clean_margin_note(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut position = 0;
+    while let Some(offset) = body[position..].find("<a ") {
+        let start = position + offset;
+        let Some(open_end) = body[start..].find('>').map(|index| start + index + 1) else {
+            break;
+        };
+        if !body[start..open_end].contains("data-footnote-backref") {
+            out.push_str(&body[position..open_end]);
+            position = open_end;
+            continue;
+        }
+        let Some(close) = body[open_end..]
+            .find("</a>")
+            .map(|index| open_end + index + "</a>".len())
+        else {
+            break;
+        };
+        out.push_str(body[position..start].trim_end_matches(['\u{a0}', ' ']));
+        position = close;
+    }
+    out.push_str(&body[position..]);
+
+    // Remove `id` attributes so the copy introduces no duplicate fragment targets.
+    let mut cleaned = String::with_capacity(out.len());
+    let mut position = 0;
+    while let Some(offset) = out[position..].find('<') {
+        let start = position + offset;
+        let Some(open_end) = out[start..].find('>').map(|index| start + index + 1) else {
+            break;
+        };
+        let tag = &out[start..open_end];
+        cleaned.push_str(&out[position..start]);
+        if attribute_value(tag, "id").is_some() {
+            cleaned.push_str(&set_attribute(tag, "id", "").replace(" id=\"\"", ""));
+        } else {
+            cleaned.push_str(tag);
+        }
+        position = open_end;
+    }
+    cleaned.push_str(&out[position..]);
+    cleaned
+}
+
+/// Copy each same-page footnote into an `<aside>` beside its reference, so a wide viewport can
+/// show margin notes with CSS alone. The `.footnotes` list stays in the document for narrow
+/// viewports, for printing and for readers that follow the link; the stylesheet shows exactly one
+/// of the two. Returns the rewritten HTML and whether any note was placed.
+pub fn margin_notes(html: &str) -> (String, bool) {
+    const REFERENCE: &str = "<sup class=\"footnote-ref\">";
+    if !html.contains(REFERENCE) {
+        return (html.to_string(), false);
+    }
+    let definitions = footnote_definitions(html);
+    if definitions.is_empty() {
+        return (html.to_string(), false);
+    }
+
+    let mut out = String::with_capacity(html.len() * 2);
+    let mut position = 0;
+    let mut placed = 0usize;
+    while let Some(offset) = html[position..].find(REFERENCE) {
+        let start = position + offset;
+        let Some(end) = html[start..]
+            .find("</sup>")
+            .map(|index| start + index + "</sup>".len())
+        else {
+            break;
+        };
+        let sup = &html[start..end];
+        out.push_str(&html[position..end]);
+        position = end;
+
+        // `sup` wraps the reference anchor; attribute lookups need that inner tag.
+        let anchor = sup
+            .find("<a ")
+            .and_then(|start| {
+                sup[start..]
+                    .find('>')
+                    .map(|end| &sup[start..start + end + 1])
+            })
+            .filter(|tag| tag.contains("data-footnote-ref"));
+        let Some(anchor) = anchor else {
+            continue;
+        };
+        let target = attribute_value(anchor, "href")
+            .and_then(|href| href.strip_prefix('#'))
+            .map(str::to_string);
+        let (Some(target), Some(reference)) = (target, attribute_value(anchor, "id")) else {
+            continue;
+        };
+        let Some(body) = definitions.get(&target) else {
+            continue;
+        };
+        let number = html_to_text(sup);
+        let number = number.trim();
+        let note_id = format!("{reference}-note");
+        let marker = format!("<span class=\"margin-note-number\">{number}. </span>");
+        let body = clean_margin_note(body);
+        let body = match body.strip_prefix("<p>") {
+            Some(rest) => format!("<p>{marker}{rest}"),
+            None => format!("{marker}{body}"),
+        };
+        out.push_str(&format!(
+            "<aside class=\"margin-note footnote-margin-note\" role=\"note\" aria-label=\"Note {number}\" id=\"{note_id}\">{body}</aside>"
+        ));
+        placed += 1;
+    }
+    out.push_str(&html[position..]);
+
+    if placed == 0 {
+        return (html.to_string(), false);
+    }
+    // Point each reference at its copy for assistive technology.
+    let mut described = String::with_capacity(out.len());
+    let mut position = 0;
+    while let Some(offset) = out[position..].find("<a href=\"#fn-") {
+        let start = position + offset;
+        let Some(open_end) = out[start..].find('>').map(|index| start + index + 1) else {
+            break;
+        };
+        let tag = &out[start..open_end];
+        described.push_str(&out[position..start]);
+        match attribute_value(tag, "id").filter(|_| tag.contains("data-footnote-ref")) {
+            Some(reference) => {
+                let note_id = format!("{reference}-note");
+                described.push_str(&set_attribute(tag, "aria-describedby", &note_id));
+            }
+            None => described.push_str(tag),
+        }
+        position = open_end;
+    }
+    described.push_str(&out[position..]);
+    (described, true)
+}
+
+/// Mark every absolute link in the reader body as leaving the site. The body only ever contains
+/// publisher links, so this needs no knowledge of the site's own base path, and doing it here means
+/// the behaviour survives with JavaScript disabled.
+pub fn external_body_links(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() + 64);
+    let mut position = 0;
+    while let Some(offset) = html[position..].find("<a ") {
+        let start = position + offset;
+        let Some(open_end) = html[start..].find('>').map(|index| start + index + 1) else {
+            break;
+        };
+        let tag = &html[start..open_end];
+        out.push_str(&html[position..start]);
+        position = open_end;
+
+        let absolute = attribute_value(tag, "href").is_some_and(|href| {
+            let href = href.trim().to_ascii_lowercase();
+            href.starts_with("http://") || href.starts_with("https://")
+        });
+        if !absolute {
+            out.push_str(tag);
+            continue;
+        }
+        let tag = set_attribute(tag, "target", "_blank");
+        let mut tag = set_attribute(&tag, "rel", "external noopener noreferrer");
+        // Announce the new tab, the way a sighted reader infers it from the arrow marker.
+        if attribute_value(&tag, "aria-label").is_none()
+            && let Some(close) = html[position..].find("</a>").map(|index| position + index)
+        {
+            let label = html_to_text(&html[position..close]);
+            let label = label.trim();
+            if !label.is_empty() {
+                tag = set_attribute(&tag, "aria-label", &format!("{label}, opens in a new tab"));
+            }
+        }
+        out.push_str(&tag);
+    }
+    out.push_str(&html[position..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn body_links_leaving_the_site_open_in_a_new_tab() {
+        let html = external_body_links(
+            "<p>See <a href=\"https://example.org/paper\">the paper</a> and <a href=\"#fn-1\">note</a>.</p>",
+        );
+        assert!(html.contains(
+            "<a href=\"https://example.org/paper\" target=\"_blank\" rel=\"external noopener noreferrer\" aria-label=\"the paper, opens in a new tab\">"
+        ));
+        // Same-page fragments are not external and keep their plain form.
+        assert!(html.contains("<a href=\"#fn-1\">note</a>"));
+    }
+
+    #[test]
+    fn external_body_links_keep_a_publisher_label_and_survive_empty_text() {
+        let labelled = external_body_links(
+            "<p><a href=\"https://example.org\" aria-label=\"Publisher label\">x</a></p>",
+        );
+        assert!(labelled.contains("aria-label=\"Publisher label\""));
+        assert_eq!(labelled.matches("aria-label").count(), 1);
+
+        let imageonly = external_body_links(
+            "<p><a href=\"https://example.org\"><img src=\"a.png\" alt=\"\"></a></p>",
+        );
+        assert!(imageonly.contains("rel=\"external noopener noreferrer\""));
+        assert!(!imageonly.contains("aria-label"));
+    }
+
+    #[test]
+    fn margin_notes_copy_each_footnote_beside_its_reference() {
+        let mut options = comrak::Options::default();
+        options.extension.footnotes = true;
+        let rendered = comrak::markdown_to_html(
+            "Text[^a] and more[^b].\n\n[^a]: First note.\n\n[^b]: Second note.\n",
+            &options,
+        );
+        let (html, placed) = margin_notes(&rendered);
+        assert!(placed);
+
+        // One aside per reference, carrying the reference number and the note text.
+        assert_eq!(
+            html.matches("class=\"margin-note footnote-margin-note\"")
+                .count(),
+            2
+        );
+        assert!(html.contains(
+            "<aside class=\"margin-note footnote-margin-note\" role=\"note\" aria-label=\"Note 1\" id=\"fnref-a-note\"><p><span class=\"margin-note-number\">1. </span>First note.</p></aside>"
+        ));
+        assert!(html.contains("<span class=\"margin-note-number\">2. </span>Second note."));
+
+        // The copy must not duplicate fragment targets or repeat the back-reference control.
+        let copies: String = html
+            .match_indices("<aside")
+            .filter_map(|(start, _)| {
+                let body = &html[start..];
+                body.find("</aside>").map(|end| &body[..end])
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!copies.contains("footnote-backref"), "{copies}");
+        assert_eq!(copies.matches("id=").count(), 2, "{copies}");
+
+        // References point at their copy, and the original list survives for narrow viewports.
+        assert!(html.contains("aria-describedby=\"fnref-a-note\""));
+        assert!(html.contains("<section class=\"footnotes\""));
+        assert!(html.contains("<li id=\"fn-a\">"));
+    }
+
+    #[test]
+    fn margin_notes_leave_documents_without_usable_footnotes_alone() {
+        for html in [
+            "<p>No footnotes here.</p>",
+            // A reference with no matching definition must not invent one.
+            "<p>Text<sup class=\"footnote-ref\"><a href=\"#fn-x\" id=\"fnref-x\" data-footnote-ref>1</a></sup></p>",
+        ] {
+            let (out, placed) = margin_notes(html);
+            assert!(!placed, "{html}");
+            assert_eq!(out, html);
+        }
+    }
+
     use super::*;
     use crate::content::to_markdown;
+
+    #[test]
+    fn archived_numbered_citations_render_as_superscripts_without_changing_links() {
+        // The Snowden article retains external bracketed references instead of local endnotes.
+        let markdown = r"Documents.[\[4\]](https://libroot.org/post#n4)[\[5\]](https://libroot.org/post#n5)[\[1\]](#n1)";
+        let rendered = render_markdown(markdown);
+        let document = Html::parse_fragment(&rendered);
+        let references = document
+            .select(&Selector::parse("sup.citation-ref > a").unwrap())
+            .map(|node| {
+                (
+                    node.inner_html(),
+                    node.value().attr("href").unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            references,
+            vec![
+                ("[4]".into(), "https://libroot.org/post#n4".into()),
+                ("[5]".into(), "https://libroot.org/post#n5".into()),
+                ("[1]".into(), "#n1".into()),
+            ]
+        );
+        assert!(!rendered.contains("<br"), "{rendered}");
+        assert!(rendered.contains("</sup><sup"), "{rendered}");
+    }
+
+    #[test]
+    fn citation_styling_preserves_native_footnotes_code_and_ordinary_links() {
+        let markdown = "Native[^1], [1](https://example.org/page), [\\[2\\]](https://example.org/page), [chapter](#chapter).\n\n`[3](#n3)`\n\n```html\n<a href=\"#n4\">[4]</a>\n```\n\n[^1]: Real note.\n";
+        let rendered = render_markdown(markdown);
+        let document = Html::parse_fragment(&rendered);
+        assert_eq!(
+            document
+                .select(&Selector::parse("sup.footnote-ref").unwrap())
+                .count(),
+            1
+        );
+        assert!(!rendered.contains("citation-ref"), "{rendered}");
+        assert!(rendered.contains("[3](#n3)"), "{rendered}");
+        assert!(rendered.contains("href=\"#chapter\""), "{rendered}");
+    }
 
     #[test]
     fn standalone_video_links_become_inline_facades() {
@@ -808,7 +1304,7 @@ mod tests {
         let anchored = anchor_headings(html, Some(&article));
         assert_eq!(
             anchored,
-            "<h2 id=\"how-did-this-happen\">How did this happen?</h2><p>Text</p><h3 id=\"cost\">Cost <em>estimates</em></h3><h2 id=\"cost-estimates\">Cost estimates</h2><h2 id=\"cost-estimates-2\">Cost estimates</h2><h2 id=\"external-paper\"><a href=\"https://example.com/paper\">External paper</a></h2><h2 id=\"see-partial-link\">See <a href=\"#x\">partial</a> link</h2><h4 id=\"keep\">Kept id</h4><h2 id=\"section\"></h2>"
+            "<h2 id=\"how-did-this-happen\">How did this happen?<a class=\"heading-anchor\" href=\"#how-did-this-happen\" aria-label=\"Link to this section\">#</a></h2><p>Text</p><h3 id=\"cost\">Cost <em>estimates</em><a class=\"heading-anchor\" href=\"#cost\" aria-label=\"Link to this section\">#</a></h3><h2 id=\"cost-estimates\">Cost estimates<a class=\"heading-anchor\" href=\"#cost-estimates\" aria-label=\"Link to this section\">#</a></h2><h2 id=\"cost-estimates-2\">Cost estimates<a class=\"heading-anchor\" href=\"#cost-estimates-2\" aria-label=\"Link to this section\">#</a></h2><h2 id=\"external-paper\"><a href=\"https://example.com/paper\">External paper</a><a class=\"heading-anchor\" href=\"#external-paper\" aria-label=\"Link to this section\">#</a></h2><h2 id=\"see-partial-link\">See <a href=\"#x\">partial</a> link<a class=\"heading-anchor\" href=\"#see-partial-link\" aria-label=\"Link to this section\">#</a></h2><h4 id=\"keep\">Kept id<a class=\"heading-anchor\" href=\"#keep\" aria-label=\"Link to this section\">#</a></h4><h2 id=\"section\"><a class=\"heading-anchor\" href=\"#section\" aria-label=\"Link to this section\">#</a></h2>"
         );
         assert_eq!(
             anchor_headings("<p>no headings</p><hr>", None),
@@ -825,7 +1321,7 @@ mod tests {
                 "<h1>Title again</h1><h2>Next</h2><h1 id=\"x\">Kept</h1><h3>Deep</h3>",
                 None
             ),
-            "<h1 id=\"title-again\" aria-level=\"2\">Title again</h1><h2 id=\"next\">Next</h2><h1 id=\"x\" aria-level=\"2\">Kept</h1><h3 id=\"deep\">Deep</h3>"
+            "<h1 id=\"title-again\" aria-level=\"2\">Title again<a class=\"heading-anchor\" href=\"#title-again\" aria-label=\"Link to this section\">#</a></h1><h2 id=\"next\">Next<a class=\"heading-anchor\" href=\"#next\" aria-label=\"Link to this section\">#</a></h2><h1 id=\"x\" aria-level=\"2\">Kept<a class=\"heading-anchor\" href=\"#x\" aria-label=\"Link to this section\">#</a></h1><h3 id=\"deep\">Deep<a class=\"heading-anchor\" href=\"#deep\" aria-label=\"Link to this section\">#</a></h3>"
         );
     }
 
@@ -1288,6 +1784,41 @@ mod tests {
         assert_eq!(
             excerpt("# Head\n\n[link](https://x.y) and `code`\n", 100),
             "Head link and code"
+        );
+    }
+
+    #[test]
+    fn rebase_site_paths_prefixes_only_site_relative_references() {
+        let html = concat!(
+            "<p>Note<sup class=\"footnote-ref\"><a href=\"#fn-1\" id=\"fnref-1\">1</a></sup> ",
+            "<a href=\"https://example.com/a\">a</a> <a href=\"/root\">r</a> <a href=\"?q=1\">q</a> ",
+            "<a href=\"mailto:x@example.com\">m</a> <code>src=\"assets/not-an-attribute\"</code></p>",
+            "<picture><source srcset=\"assets/images/a.webp 640w, https://cdn.example/b,c.webp 1200w,assets/images/d.webp 2x\">",
+            "<img src=\"assets/images/a.png\" srcset=\"assets/images/a.png\" alt=\"x\"></picture>",
+            "<video poster=\"assets/images/p.jpg\" src=\"data:video/mp4;base64,AAAA\"></video>",
+            "<a href=\"assets/docs/paper.pdf\">pdf</a>"
+        );
+        let rebased = rebase_site_paths(html, "../../../");
+        assert_eq!(
+            rebased,
+            concat!(
+                "<p>Note<sup class=\"footnote-ref\"><a href=\"#fn-1\" id=\"fnref-1\">1</a></sup> ",
+                "<a href=\"https://example.com/a\">a</a> <a href=\"/root\">r</a> <a href=\"?q=1\">q</a> ",
+                "<a href=\"mailto:x@example.com\">m</a> <code>src=\"assets/not-an-attribute\"</code></p>",
+                "<picture><source srcset=\"../../../assets/images/a.webp 640w, https://cdn.example/b,c.webp 1200w, ../../../assets/images/d.webp 2x\">",
+                "<img src=\"../../../assets/images/a.png\" srcset=\"../../../assets/images/a.png\" alt=\"x\"></picture>",
+                "<video poster=\"../../../assets/images/p.jpg\" src=\"data:video/mp4;base64,AAAA\"></video>",
+                "<a href=\"../../../assets/docs/paper.pdf\">pdf</a>"
+            )
+        );
+        assert_eq!(rebase_site_paths(html, "./"), rebase_site_paths(html, "./"));
+        assert_eq!(
+            rebase_site_paths("<img src=\"assets/x.png\">", "/repo/"),
+            "<img src=\"/repo/assets/x.png\">"
+        );
+        assert_eq!(
+            rebase_site_paths("plain <b>text</b> with src=\"assets/x\"", "../"),
+            "plain <b>text</b> with src=\"assets/x\""
         );
     }
 }

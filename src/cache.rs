@@ -14,7 +14,7 @@ use url::Url;
 
 const BUILD_NAMESPACE: &str = "build-v1";
 const DEV_NAMESPACE: &str = "dev-v1";
-const RENDER_KEY_FILE: &str = ".aggr-build-key";
+pub(crate) const RENDER_KEY_FILE: &str = ".aggr-build-key";
 
 /// Every directory aggr creates under a build or dev cache root. The reusable workflow persists
 /// the derived-state subset between runners, so a namespace's name is an on-disk contract: rename
@@ -32,6 +32,8 @@ pub enum Namespace {
     Pagefind,
     /// Validation receipts for retained images, keyed by every input byte.
     ValidatedImages,
+    /// Checksummed deployment image projections; full-quality masters remain in the archive.
+    DeploymentMedia,
     /// Backoff markers for image downloads that failed, per media implementation generation.
     ImageFailures,
     /// Backoff markers for feed-only captures awaiting their original page.
@@ -40,17 +42,21 @@ pub enum Namespace {
     RecordingDuration,
     /// Feed parser receipts that gate conditional GET after a parser change.
     FeedParsing,
+    /// What the last build that fit its limit admitted, so the next one starts there.
+    Budget,
 }
 
 impl Namespace {
     /// Test-only: unit tests pin the reusable workflow's cache list to this registry.
     #[cfg(test)]
-    pub const ALL: [Namespace; 9] = [
+    pub const ALL: [Namespace; 11] = [
         Namespace::Articles,
         Namespace::Render,
+        Namespace::Budget,
         Namespace::Discussions,
         Namespace::Pagefind,
         Namespace::ValidatedImages,
+        Namespace::DeploymentMedia,
         Namespace::ImageFailures,
         Namespace::CaptureRetries,
         Namespace::RecordingDuration,
@@ -64,10 +70,12 @@ impl Namespace {
             Namespace::Discussions => "discussions-v1",
             Namespace::Pagefind => "pagefind-v1",
             Namespace::ValidatedImages => "validated-images-v2",
+            Namespace::DeploymentMedia => "deployment-media-v1",
             Namespace::ImageFailures => "image-failures-v1",
             Namespace::CaptureRetries => "capture-retries-v1",
             Namespace::RecordingDuration => "recording-duration-v1",
             Namespace::FeedParsing => "feed-parsing",
+            Namespace::Budget => "budget-v1",
         }
     }
 
@@ -96,7 +104,7 @@ pub fn ci_cached_paths() -> Vec<String> {
 }
 
 /// Bump when article extraction semantics change. Raw responses remain reusable across bumps.
-const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-9";
+const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-14";
 const MAX_ARTICLE_METADATA_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_ARTICLE_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXTRACTED_ARTICLE_BYTES: usize = 16 * 1024 * 1024;
@@ -235,10 +243,13 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("source-graph", "config/import_graph.rs"),
         source!("defaults", "../config.default.toml"),
         source!("content", "content.rs"),
+        source!("content-access", "content/access.rs"),
+        source!("content-aggregator", "content/aggregator.rs"),
         source!("content-cleanup", "content/cleanup.rs"),
         source!("content-extract", "content/extract.rs"),
         source!("content-markdown", "content/markdown.rs"),
         source!("content-module", "content/module.rs"),
+        source!("content-normalize", "content/normalize.rs"),
         source!("content-math", "content/math.rs"),
         source!("content-render", "content/render.rs"),
         source!("content-resources", "content/resources.rs"),
@@ -247,6 +258,8 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("content-highlight", "content_highlight.rs"),
         source!("discussions", "discussions.rs"),
         source!("media", "media.rs"),
+        source!("platform", "platform.rs"),
+        source!("media-compact", "media/compact.rs"),
         source!("media-stored-cache", "media/stored_cache.rs"),
         source!("media-placeholder", "media/placeholder.rs"),
         source!("media-srcset", "media/srcset.rs"),
@@ -259,13 +272,17 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("store", "store/mod.rs"),
         source!("frontmatter", "store/frontmatter.rs"),
         source!("site", "site/mod.rs"),
+        source!("source-index", "site/source_index.rs"),
         source!("assets", "site/assets.rs"),
+        source!("budget", "site/budget.rs"),
+        source!("compressed-media", "site/compressed_media.rs"),
         source!("page", "site/page.rs"),
         source!("directory", "site/directory.rs"),
         source!("output-dir", "site/output_dir.rs"),
         source!("context", "site/context.rs"),
         source!("display", "site/display.rs"),
         source!("document", "site/document.rs"),
+        source!("document-storage", "document.rs"),
         source!("interactive", "site/interactive.rs"),
         source!("native-media", "site/native_media.rs"),
         source!("item-type", "site/item_type.rs"),
@@ -276,6 +293,8 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("render", "site/render.rs"),
         source!("video", "site/video.rs"),
         source!("threads", "threads.rs"),
+        source!("thread-embeds", "threads/embeds.rs"),
+        source!("thread-x", "threads/x.rs"),
     ]
 }
 
@@ -304,8 +323,9 @@ const RENDER_INDEPENDENT_SOURCES: &[&str] = &[
     // is listed above; its `duration.rs` submodule serves ingestion-only duration and caption
     // probes.
     "sources/",
-    // X thread expansion runs during capture; the expanded body is stored in the data branch.
-    "threads/x.rs",
+    // Generated documents and their oracles. Test-only: the conversion they exercise is
+    // fingerprinted through `content/markdown.rs` itself.
+    "content/markdown/fuzz.rs",
     // Retention plans remove files from the checkout in sync; the build sees the resulting tree.
     "store/retention.rs",
 ];
@@ -316,6 +336,42 @@ struct RenderManifest {
     pages: usize,
     items: usize,
     stubs: usize,
+}
+
+/// Everything a fitting build published that was not optional media. A site larger than its limit
+/// converges in two complete builds: one to measure the overflow, one to fit. What the first one
+/// really measures is how much of the limit the text, pages and search index need, and that moves
+/// slowly — so it is worth carrying between runs, and the exact retry still decides whether it
+/// was right.
+#[derive(Serialize, Deserialize)]
+pub struct BudgetReceipt {
+    /// The limit this answer was measured against; another limit says nothing about this one.
+    pub limit: u64,
+    /// Output bytes that were not admitted media: article text, pages, feeds, the search index.
+    pub required: u64,
+}
+
+/// Room left for media under `limit`, from what a previous build needed for everything else.
+/// An archive grows between runs, so a twentieth of that measurement is held back: guessing a
+/// little low publishes marginally less media, while guessing high costs the whole second build
+/// this is here to avoid.
+pub fn budget_allowance(cache_root: &Path, limit: u64) -> Option<u64> {
+    let path = Namespace::Budget.dir(cache_root).join("allowance.json");
+    let receipt: BudgetReceipt = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if receipt.limit != limit {
+        return None;
+    }
+    let reserved = receipt.required.saturating_add(receipt.required / 20);
+    Some(limit.saturating_sub(reserved)).filter(|allowance| *allowance > 0)
+}
+
+pub fn store_budget_allowance(cache_root: &Path, receipt: &BudgetReceipt) -> Result<()> {
+    let root = Namespace::Budget.dir(cache_root);
+    std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+    write(
+        &root.join("allowance.json"),
+        &serde_json::to_vec(receipt).context("serialising the budget receipt")?,
+    )
 }
 
 /// Restore a matching site into `out`. If `out` already carries this key the operation is an
@@ -551,6 +607,29 @@ impl ArticleCache {
         Self {
             root: Namespace::Articles.dir(cache_root),
         }
+    }
+
+    pub(crate) fn archive_retry_ready(&self, url: &Url, now: i64) -> Result<bool> {
+        let path = self
+            .root
+            .join("archive-retries")
+            .join(crate::model::sha1_hex(url.as_str()));
+        let Some(bytes) = read_bounded_regular(&path, 32)? else {
+            return Ok(true);
+        };
+        let attempted = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok());
+        Ok(attempted
+            .is_none_or(|attempted| now < attempted || now.saturating_sub(attempted) >= 86_400))
+    }
+
+    pub(crate) fn record_archive_failure(&self, url: &Url, now: i64) -> Result<()> {
+        let path = self
+            .root
+            .join("archive-retries")
+            .join(crate::model::sha1_hex(url.as_str()));
+        write(&path, now.to_string().as_bytes())
     }
 
     pub fn load(&self, url: &Url, headers: &[(String, String)]) -> Result<Option<ArticleResponse>> {
@@ -977,6 +1056,7 @@ mod tests {
                 &crate::content::ExtractedArticle {
                     html: "<article>clean</article>".into(),
                     image: None,
+                    labels: Vec::new(),
                 },
             )
             .unwrap();
@@ -1086,6 +1166,7 @@ mod tests {
         let extracted = crate::content::ExtractedArticle {
             html: "<p>article</p>".into(),
             image: None,
+            labels: Vec::new(),
         };
         cache
             .store_extracted(&response.extraction_key(), &url, &extracted)
@@ -1497,6 +1578,7 @@ mod tests {
                 &crate::content::ExtractedArticle {
                     html: String::from_utf8_lossy(body).into_owned(),
                     image: None,
+                    labels: Vec::new(),
                 },
             )
             .unwrap();

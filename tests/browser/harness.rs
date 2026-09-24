@@ -11,7 +11,7 @@ use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -32,7 +32,6 @@ pub(crate) struct Fixture {
     pub(crate) offline: Arc<AtomicBool>,
     pub(crate) scripts_blocked: Arc<AtomicBool>,
     pub(crate) media: Arc<MediaResponses>,
-    app_override: Mutex<Option<String>>,
     stopped: Arc<AtomicBool>,
 }
 
@@ -65,47 +64,6 @@ impl Fixture {
         self.build()
     }
 
-    pub(crate) fn deploy_app_update(&self) -> Result<()> {
-        let root = self.directory.path();
-        let config = root.join("aggr.toml");
-        std::fs::write(
-            &config,
-            std::fs::read_to_string(&config)?.replace("Reading room", "Updated reading room"),
-        )?;
-        self.build()?;
-        let manifest_path = self.out.join("updates.json");
-        let manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
-        let previous = manifest["app_version"]
-            .as_str()
-            .context("fixture app version")?
-            .to_string();
-        let next = format!("{previous}-next");
-        *self.app_override.lock().expect("fixture app version lock") = Some(next.clone());
-        self.apply_app_version(&next)
-    }
-
-    fn apply_app_version(&self, next: &str) -> Result<()> {
-        let manifest_path = self.out.join("updates.json");
-        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
-        let previous = manifest["app_version"]
-            .as_str()
-            .context("fixture app version")?
-            .to_string();
-        for entry in walkdir::WalkDir::new(&self.out) {
-            let entry = entry?;
-            if entry.file_type().is_file()
-                && (entry.path().extension().is_some_and(|ext| ext == "html")
-                    || entry.file_name() == "sw.js")
-            {
-                let text = std::fs::read_to_string(entry.path())?;
-                std::fs::write(entry.path(), text.replace(&previous, next))?;
-            }
-        }
-        manifest["app_version"] = json!(next);
-        std::fs::write(manifest_path, serde_json::to_vec(&manifest)?)?;
-        Ok(())
-    }
-
     pub(crate) fn build(&self) -> Result<()> {
         let root = self.directory.path();
         let output = aggr_command(root)
@@ -123,14 +81,6 @@ impl Fixture {
                 "fixture deployment: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-        }
-        if let Some(version) = self
-            .app_override
-            .lock()
-            .expect("fixture app version lock")
-            .clone()
-        {
-            self.apply_app_version(&version)?;
         }
         Ok(())
     }
@@ -218,8 +168,14 @@ impl Fixture {
             } else {
                 "2026-09-05T12:00:00Z"
             };
+            // One article carries a section, so a heading anchor has somewhere to point.
+            let section = if index == 40 {
+                "## A section worth linking\n\nProse beneath the section heading.\n\n"
+            } else {
+                ""
+            };
             let markdown = format!(
-                "---\ntitle: {title}\nlink: {link}\nsource: example\npublished: {published}\nupdated: {updated}\nfirst_seen: {published}\ncontent: feed\nlabels: [reading, rust]\n{preview}{archived_image}---\n\n* * *\n\nA paragraph with [first link](https://example.invalid/one) and more prose before [a comparison grid](https://example.invalid/two) continues naturally.\n\n```bash\n$ z dotfiles\n$ pwd\n/private/dotfiles\n```\n\n![An article illustration]({base}body.png)\n\nThis entry explores archive topic {index}.\n\n{}\n",
+                "---\ntitle: {title}\nlink: {link}\nsource: example\npublished: {published}\nupdated: {updated}\nfirst_seen: {published}\ncontent: feed\nlabels: [reading, rust]\n{preview}{archived_image}---\n\n* * *\n\nA paragraph with [first link](https://example.invalid/one) and more prose before [a comparison grid](https://example.invalid/two) continues naturally.\n\n```bash\n$ z dotfiles\n$ pwd\n/private/dotfiles\n```\n\n![An article illustration]({base}body.png)\n\nThis entry explores archive topic {index}.\n\n{section}{}\n",
                 "Reading comfortably should not change the current page while a deployment arrives.\n\n".repeat(15)
             );
             std::fs::write(
@@ -295,7 +251,6 @@ impl Fixture {
             offline,
             scripts_blocked,
             media,
-            app_override: Mutex::new(None),
             stopped,
         })
     }
@@ -366,7 +321,7 @@ fn only_browser_hangups_are_expected_socket_errors() {
 fn artifact_names_are_bounded_file_safe_slugs() {
     let name = artifact_name(
         "search::rich_search_and_complete_offline_index",
-        "document.querySelector('#q')?.value.trim()==='sort:oldest' && !document.querySelector('.search-completions')",
+        "document.querySelector('#q')?.value.trim()==='sort:oldest' && !document.querySelector('.search-completions:not([hidden])')",
     );
     assert!(
         name.starts_with("search-rich_search_and_complete_offline_index-document-queryselector-q-value-trim-sort-oldest"),
@@ -549,8 +504,14 @@ pub(crate) async fn wait_for(client: &Client, expression: &str) -> Result<()> {
     let start = Instant::now();
     let timeout = wait_timeout();
     loop {
+        // A wait is a question about a page that is still changing: an expression that reaches
+        // through something not there yet is simply not true yet, and saying so leaves the
+        // timeout to report where it got stuck.
         if client
-            .execute(&format!("return Boolean({expression})"), vec![])
+            .execute(
+                &format!("try {{ return Boolean({expression}) }} catch (error) {{ return false }}"),
+                vec![],
+            )
             .await?
             == json!(true)
         {
@@ -592,15 +553,20 @@ pub(crate) async fn wait_for(client: &Client, expression: &str) -> Result<()> {
     }
 }
 
-/// The client is booted once Swup owns navigation; most page contracts start there.
+/// The client marks the document ready once its enhancements are installed; most page contracts
+/// start there. The page itself is usable well before this.
 pub(crate) async fn wait_booted(client: &Client) -> Result<()> {
-    wait_for(client, "typeof window.swup?.navigate === 'function'").await
+    wait_for(
+        client,
+        "document.documentElement.dataset.aggrReady === 'true'",
+    )
+    .await
 }
 
 pub(crate) async fn wait_booted_with(client: &Client, extra: &str) -> Result<()> {
     wait_for(
         client,
-        &format!("typeof window.swup?.navigate === 'function' && ({extra})"),
+        &format!("document.documentElement.dataset.aggrReady === 'true' && ({extra})"),
     )
     .await
 }
@@ -667,12 +633,18 @@ pub(crate) async fn key(client: &Client, key: &str) -> Result<()> {
         "ArrowDown" => "\u{e015}",
         key => key,
     };
-    client
-        .active_element()
-        .await?
-        .send_keys(key)
-        .await
-        .with_context(|| format!("sending key {key:?}"))?;
+    // The element holding the keyboard can be replaced as a list re-renders underneath it, so a
+    // refused keystroke is worth finding the focus again for.
+    for attempt in 0..2 {
+        match client.active_element().await?.send_keys(key).await {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt == 0 => {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let _ = error;
+            }
+            Err(error) => return Err(error).with_context(|| format!("sending key {key:?}")),
+        }
+    }
     Ok(())
 }
 
@@ -727,12 +699,20 @@ pub(crate) async fn browser_client() -> Result<Client> {
 }
 
 pub(crate) async fn browser_client_with_load_strategy(strategy: &str) -> Result<Client> {
+    browser_client_with_preferences(strategy, json!({})).await
+}
+
+pub(crate) async fn browser_client_with_preferences(
+    strategy: &str,
+    preferences: Value,
+) -> Result<Client> {
     let driver = std::env::var("AGGR_WEBDRIVER_URL")
         .context("set AGGR_WEBDRIVER_URL to the local driver")?;
     let mut capabilities = serde_json::Map::new();
     capabilities.insert("browserName".into(), json!("chrome"));
     capabilities.insert("pageLoadStrategy".into(), json!(strategy));
     let mut chrome = json!({"args":["--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-search-engine-choice-screen"]});
+    chrome["prefs"] = preferences;
     if let Ok(binary) = std::env::var("AGGR_CHROME_BINARY") {
         chrome["binary"] = json!(binary);
     }

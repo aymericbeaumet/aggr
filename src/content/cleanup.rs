@@ -39,18 +39,53 @@ pub(super) fn protect_markdown_code(
     transform: impl FnOnce(&str) -> String,
 ) -> String {
     let ranges = markdown_code_ranges(markdown);
-    let mut protected = markdown.to_string();
-    for (index, range) in ranges.iter().enumerate().rev() {
-        protected.replace_range(range.clone(), &format!("\u{e010}{index}\u{e011}"));
+    if ranges.is_empty() {
+        return transform(markdown);
     }
-    let mut transformed = transform(&protected);
+    // Both halves walk the document once. Swapping each placeholder in turn rescans and reallocates
+    // the whole body per code span, which an article with many of them pays for over and over.
+    let mut protected = String::with_capacity(markdown.len());
+    let mut position = 0;
     for (index, range) in ranges.iter().enumerate() {
-        transformed = transformed.replace(
-            &format!("\u{e010}{index}\u{e011}"),
-            &markdown[range.clone()],
-        );
+        if range.start < position {
+            continue;
+        }
+        protected.push_str(&markdown[position..range.start]);
+        protected.push_str(&format!("\u{e010}{index}\u{e011}"));
+        position = range.end;
     }
-    transformed
+    protected.push_str(&markdown[position..]);
+    restore_protected_code(&transform(&protected), markdown, &ranges)
+}
+
+/// Put every `\u{e010}index\u{e011}` marker back, leaving anything that is not one alone.
+fn restore_protected_code(
+    transformed: &str,
+    markdown: &str,
+    ranges: &[std::ops::Range<usize>],
+) -> String {
+    let mut out = String::with_capacity(markdown.len());
+    let mut rest = transformed;
+    while let Some(start) = rest.find('\u{e010}') {
+        out.push_str(&rest[..start]);
+        let marker = &rest[start + '\u{e010}'.len_utf8()..];
+        let code = marker.find('\u{e011}').and_then(|end| {
+            let range = ranges.get(marker[..end].parse::<usize>().ok()?)?;
+            Some((markdown.get(range.clone())?, end))
+        });
+        match code {
+            Some((code, end)) => {
+                out.push_str(code);
+                rest = &marker[end + '\u{e011}'.len_utf8()..];
+            }
+            None => {
+                out.push('\u{e010}');
+                rest = marker;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Shared cleanup for every feed and extracted article, both on storage and when building older
@@ -77,6 +112,107 @@ pub fn strip_article_metadata(
         return protect_markdown_code(&markdown, tidy_markdown);
     }
     markdown
+}
+
+/// Clean publisher metadata and move explicit boundary hashtags into article labels.
+pub fn normalize_article_body(
+    markdown: &str,
+    title: &str,
+    published: Option<DateTime<Utc>>,
+    source_slug: &str,
+) -> (String, Vec<String>) {
+    let mut body = crate::threads::format_archived_x_embeds(markdown);
+    let mut labels = Vec::new();
+    loop {
+        let (cleaned, found) = boundary_hashtags(&body);
+        labels.extend(found);
+        let cleaned = strip_article_metadata(&cleaned, title, published, source_slug);
+        if cleaned == body {
+            return (body, crate::model::normalize_labels(labels));
+        }
+        body = cleaned;
+    }
+}
+
+fn boundary_hashtags(markdown: &str) -> (String, Vec<String>) {
+    if !markdown.contains('#') {
+        return (markdown.to_string(), Vec::new());
+    }
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    let blocks = root.children().collect::<Vec<_>>();
+    let mut first = 0;
+    let mut last = blocks.len();
+    let mut labels = Vec::new();
+    while first < last {
+        let Some(tags) = hashtag_paragraph(blocks[first]) else {
+            break;
+        };
+        labels.extend(tags);
+        first += 1;
+    }
+    while last > first {
+        let Some(tags) = hashtag_paragraph(blocks[last - 1]) else {
+            break;
+        };
+        labels.extend(tags);
+        last -= 1;
+    }
+    if labels.is_empty() {
+        return (markdown.to_string(), labels);
+    }
+    if first == last {
+        return (String::new(), labels);
+    }
+    let mut lines = vec![0];
+    lines.extend(markdown.match_indices('\n').map(|(index, _)| index + 1));
+    let start = if first > 0 {
+        lines[blocks[first].data.borrow().sourcepos.start.line - 1]
+    } else {
+        0
+    };
+    let end = if last < blocks.len() {
+        lines[blocks[last].data.borrow().sourcepos.start.line - 1]
+    } else {
+        markdown.len()
+    };
+    let kept = &markdown[start..end];
+    let body = if last < blocks.len() {
+        format!("{}\n", kept.trim_end_matches('\n'))
+    } else {
+        kept.to_string()
+    };
+    (body, labels)
+}
+
+fn hashtag_paragraph<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<Vec<String>> {
+    use comrak::nodes::NodeValue;
+    if !matches!(node.data.borrow().value, NodeValue::Paragraph) {
+        return None;
+    }
+    let mut text = String::new();
+    for child in node.descendants() {
+        match &child.data.borrow().value {
+            NodeValue::Text(value) => text.push_str(value),
+            NodeValue::SoftBreak | NodeValue::LineBreak => text.push(' '),
+            NodeValue::Paragraph | NodeValue::Link(_) | NodeValue::Emph | NodeValue::Strong => {}
+            _ => return None,
+        }
+    }
+    let tags = text
+        .split_whitespace()
+        .map(|token| {
+            let tag = token.strip_prefix('#')?;
+            (!tag.is_empty()
+                && tag.chars().count() <= 64
+                && tag.chars().any(char::is_alphanumeric)
+                && tag
+                    .chars()
+                    .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-')))
+            .then(|| tag.to_string())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!tags.is_empty()).then_some(tags)
 }
 
 pub(super) fn is_accessibility_label(text: &str) -> bool {
@@ -114,7 +250,9 @@ fn strip_boundary_controls(markdown: &str) -> String {
         return markdown.to_string();
     }
     let arena = comrak::Arena::new();
-    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    let mut options = comrak::Options::default();
+    options.extension.table = true;
+    let root = comrak::parse_document(&arena, markdown, &options);
     let blocks = root.children().collect::<Vec<_>>();
     if blocks.is_empty() {
         return markdown.to_string();
@@ -139,7 +277,7 @@ fn strip_boundary_controls(markdown: &str) -> String {
     let trailing = blocks
         .iter()
         .rev()
-        .take_while(|node| is_boundary_control(node))
+        .take_while(|node| is_boundary_control(node) || is_lwn_index_table(node))
         .count();
     if leading == 0 && trailing == 0 {
         return markdown.to_string();
@@ -177,6 +315,76 @@ fn strip_boundary_controls(markdown: &str) -> String {
     } else {
         kept.to_string()
     }
+}
+
+/// LWN ends articles with a category/topic index. Match its complete navigation shape and host,
+/// not merely the heading: articles can legitimately discuss indexes or quote the same table.
+fn is_lwn_index_table<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
+    use comrak::nodes::NodeValue;
+    if !matches!(node.data.borrow().value, NodeValue::Table(_)) {
+        return false;
+    }
+    let rows = node.children().collect::<Vec<_>>();
+    let Some(header) = rows.first() else {
+        return false;
+    };
+    let cells = header.children().collect::<Vec<_>>();
+    if rows.len() < 2 || cells.len() != 2 || cells[1].first_child().is_some() {
+        return false;
+    }
+    let label = cells[0].children().collect::<Vec<_>>();
+    if label.len() != 1
+        || !matches!(&label[0].data.borrow().value, NodeValue::Text(text) if text.trim() == "Index entries for this article")
+    {
+        return false;
+    }
+    rows[1..].iter().all(|row| {
+        let cells = row.children().collect::<Vec<_>>();
+        if cells.len() != 2 {
+            return false;
+        }
+        let Some(category) = lwn_index_cell_url(cells[0]) else {
+            return false;
+        };
+        let Some(topic) = lwn_index_cell_url(cells[1]) else {
+            return false;
+        };
+        category.fragment().is_none()
+            && topic
+                .fragment()
+                .is_some_and(|fragment| !fragment.is_empty())
+            && category.path() == topic.path()
+    })
+}
+
+fn lwn_index_cell_url<'a>(cell: &'a comrak::nodes::AstNode<'a>) -> Option<url::Url> {
+    use comrak::nodes::NodeValue;
+    let children = cell.children().collect::<Vec<_>>();
+    if children.len() != 1 {
+        return None;
+    }
+    let NodeValue::Link(link) = &children[0].data.borrow().value else {
+        return None;
+    };
+    // A navigation cell contains only its linked label; embedded code or images may be article data.
+    if !children[0]
+        .children()
+        .all(|node| matches!(&node.data.borrow().value, NodeValue::Text(_)))
+    {
+        return None;
+    }
+    let url = url::Url::parse(&link.url).ok()?;
+    let segments = url.path_segments()?.collect::<Vec<_>>();
+    (matches!(url.scheme(), "http" | "https")
+        && url.host_str() == Some("lwn.net")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
+        && segments.len() == 2
+        && !segments[0].is_empty()
+        && segments[1] == "Index")
+        .then_some(url)
 }
 
 fn boundary_paragraph_text<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<(String, bool)> {
@@ -352,6 +560,8 @@ enum LeadingMetadata {
     /// A category label or eyebrow above the opening: a lone short link, or a few words that
     /// introduce the heading right after them.
     Kicker,
+    /// A follow widget's label, left behind once the button it introduced was dropped.
+    Follow,
 }
 
 /// Remove the metadata lines readability promoted to the front of the article: a heading that
@@ -369,20 +579,34 @@ pub fn strip_leading_metadata(
     let mut rest = markdown.trim_start_matches('\n');
     let mut bylines = 0;
     let mut previous = None;
+    // A hero picture belongs to the article, so the walk steps over it rather than into it: the
+    // page's own chrome can sit below it, and dropping the picture to reach that would be a trade
+    // nobody asked for.
+    let mut kept = String::new();
+    let mut heroes = 0;
+    let mut stripped = false;
     while let Some((first, tail)) = rest.split_once("\n\n") {
         if first.lines().count() != 1 {
             break;
         }
         let tail = tail.trim_start_matches('\n');
         let plain = html_to_text(&render_markdown(first));
+        if previous.is_none() && heroes < MAX_HERO_PICTURES && hero_picture(first, &plain) {
+            heroes += 1;
+            kept.push_str(first);
+            kept.push_str("\n\n");
+            rest = tail;
+            continue;
+        }
         let Some(kind) =
             leading_metadata(first, &plain, title, published, source_slug, tail, previous)
         else {
             if let Some(without_stamp) = stamp_behind_lede(first, &plain, tail) {
-                return without_stamp;
+                return kept + &without_stamp;
             }
             break;
         };
+        stripped = true;
         if kind == LeadingMetadata::Byline {
             bylines += 1;
             if bylines > 3 {
@@ -400,7 +624,48 @@ pub fn strip_leading_metadata(
             }
         }
     }
-    rest.to_string()
+    if !stripped {
+        return markdown.to_string();
+    }
+    kept + rest
+}
+
+/// Hero pictures a publisher stacks above its opening, as many as the resource row allows.
+const MAX_HERO_PICTURES: usize = 3;
+
+/// A paragraph that is only a picture: it says nothing, and what it shows is the article's.
+fn hero_picture(block: &str, plain: &str) -> bool {
+    plain.trim().is_empty() && block.contains("![")
+}
+
+/// `Add Android Authority on Google:` — the label of a follow widget, left behind once the button
+/// it introduced was dropped. A colon that introduces nothing is what tells it from prose, so a
+/// line followed by the list or quote it announces stays.
+fn is_follow_prompt(text: &str, tail: &str) -> bool {
+    let text = text.trim();
+    if text.chars().count() > 80 || !text.ends_with(':') {
+        return false;
+    }
+    let lower = text.to_lowercase();
+    if ![
+        "add ",
+        "follow ",
+        "subscribe to ",
+        "subscribe ",
+        "join ",
+        "read ",
+    ]
+    .iter()
+    .any(|verb| lower.starts_with(verb))
+    {
+        return false;
+    }
+    // What follows tells the two apart: a label above the list, quote, picture or link it
+    // announces is doing its job, while one above ordinary prose lost whatever it introduced.
+    let next = tail.split("\n\n").next().unwrap_or_default().trim_start();
+    !next.starts_with(['-', '*', '+', '>', '#', '[', '!', '<'])
+        && !next.starts_with(|character: char| character.is_ascii_digit())
+        && !next.starts_with("http")
 }
 
 fn leading_metadata(
@@ -420,6 +685,9 @@ fn leading_metadata(
     }
     if matches!(previous, None | Some(LeadingMetadata::Kicker)) && is_kicker(block, plain, tail) {
         return Some(LeadingMetadata::Kicker);
+    }
+    if !block.trim_start().starts_with('#') && is_follow_prompt(plain, tail) {
+        return Some(LeadingMetadata::Follow);
     }
     // `Carlo Piovesan, Geertjan Wielenga` over `2026-09-18 | 9 min`: the authors line of a
     // metadata row is the byline, whatever follows it.
@@ -540,6 +808,44 @@ fn is_title_heading(block: &str, plain: &str, title: &str) -> bool {
         || heading
             .strip_prefix("title:")
             .is_some_and(|rest| same_title(rest.trim(), &expected))
+        // A headline the page states in full while the feed shortened it, or the other way round:
+        // `Devin Fusion` against `Devin Fusion: Frontier Performance at 60% Lower Cost`. Only a
+        // document's own title carries a subtitle like that, so a deeper heading has to match
+        // outright; a section named after the article is still a section. A heading holding a
+        // destination is worth more than the repetition costs, so it stays either way.
+        || (marks <= 2 && !block.contains("](") && !block.contains("<a ")
+            && restates_title(&heading, &expected))
+}
+
+/// Whether one title runs through the other word for word, with at most a subtitle, a prefix such
+/// as `Introducing`, or a year marker around it. One shared word is a coincidence, not a title.
+fn restates_title(heading: &str, title: &str) -> bool {
+    let (heading, title) = (title_words(heading), title_words(title));
+    let (short, long) = if heading.len() <= title.len() {
+        (heading, title)
+    } else {
+        (title, heading)
+    };
+    short.len() >= 2 && long.windows(short.len()).any(|window| window == short)
+}
+
+/// A title as words to compare, without the punctuation around them, the articles that carry no
+/// meaning, or the original year an aggregator appended to a republished story.
+fn title_words(text: &str) -> Vec<&str> {
+    let mut words: Vec<&str> = text.split_whitespace().collect();
+    if words.last().is_some_and(|word| {
+        word.len() == 6
+            && word.starts_with('(')
+            && word.ends_with(')')
+            && word[1..5].bytes().all(|byte| byte.is_ascii_digit())
+    }) {
+        words.pop();
+    }
+    words
+        .into_iter()
+        .map(|word| word.trim_matches(|character: char| !character.is_alphanumeric()))
+        .filter(|word| !word.is_empty() && !matches!(*word, "the" | "a" | "an"))
+        .collect()
 }
 
 /// The page's own title as a plain paragraph (a `<header>` that styles a `<p>` as the heading):
@@ -581,7 +887,10 @@ fn stamp_follows(tail: &str) -> bool {
 
 /// Two normalised titles that name the same article. An aggregator (Hacker News) shortens words
 /// when it edits a title (`repositories` → `repos`), so a word that is a prefix of its partner,
-/// three characters or longer, still matches.
+/// three characters or longer, still matches. A publisher rarely writes its own headline exactly
+/// as the feed sends it either (`breaks Enigma message` → `breaking an Enigma message`), so a
+/// longer title may also differ by a word in four. Short titles must still match word for word:
+/// one word out of three carries most of their meaning.
 fn same_title(a: &str, b: &str) -> bool {
     if a == b {
         return true;
@@ -590,11 +899,33 @@ fn same_title(a: &str, b: &str) -> bool {
         a.split_whitespace().collect(),
         b.split_whitespace().collect(),
     );
-    a.len() == b.len()
-        && !a.is_empty()
-        && a.iter().zip(&b).all(|(x, y)| {
-            x == y || (x.len().min(y.len()) >= 3 && (x.starts_with(y) || y.starts_with(x)))
-        })
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let budget = a.len().max(b.len()) / 4;
+    a.len().abs_diff(b.len()) <= budget && title_edits(&a, &b, budget) <= budget
+}
+
+/// Words to insert, drop or replace to turn one title into the other, giving up past `budget`.
+fn title_edits(a: &[&str], b: &[&str], budget: usize) -> usize {
+    let same_word = |x: &str, y: &str| {
+        x == y || x.len().min(y.len()) >= 3 && (x.starts_with(y) || y.starts_with(x))
+    };
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0; b.len() + 1];
+    for (index, x) in a.iter().enumerate() {
+        current[0] = index + 1;
+        for (offset, y) in b.iter().enumerate() {
+            current[offset + 1] = (previous[offset] + usize::from(!same_word(x, y)))
+                .min(previous[offset + 1] + 1)
+                .min(current[offset] + 1);
+        }
+        if current.iter().all(|edits| *edits > budget) {
+            return budget + 1;
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
 }
 
 /// `plain` without a trailing reading-time estimate (`11 min read`, `5-minute read`,
@@ -943,6 +1274,80 @@ struct LeadingDate {
     labelled: bool,
 }
 
+/// `Tuesday 22 Sept 2026`: the weekday names the same day the date does, so a byline that opens
+/// with one is still that date.
+fn without_weekday(value: &str) -> String {
+    const WEEKDAYS: [&str; 14] = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri",
+        "sat",
+        "sun",
+    ];
+    let trimmed = value.trim_start();
+    let Some((head, rest)) = trimmed.split_once(char::is_whitespace) else {
+        return value.to_string();
+    };
+    let head = head.trim_end_matches([',', '.']).to_ascii_lowercase();
+    if WEEKDAYS.contains(&head.as_str()) {
+        return rest.trim_start().to_string();
+    }
+    value.to_string()
+}
+
+/// `Sept` is the month the publisher wrote; the date parser only knows `Sep`.
+fn with_known_month_abbreviations(value: String) -> String {
+    const ABBREVIATIONS: [(&str, &str); 2] = [("Sept ", "Sep "), ("Sept. ", "Sep ")];
+    let mut value = value;
+    for (from, to) in ABBREVIATIONS {
+        if let Some(at) = value.find(from) {
+            value.replace_range(at..at + from.len(), to);
+        }
+    }
+    value
+}
+
+/// `Press release issued: 22 September 2026`: a publisher can introduce its date with any short
+/// phrase, so the phrase is read rather than listed. Only a few plain words before a colon count,
+/// and only the ones that say a date follows let the line go on its own evidence: everything else
+/// still has to match the item's own date.
+fn colon_label(value: &str) -> Option<(&str, bool)> {
+    const DATE_WORDS: [&str; 9] = [
+        "issued",
+        "published",
+        "posted",
+        "updated",
+        "written",
+        "released",
+        "modified",
+        "date",
+        "dated",
+    ];
+    let (label, rest) = value.split_once(':')?;
+    let words: Vec<&str> = label.split_whitespace().collect();
+    if words.is_empty()
+        || words.len() > 4
+        || !words
+            .iter()
+            .all(|word| word.chars().all(char::is_alphabetic))
+    {
+        return None;
+    }
+    let dated = words
+        .iter()
+        .any(|word| DATE_WORDS.contains(&word.to_ascii_lowercase().as_str()));
+    Some((rest.trim_start(), dated))
+}
+
 fn parse_date_only(raw: &str) -> Option<LeadingDate> {
     let value = raw.trim().trim_matches(['*', '_']).trim();
     let lowercase = value.to_ascii_lowercase();
@@ -953,8 +1358,11 @@ fn parse_date_only(raw: &str) -> Option<LeadingDate> {
                 .starts_with(label)
                 .then(|| (&value[label.len()..], true))
         })
+        .or_else(|| colon_label(value))
         .unwrap_or((value, false));
     let value = without_ordinal_suffixes(value);
+    let value = without_weekday(&value);
+    let value = with_known_month_abbreviations(value);
     // `%Y%m%d` is a compact permalink date; it only ever strips a line that matches the item's
     // own publication date, so an unrelated eight-digit number stays put.
     [
@@ -1081,6 +1489,49 @@ fn is_thematic_break(line: &str, starts_block: bool) -> bool {
 mod tests {
     use super::*;
     use crate::content::to_markdown;
+
+    #[test]
+    fn article_tags_move_only_explicit_boundary_groups_into_labels() {
+        let (body, labels) = normalize_article_body(
+            "#RUST #AI\n\nCarlo Piovesan, Geertjan Wielenga\n\n2026-09-18 | 9 min\n\nActual prose about #rust.\n\n#interior\n\nMore prose.\n\n[#Jev](https://youtube.com/hashtag/jev) **#AI**\n\n#coding #中文\n",
+            "",
+            None,
+            "video",
+        );
+        assert_eq!(
+            body,
+            "Actual prose about #rust.\n\n#interior\n\nMore prose.\n"
+        );
+        assert_eq!(labels, ["ai", "coding", "jev", "rust", "中文"]);
+        assert_eq!(
+            normalize_article_body(&body, "", None, "video"),
+            (body, Vec::new())
+        );
+    }
+
+    #[test]
+    fn article_tags_preserve_prose_code_lists_quotes_and_headings() {
+        for body in [
+            "Discuss #rust and #ai.\n",
+            "# A heading\n",
+            "`#rust #ai`\n",
+            "```sh\n#rust #ai\n```\n",
+            "    #rust #ai\n",
+            "> #rust #ai\n",
+            "- #rust\n- #ai\n",
+            "#rust is great\n",
+            "#rust.\n",
+            "#rust/path\n",
+            "![#rust](https://example.com/image.png)\n",
+            "Opening.\n\n#rust #ai\n\nClosing.\n",
+        ] {
+            assert_eq!(
+                normalize_article_body(body, "", None, "feed"),
+                (body.to_string(), Vec::new()),
+                "{body}"
+            );
+        }
+    }
 
     #[test]
     fn boundary_update_notices_are_removed_but_prose_mentions_stay() {
@@ -1401,6 +1852,113 @@ mod tests {
     }
 
     #[test]
+    fn a_follow_widget_under_the_hero_goes_without_taking_the_picture() {
+        // androidauthority.com: the hero picture, then the label of a follow widget whose button
+        // readability dropped, then the article.
+        let body = concat!(
+            "![samsung family hub fridge large](https://cdn.example/fridge.jpg)\n\n",
+            "Add Android Authority on Google:\n\n",
+            "TL;DR\n\n",
+            "- Samsung has halted a SmartThings update.\n",
+        );
+        assert_eq!(
+            strip_leading_metadata(body, "Samsung freezes its fridges", None, "hnrss-org"),
+            concat!(
+                "![samsung family hub fridge large](https://cdn.example/fridge.jpg)\n\n",
+                "TL;DR\n\n",
+                "- Samsung has halted a SmartThings update.\n",
+            )
+        );
+
+        // A colon that introduces what follows is prose, a heading is never chrome, and a picture
+        // with nothing behind it keeps the body exactly as it was.
+        for body in [
+            "Follow these steps:\n\n- First step.\n",
+            "Subscribe to the newsletter:\n\n> A quote follows.\n",
+            "## Add us on Google:\n\nArticle prose.\n",
+            "![A hero](https://cdn.example/a.jpg)\n\nArticle prose.\n",
+            "Read the docs and get started building today:\n\n[Docs](https://example.com)\n",
+        ] {
+            assert_eq!(
+                strip_leading_metadata(body, "A title", None, "blog"),
+                body,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reworded_heading_still_repeats_the_title() {
+        // cryptocellar.org via Hacker News: the same headline, written `breaks Enigma message` by
+        // the submitter and `breaking an Enigma message` by the page itself.
+        let title =
+            "OpenAI GPT–6 Astra breaks Enigma message that has resisted solution since 2005";
+        let source = "hnrss-org";
+        let body = "## OpenAI GPT–6 Astra breaking an Enigma message that has resisted solution since 2005.\n\nOn 15 September 2026, Carter Leffer contacted me.\n";
+        let expected = "On 15 September 2026, Carter Leffer contacted me.\n";
+        assert_eq!(strip_article_metadata(body, title, None, source), expected);
+        assert_eq!(
+            strip_article_metadata(expected, title, None, source),
+            expected
+        );
+
+        // A feed that drops a year marker or gains a word, a publisher that adds its own subtitle,
+        // and a heading that is a section of its own: a quarter of the words may differ, a title
+        // may run through the middle of a document heading, and short titles still match outright.
+        for (title, heading, stripped) in [
+            (
+                "We built our house for LAN parties (2024)",
+                "## We built our house for LAN parties",
+                true,
+            ),
+            (
+                "MCP was always a bad idea?",
+                "## Why MCP Was Always a Bad Idea",
+                true,
+            ),
+            ("The DeepWiki MCP Server", "## DeepWiki MCP Server", true),
+            (
+                "Devin Fusion",
+                "## Devin Fusion: Frontier Performance at 60% Lower Cost",
+                true,
+            ),
+            (
+                "The LLMentalist Effect (2023)",
+                "## The LLMentalist Effect: how a chat model replicates a con",
+                true,
+            ),
+            (
+                "GPT-6 Astra: A new generation of intelligence",
+                "# A new generation of intelligence",
+                true,
+            ),
+            // A section named after the article is still a section, and a heading whose link the
+            // body would otherwise lose is worth more than the repetition costs.
+            ("Pixtral Large", "### Pixtral Large in short:", false),
+            (
+                "Kimi Vendor Verifier",
+                "## Rebuilding Trust: Kimi Vendor Verifier [GitHub](https://github.com/x)",
+                false,
+            ),
+            (
+                "Jean-Pierre Serre turns 100",
+                "## Jean-Pierre Albert Achille Serre",
+                false,
+            ),
+            (
+                "Chopping up books when they are too big",
+                "## Chop up your books",
+                false,
+            ),
+            ("What Zig felt like, coming from Rust", "## Intro", false),
+        ] {
+            let body = format!("{heading}\n\nArticle prose.\n");
+            let cleaned = strip_article_metadata(&body, title, None, source);
+            assert_eq!(cleaned != body, stripped, "{heading}");
+        }
+    }
+
+    #[test]
     fn separator_rows_left_by_dropped_controls_are_removed() {
         // openspec.dev: `<button>npm</button><span>/</span><button>pnpm</button>…` — Readability
         // drops the buttons and leaves their separators as a paragraph.
@@ -1427,6 +1985,43 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn strips_a_masthead_line_whose_date_names_its_weekday() {
+        use chrono::TimeZone as _;
+
+        // dbushell.com: a policy badge and the publication date, written the way a person says it.
+        let published = Utc.with_ymd_and_hms(2026, 9, 22, 15, 0, 0).unwrap();
+        let markdown = to_markdown(
+            "<div><p data-speech-synth=\"none\"><img alt=\"No AI - Made by Human\" width=\"70\" height=\"38\" src=\"https://dbushell.com/assets/images/ai-policy.svg\"><time datetime=\"2026-09-22T15:00:00.000Z\"> Tuesday 22 <abbr title=\"September\">Sept</abbr> 2026 </time></p><p>The nice thing about keeping a blog is that I can say precisely when.</p></div>",
+            None,
+        );
+        assert_eq!(
+            strip_article_metadata(&markdown, "I said no", Some(published), "dbushell-com"),
+            "The nice thing about keeping a blog is that I can say precisely when.\n"
+        );
+        // A publisher's own phrase introduces the date as well as a known label does.
+        for date in [
+            "Tuesday 22 Sept 2026",
+            "22 Sept 2026",
+            "Tue, 22 Sept 2026",
+            "Press release issued: 22 September 2026",
+            "Date: 2026-09-22",
+        ] {
+            assert_eq!(
+                parse_date_only(date).map(|parsed| parsed.date.to_string()),
+                Some("2026-09-22".to_string()),
+                "{date}"
+            );
+        }
+        assert!(parse_date_only("Tuesday morning 2026").is_none());
+        // A sentence that happens to hold a colon is prose, not a label.
+        assert!(parse_date_only("The answer to the whole question: 42").is_none());
+        assert!(parse_date_only("Note: it rained all 22 September 2026 long").is_none());
+        // Only a phrase that says a date follows lets a line go without matching the item.
+        assert_eq!(colon_label("Press release issued: x"), Some(("x", true)));
+        assert_eq!(colon_label("Location: x"), Some(("x", false)));
     }
 
     #[test]
@@ -1605,6 +2200,79 @@ mod tests {
         ] {
             assert_eq!(
                 strip_leading_metadata(body, "", None, "lobste-rs"),
+                body,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn duckdb_byline_is_removed_when_feed_date_is_the_next_day() {
+        let published = DateTime::parse_from_rfc3339("2026-09-19T18:46:39Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let markdown = to_markdown(
+            "<p>Carlo Piovesan, Geertjan Wielenga</p><p>2026-09-18 | 9 min</p><p><em>TL;DR: DuckDB-Wasm can open a persistent database file.</em></p>",
+            None,
+        );
+        assert_eq!(
+            strip_article_metadata(
+                &markdown,
+                "Persistent Databases in the Browser",
+                Some(published),
+                "lobste-rs"
+            ),
+            "*TL;DR: DuckDB-Wasm can open a persistent database file.*\n"
+        );
+    }
+
+    #[test]
+    fn trailing_lwn_index_navigation_and_surrounding_breaks_are_removed() {
+        let footer = "| Index entries for this article | |\n| --- | --- |\n| [Kernel](https://lwn.net/Kernel/Index) | [io\\_uring](https://lwn.net/Kernel/Index#io_uring) |";
+        for body in [
+            format!("Better performance.\n\n{footer}\n"),
+            format!("Better performance.\\\n\n{footer}\n\n\\\n"),
+        ] {
+            assert_eq!(
+                strip_article_metadata(&body, "", None, "lobste-rs"),
+                "Better performance.\n"
+            );
+        }
+        let html = "<p>Better performance.<br clear=all></p><table class=IndexEntries><tr><th colspan=2>Index entries for this article</th></tr><tr><td><a href='https://lwn.net/Kernel/Index'>Kernel</a></td><td><a href='https://lwn.net/Kernel/Index#io_uring'>io_uring</a></td></tr></table><br clear=all>";
+        assert_eq!(
+            strip_article_metadata(&to_markdown(html, None), "", None, "lobste-rs"),
+            "Better performance.\n"
+        );
+    }
+
+    #[test]
+    fn index_navigation_cleanup_preserves_body_tables_and_code() {
+        let footer = "| Index entries for this article | |\n| --- | --- |\n| [Kernel](https://lwn.net/Kernel/Index) | [io\\_uring](https://lwn.net/Kernel/Index#io_uring) |";
+        for body in [
+            format!("Opening.\n\n{footer}\n\nMore article.\n"),
+            format!("Opening.\n\n```markdown\n{footer}\n```\n"),
+            format!("Opening.\n\n{}\n", footer.replace("lwn.net", "example.com")),
+            format!(
+                "Opening.\n\n{}\n",
+                footer.replace("lwn.net", "lwn.net.example.com")
+            ),
+            format!(
+                "Opening.\n\n{}\n",
+                footer.replace("Index entries for this article", "Article data")
+            ),
+            format!(
+                "Opening.\n\n{}\n",
+                footer.replace("[Kernel](https://lwn.net/Kernel/Index)", "Kernel data")
+            ),
+            format!(
+                "Opening.\n\n{}\n",
+                footer.replace("| [io", "| Explanation [io")
+            ),
+            format!("{footer}\n\nArticle body.\n"),
+            format!("Opening.\n\n> {}\n", footer.replace('\n', "\n> ")),
+        ] {
+            assert_eq!(
+                strip_article_metadata(&body, "", None, "lobste-rs"),
                 body,
                 "{body}"
             );

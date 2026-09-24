@@ -31,7 +31,7 @@
 <p class="empty">Nothing here yet.</p>
 {% endif %}
 {% if paginator.number_pagers > 1 or page.kind == 'river' %}
-<nav class="pager" aria-label="Pagination"{% if page.kind == 'river' %} data-feed-pager data-static-page="{{ paginator.current_index }}" data-static-pages="{{ paginator.number_pagers }}" data-static-page-size="{{ paginator.paginate_by }}" data-total-items="{{ paginator.total_items }}" data-static-first="{{ paginator.first | url_for }}" data-static-last="{{ paginator.last | url_for }}"{% if paginator.previous %} data-static-previous="{{ paginator.previous | url_for }}"{% endif %}{% if paginator.next %} data-static-next="{{ paginator.next | url_for }}"{% endif %}{% if paginator.number_pagers == 1 %} hidden{% endif %}{% endif %}>
+<nav class="pager" aria-label="Pagination"{% if page.kind == 'river' %} data-feed-pager data-static-page="{{ paginator.current_index }}" data-static-pages="{{ paginator.number_pagers }}" data-static-page-size="{{ paginator.paginate_by }}" data-total-items="{{ paginator.total_items }}" data-static-first="{{ paginator.first | site_path }}" data-static-last="{{ paginator.last | site_path }}"{% if paginator.previous %} data-static-previous="{{ paginator.previous | site_path }}"{% endif %}{% if paginator.next %} data-static-next="{{ paginator.next | site_path }}"{% endif %}{% if paginator.number_pagers == 1 %} hidden{% endif %}{% endif %}>
   <span class="pager-side">
     <a data-page-first href="{{ paginator.first | url_for }}"{% if not paginator.previous %} hidden{% endif %}>first</a>
     <a data-page-previous href="{{ paginator.previous | url_for if paginator.previous else paginator.first | url_for }}"{% if not paginator.previous %} hidden{% endif %}>newer</a>

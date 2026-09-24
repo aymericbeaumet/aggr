@@ -16,7 +16,7 @@
 {% for author in item.authors %}<meta name="author" content="{{ author }}">{% endfor %}
 {% endblock %}
 {% block content %}
-<article class="item h-entry"{% if item.language and item.language | lower != site.language | lower %} lang="{{ item.language }}"{% endif %} data-path="{{ item.path }}" data-url="{{ item.url | url_for }}" data-link="{{ item.link }}"{% if item.previous_article %} data-previous-url="{{ item.previous_article.url | url_for }}"{% endif %}{% if item.next_article %} data-next-url="{{ item.next_article.url | url_for }}"{% endif %}>
+<article class="item h-entry"{% if item.language and item.language | lower != site.language | lower %} lang="{{ item.language }}"{% endif %} data-path="{{ item.path }}" data-url="{{ item.url | site_path }}" data-link="{{ item.link }}"{% if item.previous_article %} data-previous-url="{{ item.previous_article.url | site_path }}"{% endif %}{% if item.next_article %} data-next-url="{{ item.next_article.url | site_path }}"{% endif %}>
   <a class="u-uid u-url" href="{{ item.url | url_for }}" hidden></a>
   {% for author in item.authors %}<data class="p-author h-card" value="{{ author }}" hidden></data>{% endfor %}
   <header class="itemhead">
@@ -27,22 +27,27 @@
     <span class="itemhead-fade" aria-hidden="true"></span>
   </header>
   {% if item.resources %}<nav class="article-resources" aria-label="Article resources"><span class="article-resources-label">Resources</span>{% for resource in item.resources %}<a href="{{ resource.url }}" title="{{ resource.url }}" target="_blank" rel="noopener noreferrer">{{ resource.label }} <span aria-hidden="true">↗</span></a>{% endfor %}</nav>{% endif %}
-  {% if item.content == 'none' and not item.body_html and not item.video and not item.document and not item.native_media and not item.interactive %}
+  {% if item.extra.subscription_required %}
+  <p class="empty article-access-notice">The publisher requires a subscription. <a href="{{ item.link }}" title="{{ item.link }}" target="_blank" rel="noopener noreferrer">Open the original</a>{% if item.extra.archive_lookup_url %} or <a href="{{ item.extra.archive_lookup_url }}" target="_blank" rel="noopener noreferrer">find an archived copy</a>{% endif %}.</p>
+  {% elif item.content == 'none' and not item.body_html and not item.video and not item.document and not item.native_media and not item.interactive %}
   <p class="empty">This source publishes titles only — <a href="{{ item.link }}" title="{{ item.link }}" target="_blank" rel="noopener noreferrer">open the original</a>.</p>
   {% endif %}
   {% if item.document %}
   <figure class="document-reader" aria-label="PDF document">
     <div class="document-frame media-frame"{% if item.preview %} data-thumbhash="{{ item.preview.placeholder.hash }}" style="--image-placeholder: {{ item.preview.color }}; --image-preview: url('{{ item.preview.placeholder.data_url }}')"{% endif %}>
     <span class="document-placeholder" aria-hidden="true"><svg viewBox="0 0 36 48"><path d="M5 2h17l9 9v35H5zM22 2v10h9M11 23h14M11 29h14M11 35h10"/></svg>PDF document</span>
-    <embed class="document-viewer" src="{{ item.document.url }}" type="application/pdf" title="{{ item.title }} — PDF" width="768" height="720">
+    {% set reader_document_url = (item.document.local_url | url_for) if item.document.local_url else item.document.url %}
+    <object class="document-viewer" data="{{ reader_document_url }}" type="application/pdf" title="{{ item.title }} — PDF" width="768" height="720">
+      <div class="document-fallback"><p>PDF preview unavailable</p><a href="{{ reader_document_url }}" target="_blank" rel="noopener noreferrer" aria-label="Open PDF: {{ item.title }}">Open PDF ↗</a></div>
+    </object>
     </div>
-    <figcaption><a href="{{ item.document.url }}" target="_blank" rel="noopener noreferrer" aria-label="Open PDF: {{ item.title }}">Open PDF ↗</a></figcaption>
+    <figcaption><a href="{{ reader_document_url }}" target="_blank" rel="noopener noreferrer" aria-label="Open PDF: {{ item.title }}">Open PDF ↗</a></figcaption>
   </figure>
   {% elif item.video %}
   <div class="video-player" data-video-provider="{{ item.video.provider }}"{% if item.metadata.consumption.seconds %} data-duration-seconds="{{ item.metadata.consumption.seconds }}"{% endif %}{% if item.preview %} data-thumbhash="{{ item.preview.placeholder.hash }}" style="--image-placeholder: {{ item.preview.color }}; --image-preview: url('{{ item.preview.placeholder.data_url }}'); background-color: var(--image-placeholder)"{% endif %}>
     <a class="video-preview" data-video-embed="{{ item.video.embed_url }}"{% if item.video.requires_parent %} data-video-parent{% endif %} href="{{ item.link }}" title="{{ item.link }}" target="_blank" rel="noopener noreferrer" aria-label="Play {{ item.title }} on {{ item.video.title }}">
       {% if item.article_preview %}
-      <img src="{{ item.article_preview.url | url_for }}" srcset="{{ item.article_preview.srcset }}" sizes="(max-width: 48rem) 100vw, 48rem" width="{{ item.article_preview.width }}" height="{{ item.article_preview.height }}" alt="{{ item.article_preview.alt or '' }}" decoding="async" fetchpriority="high">
+      <img src="{{ item.article_preview.url | url_for }}" srcset="{{ item.article_preview.srcset | srcset_for }}" sizes="(max-width: 48rem) 100vw, 48rem" width="{{ item.article_preview.width }}" height="{{ item.article_preview.height }}" alt="{{ item.article_preview.alt or '' }}" decoding="async" fetchpriority="high">
       {% elif item.preview %}
       <img src="{{ item.preview.url | url_for }}" width="{{ item.preview.width }}" height="{{ item.preview.height }}" alt="{{ item.preview.alt or '' }}" decoding="async" fetchpriority="high">
       {% else %}
@@ -55,8 +60,8 @@
   {% elif item.native_media %}
   {% if item.native_media.kind == 'video' %}
   <div class="native-video media-frame"{% if item.preview %} data-thumbhash="{{ item.preview.placeholder.hash }}" style="--image-preview: url('{{ item.preview.placeholder.data_url }}')"{% endif %}>
-    <video controls playsinline preload="none"{% if item.metadata.consumption.seconds %} data-duration-seconds="{{ item.metadata.consumption.seconds }}"{% endif %} src="{{ item.native_media.url }}" aria-label="{{ item.title }}" width="1280" height="720"{% if item.preview %} poster="{{ item.preview.url | url_for }}"{% endif %}>
-      <a href="{{ item.native_media.url }}" target="_blank" rel="noopener noreferrer">Open video</a>
+    <video controls playsinline preload="none"{% if item.metadata.consumption.seconds %} data-duration-seconds="{{ item.metadata.consumption.seconds }}"{% endif %} src="{{ item.native_media.url | url_for }}" aria-label="{{ item.title }}" width="1280" height="720"{% if item.preview %} poster="{{ item.preview.url | url_for }}"{% endif %}>
+      <a href="{{ item.native_media.url | url_for }}" target="_blank" rel="noopener noreferrer">Open video</a>
     </video>
   </div>
   <div class="media-timing" data-media-timing></div>
@@ -65,29 +70,56 @@
     {% if item.preview %}<div class="audio-cover"><img class="audio-artwork" src="{{ item.preview.url | url_for }}" alt="{{ item.preview.alt or '' }}" loading="lazy" decoding="async"></div>{% endif %}
     <div class="audio-panel">
       <div class="audio-heading">
-        <div><strong>Listen</strong><p class="audio-status" data-audio-status role="status" aria-live="polite">Ready when you are</p></div>
+        <strong>Listen</strong>
+        <p class="audio-status" data-audio-status role="status" aria-live="polite">Ready when you are</p>
+        <p class="audio-estimate" data-audio-ends-at></p>
       </div>
-      <audio controls preload="none"{% if item.metadata.consumption.seconds %} data-duration-seconds="{{ item.metadata.consumption.seconds }}"{% endif %} src="{{ item.native_media.url }}" aria-label="{{ item.title }}">
-        <a href="{{ item.native_media.url }}" target="_blank" rel="noopener noreferrer">Open audio</a>
+      <audio controls preload="none"{% if item.metadata.consumption.seconds %} data-duration-seconds="{{ item.metadata.consumption.seconds }}"{% endif %} src="{{ item.native_media.url | url_for }}" aria-label="{{ item.title }}">
+        <a href="{{ item.native_media.url | url_for }}" target="_blank" rel="noopener noreferrer">Open audio</a>
       </audio>
+      <div class="audio-controls" data-audio-controls hidden>
+        <div class="audio-transport">
+          <button class="audio-skip" type="button" data-audio-skip="-30" aria-label="Back 30 seconds" title="Back 30 seconds" disabled>↶ 30</button>
+          <button class="audio-skip" type="button" data-audio-skip="-15" data-audio-back aria-label="Back 15 seconds" title="Back 15 seconds" disabled>↶ 15</button>
+          <button class="audio-toggle" type="button" data-audio-toggle aria-label="Play" title="Play">
+            <svg class="audio-play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>
+            <svg class="audio-pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>
+          </button>
+          <button class="audio-skip" type="button" data-audio-skip="15" aria-label="Forward 15 seconds" title="Forward 15 seconds" disabled>15 ↷</button>
+          <button class="audio-skip" type="button" data-audio-skip="30" data-audio-forward aria-label="Forward 30 seconds" title="Forward 30 seconds" disabled>30 ↷</button>
+        </div>
+        <div class="audio-timeline">
+          <input type="range" min="0" max="1000" value="0" step="1" data-audio-seek aria-label="Playback position" disabled>
+          <div class="audio-times"><span data-audio-elapsed>0:00</span><span data-audio-duration>--:--</span></div>
+        </div>
+      </div>
+      <div class="audio-tools" data-audio-tools hidden>
+        <label class="audio-speed">Speed <select data-audio-speed aria-label="Playback speed">
+          {% for speed in ['0.5', '0.75', '1', '1.25', '1.5', '1.75', '2', '2.5', '3'] %}<option value="{{ speed }}"{% if speed == '1' %} selected{% endif %}>{{ speed }}×</option>{% endfor %}
+        </select></label>
+        <div class="audio-volume">
+          <button type="button" data-audio-mute aria-label="Mute" title="Mute" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z"/><path class="audio-volume-wave" d="M15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></svg>
+          </button>
+          <input data-audio-volume type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume">
+        </div>
+      </div>
     </div>
   </div>
   {% endif %}
   {% elif item.interactive %}
   <figure class="interactive-reader" aria-label="Interactive page">
     <div class="interactive-frame media-frame">
-      <a class="interactive-preview" data-interactive-embed="{{ item.interactive.source_url }}" href="{{ item.interactive.source_url }}" target="_blank" rel="noopener noreferrer" aria-label="Explore {{ item.title }}">
-        <span>Open interactive page ↗</span>
-      </a>
+      <iframe class="interactive-viewer" src="{{ item.interactive.source_url }}" title="{{ item.title }} — interactive original" sandbox="allow-scripts" referrerpolicy="no-referrer" loading="lazy" width="768" height="720"></iframe>
     </div>
     <figcaption><a href="{{ item.interactive.source_url }}" target="_blank" rel="noopener noreferrer">Open original <span aria-hidden="true">↗</span></a></figcaption>
   </figure>
   {% elif item.article_preview %}
   <figure class="article-lead media-frame" data-thumbhash="{{ item.article_preview.placeholder.hash }}" style="--media-ratio: {{ item.article_preview.width }} / {{ item.article_preview.height }}; --image-placeholder: {{ item.article_preview.color }}; --image-preview: url('{{ item.article_preview.placeholder.data_url }}')">
-    <img src="{{ item.article_preview.url | url_for }}" srcset="{{ item.article_preview.srcset }}" sizes="(max-width: 48rem) 100vw, 48rem" width="{{ item.article_preview.width }}" height="{{ item.article_preview.height }}" alt="{{ item.article_preview.alt or '' }}" decoding="async" fetchpriority="high">
+    <img src="{{ item.article_preview.url | url_for }}" srcset="{{ item.article_preview.srcset | srcset_for }}" sizes="(max-width: 48rem) 100vw, 48rem" width="{{ item.article_preview.width }}" height="{{ item.article_preview.height }}" alt="{{ item.article_preview.alt or '' }}" decoding="async" fetchpriority="high">
   </figure>
   {% endif %}
-  <div class="body e-content">{{ item.body_html | safe }}</div>
+  <div class="body e-content{% if item.has_margin_notes %} has-margin-notes{% endif %}">{{ item.body_html | rebase | safe }}</div>
   {% if item.next_article or item.recommended_articles %}
   <footer class="article-footer">
     {% if item.next_article %}

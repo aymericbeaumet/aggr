@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use minijinja::{Environment, Error, ErrorKind, Value};
+use minijinja::{Environment, Error, ErrorKind, State, Value};
 use rust_embed::RustEmbed;
 use serde::Serialize;
 
@@ -137,21 +137,48 @@ impl Renderer {
         });
 
         let assets = asset_map(&layers)?;
-        let filter_assets = assets.clone();
         // Paths are ours (slugified ASCII), so `/` must not come out as `&#x2f;`.
-        env.add_filter("url_for", move |path: String| {
-            let path = path.trim_start_matches('/');
-            let resolved = path
-                .strip_prefix("assets/")
-                .and_then(|name| filter_assets.get(name))
-                .map(|asset| format!("assets/{}", asset.output))
-                .unwrap_or_else(|| path.to_string());
-            Value::from_safe_string(resolved)
+        // `url_for` is what the browser resolves: it walks up from the page being rendered, so
+        // the output works at `/`, under a nested mount, or from a file, and no `<base>` element is
+        // needed. `site_path` is the same location relative to the site root, for data attributes
+        // the client resolves itself and for joining onto `site.base_url`.
+        let filter_assets = assets.clone();
+        env.add_filter("url_for", move |state: &State, path: String| {
+            if !is_site_reference(&path) {
+                // Absolute or remote: escaped like any other value.
+                return Value::from(path);
+            }
+            let path = site_path(&filter_assets, &path);
+            let root = page_root(state);
+            Value::from_safe_string(if path.is_empty() {
+                root
+            } else {
+                crate::content::rebase_site_url(&path, &root)
+            })
+        });
+        env.add_filter("srcset_for", |state: &State, srcset: String| {
+            Value::from(crate::content::rebase_srcset(&srcset, &page_root(state)))
+        });
+        let filter_assets = assets.clone();
+        env.add_filter("site_path", move |path: String| {
+            Value::from_safe_string(site_path(&filter_assets, &path))
+        });
+        env.add_filter("rebase", |state: &State, html: Value| {
+            let html = html.as_str().unwrap_or_default();
+            Value::from_safe_string(crate::content::rebase_site_paths(html, &page_root(state)))
         });
         env.add_filter("domain", super::context::domain_of);
         env.add_filter("profile", super::context::profile_label);
         env.add_filter("slug", |value: String| slug::slugify(value));
-        env.add_filter("facet_url", facet_url);
+        env.add_filter("facet_url", |state: &State, value: String, kind: String| {
+            format!("{}{}", page_root(state), facet_url(value, kind))
+        });
+        env.add_filter(
+            "facet_page",
+            |state: &State, value: String, kind: String| {
+                format!("{}{}", page_root(state), facet_page(value, kind))
+            },
+        );
         env.add_filter("date", date_filter);
         env.add_filter("excerpt", |text: String, max: Option<usize>| {
             crate::content::excerpt(&text, max.unwrap_or(200))
@@ -271,13 +298,60 @@ fn html_formatter(
     }
 }
 
+/// The prefix that takes a site-relative path from the page being rendered to the site root:
+/// `page.root` while a page renders, nothing for fragments rendered without one.
+fn page_root(state: &State) -> String {
+    state
+        .lookup("page")
+        .and_then(|page| page.get_attr("root").ok())
+        .and_then(|root| root.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// Whether `url_for` should treat a value as a site path: anything without a scheme. A leading
+/// `/` is tolerated as a site path for older templates; fragments and queries pass through.
+fn is_site_reference(value: &str) -> bool {
+    !value.split_once(':').is_some_and(|(scheme, _)| {
+        scheme
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
+}
+
+/// A site-relative path with content-hashed asset names substituted.
+fn site_path(assets: &BTreeMap<String, Asset>, path: &str) -> String {
+    let path = path.trim_start_matches('/');
+    let path = path.strip_prefix("./").unwrap_or(path);
+    path.strip_prefix("assets/")
+        .and_then(|name| assets.get(name))
+        .map(|asset| format!("assets/{}", asset.output))
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// The collection page a facet value already has, relative to the site root. A chip navigates to
+/// a page the build wrote rather than to a query the browser has to answer: the same list, with
+/// no index to download.
+fn facet_page(value: String, kind: String) -> String {
+    let directory = match kind.as_str() {
+        "source" => "sources",
+        "category" => "categories",
+        _ => "tags",
+    };
+    format!("{directory}/{value}/")
+}
+
+/// The root feed filtered to one facet value, relative to the site root.
 fn facet_url(value: String, kind: String) -> String {
     let quoted = serde_json::to_string(&value).unwrap_or_default();
     let query = format!("{kind}:{quoted}");
     let encoded = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("q", &query)
         .finish();
-    format!("./?{encoded}")
+    format!("?{encoded}")
 }
 
 /// `{{ value | date }}` → `2026-09-02`; `{{ value | date("%d %b %Y") }}` for custom formats.
@@ -318,10 +392,6 @@ mod tests {
     /// Classes the stylesheet styles that no template, client source or Rust string spells out
     /// as a whole, because the name is assembled from data at build or run time.
     const GENERATED_CLASSES: &[(&str, &str)] = &[
-        (
-            "swup-enabled",
-            "the vendored themes/default/static/swup.js adds it to <html> when it takes over navigation",
-        ),
         (
             "syntax-comment",
             "syntect ClassStyle::SpacedPrefixed { prefix: \"syntax-\" } in content_highlight.rs",
@@ -446,11 +516,11 @@ mod tests {
         let declared = declared_classes(&css);
         assert!(declared.contains("row") && declared.contains("table-scroll"));
         assert!(!declared.contains("5rem") && !declared.contains("body p"));
-        // This file's own assertions must not vouch for a class.
-        let corpus = ["themes/default/templates", "web/src", "src"]
+        // This file's own assertions must not vouch for a class, and neither may the stylesheet.
+        let corpus = ["themes/default/templates", "themes/default/static", "src"]
             .iter()
             .flat_map(|dir| read_tree(&repository_path(dir)))
-            .filter(|(name, _)| name != "site/render.rs")
+            .filter(|(name, _)| name != "site/render.rs" && !name.ends_with(".css"))
             .map(|(_, text)| text)
             .collect::<Vec<_>>();
         let unused = declared
@@ -485,25 +555,105 @@ mod tests {
     }
 
     #[test]
+    fn every_stretched_link_is_contained_by_the_card_it_covers() {
+        // From disk: the embedded copy is only as fresh as the last compile.
+        let css =
+            std::fs::read_to_string(repository_path("themes/default/static/style.css")).unwrap();
+        let css = css.as_str();
+        let class = regex::Regex::new(r"\.([a-z][a-z0-9_-]*)").unwrap();
+        // Only the element a rule applies to is positioned, never the ancestors that select it.
+        let positioned: BTreeSet<String> = rules(css)
+            .filter(|(_, block)| block.contains("position: relative"))
+            .flat_map(|(prelude, _)| selectors(&prelude))
+            .flat_map(|selector| {
+                class
+                    .captures_iter(&subject(&selector))
+                    .map(|capture| capture[1].to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        // An overlay filling `inset: 0` fills its nearest positioned ancestor. Without one of its
+        // own it covers whatever surrounds it — the article body reads as the last card's link,
+        // underlining on hover and navigating on click.
+        let overlays: Vec<_> = rules(css)
+            .filter(|(_, block)| block.contains("position: absolute") && block.contains("inset: 0"))
+            // Each selector in a group stands on its own: one of them being contained says
+            // nothing about the others.
+            .flat_map(|(prelude, _)| selectors(&prelude))
+            .filter(|selector| selector.contains("::after"))
+            .filter(|selector| {
+                !class
+                    .captures_iter(selector)
+                    .any(|capture| positioned.contains(&capture[1]))
+            })
+            .collect();
+        assert!(
+            overlays.is_empty(),
+            "stretched links with nothing to contain them: {overlays:?}"
+        );
+    }
+
+    /// The compound a selector applies to: whatever follows its last top-level combinator.
+    fn subject(selector: &str) -> String {
+        let mut depth = 0usize;
+        let mut start = 0usize;
+        for (index, character) in selector.char_indices() {
+            match character {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth = depth.saturating_sub(1),
+                ' ' | '>' | '+' | '~' if depth == 0 => start = index + character.len_utf8(),
+                _ => {}
+            }
+        }
+        selector[start..].to_string()
+    }
+
+    /// A selector group split into its selectors, ignoring the commas inside `:is()` and friends.
+    fn selectors(prelude: &str) -> Vec<String> {
+        let mut selectors = vec![String::new()];
+        let mut depth = 0usize;
+        for character in prelude.chars() {
+            match character {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    selectors.push(String::new());
+                    continue;
+                }
+                _ => {}
+            }
+            let last = selectors.len() - 1;
+            selectors[last].push(character);
+        }
+        selectors
+            .into_iter()
+            .map(|selector| selector.trim().to_string())
+            .filter(|selector| !selector.is_empty())
+            .collect()
+    }
+
+    /// `(prelude, declarations)` for every rule in `css`, comments removed.
+    fn rules(css: &str) -> impl Iterator<Item = (String, String)> {
+        let css = regex::Regex::new(r"(?s)/\*.*?\*/")
+            .unwrap()
+            .replace_all(css, "")
+            .into_owned();
+        css.split('}')
+            .filter_map(|rule| {
+                let (prelude, block) = rule.split_once('{')?;
+                (!prelude.trim_start().starts_with('@'))
+                    .then(|| (prelude.trim().to_string(), block.to_string()))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
     fn embedded_theme_allows_native_vertical_overscroll() {
         let file = DefaultTheme::get("static/style.css").unwrap();
         let css = std::str::from_utf8(file.data.as_ref()).unwrap();
         assert!(css.contains("overscroll-behavior-y: auto"));
         assert!(!css.contains("overscroll-behavior-y: none"));
-    }
-
-    #[test]
-    fn embedded_theme_implements_touch_pull_to_refresh() {
-        let base_file = DefaultTheme::get("templates/base.html").unwrap();
-        let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
-        assert!(base.contains("id=\"pull-refresh\""));
-        assert!(base.contains("id=\"pull-refresh-label\""));
-
-        let css_file = DefaultTheme::get("static/style.css").unwrap();
-        let css = std::str::from_utf8(css_file.data.as_ref()).unwrap();
-        assert!(css.contains("--pull-distance"));
-        assert!(css.contains("html[data-pull-state=\"pulling\"]"));
-        assert!(css.contains("html[data-pull-state=\"armed\"]"));
     }
 
     #[test]
@@ -522,8 +672,10 @@ mod tests {
         let mut expected = crate::cache::ci_cached_paths();
         expected.sort();
 
-        let mut restore = None;
-        let mut save = None;
+        let mut restores = Vec::new();
+        let mut saves = Vec::new();
+        let mut restored_paths = Vec::new();
+        let mut saved_paths = Vec::new();
         let mut build = None;
         for (index, step) in steps.iter().enumerate() {
             let uses = step["uses"].as_str().unwrap_or_default();
@@ -551,22 +703,33 @@ mod tests {
             {
                 continue;
             }
-            let mut paths = path
+            let paths = path
                 .lines()
                 .map(str::trim)
                 .filter(|line| !line.is_empty())
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            paths.sort();
-            assert_eq!(paths, expected, "{uses} disagrees with cache::Namespace");
             if uses.starts_with("actions/cache/restore@") {
-                assert!(restore.replace(index).is_none(), "one restore step");
+                restores.push(index);
+                restored_paths.extend(paths);
             } else {
-                assert!(save.replace(index).is_none(), "one save step");
+                saves.push(index);
+                saved_paths.extend(paths);
             }
         }
-        let (restore, build, save) = (restore.unwrap(), build.unwrap(), save.unwrap());
-        assert!(restore < build && build < save, "restore, build, then save");
+        restored_paths.sort();
+        saved_paths.sort();
+        assert_eq!(
+            restored_paths, expected,
+            "restore all derived namespaces exactly once"
+        );
+        assert_eq!(
+            saved_paths, expected,
+            "save all derived namespaces exactly once"
+        );
+        let build = build.unwrap();
+        assert!(restores.iter().all(|index| *index < build));
+        assert!(saves.iter().all(|index| *index > build));
     }
 
     #[test]
@@ -594,19 +757,24 @@ mod tests {
         assert!(css.contains("var(--image-placeholder, var(--code))"));
         assert!(css.contains("inline-size: min(100%, var(--image-width, 100%))"));
         assert!(css.contains("aspect-ratio: var(--image-ratio)"));
-        assert!(css.contains(".article-picture.is-loading.is-loaded .progressive-image"));
-
+        // Content-addressed media is safe to serve from the cache without revalidating. Published
+        // PDFs are content-addressed the same way, so they belong with the images and previews
+        // rather than in the bounded page cache a later visit can evict them from.
         let worker_file = DefaultTheme::get("templates/sw.js").unwrap();
         let worker = std::str::from_utf8(worker_file.data.as_ref()).unwrap();
-        assert!(worker.contains("BASE + \"assets/images/\""));
-        assert!(worker.contains("cacheFirst(request, IMAGES, IMAGE_MAX"));
+        assert!(worker.contains("(images|previews|documents)"));
+        assert!(worker.contains("assetResponse(request, ASSETS, ASSET_LIMIT)"));
     }
 
     #[test]
-    fn embedded_worker_versions_runtime_search_indexes() {
+    fn embedded_worker_serves_versioned_search_resources_from_the_cache() {
         let worker_file = DefaultTheme::get("templates/sw.js").unwrap();
         let worker = std::str::from_utf8(worker_file.data.as_ref()).unwrap();
-        assert!(worker.contains("var SEARCH = SEARCH_PREFIX + VERSION"));
+        // The index lives under an immutable version, so it never needs revalidating.
+        assert!(worker.contains("pagefind\\/[0-9a-f]{64}\\/"));
+        // Nothing is downloaded ahead of the reader: no archive, no index prefetch.
+        assert!(!worker.contains("OFFLINE_CATALOG"));
+        assert!(!worker.contains("search-manifest.json"));
     }
 
     #[test]
@@ -627,25 +795,33 @@ mod tests {
     fn embedded_theme_exposes_progressive_refresh_and_update_controls() {
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
-        assert!(base.contains("data-connection-root"));
-        assert!(base.contains("data-shortcut-help-root"));
+        // The shortcut dialog ships as markup; nothing waits for a component to mount.
+        assert!(base.contains("<dialog id=\"shortcut-help\""));
+        assert!(!base.contains("data-connection-root"));
+        assert!(!base.contains("data-shortcut-help-root"));
 
         let preferences_file = DefaultTheme::get("templates/preferences.html").unwrap();
         let preferences = std::str::from_utf8(preferences_file.data.as_ref()).unwrap();
         assert!(!preferences.contains("id=\"install-app\""));
         assert!(!preferences.contains("preferences-config"));
         assert!(!preferences.contains(">aggr.toml <span aria-hidden=\"true\">↗</span></a>"));
-        assert!(preferences.contains("data-preferences-root"));
         assert!(preferences.contains("<noscript>"));
-        assert!(!preferences.contains("<input"));
-        assert!(!preferences.contains("<select"));
+        // Every control is rendered from the typed schema, not built in the browser.
+        assert!(preferences.contains("site.preference_schema.groups"));
+        assert!(preferences.contains("<select"));
+        assert!(preferences.contains("data-preference="));
+        assert!(!preferences.contains("data-preferences-root"));
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
-        assert!(base.contains("window.AGGRPreferences"));
-        assert!(base.contains("Object.prototype.hasOwnProperty.call(schema, key)"));
-        assert!(base.contains("values: [true, false]"));
-        assert!(base.contains("\"feed-page-size\": { initial: \"50\""));
+        assert!(base.contains("<script id=\"aggr-preferences\" type=\"application/json\">"));
+        // The rules come from the typed table in src/config/preferences.rs; nothing redeclares them.
+        assert!(base.contains("site.preference_schema.bootstrap | json"));
+        assert!(base.contains("<script src=\"{{ 'assets/bootstrap.js' | url_for }}\"></script>"));
+        let bootstrap = DefaultTheme::get("static/bootstrap.js").unwrap();
+        let bootstrap = std::str::from_utf8(bootstrap.data.as_ref()).unwrap();
+        assert!(bootstrap.contains("AGGRPreferences"));
+        assert!(!bootstrap.contains("attribute: \"textSize\""));
         assert!(!base.contains("aggr:reading-history"));
 
         let index_file = DefaultTheme::get("templates/index.html").unwrap();
@@ -828,7 +1004,7 @@ mod tests {
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
         assert!(base.contains("data-route=\"browse/\""));
         assert!(base.contains(">browse</"));
-        assert!(base.contains("data-search-action"));
+        assert!(!base.contains("data-search-action"));
         assert!(base.contains("aria-label=\"Site navigation\""));
         assert!(!base.contains("id=\"site-menu\""));
     }
@@ -871,7 +1047,7 @@ mod tests {
         assert!(css.contains(".itemhead::before"));
         assert!(css.contains(".nav .brand {"));
         assert!(css.contains("margin-inline-start: 0;"));
-        assert!(css.contains("margin-inline: -0.75rem"));
+        assert!(css.contains("margin-inline: calc(-1 * var(--row-bleed))"));
 
         let item_file = DefaultTheme::get("templates/_metadata.html").unwrap();
         let item = std::str::from_utf8(item_file.data.as_ref()).unwrap();
@@ -928,6 +1104,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out, "sources/ a.b 2026-09-02  2026");
+        let out = renderer
+            .render_str_for_test(
+                "{{ 'sources/' | url_for }} {{ '' | url_for }} {{ 'https://example.com/x?a=1&b=2' | url_for }} \
+                 {{ '#top' | url_for }} {{ 'assets/images/a.png 1x, https://cdn.example/b,c.png 2x' | srcset_for }} \
+                 {{ 'rust' | facet_url('tag') }} {{ 'hnrss.org' | facet_page('source') }} \
+                 {{ '<img src=\"assets/x.png\"><a href=\"#n\">n</a>' | rebase }}",
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            "sources/  https://example.com/x?a=1&b=2 #top assets/images/a.png 1x, https://cdn.example/b,c.png 2x ?q=tag%3A%22rust%22 sources/hnrss.org/ <img src=\"assets/x.png\"><a href=\"#n\">n</a>"
+        );
+        let out = renderer
+            .env
+            .render_str(
+                "{{ 'sources/' | url_for }} {{ '' | url_for }} {{ 'https://example.com/x' | url_for }} \
+                 {{ 'assets/images/a.png 1x, https://cdn.example/b.png 2x' | srcset_for }} {{ 'rust' | facet_url('tag') }} \
+                 {{ '<img src=\"assets/x.png\"><a href=\"#n\">n</a>' | rebase }}",
+                minijinja::context! { page => minijinja::context! { root => "../../" } },
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            "../../sources/ ../../ https://example.com/x ../../assets/images/a.png 1x, https://cdn.example/b.png 2x ../../?q=tag%3A%22rust%22 <img src=\"../../assets/x.png\"><a href=\"#n\">n</a>"
+        );
     }
 
     #[test]

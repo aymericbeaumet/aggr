@@ -32,6 +32,52 @@ pub async fn expand(
         .map(Some)
 }
 
+/// Embedded cards represent the requested post, not the author's surrounding thread.
+pub(super) async fn embedded(
+    url: &Url,
+    source: &Source,
+    client: &http::Client,
+    cache: &ArticleCache,
+) -> Result<Option<String>> {
+    let Some(status) = status_url(url) else {
+        return Ok(None);
+    };
+    let mirror = Url::parse("https://xcancel.com/").context("parsing public X post host")?;
+    embedded_from(&status, &mirror, source, client, cache)
+        .await
+        .map(Some)
+}
+
+async fn embedded_from(
+    status: &Status,
+    mirror: &Url,
+    source: &Source,
+    client: &http::Client,
+    cache: &ArticleCache,
+) -> Result<String> {
+    fetch_parsed_page(
+        &mirror.join(status.url.path())?,
+        &status.user,
+        source,
+        client,
+        cache,
+        |html, base, author| {
+            let document = Html::parse_document(html);
+            let main = document
+                .select(&selector(".main-tweet .timeline-item")?)
+                .next()
+                .context("public X page exposes no embedded post")?;
+            let post = parse_post_with_reply_context(main, base, author, true)?
+                .context("public X page belongs to another author")?;
+            if post.status.id != status.id {
+                bail!("public X page does not match the embedded post")
+            }
+            Ok(post.html)
+        },
+    )
+    .await
+}
+
 #[derive(Clone, Debug)]
 struct Status {
     user: String,
@@ -181,6 +227,17 @@ async fn fetch_page(
     client: &http::Client,
     cache: &ArticleCache,
 ) -> Result<Page> {
+    fetch_parsed_page(url, author, source, client, cache, parse_page).await
+}
+
+async fn fetch_parsed_page<T>(
+    url: &Url,
+    author: &str,
+    source: &Source,
+    client: &http::Client,
+    cache: &ArticleCache,
+    parse: impl Fn(&str, &Url, &str) -> Result<T>,
+) -> Result<T> {
     let headers = http::source_headers(source, url);
     let cached = cache.load(url, headers)?;
     let response = client
@@ -198,18 +255,18 @@ async fn fetch_page(
             if body.final_url.origin() != url.origin() || body.final_url.path() != url.path() {
                 bail!("public X thread redirected away from the requested status");
             }
-            let parsed = parse_page(&body.html_text(), url, author)?;
+            let parsed = parse(&body.html_text(), url, author)?;
             cache.store(url, headers, &body)?;
             Ok(parsed)
         }
         Ok(http::Response::NotModified) => {
             let response = cached.context("public X thread returned 304 without a cached page")?;
-            parse_page(&response.html_text(), url, author)
+            parse(&response.html_text(), url, author)
         }
         Err(error) => match cached {
             Some(response) => {
                 log::debug!("using cached public X thread after request failed: {error:#}");
-                parse_page(&response.html_text(), url, author)
+                parse(&response.html_text(), url, author)
             }
             None => Err(error),
         },
@@ -323,6 +380,15 @@ fn unavailable_author_post(item: ElementRef<'_>, author: &str) -> Result<bool> {
 }
 
 fn parse_post(item: ElementRef<'_>, base: &Url, author: &str) -> Result<Option<Post>> {
+    parse_post_with_reply_context(item, base, author, false)
+}
+
+fn parse_post_with_reply_context(
+    item: ElementRef<'_>,
+    base: &Url,
+    author: &str,
+    include_replies: bool,
+) -> Result<Option<Post>> {
     let Some(username) = item.value().attr("data-username") else {
         return Ok(None);
     };
@@ -368,7 +434,10 @@ fn parse_post(item: ElementRef<'_>, base: &Url, author: &str) -> Result<Option<P
                 .value()
                 .attr("href")
                 .and_then(|value| base.join(value).ok());
-            if target.is_none_or(|url| !url.path().trim_matches('/').eq_ignore_ascii_case(author)) {
+            if !include_replies
+                && target
+                    .is_none_or(|url| !url.path().trim_matches('/').eq_ignore_ascii_case(author))
+            {
                 return Ok(None);
             }
         }
@@ -549,7 +618,11 @@ fn render(mut posts: Vec<Post>) -> ExtractedArticle {
     }
     html.push_str("</section>");
     let (html, _) = content::storage_html(&html, 2 * 1024 * 1024);
-    ExtractedArticle { html, image }
+    ExtractedArticle {
+        html,
+        image,
+        labels: Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -731,6 +804,52 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.posts.keys().copied().collect::<Vec<_>>(), [100, 102]);
         assert!(parsed.incomplete);
+    }
+
+    #[tokio::test]
+    async fn embedded_x_downloads_only_requested_post_and_reuses_cached_response() {
+        use httpmock::prelude::*;
+        crate::http::install_crypto_provider();
+        let server = MockServer::start();
+        let main = post("author", 100, "A reply that is itself the embedded post.", "<div class='attachments'><img src='https://pbs.twimg.com/media/photo.jpg'></div>")
+            .replace("<div class=\"tweet-content\">", "<div class='replying-to'><a href='/someone'>Someone</a></div><div class=\"tweet-content\">");
+        let mut first = server.mock(|when, then| {
+            when.method(GET)
+                .path("/author/status/100")
+                .header_missing("authorization");
+            then.status(200)
+                .header("etag", "post-v1")
+                .body(page(&main, &post("author", 101, "Unrelated follow-up", "")));
+        });
+        let config = crate::config::Config::parse("[fetch]\nretries=0\n[[sources]]\nurl='https://publisher.example/article'\nheaders={Authorization='private'}").unwrap();
+        let source = config.sources().unwrap().remove(0);
+        let client = http::Client::new(&config.fetch).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ArticleCache::new(dir.path());
+        let status = status_url(&Url::parse("https://x.com/author/status/100").unwrap()).unwrap();
+        let mirror = server.base_url().parse().unwrap();
+        let html = embedded_from(&status, &mirror, &source, &client, &cache)
+            .await
+            .unwrap();
+        assert!(html.contains("A reply that is itself"));
+        assert!(html.contains("https://pbs.twimg.com/media/photo.jpg"));
+        assert!(!html.contains("Unrelated follow-up"));
+        first.assert_calls(1);
+        first.delete();
+        let cached = server.mock(|when, then| {
+            when.method(GET)
+                .path("/author/status/100")
+                .header("if-none-match", "post-v1")
+                .header_missing("authorization");
+            then.status(304);
+        });
+        assert_eq!(
+            embedded_from(&status, &mirror, &source, &client, &cache)
+                .await
+                .unwrap(),
+            html
+        );
+        cached.assert_calls(1);
     }
 
     #[tokio::test]

@@ -12,7 +12,24 @@ use anyhow::{Context as _, Result, bail};
 /// Acquisition never waits: a second command fails at once with the holder's identity.
 #[derive(Debug)]
 pub struct Guard {
-    _file: File,
+    file: File,
+    /// Where this guard wrote its identity, when it wrote one at all.
+    record: Option<PathBuf>,
+}
+
+impl Drop for Guard {
+    /// The record says who holds the lock, so it goes when the lock does. Leaving it behind let a
+    /// later conflict name a process that had already exited, and the wrong subcommand with it.
+    /// This runs before `file` is dropped, so the lock is never free while a stale record stands.
+    fn drop(&mut self) {
+        if let Some(record) = &self.record {
+            let _ = std::fs::remove_file(record);
+            // The locked file's own body is the identity a reader falls back to where it can be
+            // read at all, so it has to go the same way. Leaving it let the next conflict name
+            // this process after it had exited, under the subcommand that ran here.
+            let _ = self.file.set_len(0);
+        }
+    }
 }
 
 impl Guard {
@@ -58,16 +75,21 @@ impl Guard {
                 return Err(err).with_context(|| format!("locking {}", path.display()));
             }
         }
-        if !read_only {
-            let record = format!("{} {subject}", std::process::id());
+        // `inspect` backs `--dry-run`, which promises to create, change and remove nothing, and
+        // opens the lock without write access: it reports and leaves no trace. So it records no
+        // holder either, and a conflict with one falls back to naming no subject rather than the
+        // last one written. Only a run that takes the lock to work under it writes its identity.
+        let record = (!read_only).then(|| record_path(path));
+        if let Some(record_path) = &record {
+            let identity = format!("{} {subject}", std::process::id());
             file.set_len(0)?;
             file.rewind()?;
-            write!(file, "{record}")?;
+            write!(file, "{identity}")?;
             file.flush()?;
-            std::fs::write(record_path(path), record)
+            std::fs::write(record_path, identity)
                 .with_context(|| format!("recording the holder of {}", path.display()))?;
         }
-        Ok(Some(Self { _file: file }))
+        Ok(Some(Self { file, record }))
     }
 }
 
@@ -116,7 +138,20 @@ mod tests {
         );
         assert!(Guard::inspect(&path, "clean", target).is_err());
         drop(first);
-        Guard::acquire(&path, "build", target).unwrap();
+        // A released lock leaves nobody to name. Keeping the record let the next conflict report
+        // a process that had already exited, under whatever subcommand ran last.
+        assert!(!record_path(&path).exists());
+
+        let second = Guard::acquire(&path, "build", target).unwrap();
+        // `inspect` backs `--dry-run`, which promises to leave everything as it found it: it
+        // takes the lock to answer the question and writes no record of its own.
+        assert!(Guard::inspect(&path, "clean", target).is_err());
+        assert_eq!(
+            std::fs::read_to_string(record_path(&path)).unwrap(),
+            format!("{} build", std::process::id())
+        );
+        drop(second);
+        assert!(!record_path(&path).exists());
         assert!(
             Guard::inspect(&temp.path().join("absent.lock"), "clean", target)
                 .unwrap()

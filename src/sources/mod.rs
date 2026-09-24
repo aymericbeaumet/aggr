@@ -45,6 +45,10 @@ pub struct SourceMeta {
     /// [`normalize_language`]. Items inherit it at build time, so the source-level value covers
     /// articles archived long before it was learned.
     pub language: Option<String>,
+    /// Whether the items were read off a page rather than parsed from a feed. A publisher that
+    /// retires its feed keeps answering at the same URL, and a scrape of the page left behind
+    /// looks healthy until someone is told which it was.
+    pub extracted: bool,
 }
 
 /// Canonical form of a publisher-declared language tag, or `None` when it is not a well-formed

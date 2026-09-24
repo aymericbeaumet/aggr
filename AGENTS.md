@@ -20,15 +20,36 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   handlers and `data:`/`javascript:` URLs before storage; ammonia sanitizes before display;
   comrak renders with raw HTML off. Never serve stored HTML unsanitized.
 - No data leaves the user's repository except the fetches they configured.
-- The CLI and static generator are Rust; the reader uses Svelte and TypeScript built with Vite.
-  Site generation stays entirely Rust: never execute JavaScript/SSR or invoke a frontend compiler
-  from the CLI or Cargo build. Compile Svelte only for browser assets during frontend development;
-  embed committed, self-contained bundles so running or building aggr never requires Node. Async Rust
-  work uses tokio (`JoinSet` + `Semaphore`); git is shelled out. Normal HTTP uses rustls with
+- Fetching is the only step that touches the network: after a sync the build is hermetic, a pure
+  function of the archive and the binary. Rendering must never make a request, so anything a page
+  needs — article text, images, previews, durations, discussions, the search index — is resolved
+  during the fetch and stored. A build that would need the network drops the feature instead.
+- The CLI and static generator are Rust; the reader is hand-written HTML, CSS and JavaScript with
+  no build step and no dependencies. Site generation stays entirely Rust: never execute
+  JavaScript/SSR or invoke a frontend compiler from the CLI or Cargo build. Never reintroduce a
+  frontend toolchain, a framework, or a vendored browser library. Async Rust
+  work uses tokio (`JoinSet` + `Semaphore`); git is shelled out. Every CPU-bound stage is sized from
+  the machine's parallelism, never a fixed slot count, and stages that run at the same time share it
+  rather than each claiming the whole machine. Normal HTTP uses rustls with
   ring, installed via `http::install_crypto_provider()` before any client (tests too). The bounded
   challenge fallback uses wreq/BoringSSL; both transports share request and preservation limits.
 - `config.default.toml` is the source of truth for defaults and must stay in sync with
   `config.rs` (it is embedded and parsed by a test).
+- `aggr init` embeds `examples/starter.toml`: keep that small, explicit starter distinct from
+  the full defaults. Retention bounds the current tree, never accumulated Git history.
+- Search-engine indexing is opt-in with `[site] indexing = true` in release builds; development
+  and previews remain noindex. Preserve local search and instance discovery regardless.
+- Build budgets preserve all article text and leave archived media untouched. A build that fits records what it
+  needed for everything but media, so the next one starts there instead of measuring the overflow
+  with a whole extra build; the exact retry still decides whether that guess was right. The budget
+  is a publishing limit: only a release build measures it, because measuring an over-budget archive
+  costs a second complete build, and a development snapshot is never published. `dev --release`
+  still applies it. Admit complete media
+  families newest first, measure the complete output, and fail if text and required assets cannot
+  fit. Include publication cache markers and recheck restored output. Cache compressed publication
+  copies separately from sync state; see `docs/build-budget.md`.
+- aggr is MIT-licensed, inbound and outbound. Preserve third-party notices and follow
+  `CONTRIBUTING.md` for incoming contribution rights.
 - `VERSION` and `Cargo.toml` `version` must agree; releases are tags `vX.Y.Z`. The stable reusable
   workflow (`@v1`) selects the greatest published binary in its major channel at run time; binary
   releases do not move the workflow tag. Distribute binaries through GitHub Releases and mise
@@ -57,7 +78,7 @@ src/commands/check.rs                     probe every source once; non-zero when
 src/commands/clean.rs                     provably disposable targets only
 src/commands/init.rs                      aggr.toml and the optional GitHub workflow
 src/commands/lock.rs                      non-blocking advisory lock (.aggr/aggr.lock, dev.lock)
-src/commands/server.rs, server/client.rs  the dev HTTP server and its Vite passthrough
+src/commands/server.rs                    the dev HTTP server and its reload stream
 src/config.rs, config/                    aggr.toml types, imports and collections, ${ENV}, BCP 47 tags, preferences, validation
 src/git.rs                                worktree/orphan bootstrap, commit with trailers, push+rebase, refs
 src/http.rs, http/transport.rs            reqwest client (UA, timeouts, size cap, conditional GET, retries) + wreq challenge fallback
@@ -86,8 +107,9 @@ src/site/outputs.rs                       feeds, OPML, discovery documents, site
 src/site/pagefind.rs                      the search index and its cache key
 src/site/parallel.rs                      ordered map over at most 8 scoped workers; AGGR_BUILD_WORKERS
 src/site/{related,display,document,interactive,item_type,native_media,video}.rs  navigation and presentation contexts
-themes/default/                           embedded theme (templates/, static/ with the committed client bundle)
-web/                                      Svelte/TypeScript client; web/src/reader/ holds the tested reader modules
+themes/default/                           embedded theme: templates/ plus static/ with the hand-written client
+themes/default/static/{app,search,media,bootstrap}.js  the whole client: core, lazy search, lazy media, pre-paint
+types/aggr.d.ts, jsconfig.json            editor-only type checking for the client; nothing to install
 tests/cli.rs                              end-to-end: bare origin + clone + httpmock + the real binary
 tests/clean.rs, local_sources.rs          cleanup and local-file source scenarios
 tests/support/                            shared integration helpers: git and environment isolation
@@ -100,8 +122,7 @@ docs/*.md                                 the user-facing reference the readme l
 ## Commands
 
 ```sh
-make check                                   # Rust checks and frontend type/tests; npm ci --prefix web first
-make client-build                            # rebuild committed embedded client assets after frontend edits
+make check                                   # fmt, clippy and the full test suite
 cargo test --test cli                        # end-to-end only
 make run ARGS="dev --port 3000"              # dogfood examples/aggr.toml
 cargo run -- sync --dry-run -vv              # fetch without writing, with debug logs
@@ -120,10 +141,15 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   new mock for the same path.
 - minijinja: `trim_blocks`/`lstrip_blocks` are on, autoescape follows the `.html` extension, and
   the custom formatter escapes `& < > " '` only.
-- `themes/default/static/swup.js` is the vendored Swup 4 UMD build; keep `swup.LICENSE` beside it
-  and keep navigation progressively functional without JavaScript.
+- A listing that is only the page it came from is not a listing: probe the conventional endpoints
+  before accepting a single-page app's own shell, and prefer any feed that parses. Keep the
+  subscribed origin's endpoints in the probe set when a response redirects away from it, and say in
+  `check` whether items came from a feed or from cards read off a page.
 - A normal source URL is intentionally enough: keep HTML heuristics internal and remember the
   discovered feed endpoint. `type = "html"` and site-specific selectors are not public config.
+  An origin that publishes nothing itself is read from the section that does (`/blog`, `/news`,
+  `/posts`) once every feed endpoint has failed, so the subscription can be the site; a URL that
+  already names a section has said where to look and keeps it.
   A listing URL names a section, so probe conventional endpoints relative to it with or without a
   trailing slash, never at the root, and only on first resolution. A discovered feed with no
   entries loses to the listing that does have them.
@@ -166,26 +192,111 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   language; a publisher's own name for a language outranks the grammar used to colour it.
 - Preserve existing body, HTML, and preview companions when explicit refresh fills missing media;
   apply shared boundary cleanup during both fetch and rendering so old archives benefit safely.
+  The leading-metadata walk steps over a publisher's hero pictures rather than into them, so page
+  chrome below one is still reachable and the picture is never the price of reaching it. A follow
+  widget's label survives its button as a colon introducing nothing; a label above the list, quote,
+  picture or link it announces is doing its job and stays.
   Remove compact bylines only from a leading prose paragraph with a matching publication date.
 - Preserve explicitly captioned image figures before Readability classifies incidental IDs such as
   `replies.png` as boilerplate, and rename share-named wrappers that hold media but no share links.
   Script-drawn charts with inline data become tables; feed-only captures are retried with a daily,
   bounded backoff and upgraded in place when the original page becomes available. Bump the extraction-cache version when extraction semantics change;
   missing content already absent from stored HTML requires a fresh extraction.
+  A formula is a formula wherever a page put it: MathML with a TeX annotation, a `math` class, or
+  `$…$` in the prose. One command the bounded translator does not know leaves the whole formula as
+  its source, so a command it can read as text belongs in `src/content/math.rs`.
+  Markdown must be able to say what the HTML said: an inline wrapper never holds a block, emphasis
+  markers flank their content or move aside, and markers with nothing to mark are dropped rather
+  than written into the prose. `src/content/markdown/fuzz.rs` generates documents to hold the
+  conversion to that, and points the same oracle at a real archive through `AGGR_CORPUS`.
+  An article URL that cannot name its own account (a YouTube watch URL) has one read from its page
+  during the fetch it already makes and stored beside the item; a captured account on another host
+  is discarded, never shown. Markdown link labels are inline: an anchor wrapping blocks keeps them
+  and links only its leading run.
+  Notes the prose cites by number are content however link-dense they are; sibling note blocks
+  with ids (not only `<li>` lists) become Markdown footnotes, and an unreferenced or empty note
+  leaves its reference an ordinary link. A note's links back to the places citing it are
+  navigation the footnote already carries, whether labelled by return glyph or by number
+  (`↑ 1.00 1.01 …`); links pointing anywhere else are what the note says. A page whose files are line tables (GitHub gists) is
+  archived as those files, never as the discussion under them.
+  Reject positively identified subscription offers as article bodies. Public archive recovery requires
+  matching original URL, title, and readable content; keep requests bounded and backed off. Preserve
+  original provenance, reject archive lookup pages as snapshots, and show an honest fallback on failure.
+  Capture code-language hints before Readability strips classes; preserve explicit plain text and
+  legacy inline code. Decode publisher email-protection payloads into escaped text, never markup.
   Publisher-feed reconciliation enriches media in place and records canonical dedupe aliases; keep article paths
   and hand-edited content, reject ambiguous matches, and leave repeats unchanged.
-- Derive publisher/profile identity from configured or persisted source metadata, never from slugs.
+- Canonical publisher IDs are normalized article hostnames: lowercase/punycode, without trailing dots
+  or conventional `www.`, ports, or cross-domain provider aliases. Preserve other subdomains. A host
+  shared between publishers identifies none of them, so there the account path is part of the ID,
+  the page (`sources/youtube.com/@channel/`) and the filter value: the label a reader clicks and the
+  source they land on are the same publisher. An article URL settles the account where it names one;
+  where it does not, the source's own resolved metadata does, and only for that article's host.
+  Preserve configured/persisted feed identities and profile names as provenance; never migrate
+  stored source IDs to publisher IDs. Canonical articles carry deduplicated publisher/feed
+  memberships and stay unique globally. Visible labels use a canonical name: a hostname alone, plus
+  the account path only on the platform hosts listed in
+  `src/platform.rs`, where one domain is shared between unrelated publishers. `src/platform.rs` is
+  the only place that knows host aliases, account path shapes, or which hosts use opaque
+  identifiers; never re-derive any of that elsewhere. A publisher label names the account the
+  article itself identifies, so it reads the same whoever linked it; only where nothing names one
+  does the subscription that carried it, and then the bare host, stand in. A `via` label names the
+  subscription. Grouping an item under its publisher host must not overwrite its label with the
+  bare host. A derived source slug
+  is that same canonical name, disambiguated by the differing feed path when two sources collide. Exact source IDs win manual alias collisions. See [client development](docs/client.md).
+  A readable alias never replaces a source in a query: its canonical name is already readable.
+  The source directory lists whole sites and feeds: an account nobody configured keeps its page and
+  its filter value but is not listed (`sources[].listed`).
+  Public source IDs and filter values use canonical publisher names only; group same-publisher subscriptions
+  while preserving their archived IDs, article paths, and individual OPML endpoints. Display names
+  must never replace hostnames in generated queries.
   Keep upstream or configured labels distinct from categories; do not invent tags for unlabelled items.
   Model, code, and paper buttons are resource links, not topic tags; retain their destinations when
   separating them from the reader body and keep them in portable exports.
+- A shared link unfurls as the article: `og:`/`twitter:` descriptions carry the excerpt, while the
+  archival framing stays in `description` for crawlers. An aggregator's machine summary
+  (`Article URL: … Points: …`) describes the submission rather than the article and is dropped
+  however the body was captured, so it never stands in for an excerpt.
 - Apply title presentation rules once in the build context and reuse them in every published
   representation, including feeds and Markdown; preserve stored originals and article bodies.
+  A publisher writing in Markdown can emit the markers with its headline: emphasis wrapping a whole
+  title comes off, while markers around part of one are the author's own and stay.
+  A leading heading that restates the title is a duplicate: aggregators reword what they syndicate,
+  so a longer title may differ by a word in four, while short ones must still match word for word.
+  A document's own heading may also run the title through a subtitle or a year marker; a deeper
+  heading has to match outright, and a heading holding a destination stays whatever it says.
+- Article suggestions are resolved once, and every one of them is meant to be shown: never filter
+  them again downstream. They skip the chronological neighbours the page already links, and avoid
+  pointing back at an article that already suggests them so browsing never closes a two-page loop.
+- `[fetch] images` names `remote`, `original` or `compact`, globally or per source; `true`/`false`
+  stay accepted spellings of the last two, and `compact` carries its own `quality`/`max_axis`.
+  Compacting replaces the master and drops renditions; an oversized animated GIF is re-encoded as
+  a bounded GIF keeping frames, timing and loop, and the smaller of the two always wins, so an
+  already-differenced animation keeps its exact bytes. Colour-managed, high-depth, AVIF, animated
+  WebP and APNG input keeps exact bytes under every mode. Archive and deployment
+  compaction share one transform in `media/compact.rs`; add new source files to the render
+  fingerprint in `cache.rs` and to `compressed_media.rs`'s `implementation_key`. Image settings
+  apply to newly archived images only and never rewrite what earlier runs stored.
 - A lead image must not repeat a body picture (compare ThumbHashes, not only URLs) and must be at
   least 640px wide. Reader headings are id anchors, never links; portable outputs keep links.
+- A publisher that flattens an embedded post writes it as loose paragraphs: the poster's avatar
+  linking to the post, their name, what they said, any post they quoted, and the provider's
+  counters. Read those back as the quote they were, nested quote included, and leave the avatars
+  and counters behind; the prose after them is the publisher's again.
 - Expand public social threads using only the original author's posts; preserve post/media order,
   strip terminal thread counters, and keep X links canonical even when xcancel supplies the data.
   Concatenate posts without separators, per-post links, or partial-thread notices: the metadata
   original link is the only pointer. Keep traversal bounded and log incomplete continuations.
+- New items arrive without a reload: a list page polls `updates.json`, on an interval and whenever
+  the window is activated, and swaps its rows for the current ones when the content version moves.
+  The swap waits for the top of the list unless the reader has just come back to the window, so it
+  never moves the ground under them. The page carries the version it was built from.
+- Following a footnote, or its way back, marks both halves: the note and the reference. `:target`
+  carries the half the fragment names without JavaScript; the reader pairs the other, which is the
+  margin note when the notes list is off screen.
+- A source chip navigates to the collection page the build already wrote, not to a query the
+  browser has to answer: same list, no index to download. Modules a page can use load with the
+  page, and the search engine warms its index on mount rather than on the first keystroke.
 - Keep source names visible below titles in feed, search, and item metadata; tags appear only
   on item pages. The feed toolbar's omission of sources does not apply to individual feed entries.
   Put separators outside links and hover targets. Share metadata typography and spacing; format
@@ -195,7 +306,10 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - Reserve media geometry before loading or player activation, including failure and reduced-motion
   paths. Use validated dimensions or a stable fallback ratio; keep posters until players are ready.
   Generate ThumbHashes from decoded local images and embed their validated tiny PNG previews in
-  HTML; placeholders must not wait for JavaScript or a separate network request. Preserve intact
+  HTML; placeholders must not wait for JavaScript or a separate network request. Archive every
+  raster format that decodes without a system library. AVIF needs an AV1 decoder and is archived
+  undecoded instead: exact bytes, the size its `ispe` box states, and a flat stand-in preview, so
+  the picture and its geometry survive without a new build dependency. Preserve intact
   local image masters when repairing missing companions, and back off failed downloads.
   Parse `srcset` using URL and descriptor boundaries: CDN URLs may contain literal commas.
   Preserve exclamations before links as prose when converting HTML to Markdown; article footnotes
@@ -213,17 +327,30 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - Keep mobile navigation fixed to the viewport bottom. Apply the safe-area inset once inside the
   bar and derive content clearance from its measured height; never stack extra safe-area spacers.
   Skip navigation animations and bound intent/idle prefetch; uncached navigation remains progressive.
-- Keep application and content versions separate. Feed changes update lists automatically, even
-  while a release refresh is pending; only binary or effective template/static changes offer an
-  app refresh. Verify background polling without synthetic navigation/reconnect events.
-- Develop the client in `web/`; rebuild its committed assets instead of editing compiled `app.js`
-  or `client.css`. Svelte owns explicit interactive roots; Swup owns navigation and history.
-  Await page-scope disposal before content replacement, then recheck ownership after every await.
-  Keep persistent controls outside the page scope. Support only the current Svelte mount contract;
-  do not add legacy DOM adapters, old config aliases, or obsolete asset routes.
-  Keep the real Swup instance separate from window named properties such as `<main id="swup">`.
-  Svelte owns search dates/selection; static DOM helpers must not rewrite component-bound nodes.
-  Keep generated HTML usable without JavaScript.
+  Keep feed search pinned below the measured header, with results outside the sticky wrapper.
+  Touch tabs activate once on release with immediate contact feedback. Article swipes must yield to
+  selection, vertical scroll, pinch zoom, controls, horizontal scrollers, and browser edge gestures.
+  Never apply `touch-action: pan-y` to an ancestor containing horizontal scrollers.
+  Share keyboard/swipe article destinations; a missing neighbor returns to the main feed.
+- The client is four hand-written files edited in place: `bootstrap.js` (pre-paint preferences and
+  dates, the only render-blocking script), `app.js` (every page), and `search.js` and `media.js`,
+  imported on demand. Each opens with `// @ts-check`; `types/aggr.d.ts` declares the contracts they
+  share with the templates. Never add a bundler, a framework, an npm dependency, or a vendored
+  browser library, and never import across files by anything but a `url_for`-resolved URL from
+  `window.AGGR.assets`: hashed asset names are not rewritten inside file contents.
+- Reach for the platform before JavaScript: speculation rules and ordinary navigation, view
+  transitions, scroll-driven animations, `<dialog>` with invoker commands, stretched links, CSS
+  counters. Wrap anything not universally supported in `@supports` or a feature check that degrades
+  to plain HTML. Generated HTML must stay usable with JavaScript disabled.
+- A prerendered page runs before anyone sees it: gate session storage, history writes and worker
+  registration behind `document.prerendering`.
+- Preferences live in one typed table in `src/config/preferences.rs`, which produces both the
+  browser validation rules and the rendered form. Never redeclare a setting in a template or a
+  script.
+- Documents carry no `<base>` element. `url_for` and `facet_url` resolve from the page being
+  rendered; `site_path` keeps the root-relative form for data attributes the client resolves
+  against its known root, and `item.body_html | rebase` points body media at the page. Fragment
+  links such as footnotes must stay `#id` so they navigate within the current document.
 - Apply every search clause before counting or pagination. Bind runtime, chunks, and completion
   vocabulary to one index version. Offline search is ready only after its complete manifest is
   cached; index fragments never establish article/media readiness.
@@ -234,12 +361,19 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - Keep reading and supported media inside aggr whenever practical, with accessible original-link
   fallbacks when a provider or browser prevents embedding. Activating a provider facade plays at
   once: ask the player directly instead of trusting an `autoplay` parameter.
+- Keep PDFs as bounded, validated item companions; preserve them across refresh and replication.
+  Admit same-origin document URLs through the media budget and include retained copies in offline
+  resources. Serve `application/pdf`, including in dev previews. Preserve the publisher fallback
+  and portable caption links; see
+  [PDF preservation](docs/interoperability.md#pdf-preservation).
 - A shared selection addresses words, not DOM offsets, so the link survives a rebuild. Keep the
   range in the fragment, update it live while the selection changes, and clear it when it empties.
   The toolbar answers the reader's own gesture, never a restored selection, and scrolling with a
   selection repositions it without re-deriving it: index the article once per page scope.
 - Mobile is a platform surface: a compact tab bar above the home indicator, colour rather than
   underline for the current tab and for links, and no default tap highlight.
+  A page whose figures are mounted by scripts has no pictures in its HTML either: two or more
+  media-less figures naming a module are read the same way as a canvas application.
   Detect interactive canvas capabilities before stripping source HTML; retain only a metadata
   marker and load live originals automatically in an opaque-origin sandbox when the reader opens
   the article, never during ingestion. Release live frames when their page scope is disposed.

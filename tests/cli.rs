@@ -163,13 +163,13 @@ fn stop_dev(mut child: std::process::Child) -> std::process::Output {
 }
 
 #[cfg(unix)]
-fn wait_for_cached_site(root: &Path, timeout: Duration) {
+fn wait_for_cached_site(root: &Path, timeout: Duration) -> PathBuf {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if walkdir::WalkDir::new(root)
+        if let Some(entry) = walkdir::WalkDir::new(root)
             .into_iter()
             .filter_map(Result::ok)
-            .any(|entry| {
+            .find(|entry| {
                 entry.file_name() == ".aggr-site"
                     && entry.path().parent().is_some_and(|site| {
                         site.file_name().is_some_and(|name| name == "site")
@@ -180,7 +180,7 @@ fn wait_for_cached_site(root: &Path, timeout: Duration) {
                     })
             })
         {
-            return;
+            return entry.path().parent().unwrap().to_path_buf();
         }
         thread::sleep(Duration::from_millis(25));
     }
@@ -495,8 +495,9 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
         master
     );
     assert!(page.contains(&master_asset), "{page}");
+    // Media is content-addressed and cached when the reader opens the article, not at install.
     assert!(
-        std::fs::read_to_string(repo.clone.join("_site/sw.js"))
+        !std::fs::read_to_string(repo.clone.join("_site/sw.js"))
             .unwrap()
             .contains(&master_asset)
     );
@@ -526,6 +527,98 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
         master
     );
     image.assert_calls(1);
+}
+
+#[test]
+fn a_compact_archive_stores_one_bounded_master_and_no_renditions() {
+    let server = MockServer::start();
+    let source = server.url("/photo.png");
+    let feed = serde_json::json!({
+        "version": "https://jsonfeed.org/version/1.1",
+        "title": "Image feed",
+        "items": [{
+            "id": "illustrated",
+            "title": "Illustrated article",
+            "url": server.url("/articles/illustrated"),
+            "date_published": "2026-09-04T10:00:00Z",
+            "content_html": format!(
+                "<p>Before.</p><img src=\"{source}\" alt=\"A useful diagram\"><p>After.</p>"
+            ),
+        }],
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.json");
+        then.status(200)
+            .header("content-type", "application/feed+json")
+            .json_body(feed);
+    });
+    // Detail the reduction has to throw away: a flat colour would compress to nothing either way.
+    let master = {
+        let image = image::RgbImage::from_fn(1200, 800, |x, y| {
+            image::Rgb([(x % 251) as u8, (y % 239) as u8, ((x + y) % 241) as u8])
+        });
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    };
+    let image_mock = server.mock(|when, then| {
+        when.method(GET).path("/photo.png");
+        then.status(200)
+            .header("content-type", "image/png")
+            .body(master.clone());
+    });
+    let repo = TestRepo::new();
+    repo.write_raw_config(&format!(
+        "[fetch]\ncontent = \"light\"\nimages = {{ mode = \"compact\", quality = 60, max_axis = 320 }}\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+        server.url("/feed.json")
+    ));
+
+    repo.aggr().arg("sync").assert().success();
+    image_mock.assert_calls(1);
+    let (path, front) = item_front(&repo, "aggr", "illustrated-article");
+    let archived = &front["images"][0];
+
+    // One bounded master, reduced to the configured axis, and nothing beside it.
+    // An image with no responsive copies omits the key rather than writing an empty list.
+    assert_eq!(
+        archived["variants"].as_sequence().map_or(0, Vec::len),
+        0,
+        "a compact archive keeps no responsive copies: {archived:?}"
+    );
+    assert_eq!(archived["original"]["width"].as_u64(), Some(320));
+    let directory = Path::new(&path).parent().unwrap();
+    let stored = directory.join(archived["original"]["file"].as_str().unwrap());
+    let bytes = repo.origin_bytes("aggr", stored.to_str().unwrap());
+    assert_eq!(
+        image::guess_format(&bytes).unwrap(),
+        image::ImageFormat::Jpeg
+    );
+    assert!(
+        bytes.len() < master.len() / 10,
+        "compact master kept {} of {} bytes",
+        bytes.len(),
+        master.len()
+    );
+    // The publisher's URL is still what the article was rewritten from.
+    assert!(repo.origin_show("aggr", &path).contains(&source));
+
+    // The reader still gets a picture, sized from the bytes that were actually stored.
+    repo.aggr().arg("build").assert().success();
+    let source_slug = path.split('/').nth(1).unwrap();
+    let item_slug = Path::new(&path).file_stem().unwrap();
+    let page = std::fs::read_to_string(
+        repo.clone
+            .join("_site/items")
+            .join(source_slug)
+            .join(item_slug)
+            .join("index.html"),
+    )
+    .unwrap();
+    assert!(
+        page.contains("<picture class=\"article-picture\""),
+        "{page}"
+    );
+    assert!(page.contains("--image-ratio:320 / "), "{page}");
 }
 
 #[test]
@@ -721,6 +814,48 @@ fn dev_uses_an_external_persistent_cache_and_stops_on_ctrl_c() {
         "{}",
         String::from_utf8_lossy(&status.stdout)
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn dev_release_keeps_an_opted_in_site_out_of_search_engines() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200).body(FEED);
+    });
+    let repo = TestRepo::new();
+    repo.write_config(
+        &server.url("/feed.xml"),
+        "indexing = true\nurl = \"https://reads.example.com\"",
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let cache_path = cache.path().canonicalize().unwrap();
+    let available = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = available.local_addr().unwrap().port();
+    drop(available);
+    let child = repo
+        .aggr()
+        .env("AGGR_CACHE_DIR", &cache_path)
+        .args(["dev", "--release", "--port", &port.to_string()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_dev(port, Duration::from_secs(10));
+    let site = wait_for_cached_site(&cache_path, Duration::from_secs(20));
+    let output = stop_dev(child);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let html = std::fs::read_to_string(site.join("index.html")).unwrap();
+    assert!(html.contains("name=\"robots\" content=\"noindex,follow\""));
+    assert!(!site.join("sitemap.xml").exists());
+    let descriptor: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("aggr.json")).unwrap()).unwrap();
+    assert!(descriptor["discovery"].get("sitemap").is_none());
 }
 
 #[test]
@@ -1437,23 +1572,29 @@ fn build_renders_the_site_and_release_needs_a_url() {
     let site = repo.clone.join("_site");
     let index = std::fs::read_to_string(site.join("index.html")).unwrap();
     assert!(
-        index.contains("href=\"items/demo/2026-09-01-hello-there/\""),
+        index.contains("href=\"./items/demo/2026-09-01-hello-there/\""),
         "{index}"
     );
     assert!(index.contains("Hello there"));
     assert!(index.contains(">aggr.toml <span aria-hidden=\"true\">↗</span></a>"));
     assert!(index.contains(">built with aggr</a>"));
     assert!(index.contains("href=\"https://github.com/aymericbeaumet/aggr\""));
-    assert!(index.contains("href=\"browse/\""), "{index}");
-    assert!(index.contains("href=\"preferences/\""), "{index}");
+    assert!(index.contains("href=\"./browse/\""), "{index}");
+    assert!(index.contains("href=\"./preferences/\""), "{index}");
+    assert!(!index.contains("<base "), "{index}");
     assert!(index.contains("target=\"_blank\""), "{index}");
     assert!(!index.contains("built <time"));
-    assert!(index.contains("id=\"swup\""));
+    assert!(index.contains("id=\"content\""));
     assert!(
-        index.find("<header class=\"top\"").unwrap() < index.find("<main id=\"swup\"").unwrap(),
-        "the persistent menubar must stay outside Swup's replacement container"
+        index.find("<header class=\"top\"").unwrap() < index.find("<main id=\"content\"").unwrap(),
+        "the persistent menubar must come before the page's main content"
     );
-    assert!(index.contains("assets/swup-"));
+    // Navigation is the browser's again: no vendored library, one hand-written module.
+    assert!(!index.contains("assets/swup-"));
+    assert!(
+        index.contains("<script type=\"module\" src=\"./assets/app-"),
+        "{index}"
+    );
     assert!(!index.contains("config@"));
     assert!(!index.contains("data@"));
     assert!(!index.contains("starred"));
@@ -1512,7 +1653,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(site.join("feed.json").exists());
     assert!(site.join(".nojekyll").exists());
     assert!(site.join("browse/index.html").exists());
-    assert!(site.join("sources/demo/index.html").exists());
+    assert!(site.join("sources/127.0.0.1/index.html").exists());
     assert!(site.join("sources/index.html").exists());
     assert!(!site.join("sources/atom.xml").exists());
     assert!(!site.join("sources/rss.xml").exists());
@@ -1541,15 +1682,15 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(browse.contains("id=\"categories\""), "{browse}");
     assert!(browse.contains("id=\"tags\""), "{browse}");
     assert!(
-        browse.contains("href=\"./?q=source%3A%22demo%22\""),
+        browse.contains("href=\"../?q=source%3A%22127.0.0.1%22\""),
         "{browse}"
     );
     assert!(
-        browse.contains("href=\"./?q=category%3A%22demo%22\""),
+        browse.contains("href=\"../?q=category%3A%22demo%22\""),
         "{browse}"
     );
     assert!(
-        browse.contains("href=\"./?q=tag%3A%22example%22\""),
+        browse.contains("href=\"../?q=tag%3A%22example%22\""),
         "{browse}"
     );
     assert!(browse.contains(">#example</a>"), "{browse}");
@@ -1570,10 +1711,10 @@ fn build_renders_the_site_and_release_needs_a_url() {
     let tag = std::fs::read_to_string(site.join("tags/example/index.html")).unwrap();
     let tag = tag.replace("\r\n", "\n");
     assert!(tag.contains("<h1>\n      #example\n"), "{tag}");
-    let search_manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(site.join("search-manifest.json")).unwrap()).unwrap();
+    let search_catalogue: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("search-catalog.json")).unwrap()).unwrap();
     assert!(
-        search_manifest["facets"]["tag"]
+        search_catalogue["facets"]["tag"]
             .as_array()
             .unwrap()
             .iter()
@@ -1584,9 +1725,10 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(index.contains("rel=\"manifest\""), "{index}");
     let sw = std::fs::read_to_string(site.join("sw.js")).unwrap();
     assert!(sw.contains("\"assets/style-"), "{sw}");
-    assert!(sw.contains("\"assets/swup-"), "{sw}");
+    assert!(sw.contains("\"assets/app-"), "{sw}");
+    // Articles are cached as the reader opens them, so none is listed at install time.
     assert!(
-        sw.contains("\"items/demo/2026-09-01-hello-there/\""),
+        !sw.contains("\"items/demo/2026-09-01-hello-there/\""),
         "{sw}"
     );
     assert!(site.join("manifest.webmanifest").exists());
@@ -1617,7 +1759,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
         .assert()
         .success();
     let index = std::fs::read_to_string(site.join("index.html")).unwrap();
-    assert!(index.contains("href=\"items/demo/"), "{index}");
+    assert!(index.contains("href=\"./items/demo/"), "{index}");
     assert!(
         !site.join("CNAME").exists(),
         "github.io hosts need no CNAME"
@@ -2000,7 +2142,11 @@ fn included_topic_files_and_automatic_html_fallback_work_end_to_end() {
         .success()
         .stdout(predicate::str::contains("ok     demo"))
         .stdout(predicate::str::contains("ok     scraped  web"))
-        .stdout(predicate::str::contains("2 item(s)  \"Blog | Scraped\""));
+        // Cards read off a page say so; a feed's own entries do not.
+        .stdout(predicate::str::contains(
+            "2 item(s) (extracted)  \"Blog | Scraped\"",
+        ))
+        .stdout(predicate::str::contains("2 item(s)  \"Demo blog\""));
 
     repo.aggr()
         .arg("sync")

@@ -31,11 +31,6 @@ pub(super) fn source_contexts(
         .map(|source| {
             let state = store.source_state(&source.slug)?;
             let (count, latest) = counts.remove(source.slug.as_str()).unwrap_or_default();
-            let name = source
-                .name
-                .clone()
-                .or_else(|| state.title.clone())
-                .unwrap_or_else(|| source.slug.clone());
             let fallback = source
                 .public_url
                 .as_deref()
@@ -43,10 +38,19 @@ pub(super) fn source_contexts(
                 .map(context::domain_of)
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| "Unknown source".into());
-            let name = display::title(&name, &fallback);
+            let name = display::title(
+                source
+                    .name
+                    .as_deref()
+                    .or(state.title.as_deref())
+                    .unwrap_or(&fallback),
+                &fallback,
+            );
             Ok(SourceCtx {
                 page: format!("sources/{}/", source.slug),
+                listed: true,
                 slug: source.slug.clone(),
+                query_value: source.slug.clone(),
                 name,
                 url: source.public_url.clone(),
                 feed_url: public_http_url(state.resolved_url.as_deref()),
@@ -79,7 +83,9 @@ pub(super) fn source_contexts(
         let name = display::title(state.title.as_deref().unwrap_or(&fallback), &fallback);
         contexts.push(SourceCtx {
             page: format!("sources/{slug}/"),
+            listed: true,
             slug: slug.to_string(),
+            query_value: slug.to_string(),
             name,
             url,
             feed_url,
@@ -124,7 +130,9 @@ pub(super) struct TaxonomyIndex {
 pub(super) fn source_members(items: &[ItemCtx]) -> BTreeMap<String, Vec<usize>> {
     let mut members: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, item) in items.iter().enumerate() {
-        members.entry(item.source.clone()).or_default().push(index);
+        for source in &item.source_memberships {
+            members.entry(source.slug.clone()).or_default().push(index);
+        }
     }
     members
 }

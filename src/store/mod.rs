@@ -20,6 +20,7 @@ pub const GITATTRIBUTES: &str = "\
 # aggr data branch. Concurrent runs append to seen.txt; union merge keeps both sides.
 sources/*/seen.txt merge=union
 * text=auto eol=lf
+*.pdf -text
 ";
 /// Atomic writes stage `.tmpXXXXXX` files (tempfile's default prefix) beside their target; a run
 /// killed before `persist` leaves one behind, and `git add -A` must never commit it.
@@ -130,6 +131,19 @@ pub struct StoredImage {
 }
 
 pub(crate) const MAX_STORED_HTML_BYTES: usize = 16 * 1024 * 1024;
+
+/// Each source transaction owns its attributes file, so another source's rollback cannot
+/// remove the rule that protects already-retained PDF bytes from Git's line-ending conversion.
+pub(crate) fn document_attributes_path(directory: &Path) -> Result<PathBuf> {
+    let mut components = directory.components();
+    if components.next() != Some(Component::Normal(std::ffi::OsStr::new("items"))) {
+        bail!("document directory is outside items");
+    }
+    let Some(Component::Normal(source)) = components.next() else {
+        bail!("document directory has no owning source");
+    };
+    Ok(Path::new("items").join(source).join(".gitattributes"))
+}
 
 struct StoredMediaBudget {
     files: usize,
@@ -325,6 +339,14 @@ impl Store {
     }
 
     pub fn write_item(&self, item: NewItem<'_>) -> Result<()> {
+        self.write_item_with_document(item, None)
+    }
+
+    pub fn write_item_with_document(
+        &self,
+        item: NewItem<'_>,
+        document: Option<&crate::document::Asset>,
+    ) -> Result<()> {
         let limits = crate::media::MediaLimits::default();
         if item.front.images.len() > limits.max_assets {
             bail!("article has too many stored images");
@@ -332,6 +354,53 @@ impl Store {
         let relative_dir = PathBuf::from(item.dir);
         let md = relative_dir.join(format!("{}.md", item.stem));
         let mut targets = vec![md.clone()];
+        let item_path = format!("{}/{}", item.dir, item.stem);
+        let mut front = item.front.clone();
+        let mut document_attributes = None;
+        if let Some(asset) = document {
+            let metadata = asset.metadata(item.stem);
+            crate::document::validate_stored(&asset.bytes, &metadata, item.stem)?;
+            if front
+                .document
+                .as_ref()
+                .is_some_and(|value| *value != metadata)
+            {
+                bail!("document metadata does not match supplied bytes");
+            }
+            targets.push(relative_dir.join(&metadata.file));
+            let relative = document_attributes_path(&relative_dir)?;
+            let path = self.checked_path(&relative)?;
+            let mut attributes = match fs::read_to_string(&path) {
+                Ok(attributes) => attributes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(error) => return Err(error).context("reading document Git attributes"),
+            };
+            if attributes.lines().last() != Some("*.pdf -text") {
+                if !attributes.is_empty() && !attributes.ends_with('\n') {
+                    attributes.push('\n');
+                }
+                attributes.push_str("*.pdf -text\n");
+                document_attributes = Some((relative.clone(), attributes));
+            }
+            targets.push(relative);
+            front.document = Some(metadata);
+        } else {
+            let existing = self.read_item(&item_path).ok();
+            if front.document.is_some()
+                && front.document
+                    != existing
+                        .as_ref()
+                        .and_then(|item| item.front.document.clone())
+            {
+                bail!("retained document metadata changed without supplied bytes");
+            }
+            front.document = match existing {
+                Some(existing) => self
+                    .read_document(&existing)?
+                    .map(|asset| asset.metadata(item.stem)),
+                None => None,
+            };
+        }
 
         if let Some(preview) = &item.front.preview {
             if !preview.is_valid_for(item.stem) {
@@ -350,7 +419,6 @@ impl Store {
             bail!("preview bytes have no metadata");
         }
 
-        let item_path = format!("{}/{}", item.dir, item.stem);
         let existing = if item.front.images.len() > item.images.len() {
             Some(
                 self.read_item(&item_path)
@@ -426,7 +494,20 @@ impl Store {
             self.checked_path(target)?;
         }
 
-        let markdown = frontmatter::render(item.front, item.body)?;
+        let markdown = frontmatter::render(&front, item.body)?;
+        if let Some((relative, attributes)) = document_attributes {
+            self.write_text(&relative, &attributes)?;
+        }
+        if let (Some(asset), Some(metadata)) = (document, &front.document) {
+            let relative = relative_dir.join(&metadata.file);
+            let path = self.checked_path(&relative)?;
+            let unchanged = fs::symlink_metadata(&path).is_ok_and(|metadata| {
+                metadata.file_type().is_file() && metadata.len() == asset.bytes.len() as u64
+            }) && fs::read(&path).is_ok_and(|bytes| bytes == asset.bytes);
+            if !unchanged {
+                self.write_bytes(&relative, &asset.bytes)?;
+            }
+        }
         if let (Some(preview), Some(bytes)) = (&item.front.preview, item.preview) {
             self.write_bytes(&relative_dir.join(&preview.file), bytes)?;
         }
@@ -468,6 +549,21 @@ impl Store {
             && let Some(stem) = Path::new(path).file_name().and_then(|name| name.to_str())
         {
             let parent = Path::new(path).parent().unwrap_or_else(|| Path::new(""));
+            if let Some(document) = item
+                .front
+                .document
+                .as_ref()
+                .filter(|document| document.is_valid_for(stem))
+            {
+                let file = self.checked_path(&parent.join(&document.file))?;
+                match fs::remove_file(&file) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => {
+                        return Err(err).with_context(|| format!("removing {}", file.display()));
+                    }
+                }
+            }
             for image in item
                 .front
                 .images
@@ -519,6 +615,14 @@ impl Store {
             front.preview = None;
         }
         let mut image_sources = BTreeSet::new();
+        if front
+            .document
+            .as_ref()
+            .is_some_and(|document| !document.is_valid_for(stem))
+        {
+            log::debug!("ignoring invalid document metadata for {path}");
+            front.document = None;
+        }
         front.images.retain(|image| {
             let valid = image.is_valid_for(stem) && image_sources.insert(image.source.clone());
             if !valid {
@@ -535,15 +639,20 @@ impl Store {
 
     /// Every item under `items/`, unsorted. Files that fail to parse are logged and skipped so
     /// one hand edit never takes the site down.
+    /// Every archived item. Each is an independent file read and parse, so the archive is read on
+    /// the shared worker pool and the results keep their sorted path order.
     pub fn items(&self) -> Result<Vec<Item>> {
-        let mut items = Vec::new();
-        for path in self.item_paths()? {
-            match self.read_item(&path) {
-                Ok(item) => items.push(item),
-                Err(err) => log::warn!("skipping {path}.md: {err:#}"),
-            }
-        }
-        Ok(items)
+        let paths = self.item_paths()?;
+        let read = crate::site::parallel::map(&paths, |path| {
+            Ok(match self.read_item(path) {
+                Ok(item) => Some(item),
+                Err(err) => {
+                    log::warn!("skipping {path}.md: {err:#}");
+                    None
+                }
+            })
+        })?;
+        Ok(read.into_iter().flatten().collect())
     }
 
     /// Relative item paths (without extension), for stub generation and sorting.
@@ -611,6 +720,57 @@ impl Store {
             Err(error) => {
                 log::debug!(
                     "ignoring unavailable stored HTML for {}: {error:#}",
+                    item.path
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Optional documents degrade to their publisher URL if missing, unsafe or corrupted.
+    pub fn read_document(&self, item: &Item) -> Result<Option<crate::document::Asset>> {
+        let Some(document) = &item.front.document else {
+            return Ok(None);
+        };
+        let result = (|| -> Result<crate::document::Asset> {
+            let path = Path::new(&item.path);
+            let stem = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("stored document has no owning item")?;
+            if !document.is_valid_for(stem) {
+                bail!("invalid stored document metadata");
+            }
+            let relative = path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(&document.file);
+            let file = self.checked_path(&relative)?;
+            let metadata = fs::symlink_metadata(&file)?;
+            if !metadata.file_type().is_file()
+                || metadata.len() > crate::document::MAX_DOCUMENT_BYTES as u64
+            {
+                bail!("invalid stored document companion");
+            }
+            if !file.canonicalize()?.starts_with(self.root.canonicalize()?) {
+                bail!("stored document escapes the store");
+            }
+            use std::io::Read as _;
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            fs::File::open(&file)?
+                .take((crate::document::MAX_DOCUMENT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            crate::document::validate_stored(&bytes, document, stem)?;
+            Ok(crate::document::Asset {
+                source_url: document.source.clone(),
+                bytes,
+            })
+        })();
+        match result {
+            Ok(asset) => Ok(Some(asset)),
+            Err(error) => {
+                log::debug!(
+                    "ignoring unavailable stored document for {}: {error:#}",
                     item.path
                 );
                 Ok(None)
@@ -1122,6 +1282,179 @@ fn atomic_write_bytes(path: &Path, content: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    fn document_asset() -> crate::document::Asset {
+        crate::document::Asset {
+            source_url: "https://publisher.example/paper.pdf".into(),
+            bytes: b"%PDF-1.7\narchived paper".to_vec(),
+        }
+    }
+
+    fn write_document_item(
+        store: &Store,
+        front: &FrontMatter,
+        document: Option<&crate::document::Asset>,
+    ) -> Result<()> {
+        store.write_item_with_document(
+            NewItem {
+                dir: "items/blog",
+                stem: "paper",
+                front,
+                body: "Readable abstract",
+                html: None,
+                preview: None,
+                images: &[],
+            },
+            document,
+        )
+    }
+
+    #[test]
+    fn document_roundtrip_survives_body_refresh_and_retention_removes_only_owned_companion() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path());
+        let asset = document_asset();
+        write_document_item(&store, &FrontMatter::default(), Some(&asset)).unwrap();
+        let path = directory
+            .path()
+            .join("items/blog")
+            .join(asset.metadata("paper").file);
+        let timestamp = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(timestamp)
+            .unwrap();
+        write_document_item(&store, &FrontMatter::default(), None).unwrap();
+        let item = store.read_item("items/blog/paper").unwrap();
+        assert_eq!(item.front.document, Some(asset.metadata("paper")));
+        assert_eq!(store.read_document(&item).unwrap(), Some(asset));
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), timestamp);
+        let other = directory.path().join("items/blog/other.pdf");
+        fs::write(&other, b"unrelated").unwrap();
+        store.remove_item(&item.path).unwrap();
+        assert!(!path.exists());
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn invalid_document_write_leaves_no_markdown_and_corrupt_optional_document_degrades() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path());
+        let mut asset = document_asset();
+        asset.bytes = b"<html>challenge</html>".to_vec();
+        assert!(write_document_item(&store, &FrontMatter::default(), Some(&asset)).is_err());
+        assert!(!directory.path().join("items/blog/paper.md").exists());
+        let asset = document_asset();
+        write_document_item(&store, &FrontMatter::default(), Some(&asset)).unwrap();
+        let item = store.read_item("items/blog/paper").unwrap();
+        let path = directory
+            .path()
+            .join("items/blog")
+            .join(asset.metadata("paper").file);
+        fs::write(&path, b"%PDF-tampered").unwrap();
+        assert_eq!(store.read_document(&item).unwrap(), None);
+        write_document_item(&store, &item.front, None).unwrap();
+        assert!(
+            store
+                .read_item(&item.path)
+                .unwrap()
+                .front
+                .document
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn document_metadata_cannot_attach_an_unrelated_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path());
+        let front = FrontMatter {
+            document: Some(document_asset().metadata("other")),
+            ..Default::default()
+        };
+        assert!(write_document_item(&store, &front, None).is_err());
+        assert!(write_document_item(&store, &front, Some(&document_asset())).is_err());
+        let parsed: FrontMatter =
+            serde_yaml_ng::from_str("document: [invalid]\ntitle: Paper").unwrap();
+        assert!(parsed.document.is_none());
+    }
+
+    #[test]
+    fn document_git_roundtrip_keeps_crlf_bytes_and_preserves_source_attributes() {
+        use std::process::Command;
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path());
+        fs::create_dir_all(directory.path().join("items/blog")).unwrap();
+        // An existing branch predates the PDF-specific root rule.
+        fs::write(
+            directory.path().join(".gitattributes"),
+            "* text=auto eol=lf\n",
+        )
+        .unwrap();
+        let attributes = directory.path().join("items/blog/.gitattributes");
+        fs::write(&attributes, "*.md linguist-language=Markdown").unwrap();
+        let asset = crate::document::Asset {
+            source_url: "https://example.com/paper.pdf".into(),
+            bytes: b"%PDF-1.7\r\nASCII PDF with CRLF\r\n%%EOF\r\n".to_vec(),
+        };
+        write_document_item(&store, &FrontMatter::default(), Some(&asset)).unwrap();
+        assert_eq!(
+            fs::read_to_string(&attributes).unwrap(),
+            "*.md linguist-language=Markdown\n*.pdf -text\n"
+        );
+        write_document_item(&store, &FrontMatter::default(), Some(&asset)).unwrap();
+        assert_eq!(
+            fs::read_to_string(&attributes)
+                .unwrap()
+                .matches("*.pdf -text")
+                .count(),
+            1
+        );
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(directory.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        };
+        git(&["init", "--quiet"]);
+        let path = format!("items/blog/{}", asset.metadata("paper").file);
+        git(&["add", "--", &path]);
+        assert_eq!(git(&["show", &format!(":{path}")]), asset.bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn document_symlink_cannot_be_read_written_or_followed_during_removal() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path());
+        let asset = document_asset();
+        write_document_item(&store, &FrontMatter::default(), Some(&asset)).unwrap();
+        let item = store.read_item("items/blog/paper").unwrap();
+        let path = directory
+            .path()
+            .join("items/blog")
+            .join(asset.metadata("paper").file);
+        let external = outside.path().join("paper.pdf");
+        fs::write(&external, &asset.bytes).unwrap();
+        fs::remove_file(&path).unwrap();
+        symlink(&external, &path).unwrap();
+        assert!(store.read_document(&item).unwrap().is_none());
+        assert!(write_document_item(&store, &item.front, Some(&asset)).is_err());
+        assert!(store.remove_item(&item.path).is_err());
+        assert_eq!(fs::read(&external).unwrap(), asset.bytes);
+    }
 
     fn repair_asset(source: &str, seed: u32) -> crate::media::Asset {
         let image =

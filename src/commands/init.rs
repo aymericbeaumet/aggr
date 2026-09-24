@@ -7,22 +7,7 @@ use anyhow::{Context as _, Result, bail};
 use crate::cli::InitArgs;
 use crate::config;
 
-pub const MINIMAL_CONFIG: &str = "\
-# aggr.toml — only what differs from the defaults needs to be here.
-# `aggr init --defaults` writes every option with its default value and a comment.
-
-[site]
-title = \"My reads\"
-# url = \"https://reads.example.com\"   # custom domain: also writes the CNAME file
-
-[[sources]]
-url = \"https://blog.rust-lang.org/feed.xml\"
-category = \"rust\"
-
-[[sources]]
-url = \"https://hnrss.org/frontpage?points=100\"
-name = \"Hacker News\"
-";
+pub const MINIMAL_CONFIG: &str = include_str!("../../examples/starter.toml");
 
 pub const WORKFLOW_PATH: &str = ".github/workflows/aggr.yml";
 
@@ -106,6 +91,16 @@ mod tests {
             WORKFLOW.lines().count() <= 10,
             "the workflow must stay tiny"
         );
+    }
+
+    #[test]
+    fn starter_bounds_imports_without_discarding_archive_text() {
+        let config = crate::config::Config::parse(MINIMAL_CONFIG).unwrap();
+        assert_eq!(config.sources.len(), 2);
+        assert_eq!(config.fetch.max_items_per_source, 10);
+        assert!(config.fetch.images.archives());
+        assert_eq!(config.store.max_items, None);
+        assert_eq!(config.site.build_max_bytes, 1_000_000_000);
     }
 
     #[test]

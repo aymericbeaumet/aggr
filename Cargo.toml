@@ -19,7 +19,7 @@ bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-comrak = { version = "0.54", default-features = false }
+comrak = { version = "0.55", default-features = false }
 dom_smoothie = "0.18"
 directories = "6"
 encoding_rs = "0.8"
@@ -30,12 +30,12 @@ glob = "0.3"
 hayro = { version = "0.7.1", features = ["embed-fonts"] }
 hex = "0.4"
 htmd = "0.5"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico", "tiff", "qoi"] }
 log = "0.4"
 minijinja = { version = "2", features = ["loader", "json"] }
 notify = "8"
 pagefind = { version = "1.5.2", default-features = false }
-quick-xml = "0.41"
+quick-xml = "0.42"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = [
   "rustls-no-provider",
@@ -60,6 +60,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal"] }
 toml = "1"
 url = { version = "2", features = ["serde"] }
+unicode-normalization = "0.1"
 unicode-segmentation = "1"
 walkdir = "2"
 # These Apache-2.0 releases support the project's MSRV; newer releases require Rust 1.98.

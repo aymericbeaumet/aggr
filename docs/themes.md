@@ -18,10 +18,31 @@ Every page receives `site`, `page`, and `build`. Collection pages receive `items
 metadata; an article page receives `item`, including its rendered `body_html`. The complete field
 definitions live in [`src/site/context.rs`](../src/site/context.rs).
 
+`site.indexing` is true only for release builds with `[site] indexing = true`; it defaults to false.
+`page.indexable` additionally excludes utility pages. Preserve this policy in custom HTML themes:
+
+```jinja
+<meta name="robots" content="{{ 'index,follow' if page.indexable else 'noindex,follow' }}">
+```
+
+Preview and development builds always request `noindex`. Local search and feeds remain available
+regardless of this setting; see [public hosting](hosting.md#publication-and-search-indexing).
+
 Items and recommendation links also expose `metadata`, the precomputed display view shared with search:
-source identity, category, publication/update dates, reading statistics, resolved discussions, and
-optional points/comments. The default
+source identity, category, publication/update dates, reading statistics, and resolved discussions.
+An aggregator's score and comment count stay in the stored front matter as provenance; the reader
+shows the discussion link instead. The default
 metadata partial uses this shared view; values must still be escaped normally.
+Source filter links use `metadata.source_query`; `metadata.source_slug` remains the stable index
+identifier. Source directory entries and `metadata.feed_sources` expose these as
+`query_value` and `slug`; both contain the canonical hostname. Names are presentation labels and
+optional manual search aliases, never generated source-link values. Pass these values through `facet_url('source')` so
+quotes, backslashes, and URL characters remain correctly escaped.
+
+Confirmed subscription gates set `item.extra.subscription_required` and a validated
+`archive_lookup_url`. Show an access notice and the lookup link even when a feed summary is
+available; do not describe a blocked publisher as a titles-only source. A recovered archive instead
+records `archive_url` and, when available, `archive_captured_at`, preserving the original item link.
 
 `item.resources` contains validated `{ label, url }` links moved from an opening resource-only
 paragraph into a compact row below the article header. Detection requires 2–8 short links to
@@ -34,10 +55,11 @@ paragraph; plain-text and reStructuredText exports also list their destinations 
 Stored Markdown and publisher metadata remain unchanged. Custom item templates should
 render `item.resources` alongside `item.body_html`, escaping labels and URLs normally.
 
-The default theme explicitly opts into browser components using `data-preferences-root`,
-`data-shortcut-help-root`, `data-connection-root`, and `data-audio-component`. These regions become
-owned by Svelte after loading. Custom templates must provide these markers;
-the default components exclusively own those regions. Site generation requires no JavaScript runtime. See [client ownership](client.md#component-and-service-ownership).
+The reader's controls are rendered markup, not mount points: the keyboard-help `<dialog>`, the
+search shell, the preferences form and the podcast player all ship complete in the HTML, and the
+client only wires them up. A custom template that keeps `data-audio-component`, `data-search-root`
+and the documented control markers keeps their behaviour; one that drops them simply gets the
+static version. Site generation requires no JavaScript runtime. See [client development](client.md).
 
 Article contexts also expose `item.word_count` and `item.reading_minutes`. Both are derived from
 the visible Unicode text at build time, with reading time rounded up at 225 words per minute; an
@@ -57,10 +79,14 @@ differs from `site.language`, so a single-language instance renders exactly as b
 `sources[].feed_url` is the resolved feed endpoint when one is known, which the build
 also publishes as `sources.opml` for other readers alongside `llms.txt` and `aggr.json`.
 
-Use `url_for` for internal pages and assets so the same output works at `/` or under a nested
-mount. The default base template supplies the page-relative `<base>`; static asset names are
-content-hashed during the build. Public canonical and social URLs should use `site.base_url` only
-when it is available.
+Use `url_for` for internal pages and assets so the same output works at `/`, under a nested
+mount, or from a file. It resolves the site-relative path from the page being rendered (for
+example `../../../browse/` on an article page), so documents carry no `<base>` element and
+fragment links such as footnotes stay on the current page. `site_path` is the same location
+relative to the site root, for data attributes the client resolves against its known root and for
+joining onto `site.base_url`; `item.body_html | rebase` points the site-relative media inside an
+article body at the page. Static asset names are content-hashed during the build. Public
+canonical and social URLs should use `site.base_url` only when it is available.
 
 ```jinja
 <a href="{{ item.url | url_for }}">{{ item.title }}</a>
@@ -70,6 +96,12 @@ when it is available.
 HTML templates escape values automatically. `item.body_html` is already sanitized and may be
 rendered with `|safe`; do not apply that filter to arbitrary source text or serve stored HTML
 without sanitizing it.
+
+A link shared into a chat or a social app unfurls from `og:`/`twitter:` metadata: the title, the
+article's own excerpt, and the lead image when the article has one, else its thumbnail, else the
+site icon. Those image and URL tags need an absolute root, so they are emitted only when the build
+knows one (`[site] url` or `--base-url`); `description` keeps the archival framing that tells a
+crawler this is a preserved copy.
 
 ## Optional article previews
 
@@ -162,12 +194,14 @@ When extending the default script, keep these relationships intact:
   it. `#aggr-page` supplies the current page root and kind after navigation.
 - Primary navigation links use `data-route` and `data-kinds` for destination and active state.
   `browse`, `preferences`, and aggr.toml are visible in the desktop header. Mobile navigation uses
-  feed, search, browse, and preferences tabs below the content. Search lives above the first feed entry, with visible scope
-  qualifiers on category/source/tag feeds. The brand returns to the main feed. Facet links use the
+  feed, browse, and preferences in a fixed, inset rounded bar with a selected-tab surface.
+  Icon and label rows align across tabs; the wrapper includes the home-indicator inset once.
+  Search stays pinned below the header on feeds; keep its results outside the sticky toolbar.
+  Category/source/tag feeds show their scope beside it. The brand returns to the main feed. Facet links use the
   `facet_url` filter to open the main feed with a quoted search qualifier. Static archives remain at
   `sources/<slug>/`, `categories/<slug>/`, and `tags/<slug>/`; `/browse/` combines the directories. See [client development and search](client.md) for syntax and ownership.
 - Article lists use `.rows .row`, with a `[data-row-open]` title link. `.is-selected` identifies the
-  remembered keyboard cursor. Keep `_item.html` and the Svelte search result component aligned.
+  remembered keyboard cursor. Keep `_item.html` aligned with the rows `search.js` builds.
 - List pagination exposes `data-page-previous` and `data-page-next`. The home feed's
   `data-feed-pager` also carries its generated page size, total, and static edge routes. The
   default script may divide one generated page into smaller `?feed-page=N` views; every row must
@@ -189,18 +223,31 @@ precedence, and resetting preferences returns to the site's defaults. See
 
 Root datasets cover theme (including sepia), text size, reading width, typeface, line and paragraph
 spacing, optional paragraph indentation (off by default), alignment, letter and word spacing,
-density, thumbnails, and motion. Feed page size, dates, shortcuts, `scroll-amount` (1–100 lines),
-and `offline-items` (0–1000 articles) also use the shared schema. Reading settings affect prose,
+density, thumbnails, and motion. Feed page size, dates, shortcuts and `scroll-amount` (1–100 lines)
+also use the shared schema. Reading settings affect prose,
 not browser zoom or navigation. System reduced motion always wins. These controls follow familiar
 reader features documented by [Apple Books](https://support.apple.com/en-ca/guide/books/ibks8923126d/mac).
+
+Nested ordered and unordered lists use the same compact item spacing at every depth. Only outer
+lists use paragraph spacing; nested lists and paragraph wrappers inside items must not add extra
+gaps at nesting boundaries.
+
+Footnote references and bracketed numeric citations pointing to document fragments render as
+compact superscripts. Preserve their destinations and adjacent references; ordinary numbered
+links and code remain unchanged. Superscripts use zero line height to avoid stretching prose lines.
 
 Transfer actions share one versioned `{ "version": 1, "preferences": { … } }` JSON contract. Links
 carry base64url JSON in `#aggr-state=…`, not a server-visible query; older `aggr-state` query links
 remain importable. Files and links are size-bounded, allowlisted, and reviewed before explicit
-application. Reading history and cached article contents are never exported. Resetting preferences also restores
-the site's offline article count, which can resize automatic downloads.
+application. Reading history and cached article contents are never exported.
 Disabling single-key shortcuts leaves modifier shortcuts and native keyboard operation available.
-Cmd/Ctrl+K focuses the shared global search field; Escape closes suggestions and removes focus.
+`j`/`k` and the arrows walk a list alike, so the vim keys are a preference rather than a
+requirement; an article page keeps the arrows for scrolling, which is what reading it needs.
+Cmd/Ctrl+K, or `/` where single-key shortcuts are on, focuses the shared global search field; a
+page without one lands on the feed with it focused. Escape closes suggestions and removes focus.
+Both modifiers are always handled; only the name shown differs, so the shortcut help marks a
+platform-specific pair with `data-platform-key` and `<html data-platform>` settles which one it
+shows. A mapping that reads the same everywhere, such as `Ctrl+d`, carries no such marking.
 On feeds and search results, `gg` selects and focuses the first visible item and `G` the last,
 also scrolling to the corresponding page boundary. On article pages they scroll to the top and bottom instead.
 Explicit focus keeps the current scroll position when the entire input is visible; otherwise it
@@ -215,10 +262,9 @@ programmatic main focus with `data-navigation-focus`, suppressing only the large
 outline after a page change. Ordinary links, form controls, and the skip link must remain usable
 with a keyboard.
 
-Navigation replaces content without a document transition. Swup starts with pristine initial
-HTML, before enhancement adds binding markers. Page requests share in-flight work; speculative
-fetches are bounded, canceled when unrelated to navigation, and promoted when they become the
-navigation target. Search display data is precomputed and hex-encoded because Pagefind indexes
+Navigation is ordinary multi-page navigation. A `speculationrules` document rule lets the browser
+prefetch likely destinations on its own budget, and `@view-transition` animates the change where
+the browser supports it. Search display data is precomputed and hex-encoded because Pagefind indexes
 even zero-weight metadata values; decoding it for display must not leak implementation keys into
 search matches.
 
@@ -240,36 +286,53 @@ service workers so a previous deployment cannot mask a local snapshot. Loading, 
 removing dev snapshots runs on blocking workers, so large asset trees cannot stop HTTP responses
 while the previous in-memory snapshot remains available.
 
-The worker coalesces offline-count changes, cancels superseded downloads, and uses six independent
-slots without delaying activation. Failed replacements retain older complete articles within N. Shared
-images reuse one request; verified content revisions avoid downloading unchanged resources across
-builds. The offline fallback lists only fully saved articles on the current device. Downloads run
-in ordinary secure browser tabs as well as installed PWAs; `pwa = false` disables both. Browser
-storage eviction or quota limits can still remove/prevent downloads, so check the reported count.
+The worker keeps the pages a reader has opened and the content-addressed assets they used, each
+in a bounded cache, and serves `offline.html` for anything it has never seen. It downloads nothing
+ahead of the reader. A host answering with a server error is treated like a host that cannot be
+reached, so an error body never replaces a page that was read before. Caching works in ordinary
+secure browser tabs as well as installed PWAs; `pwa = false` disables both. Browser storage
+eviction can still drop what was kept.
 
 Validate custom themes at narrow widths, with enlarged text, both color schemes, reduced motion,
-and JavaScript disabled. The visible navigation links wrap on mobile;
-there is no duplicate bottom navigation bar.
+and JavaScript disabled. Mobile uses the persistent bottom navigation bar; the desktop header
+links are hidden at that width. Keep the bar outside the page replacement container.
 
 ## Metadata and scrolling
 
-`_metadata.html` supplies the feed and item metadata; search uses the same field order in
-the Svelte search result component. Feed rows, search results, and article headers all begin their metadata with a
-source link combining publisher identity with an optional italic `via` feed name. The navigation bar
+`_metadata.html` supplies the feed and item metadata; search results use the same field order.
+Feed rows, search results, and article headers all begin their metadata with a
+publisher source link followed by optional italic `via` and separate feed links. `via` and commas
+remain outside the links. `item.publisher_source` identifies the publisher; `item.source` retains the
+stored origin, and `item.source_memberships` contains deduplicated `{ slug, query_value, name, display }` memberships.
+`metadata.source_slug` is the canonical publisher; `metadata.source_query` and
+`metadata.feed_sources[].query_value` supply the escaped search-link values.
+One canonical article appears in every matching source listing without duplication in global feeds.
+Subscriptions on the same publisher share one source collection, including the publisher when its
+name matches. Archived source IDs and article paths remain unchanged.
+A host shared between publishers identifies none of them, so there the account is part of the
+publisher: `youtube.com/@channel` reads, filters and archives under that name, at the nested page
+`sources/youtube.com/@channel/`. An article URL settles this where it names an account; a YouTube
+watch URL does not, and the source's own resolved metadata supplies it. `sources[].listed` is
+false for an account nobody configured, so the directory stays the list of whole sites and feeds
+while every source keeps its page and its search value.
+Inferred publishers expose `sources[].engine = "publisher"` and are excluded from subscription OPML. The navigation bar
 omits individual source details; feed entries retain them. Only `.source-resolved` uses the palette's
 orange; `via` keeps the muted metadata color.
 Source names and article titles share `site::display::title` cleanup through the build context:
 HTML, search, RSS, Atom, JSON Feed, Markdown, plain text, and reStructuredText all use those display
-titles. Stored originals and article-body emoji remain intact. Profile paths distinguish channels
-on shared hosts. Podcast platforms with opaque show IDs use compact provider/show-name display
-labels derived from source metadata; actual destinations and archive IDs remain unchanged.
+titles. Stored originals and article-body emoji remain intact. Canonical publisher names and IDs
+use the normalized article hostname without ports, plus the account path on a shared host;
+distinct subdomains remain distinct.
+Publisher URLs point to the origin root. Visible publisher and `via` labels use canonical hostnames
+in feed rows, article metadata, recommendations, and search results. Subscription paths and
+channel/show names remain in stored provenance and descriptive titles, not these labels.
 An optional linked `/category` follows
 as its own field, then publication time, reading time, original link, and discussions.
 Noninteractive field wrappers own evenly spaced middots, keeping them outside link underlines and
 tooltips. The publication tooltip contains published and updated timestamps on separate lines;
 equal instants omit the update. Exact dates are localized on interaction with cached formatters.
 Feed, search, and article metadata share typography, field heights, and separator spacing in each
-density and pointer mode. Dates use their natural text width. The `_dates.html` head bootstrap
+density and pointer mode. Dates use their natural text width. The synchronous `bootstrap.js` head script
 formats dates during initial HTML parsing, before paint, and `app.js` uses the same formatter
 thereafter; this avoids both empty date columns and media shifts during startup.
 Tags use `#` and occupy the article header's second metadata line, with the same muted color and
@@ -285,6 +348,9 @@ Navigation and discovery exclude aliases of the current article and repeated ful
 Identity combines normalized original URLs, retained page paths, and exact whitespace-normalized
 body matches of at least 64 words. Similar titles, shared topics, and short teasers do not establish
 identity; a product page and its announcement can remain separate suggestions.
+`item.recommended_articles` is already complete: it holds up to three suggestions that are neither
+the previous nor the next article, and that do not point back at an article suggesting this one, so
+a theme renders the list as it comes instead of filtering it again.
 
 Canvas applications with interactive controls can offer the live original inside a reserved
 viewer, alongside safely retained prose. The original loads automatically when the article opens and
@@ -294,7 +360,8 @@ never run during ingestion. A visible original link remains available when frami
 network access, or browser graphics support prevents the interactive view from working.
 
 Media placeholders use trusted inline PNG data URLs, independent of site base paths. Ordinary
-local image `src` attributes continue to use the document's `<base>`.
+local image `src` attributes are site-relative in `item.body_html` and rebased onto the page by the
+`rebase` filter.
 
 Header folding follows vertical scroll directly. The title scales with fixed line wrapping and a
 measured height so a two-line title cannot abruptly become one line. Slash-separated title terms
@@ -324,12 +391,16 @@ upscale badly as a hero. Small feed previews must not replace full article maste
 Reader headings carry stable ids. A publisher heading that is one link to its own anchor or to
 the article's own page becomes a plain heading with that anchor id; other ids come from the
 heading text. Hovering shows a `#` marker in the margin without moving the title, and a plain click
-updates the URL fragment and scrolls to the heading. Headings are never links in the reader;
+anywhere in the heading updates the URL fragment and scrolls to the heading, clear of the sticky
+header above it: the article header folds as the page moves, so its height is measured at the jump
+rather than tracked. A click carrying a modifier, landing on a link the publisher wrote inside the
+heading, or ending a text selection is left alone. Headings are never links in the reader;
 portable outputs keep the original Markdown.
 
 On screens of at least 2dppx, body pictures display at most two thirds of their intrinsic width
 so a modest master is not stretched to double its pixels; large masters still fill the measure.
-Interactive and PDF viewers caption only the original link.
+Interactive and PDF viewer links are figure captions, centered and italic. Portable Markdown
+and article JSON include equivalent italic links; they keep the publisher destination.
 
 Provider players are facades: nothing is requested from YouTube, Vimeo, or Twitch until the reader
 activates the poster, and activation starts playback in one click. A body paragraph that is only a
@@ -342,19 +413,27 @@ can differ from the frame visible after playback begins.
 
 ## PDF documents
 
-Direct PDF article URLs (a `.pdf` path or `filename=*.pdf`) render a native PDF embed inside the
-article, with a permanent Open PDF fallback link. The viewer uses the original HTTP(S) URL and its
-query/fragment, without a third-party viewer. Browser PDF support and publisher embedding policies
-still apply; unsupported viewers use the fallback. PDF links in article prose remain ordinary links.
-When preferred previews are absent, fetching can rasterize the first page to a retained thumbnail;
-the full PDF still loads from its publisher and is not retained for offline access.
+Direct PDF article URLs (a `.pdf` path or `filename=*.pdf`) render a native PDF object inside the
+article, with an Open PDF caption. If the viewer is unavailable or the request is blocked, the object
+reveals an actionable inline fallback without JavaScript, retaining the reserved viewer dimensions.
+When a verified PDF companion fits the build budget, the viewer and Open PDF caption use its
+immutable URL on the reader's own origin. This also lets HTTP-only publisher documents work in
+HTTPS readers. The article's original link and portable exports retain the publisher URL.
+Published PDF companions are included in the article's offline resources.
+
+If capture fails or the companion cannot fit, the viewer falls back to the publisher URL.
+Publisher embedding policies and HTTPS-Only settings can then prevent inline viewing; aggr
+does not bypass browser security. PDF links inside ordinary prose remain links. When preferred
+previews are absent, fetching can also rasterize the first page to a retained thumbnail.
+A PDF article without a published local document is excluded from the downloadable offline catalogue.
+See [PDF preservation](interoperability.md#pdf-preservation) for capture limits.
 
 ## Stable media loading
 
 Images use retained intrinsic dimensions first, then sanitized publisher dimensions, then a fixed
 16:9 fallback. The fallback stays fixed after loading and contains the image without distortion.
 Lead images, native video, provider players, audio controls, and PDF viewers also reserve their
-space before fetching. PDFs keep a document placeholder behind the native viewer; an embed load
+space before fetching. PDFs keep a document placeholder behind the native viewer; a viewer load
 event does not establish that the browser successfully rendered the document. Provider posters
 remain visible until the frame loads, including with reduced motion. Twitch reserves its 4:3
 viewport before activation so the provider minimum size cannot enlarge the article.

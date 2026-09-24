@@ -2,6 +2,8 @@
 //! The planning half (`plan`) is pure; `build` does the IO.
 
 mod assets;
+mod budget;
+mod compressed_media;
 pub mod context;
 mod directory;
 mod display;
@@ -13,9 +15,10 @@ mod output_dir;
 pub mod outputs;
 mod page;
 mod pagefind;
-mod parallel;
+pub(crate) mod parallel;
 mod related;
 pub mod render;
+mod source_index;
 pub(crate) mod video;
 
 use std::collections::BTreeMap;
@@ -44,7 +47,12 @@ use page::{ListPage, Pages, SharedCtx, SimplePage, archive_modified_at, default_
 use render::{Layers, Renderer};
 
 const EXCERPT_CHARS: usize = 240;
-const RECOMMENDATION_CARD_COUNT: usize = 1;
+
+fn is_visible_item(item: &Item) -> bool {
+    !item.front.hidden
+        && !url::Url::parse(&item.front.link)
+            .is_ok_and(|url| crate::sources::youtube::is_short_url(&url))
+}
 
 /// Pick one archive page per article without changing retained data or breaking old page URLs.
 fn visible_archive(items: Vec<Item>, sources: &[Source]) -> (Vec<Item>, Vec<(String, String)>) {
@@ -65,10 +73,7 @@ fn visible_archive(items: Vec<Item>, sources: &[Source]) -> (Vec<Item>, Vec<(Str
     let mut groups = BTreeMap::<String, Vec<Item>>::new();
     let mut visible = Vec::new();
     for item in items {
-        if item.front.hidden
-            || url::Url::parse(&item.front.link)
-                .is_ok_and(|url| crate::sources::youtube::is_short_url(&url))
-        {
+        if !is_visible_item(&item) {
             continue;
         }
         let key = crate::model::normalize_link(&item.front.link);
@@ -112,6 +117,10 @@ pub struct BuildInfo {
     pub now: DateTime<Utc>,
     /// Production build: absolute URLs from `base_url`, CNAME for custom domains.
     pub release: bool,
+    /// Local dev snapshots remain unindexable even when emulating a release build.
+    pub development: bool,
+    /// Include the persistent publication cache marker in the measured output budget.
+    pub render_cache_key: Option<String>,
     pub discussions: crate::discussions::ResolutionSet,
     /// Search-index cache shared across template-only rebuilds.
     pub pagefind_cache: Option<PathBuf>,
@@ -261,6 +270,14 @@ pub fn render_generation(items: &[Item], site: &SiteConfig, now: DateTime<Utc>) 
             context::age_band(now, item.created_at()).as_bytes(),
         );
         field(&mut hash, &[u8::from(item.created_at() >= cutoff)]);
+        field(
+            &mut hash,
+            &[u8::from(budget::full_quality(
+                item.created_at(),
+                now,
+                site.media_full_quality_days,
+            ))],
+        );
     }
     hex::encode(hash.finalize())
 }
@@ -277,6 +294,88 @@ pub fn base_path(base_url: Option<&str>) -> String {
     } else {
         format!("/{trimmed}/")
     }
+}
+
+/// How many of a source's articles must carry the same picture before it stops being any one
+/// article's picture. Two posts can honestly share an illustration; three is a house style.
+const SHARED_PICTURE_ARTICLES: usize = 3;
+
+/// Every published address of the pictures a source repeats across its articles: its thumbnail,
+/// the full-size original, and each responsive variant of it.
+///
+/// Feeds that set one social card for the whole site, or open every post with the same banner,
+/// otherwise fill a feed with the same thumbnail and put that picture above every article instead
+/// of the writing.
+fn shared_source_pictures(
+    items: &[ItemCtx],
+    article_images: &BTreeMap<String, Vec<content::LocalImage>>,
+    bodies: &BTreeMap<&str, &str>,
+) -> BTreeMap<String, std::collections::BTreeSet<String>> {
+    // A picture the article shows itself is the article's own business, however many other
+    // articles also show it. Only the pictures chosen for it — its thumbnail and the opening
+    // image taken from what came with it — are counted here.
+    let standalone = |path: &str, image: &content::LocalImage| {
+        bodies
+            .get(path)
+            .is_none_or(|body| !body.contains(image.source.as_str()))
+    };
+    let mut previews: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    let mut pictures: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for item in items {
+        if let Some(preview) = &item.preview {
+            *previews
+                .entry((item.source.as_str(), preview.url.as_str()))
+                .or_default() += 1;
+        }
+        let images = article_images
+            .get(&item.path)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        // One article using a picture twice is still one article.
+        let mut seen = std::collections::BTreeSet::new();
+        for image in images
+            .iter()
+            .filter(|image| standalone(&item.path, image))
+            .filter(|image| seen.insert(image.original.as_str()))
+        {
+            *pictures
+                .entry((item.source.as_str(), image.original.as_str()))
+                .or_default() += 1;
+        }
+    }
+    let repeated = |counts: &BTreeMap<(&str, &str), usize>, source: &str, url: &str| {
+        counts
+            .get(&(source, url))
+            .is_some_and(|count| *count >= SHARED_PICTURE_ARTICLES)
+    };
+    // Kept per source. Media is content-addressed, so two sources that legitimately use the same
+    // picture publish it at one URL, and a bare set of URLs would take one source's house banner
+    // away from every other source that happened to run the same photograph once.
+    let mut shared: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for item in items {
+        if let Some(preview) = &item.preview
+            && repeated(&previews, &item.source, &preview.url)
+        {
+            shared
+                .entry(item.source.clone())
+                .or_default()
+                .insert(preview.url.clone());
+        }
+        for image in article_images
+            .get(&item.path)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            if !standalone(&item.path, image) || !repeated(&pictures, &item.source, &image.original)
+            {
+                continue;
+            }
+            let urls = shared.entry(item.source.clone()).or_default();
+            urls.insert(image.original.clone());
+            urls.extend(image.variants.iter().map(|variant| variant.url.clone()));
+        }
+    }
+    shared
 }
 
 /// Relative reference from a generated page back to the output root. Directory routes end in
@@ -301,12 +400,7 @@ struct SwCtx<'a> {
     site: &'a SiteCtx,
     build: &'a BuildCtx,
     version: String,
-    app_version: &'a str,
-    content_version: &'a str,
     precache: Vec<assets::PrecacheEntry>,
-    offline_catalog: Vec<assets::OfflineArticle>,
-    offline_count: usize,
-    search_manifest: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,6 +416,87 @@ pub fn build(
     store: &Store,
     project_root: &Path,
     info: &BuildInfo,
+) -> Result<Summary> {
+    // `build_max_bytes` is what a host will accept, and a development snapshot is never published:
+    // it is served from a local cache. Measuring it there costs a second complete build whenever the
+    // archive is larger than the limit, which is the common case for an instance worth the wait.
+    // `aggr dev --release` is how the published shape is exercised locally, and it still applies.
+    let limit = if info.development && !info.release {
+        u64::MAX
+    } else {
+        config.site.build_max_bytes
+    };
+    // A build that already fit this limit measured what fits. Starting from that answer turns the
+    // usual two complete builds into one; the retry below still decides whether it was right.
+    let cache = info.pagefind_cache.as_deref();
+    let mut attempt = cache
+        .filter(|_| limit != u64::MAX)
+        .and_then(|cache| crate::cache::budget_allowance(cache, limit))
+        .map_or_else(|| budget::Attempt::new(limit), budget::Attempt::resuming);
+    loop {
+        let mut media_budget = budget::MediaBudget::new(attempt.allowance());
+        let summary = build_once(
+            config,
+            sources,
+            store,
+            project_root,
+            info,
+            &mut media_budget,
+        )?;
+        if let Some(key) = &info.render_cache_key {
+            write(
+                &info.out.join(crate::cache::RENDER_KEY_FILE),
+                key.as_bytes(),
+            )?;
+        }
+        let bytes = budget::output_bytes(&info.out)?;
+        if bytes <= limit {
+            log::info!(
+                "site size: {bytes} / {limit} bytes; {} media groups left at their publisher to fit",
+                media_budget.omitted
+            );
+            if let Some(cache) = cache.filter(|_| limit != u64::MAX) {
+                let receipt = crate::cache::BudgetReceipt {
+                    limit,
+                    required: bytes.saturating_sub(media_budget.used),
+                };
+                if let Err(err) = crate::cache::store_budget_allowance(cache, &receipt) {
+                    log::debug!("not remembering the media allowance: {err:#}");
+                }
+            }
+            return Ok(summary);
+        }
+        let Some(next) = attempt.next(bytes - limit, media_budget.used) else {
+            bail!(
+                "site text and required assets need {bytes} bytes, exceeding [site] build_max_bytes = {limit}; increase the build limit or use a host with more capacity; no archived articles were removed"
+            );
+        };
+        log::info!(
+            "site is {bytes} bytes; reserving space for all article text and rebuilding with {} media bytes",
+            next.allowance()
+        );
+        attempt = next;
+    }
+}
+
+/// Cache hits and final restoration must obey the same limit as a fresh render.
+pub(crate) fn verify_output_budget(out: &Path, limit: u64) -> Result<()> {
+    let bytes = budget::output_bytes(out)?;
+    if bytes > limit {
+        bail!(
+            "generated site is {bytes} bytes, exceeding [site] build_max_bytes = {limit}; remove modified output or rebuild with a larger budget"
+        );
+    }
+    Ok(())
+}
+
+fn build_once(
+    config: &Config,
+    sources: &[Source],
+    store: &Store,
+    project_root: &Path,
+    info: &BuildInfo,
+    media_budget: &mut budget::MediaBudget,
 ) -> Result<Summary> {
     let started = std::time::Instant::now();
     let mut phases: Vec<(&str, std::time::Duration)> = Vec::new();
@@ -356,6 +531,7 @@ pub fn build(
     let discussion_shortcuts = context::discussion_shortcuts(&config.networks);
     let mut site = SiteCtx {
         preferences: config.site.preferences.browser_defaults()?,
+        preference_schema: config.site.preferences.schema(),
         title: config.site.title.clone(),
         description,
         identity: config
@@ -375,6 +551,7 @@ pub fn build(
         og_locale: context::og_locale(&config.site.language),
         base_path: base.clone(),
         base_url: info.base_url.clone().map(|url| ensure_trailing_slash(&url)),
+        indexing: config.site.indexing && info.release && !info.development,
         repository: repository.clone(),
         data_branch: config.store.branch.clone(),
         network_url: outputs::AGGR_NETWORK,
@@ -430,22 +607,32 @@ pub fn build(
 
     // Sources: config order, enriched with stored state and counts.
     let status = store.status()?;
-    let (mut all_items, duplicate_redirects) = visible_archive(store.items()?, sources);
-    for item in &mut all_items {
-        item.body = content::strip_article_metadata(
-            &item.body,
-            &item.front.title,
-            item.front.published,
-            &item.front.source,
-        );
-        item.body = crate::threads::clean_archived_thread(&item.body, &item.front.link);
+    let stored_items: Vec<_> = store.items()?.into_iter().filter(is_visible_item).collect();
+    let mut source_ctxs = source_contexts(sources, store, &status, &stored_items)?;
+    let stored_sources = source_index::capture_sources(&stored_items);
+    let (mut all_items, duplicate_redirects) = visible_archive(stored_items, sources);
+    // Cleanup added since an item was captured reaches it here, so every build pays for every
+    // stored body. Each item is independent, which is what makes the archive's share of a rebuild
+    // scale with the machine instead of with one core.
+    let normalized = parallel::map(&all_items, |item| {
+        let mut front = item.front.clone();
+        let body = content::normalize_subscription_metadata(&item.body, &mut front);
+        let body = content::normalize_aggregator_metadata(&body, &mut front);
+        let (body, boundary_labels) =
+            content::normalize_article_body(&body, &front.title, front.published, &front.source);
+        front.labels = crate::model::normalize_labels(front.labels.iter().chain(&boundary_labels));
+        let body = crate::threads::clean_archived_thread(&body, &front.link);
+        Ok((body, front))
+    })?;
+    for (item, (body, front)) in all_items.iter_mut().zip(normalized) {
+        item.body = body;
+        item.front = front;
     }
     all_items.sort_by(|a, b| {
         b.created_at()
             .cmp(&a.created_at())
             .then_with(|| b.path.cmp(&a.path))
     });
-    let source_ctxs = source_contexts(sources, store, &status, &all_items)?;
     let source_by_slug: BTreeMap<&str, &SourceCtx> =
         source_ctxs.iter().map(|s| (s.slug.as_str(), s)).collect();
 
@@ -473,6 +660,21 @@ pub fn build(
     let mut article_images = BTreeMap::<String, Vec<content::LocalImage>>::new();
     let mut written_assets = assets::Published::new();
     let media_memo = assets::MediaMemo::new(store.image_cache().cloned());
+    let compact_cache = info
+        .pagefind_cache
+        .as_deref()
+        .map(|root| crate::cache::Namespace::DeploymentMedia.dir(root));
+    let media_enabled = media_budget.allowance() > 0;
+    if !media_enabled {
+        media_budget.omitted = all_items
+            .iter()
+            .map(|item| {
+                item.front.images.len()
+                    + usize::from(item.front.preview.is_some())
+                    + usize::from(item.front.document.is_some())
+            })
+            .sum();
+    }
     let derive_preview = |item: &Item| {
         sources
             .iter()
@@ -489,7 +691,21 @@ pub fn build(
         .zip(prepared_bodies.chunks(media_window))
     {
         let media = parallel::map(items, |item| {
-            assets::ItemMedia::gather(store, item, derive_preview(item), &media_memo)
+            if !media_enabled {
+                return Ok(assets::ItemMedia::default());
+            }
+            assets::ItemMedia::gather(
+                store,
+                item,
+                derive_preview(item),
+                &media_memo,
+                !budget::full_quality(
+                    item.created_at(),
+                    info.now,
+                    config.site.media_full_quality_days,
+                ),
+                compact_cache.as_deref(),
+            )
         })?;
         for ((item, prepared), media) in items.iter().zip(prepared).zip(media) {
             let (source_name, category) = source_by_slug
@@ -521,15 +737,55 @@ pub fn build(
                 ctx.set_source(source);
             }
             ctx.resources = prepared.resources().to_vec();
-            let (preview, local_images) = media.publish(out, &mut written_assets)?;
+            let (preview, local_images, local_document) =
+                media.publish(out, &mut written_assets, media_budget)?;
             ctx.preview = preview;
+            ctx.document = document::DocumentCtx::from_item(item).map(|mut document| {
+                document.local_url = local_document.map(|mut local| {
+                    if let Some(fragment) = url::Url::parse(&document.url)
+                        .ok()
+                        .and_then(|url| url.fragment().map(str::to_owned))
+                    {
+                        local.push('#');
+                        local.push_str(&fragment);
+                    }
+                    local
+                });
+                document
+            });
             if !local_images.is_empty() {
                 article_images.insert(item.path.clone(), local_images);
             }
             archive_items.push(ctx);
         }
     }
+    // A picture that comes back on article after article from the same source is that source's
+    // own — a logo, a banner, a default social card. It illustrates nothing, so it is not shown
+    // as an article's thumbnail or above its opening paragraph. The archive still keeps it.
+    let portable_bodies: BTreeMap<&str, &str> = all_items
+        .iter()
+        .zip(&prepared_bodies)
+        .map(|(item, prepared)| (item.path.as_str(), prepared.portable_html()))
+        .collect();
+    let shared_pictures = shared_source_pictures(&archive_items, &article_images, &portable_bodies);
+    for ctx in &mut archive_items {
+        if ctx.preview.as_ref().is_some_and(|preview| {
+            shared_pictures
+                .get(&ctx.source)
+                .is_some_and(|urls| urls.contains(&preview.url))
+        }) {
+            ctx.preview = None;
+        }
+    }
     phase("media and item metadata");
+
+    let subscriptions = source_ctxs.clone();
+    source_index::resolve(
+        &mut archive_items,
+        &mut source_ctxs,
+        &stored_sources,
+        &duplicate_redirects,
+    );
 
     let recommendation_text: Vec<_> = prepared_bodies
         .iter()
@@ -538,15 +794,15 @@ pub fn build(
     let recommendations = related::resolve(&archive_items, &recommendation_text);
     let article_links: Vec<_> = archive_items.iter().map(ArticleLinkCtx::from).collect();
     for (item, recommendation) in archive_items.iter_mut().zip(recommendations) {
-        let previous = recommendation.previous;
-        let next = recommendation.next;
-        item.previous_article = previous.map(|index| article_links[index].clone());
-        item.next_article = next.map(|index| article_links[index].clone());
+        item.previous_article = recommendation
+            .previous
+            .map(|index| article_links[index].clone());
+        item.next_article = recommendation
+            .next
+            .map(|index| article_links[index].clone());
         item.recommended_articles = recommendation
             .articles
             .into_iter()
-            .filter(|index| Some(*index) != previous && Some(*index) != next)
-            .take(RECOMMENDATION_CARD_COUNT)
             .map(|index| article_links[index].clone())
             .collect();
     }
@@ -580,9 +836,12 @@ pub fn build(
         &site,
         &source_ctxs,
         &archive_items,
+        &written_assets,
         per_page,
         config.site.max_items,
         config.site.max_age_days,
+        config.site.build_max_bytes,
+        config.site.media_full_quality_days,
     ))?);
     write(
         &out.join("updates.json"),
@@ -743,7 +1002,7 @@ pub fn build(
         let mut ctx = ctx.clone();
         ctx.video = video::VideoCtx::from_url(&item.front.link);
         ctx.interactive = interactive::InteractiveCtx::from_item(item);
-        ctx.document = document::DocumentCtx::from_item(item);
+
         ctx.native_media = native_media::NativeMediaCtx::from_urls(
             &item.front.link,
             item.front
@@ -778,7 +1037,13 @@ pub fn build(
                     .get(&item.path)
                     .map(Vec::as_slice)
                     .unwrap_or_default(),
-            );
+            )
+            // The source's own picture is not this article's opening image.
+            .filter(|lead| {
+                !shared_pictures
+                    .get(&item.front.source)
+                    .is_some_and(|urls| urls.contains(&lead.url))
+            });
         }
         let dimensions = if portable_html.contains("<img ") {
             let retained_html = store.read_html(item)?;
@@ -795,13 +1060,16 @@ pub fn build(
             .get(&item.path)
             .map(Vec::as_slice)
             .unwrap_or_default();
-        ctx.body_html = Some(content::embed_body_videos(
-            &content::anchor_headings(
-                &prepared_markdown.reader_html_with_images(local_images, &dimensions),
-                article_url.as_ref(),
-            ),
-            local_images,
-        ));
+        let (body_html, has_margin_notes) =
+            content::margin_notes(&content::external_body_links(&content::embed_body_videos(
+                &content::anchor_headings(
+                    &prepared_markdown.reader_html_with_images(local_images, &dimensions),
+                    article_url.as_ref(),
+                ),
+                local_images,
+            )));
+        ctx.body_html = Some(body_html);
+        ctx.has_margin_notes = has_margin_notes;
         let dir = out.join(&ctx.url);
         let representation = out.join(ctx.url.trim_end_matches('/'));
         write(
@@ -815,10 +1083,17 @@ pub fn build(
         )?;
         // Alternate representations remain portable across hosts and mirrors. Only the rendered
         // archive page substitutes immutable site-local companions for publisher image URLs.
-        ctx.body_html = Some(portable_html.to_string());
+        let published_body = outputs::published_markdown_body(&ctx, &item.body);
+        ctx.body_html = Some(if published_body == item.body {
+            portable_html.to_string()
+        } else {
+            content::PreparedMarkdown::new(&published_body)
+                .portable_html()
+                .to_string()
+        });
         let mut published_front = item.front.clone();
         published_front.title = ctx.title.clone();
-        let markdown = crate::store::frontmatter::render(&published_front, &item.body)?;
+        let markdown = crate::store::frontmatter::render(&published_front, &published_body)?;
         write(&representation.with_extension("md"), markdown.as_bytes())?;
         write(
             &representation.with_extension("txt"),
@@ -830,7 +1105,7 @@ pub fn build(
         )?;
         write(
             &representation.with_extension("json"),
-            outputs::item_json(&site, &build_ctx, &ctx, &item.body)?.as_bytes(),
+            outputs::item_json(&site, &build_ctx, &ctx, &published_body)?.as_bytes(),
         )?;
         Ok(site
             .absolute(&ctx.url)
@@ -878,7 +1153,7 @@ pub fn build(
         outputs::sources_opml(
             &site,
             archive_updated.unwrap_or(build_ctx.time),
-            &source_ctxs,
+            &subscriptions,
         )
         .as_bytes(),
     )?;
@@ -903,29 +1178,30 @@ pub fn build(
         });
         write(&out.join("opensearch.xml"), opensearch.as_bytes())?;
 
-        sitemap_urls.sort_by(|left, right| left.loc.cmp(&right.loc));
-        sitemap_urls.dedup_by(|left, right| {
-            if left.loc != right.loc {
-                return false;
+        let mut robots = "User-agent: *\nAllow: /\n".to_string();
+        if site.indexing {
+            sitemap_urls.sort_by(|left, right| left.loc.cmp(&right.loc));
+            sitemap_urls.dedup_by(|left, right| {
+                if left.loc != right.loc {
+                    return false;
+                }
+                right.lastmod = left.lastmod.max(right.lastmod);
+                true
+            });
+            let sitemap_url = format!("{root}sitemap.xml");
+            let sitemap = outputs::sitemap(
+                &sitemap_urls,
+                &sitemap_url,
+                outputs::SitemapLimits::default(),
+            )?;
+            write(&out.join("sitemap.xml"), sitemap.root_xml().as_bytes())?;
+            for chunk in sitemap.chunks() {
+                write(&out.join(&chunk.name), chunk.xml.as_bytes())?;
             }
-            right.lastmod = left.lastmod.max(right.lastmod);
-            true
-        });
-        let sitemap_url = format!("{root}sitemap.xml");
-        let sitemap = outputs::sitemap(
-            &sitemap_urls,
-            &sitemap_url,
-            outputs::SitemapLimits::default(),
-        )?;
-        write(&out.join("sitemap.xml"), sitemap.root_xml().as_bytes())?;
-        for chunk in sitemap.chunks() {
-            write(&out.join(&chunk.name), chunk.xml.as_bytes())?;
+            robots.push_str(&format!("Sitemap: {sitemap_url}\n"));
         }
         if site.base_path == "/" {
-            write(
-                &out.join("robots.txt"),
-                format!("User-agent: *\nAllow: /\nSitemap: {sitemap_url}\n").as_bytes(),
-            )?;
+            write(&out.join("robots.txt"), robots.as_bytes())?;
         }
     }
     write(&out.join(".nojekyll"), b"")?;
@@ -936,7 +1212,7 @@ pub fn build(
     let assets = renderer.write_static(out)?;
     phase("feeds and static assets");
 
-    let search_manifest = pagefind::build_cached(
+    pagefind::build_cached(
         out,
         &search_documents,
         &site.language,
@@ -968,29 +1244,13 @@ pub fn build(
                 ))?
                 .as_bytes(),
         )?;
-        let scoped_lists = source_ctxs
-            .iter()
-            .map(|s| s.page.clone())
-            .chain(categories.iter().map(|c| c.page.clone()))
-            .chain(tags.iter().map(|tag| tag.page.clone()))
-            .take(config.site.preferences.offline_items.clamp(32, 256));
-        let lists = ["browse/".to_string()].into_iter().chain(scoped_lists);
-        let paths = assets::precache_paths("", lists, &assets, std::iter::empty(), 0);
+        // Only the shell: the reader caches the pages it actually opens.
+        let paths = assets::precache_paths("", &assets);
         let mut sw_ctx = SwCtx {
             site: &site,
             build: &build_ctx,
             version: cache_version(&build_ctx),
-            app_version: &build_ctx.app_version,
-            content_version: &build_ctx.content_version,
             precache: assets::precache_entries(out, paths, &written_assets)?,
-            offline_catalog: assets::offline_catalog(
-                out,
-                &archive_items,
-                &article_images,
-                &written_assets,
-            )?,
-            offline_count: config.site.preferences.offline_items.min(1000),
-            search_manifest: serde_json::json!({"version": search_manifest.version, "base": search_manifest.base}),
         };
         // Include the rendered worker and every resource revision so an installation never
         // deletes a live precache when only the theme or worker implementation changed.
@@ -1140,18 +1400,17 @@ mod tests {
 
         let out = dir.path().join("out");
         build(&config, &[], &store, dir.path(), &info(out.clone())).unwrap();
-        let archive = std::fs::read_to_string(out.join("sources/blog/index.html")).unwrap();
+        let archive = std::fs::read_to_string(out.join("sources/hnrss.org/index.html")).unwrap();
         assert!(archive.contains("Post 0"));
         assert!(archive.contains("Post 1"));
         assert!(archive.contains("Hacker News: Best"));
         let article =
             std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
         assert!(
-            article.contains("href=\"./?q=source%3A%22blog%22\""),
+            article.contains("href=\"../../../sources/hnrss.org/\""),
             "{article}"
         );
-        assert!(article.contains("hnrss.org/best"));
-        assert!(article.contains("blog.example · via Hacker News: Best"));
+        assert!(article.contains("title=\"Hacker News: Best\">hnrss.org</a>"));
         let archive_document = scraper::Html::parse_document(&archive);
         assert!(
             archive_document
@@ -1159,17 +1418,22 @@ mod tests {
                 .next()
                 .is_none()
         );
-        for html in [&archive, &article] {
+        for (html, root) in [(&archive, "../../"), (&article, "../../../")] {
             let document = scraper::Html::parse_document(html);
             let selector = scraper::Selector::parse(".meta .domain").unwrap();
             let source_link = document.select(&selector).next().unwrap();
             assert_eq!(
-                source_link.value().attr("href"),
-                Some("./?q=source%3A%22blog%22")
+                source_link
+                    .select(&scraper::Selector::parse("a.source-feed").unwrap())
+                    .next()
+                    .unwrap()
+                    .value()
+                    .attr("href"),
+                Some(format!("{root}sources/hnrss.org/").as_str())
             );
             assert_eq!(
                 source_link.text().collect::<String>().trim(),
-                "blog.example via hnrss.org/best"
+                "blog.example via hnrss.org"
             );
             let emphasis = scraper::Selector::parse("em").unwrap();
             assert_eq!(
@@ -1179,9 +1443,21 @@ mod tests {
                     .unwrap()
                     .text()
                     .collect::<String>(),
-                "via hnrss.org/best"
+                "via hnrss.org"
             );
         }
+    }
+
+    /// Page-relative links reduced to their site-relative form, so pages at different depths
+    /// can be compared.
+    fn site_relative_links(html: &str) -> String {
+        html.replace("href=\"../../../", "href=\"")
+            .replace("href=\"./", "href=\"")
+    }
+
+    /// One page-relative attribute value reduced to its site-relative form.
+    fn site_relative(value: Option<&str>) -> Option<&str> {
+        value.map(|value| value.trim_start_matches("../").trim_start_matches("./"))
     }
 
     #[test]
@@ -1197,10 +1473,11 @@ mod tests {
         let article = parse("items/blog/2026-09-01-post-0/index.html");
         let fields = scraper::Selector::parse(".meta > .meta-field").unwrap();
         let source = scraper::Selector::parse(".domain").unwrap();
+        // Links walk up to the site root from wherever the page sits; everything else is identical.
         let shared = |document: &scraper::Html| {
             document
                 .select(&fields)
-                .map(|field| field.inner_html())
+                .map(|field| site_relative_links(&field.inner_html()))
                 .collect::<Vec<_>>()
         };
         assert_eq!(shared(&feed), shared(&article));
@@ -1394,6 +1671,11 @@ mod tests {
             render_generation(std::slice::from_ref(&cutoff), &site, at),
             render_generation(&[cutoff], &site, at + Duration::minutes(2))
         );
+        let media_cutoff = item("media", at - Duration::days(30));
+        assert_ne!(
+            render_generation(std::slice::from_ref(&media_cutoff), &site, at),
+            render_generation(&[media_cutoff], &site, at + Duration::seconds(1))
+        );
     }
 
     /// Hand-edited front matter may hold YAML that JSON cannot carry. Such items must still take
@@ -1506,29 +1788,22 @@ mod tests {
             .collect()
     }
 
-    /// `url` → `revision` for every resource in the worker's offline catalog.
-    fn offline_catalog_revisions(worker: &str) -> BTreeMap<String, String> {
-        let statements = worker.replace("\r\n", "\n");
-        let catalog: serde_json::Value = serde_json::from_str(
-            statements
-                .split("var OFFLINE_CATALOG = ")
-                .nth(1)
-                .unwrap()
-                .split(";\n")
-                .next()
-                .unwrap(),
-        )
-        .unwrap();
-        catalog
-            .as_array()
-            .unwrap()
+    /// `path` → content hash for every content-addressed media file this build published.
+    fn published_media(out: &Path) -> BTreeMap<String, String> {
+        ["assets/images", "assets/previews", "assets/documents"]
             .iter()
-            .flat_map(|article| article["resources"].as_array().unwrap())
+            .flat_map(|dir| walkdir::WalkDir::new(out.join(dir)))
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
             .map(|entry| {
-                (
-                    entry["url"].as_str().unwrap().to_string(),
-                    entry["revision"].as_str().unwrap().to_string(),
-                )
+                let relative = entry
+                    .path()
+                    .strip_prefix(out)
+                    .expect("under the output root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let digest = crate::model::sha1_hex(std::fs::read(entry.path()).unwrap());
+                (relative, digest)
             })
             .collect()
     }
@@ -1683,9 +1958,376 @@ mod tests {
             generation: "fixture".into(),
             now: day(20),
             release: false,
+            development: false,
+            render_cache_key: None,
             discussions: crate::discussions::ResolutionSet::default(),
             pagefind_cache: None,
         }
+    }
+
+    #[test]
+    fn build_budget_preserves_text_and_archives_while_prioritizing_recent_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut config, sources, store) = fixture(dir.path(), 2, "pwa = true\n");
+        let mut images = Vec::new();
+        let mut items = store.items().unwrap();
+        items.sort_by(|a, b| a.path.cmp(&b.path));
+        for (index, item) in items.iter_mut().enumerate() {
+            let mut random = 42u32 + index as u32;
+            let pixels = image::RgbImage::from_fn(800, 600, |_, _| {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                image::Rgb([random as u8, (random >> 8) as u8, (random >> 16) as u8])
+            });
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(pixels)
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .unwrap();
+            let asset = crate::media::prepare_asset(
+                &crate::media::Candidate {
+                    url: url::Url::parse(&format!("https://blog.example/image-{index}.png"))
+                        .unwrap(),
+                    alt: Some("Illustration".into()),
+                },
+                encoded.into_inner(),
+                &crate::media::MediaLimits::default(),
+            )
+            .unwrap();
+            if index == 0 {
+                item.front.published = Some(day(1) - Duration::days(40));
+            }
+            item.body = format!(
+                "Distinct article {index} remains readable.\n\n![Illustration]({})",
+                asset.source_url
+            );
+            let (directory, stem) = item.path.rsplit_once('/').unwrap();
+            item.front.images = vec![asset.metadata(stem)];
+            store
+                .write_item(crate::store::NewItem {
+                    dir: directory,
+                    stem,
+                    front: &item.front,
+                    body: &item.body,
+                    html: None,
+                    preview: None,
+                    images: std::slice::from_ref(&asset),
+                })
+                .unwrap();
+            images.push(asset);
+        }
+        let archive_before = output_digests(&dir.path().join("data"));
+        let mut build_info = info(dir.path().join("out"));
+        build_info.pagefind_cache = Some(dir.path().join("cache"));
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        let master = |asset: &crate::media::Asset| {
+            format!(
+                "assets/images/{}.{}",
+                asset.master_hash, asset.master_extension
+            )
+        };
+        assert!(
+            !build_info.out.join(master(&images[0])).exists(),
+            "old master is compressed"
+        );
+        assert_eq!(
+            std::fs::read(build_info.out.join(master(&images[1]))).unwrap(),
+            images[1].master_bytes
+        );
+        let full_bytes = budget::output_bytes(&build_info.out).unwrap();
+        let compressed = compressed_media::compact_cached(
+            images[0].clone(),
+            Some(
+                &crate::cache::Namespace::DeploymentMedia
+                    .dir(build_info.pagefind_cache.as_ref().unwrap()),
+            ),
+        )
+        .unwrap();
+        assert!(compressed.master_bytes.len() < images[0].master_bytes.len());
+        assert!(build_info.out.join(master(&compressed)).is_file());
+        let full_catalog = published_media(&build_info.out);
+        assert!(
+            full_catalog
+                .keys()
+                .any(|path| path.contains("assets/images/"))
+        );
+
+        config.site.build_max_bytes = full_bytes - compressed.master_bytes.len() as u64 / 2;
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        assert!(budget::output_bytes(&build_info.out).unwrap() <= config.site.build_max_bytes);
+        assert_eq!(
+            std::fs::read(build_info.out.join(master(&images[1]))).unwrap(),
+            images[1].master_bytes
+        );
+        assert!(
+            !build_info.out.join(master(&compressed)).exists(),
+            "older media yields to recent media"
+        );
+
+        build_once(
+            &config,
+            &sources,
+            &store,
+            dir.path(),
+            &build_info,
+            &mut budget::MediaBudget::new(0),
+        )
+        .unwrap();
+        let core_bytes = budget::output_bytes(&build_info.out).unwrap();
+        config.site.build_max_bytes = core_bytes + 64_000;
+        assert!(config.site.build_max_bytes < full_bytes);
+        let summary = build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        assert_eq!(summary.items, 2);
+        assert!(budget::output_bytes(&build_info.out).unwrap() <= config.site.build_max_bytes);
+        assert!(!build_info.out.join(master(&images[1])).exists());
+        for (index, item) in items.iter().enumerate() {
+            let url = context::item_url(&item.path);
+            let representation = build_info.out.join(url.trim_end_matches('/'));
+            for path in [
+                representation.join("index.html"),
+                representation.with_extension("md"),
+                representation.with_extension("txt"),
+            ] {
+                let text = std::fs::read_to_string(path).unwrap();
+                assert!(text.contains(&format!("Distinct article {index} remains readable.")));
+            }
+            let html = std::fs::read_to_string(representation.join("index.html")).unwrap();
+            assert!(
+                html.contains(&images[index].source_url),
+                "omitted images retain publisher URLs"
+            );
+        }
+        for path in published_media(&build_info.out).keys() {
+            assert!(
+                build_info.out.join(path).is_file(),
+                "missing published resource {path}"
+            );
+        }
+        assert_eq!(output_digests(&dir.path().join("data")), archive_before);
+    }
+
+    #[test]
+    fn build_budget_includes_the_cache_marker_at_the_exact_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut config, sources, store) = fixture(dir.path(), 1, "");
+        let mut build_info = info(dir.path().join("out"));
+        build_info.pagefind_cache = Some(dir.path().join("cache"));
+        build_info.render_cache_key = Some("a".repeat(40));
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(build_info.out.join(crate::cache::RENDER_KEY_FILE)).unwrap(),
+            "a".repeat(40)
+        );
+        let exact = budget::output_bytes(&build_info.out).unwrap();
+        config.site.build_max_bytes = exact;
+        let summary = build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        crate::cache::store_render(
+            build_info.pagefind_cache.as_ref().unwrap(),
+            build_info.render_cache_key.as_ref().unwrap(),
+            &build_info.out,
+            summary,
+        )
+        .unwrap();
+        crate::cache::restore_render(
+            build_info.pagefind_cache.as_ref().unwrap(),
+            build_info.render_cache_key.as_ref().unwrap(),
+            &build_info.out,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(budget::output_bytes(&build_info.out).unwrap(), exact);
+        verify_output_budget(&build_info.out, exact).unwrap();
+        std::fs::write(build_info.out.join("extra"), b"x").unwrap();
+        assert!(verify_output_budget(&build_info.out, exact).is_err());
+        config.site.build_max_bytes = exact - 1;
+        let error = build(&config, &sources, &store, dir.path(), &build_info).unwrap_err();
+        assert!(error.to_string().contains("text and required assets"));
+    }
+
+    #[test]
+    fn build_rejects_text_and_reader_larger_than_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "build_max_bytes = 1\n");
+        let out = dir.path().join("out");
+        let error = build(&config, &sources, &store, dir.path(), &info(out)).unwrap_err();
+        assert!(format!("{error:#}").contains("text and required assets"));
+        assert_eq!(store.items().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn publisher_and_feed_share_one_article_with_separate_source_memberships() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::parse(
+            r#"
+[site]
+pwa = false
+[[sources]]
+slug = "lobsters"
+name = "Lobsters feed"
+url = "https://lobste.rs/rss"
+[[sources]]
+slug = "duckdb"
+name = "DuckDB"
+url = "https://duckdb.org/feed.xml"
+[[sources]]
+slug = "duckdb-news"
+name = "DuckDB news"
+url = "https://duckdb.org/news.xml"
+"#,
+        )
+        .unwrap();
+        let sources = config.resolve_sources(&|_| None).unwrap();
+        let store = Store::open(dir.path().join("data"));
+        for (source, stem, title, link) in [
+            (
+                "lobsters",
+                "duckdb-copy",
+                "DuckDB article",
+                "https://duckdb.org/2026/article",
+            ),
+            (
+                "duckdb",
+                "duckdb-original",
+                "DuckDB article",
+                "https://duckdb.org/2026/article#discussion",
+            ),
+            (
+                "lobsters",
+                "maharship",
+                "Maharship article",
+                "https://maharship.com/posts/example",
+            ),
+            (
+                "lobsters",
+                "repo",
+                "A repository",
+                "https://github.com/timgordontg/engrim",
+            ),
+        ] {
+            store
+                .write_item(crate::store::NewItem {
+                    dir: &format!("items/{source}/2026/09"),
+                    stem,
+                    front: &crate::model::FrontMatter {
+                        source: source.into(),
+                        title: title.into(),
+                        link: link.into(),
+                        first_seen: day(1),
+                        ..Default::default()
+                    },
+                    body: title,
+                    html: None,
+                    preview: None,
+                    images: &[],
+                })
+                .unwrap();
+        }
+        let out = dir.path().join("out");
+        let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        assert_eq!(summary.items, 3, "one canonical item per original URL");
+        let feed = std::fs::read_to_string(out.join("sources/lobste.rs/index.html")).unwrap();
+        assert!(
+            feed.contains("DuckDB article"),
+            "deduplication retains the feed membership"
+        );
+        let article =
+            std::fs::read_to_string(out.join("items/duckdb/duckdb-original/index.html")).unwrap();
+        let parsed = scraper::Html::parse_document(&article);
+        let links: Vec<_> = parsed
+            .select(&scraper::Selector::parse(".itemhead .meta .domain a").unwrap())
+            .collect();
+        assert_eq!(
+            links.len(),
+            2,
+            "publisher and distinct feed hosts are separate links"
+        );
+        assert!(
+            links[0]
+                .value()
+                .attr("href")
+                .unwrap()
+                .contains("sources/duckdb.org/")
+        );
+        assert!(
+            links[1]
+                .value()
+                .attr("href")
+                .unwrap()
+                .contains("sources/lobste.rs/")
+        );
+        assert!(
+            links
+                .iter()
+                .all(|link| !link.text().collect::<String>().contains("via"))
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("search-catalog.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["docs"], 3);
+        let facets = manifest["facets"]["source"].as_array().unwrap();
+        let subscriptions = std::fs::read_to_string(out.join("sources.opml")).unwrap();
+        assert!(subscriptions.contains("https://duckdb.org/feed.xml"));
+        assert!(subscriptions.contains("https://duckdb.org/news.xml"));
+        assert_eq!(
+            facets
+                .iter()
+                .find(|facet| facet["value"] == "lobste.rs")
+                .unwrap()["count"],
+            3
+        );
+        assert_eq!(
+            facets
+                .iter()
+                .find(|facet| facet["value"] == "github.com/timgordontg")
+                .unwrap()["count"],
+            1,
+            "the account is its own filter value"
+        );
+        assert_eq!(
+            facets
+                .iter()
+                .find(|facet| facet["value"] == "duckdb.org")
+                .unwrap()["count"],
+            1
+        );
+        let publisher = facets
+            .iter()
+            .find(|facet| facet["label"] == "maharship.com")
+            .expect("unconfigured publishers receive a source listing");
+        assert!(
+            out.join(format!(
+                "sources/{}/index.html",
+                publisher["value"].as_str().unwrap()
+            ))
+            .is_file()
+        );
+        let generated =
+            std::fs::read_to_string(out.join("items/lobsters/maharship/index.html")).unwrap();
+        let generated = scraper::Html::parse_document(&generated);
+        let publisher_link = generated
+            .select(&scraper::Selector::parse(".itemhead .meta .domain a").unwrap())
+            .next()
+            .unwrap();
+        let publisher_href = publisher_link.value().attr("href").unwrap();
+        assert!(publisher_href.contains("sources/maharship.com/"));
+        assert!(!publisher_href.contains("publisher-"));
+        assert_eq!(publisher["value"], "maharship.com");
+        let browse = std::fs::read_to_string(out.join("sources/index.html")).unwrap();
+        assert!(browse.contains("source%3A%22maharship.com%22"));
+        assert!(browse.contains("source%3A%22lobste.rs%22"));
+        // An account nobody configured filters and archives under its own name, but the directory
+        // lists whole sites and feeds rather than everyone who ever appeared on one.
+        assert!(
+            out.join("sources/github.com/timgordontg/index.html")
+                .is_file(),
+            "the account keeps its own page"
+        );
+        assert!(!browse.contains("github.com%2Ftimgordontg"), "{browse}");
+        assert_eq!(
+            store.items().unwrap().len(),
+            4,
+            "build leaves stored captures intact"
+        );
     }
 
     #[test]
@@ -1740,6 +2382,7 @@ mod tests {
             r#"[site]
 max_age_days = 365
 pwa = true
+indexing = true
 [[sources]]
 slug = "hn"
 url = "https://hnrss.org/frontpage"
@@ -1830,8 +2473,8 @@ category = "Science"
 
         for path in [
             "index.html",
-            "sources/hn/index.html",
-            "sources/blog/index.html",
+            "sources/hnrss.org/index.html",
+            "sources/blog.example/index.html",
             "categories/news/index.html",
             "categories/science/index.html",
             "browse/index.html",
@@ -1841,8 +2484,8 @@ category = "Science"
             "feed.json",
             "linkset.json",
             "sitemap.xml",
-            "sources/hn/feed.json",
-            "sources/blog/atom.xml",
+            "sources/hnrss.org/feed.json",
+            "sources/blog.example/atom.xml",
             "categories/news/rss.xml",
             "sw.js",
         ] {
@@ -1878,7 +2521,7 @@ category = "Science"
             !feed.contains("Post 0"),
             "old items should not crowd the recent feed"
         );
-        let source = std::fs::read_to_string(out.join("sources/blog/index.html")).unwrap();
+        let source = std::fs::read_to_string(out.join("sources/blog.example/index.html")).unwrap();
         assert!(source.contains("Post 0"), "{source}");
         assert!(
             out.join("items/blog/2026-09-01-post-0/index.html")
@@ -1970,6 +2613,53 @@ category = "Science"
     }
 
     #[test]
+    fn a_build_that_fit_tells_the_next_one_where_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut config, sources, store) = fixture(dir.path(), 3, "");
+        let out = dir.path().join("out");
+        let cache = dir.path().join("cache");
+        let mut build_info = info(out.clone());
+        build_info.pagefind_cache = Some(cache.clone());
+
+        // Roomy: the first attempt fits, and what it admitted is remembered for the limit.
+        config.site.build_max_bytes = 1_000_000_000;
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        let remembered = crate::cache::budget_allowance(&cache, config.site.build_max_bytes);
+        assert!(remembered.is_some(), "a build that fit measured what fits");
+
+        // Another limit says nothing about this one, so nothing is carried across.
+        assert_eq!(crate::cache::budget_allowance(&cache, 4_096), None);
+
+        // A remembered allowance that no longer fits is corrected by the same exact retry, so an
+        // impossible limit still refuses rather than publishing something too large.
+        config.site.build_max_bytes = 1;
+        assert!(build(&config, &sources, &store, dir.path(), &build_info).is_err());
+    }
+
+    #[test]
+    fn a_development_snapshot_keeps_every_rendition_and_a_release_build_fits_its_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut config, sources, store) = fixture(dir.path(), 3, "");
+        let out = dir.path().join("out");
+        // A limit no site can meet: a publishing build must still refuse or shed media for it.
+        config.site.build_max_bytes = 1;
+
+        let mut development = info(out.clone());
+        development.development = true;
+        development.release = false;
+        // The snapshot is served locally, so the hosting limit is not its business.
+        build(&config, &sources, &store, dir.path(), &development).unwrap();
+
+        let mut published = info(out.clone());
+        published.development = true;
+        published.release = true;
+        assert!(
+            build(&config, &sources, &store, dir.path(), &published).is_err(),
+            "a release build measures the limit it will be published under"
+        );
+    }
+
+    #[test]
     fn update_manifest_distinguishes_content_from_application_releases_without_pwa() {
         let dir = tempfile::tempdir().unwrap();
         let (mut config, mut sources, store) = fixture(dir.path(), 1, "pwa = false\n");
@@ -1984,10 +2674,25 @@ category = "Science"
             original["entries"],
             serde_json::json!(["items/blog/2026-09-01-post-0/"])
         );
+        // A page carries the version it was built from, so it can tell when this manifest moves.
+        let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(
+            feed.contains(&format!(
+                "content: {}",
+                serde_json::to_string(&original["content_version"]).unwrap()
+            )),
+            "{feed}"
+        );
 
         build_info.now += Duration::minutes(1);
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         assert_eq!(manifest(), original, "rebuild time is not a release");
+
+        config.site.build_max_bytes /= 2;
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        let budgeted = manifest();
+        assert_eq!(budgeted["app_version"], original["app_version"]);
+        assert_ne!(budgeted["content_version"], original["content_version"]);
 
         config.site.title = "A new reader title".into();
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
@@ -2038,7 +2743,7 @@ category = "Science"
     }
 
     #[test]
-    fn item_pages_show_next_then_one_distinct_recommendation() {
+    fn item_pages_show_next_then_three_distinct_recommendations() {
         let dir = tempfile::tempdir().unwrap();
         let (config, sources, store) = fixture(dir.path(), 6, "max_age_days = 30\npwa = false\n");
         let out = dir.path().join("out");
@@ -2051,7 +2756,7 @@ category = "Science"
             "{newest}"
         );
         assert!(!newest.contains("data-previous-url="), "{newest}");
-        assert_eq!(newest.matches("class=\"article-more-link").count(), 2);
+        assert_eq!(newest.matches("class=\"article-more-link").count(), 4);
         assert_eq!(newest.matches("article-more-neighbor").count(), 0);
         assert!(!newest.contains("article-navigation-link"), "{newest}");
         assert!(!newest.contains("article-more-label"), "{newest}");
@@ -2060,7 +2765,7 @@ category = "Science"
             std::fs::read_to_string(out.join("items/blog/2026-09-05-post-4/index.html")).unwrap();
         assert!(second.contains("data-previous-url=\"items/blog/2026-09-06-post-5/\""));
         assert!(second.contains("data-next-url=\"items/blog/2026-09-04-post-3/\""));
-        assert_eq!(second.matches("class=\"article-more-link").count(), 2);
+        assert_eq!(second.matches("class=\"article-more-link").count(), 4);
         assert_eq!(second.matches("article-more-neighbor").count(), 0);
         assert!(!second.contains("article-navigation-link"), "{second}");
 
@@ -2097,10 +2802,11 @@ category = "Science"
                 day - 1
             )))
             .unwrap();
-            let expected = if day == 1 { 1 } else { 2 };
+            // Every page offers the whole set; the oldest article has no next card.
+            let expected = if day == 1 { 3 } else { 4 };
             assert_eq!(page.matches("class=\"article-more-link").count(), expected);
             assert!(
-                page.matches("class=\"article-more-link").count() <= 2,
+                page.matches("class=\"article-more-link").count() <= 4,
                 "day {day} exceeds the continuation-card limit"
             );
         }
@@ -2125,6 +2831,69 @@ category = "Science"
             !oldest.contains("<footer class=\"article-footer\""),
             "{oldest}"
         );
+    }
+
+    #[test]
+    fn a_picture_every_article_shares_belongs_to_the_source_not_the_article() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 4, "pwa = false\n");
+        let picture = |red: u8| {
+            let mut bytes = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 75)
+                .encode_image(&image::DynamicImage::ImageRgb8(
+                    image::RgbImage::from_pixel(160, 80, image::Rgb([red, 40, 40])),
+                ))
+                .unwrap();
+            bytes
+        };
+        let house = picture(10);
+        let own = picture(200);
+        for (index, mut item) in store.items().unwrap().into_iter().enumerate() {
+            // Three of the four posts open with the same house picture; the fourth has its own.
+            let bytes = if index < 3 { &house } else { &own };
+            let (directory, stem) = item.path.rsplit_once('/').unwrap();
+            let hash = crate::model::sha1_hex(bytes);
+            item.front.preview = Some(crate::model::Preview {
+                file: format!("{stem}.preview-{}.jpg", &hash[..12]),
+                width: 160,
+                height: 80,
+                alt: Some("Preview".into()),
+                color: None,
+            });
+            store
+                .write_item(crate::store::NewItem {
+                    dir: directory,
+                    stem,
+                    front: &item.front,
+                    body: &item.body,
+                    html: None,
+                    preview: Some(bytes),
+                    images: &[],
+                })
+                .unwrap();
+        }
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let feed = scraper::Html::parse_document(
+            &std::fs::read_to_string(out.join("index.html")).unwrap(),
+        );
+        let preview = scraper::Selector::parse(".preview-image").unwrap();
+        for (url, expected) in [
+            ("items/blog/2026-09-01-post-0/", false),
+            ("items/blog/2026-09-02-post-1/", false),
+            ("items/blog/2026-09-03-post-2/", false),
+            ("items/blog/2026-09-04-post-3/", true),
+        ] {
+            let row = feed
+                .select(&scraper::Selector::parse(&format!(".row[data-url='{url}']")).unwrap())
+                .next()
+                .unwrap_or_else(|| panic!("{url} is missing from the feed"));
+            assert_eq!(
+                row.select(&preview).next().is_some(),
+                expected,
+                "{url} keeps only a picture of its own"
+            );
+        }
     }
 
     #[test]
@@ -2177,16 +2946,16 @@ category = "Science"
             .unwrap();
         let metadata = scraper::Selector::parse(".meta").unwrap();
         assert_eq!(
-            row.select(&metadata).next().unwrap().inner_html(),
-            card.select(&metadata).next().unwrap().inner_html()
+            site_relative_links(&row.select(&metadata).next().unwrap().inner_html()),
+            site_relative_links(&card.select(&metadata).next().unwrap().inner_html())
         );
         let preview = scraper::Selector::parse(".preview-image").unwrap();
         let feed_image = row.select(&preview).next().unwrap();
         let card_image = card.select(&preview).next().unwrap();
         for attribute in ["src", "width", "height", "loading"] {
             assert_eq!(
-                feed_image.value().attr(attribute),
-                card_image.value().attr(attribute)
+                site_relative(feed_image.value().attr(attribute)),
+                site_relative(card_image.value().attr(attribute))
             );
         }
     }
@@ -2318,9 +3087,9 @@ category = "Science"
             "atom.xml",
             "rss.xml",
             "feed.json",
-            "sources/blog/atom.xml",
-            "sources/blog/rss.xml",
-            "sources/blog/feed.json",
+            "sources/blog.example/atom.xml",
+            "sources/blog.example/rss.xml",
+            "sources/blog.example/feed.json",
             "items/blog/2026-09-01-post-0/index.html",
             "items/blog/2026-09-01-post-0.md",
             "items/blog/2026-09-01-post-0.txt",
@@ -2364,10 +3133,19 @@ category = "Science"
             page.contains("data-video-embed=\"https://www.youtube-nocookie.com/embed/abcDEF12345?"),
             "{page}"
         );
+        // A link inside prose stays a link, and like every body link out of the site it opens
+        // in a new tab without needing JavaScript.
+        let inline_link = page
+            .split_once("href=\"https://youtu.be/inline1234\"")
+            .map(|(before, _)| before.rsplit("<a ").next().unwrap_or_default().to_string())
+            .unwrap_or_default();
+        assert!(inline_link.contains("target=\"_blank\""), "{page}");
         assert!(
-            page.contains(
-                "href=\"https://youtu.be/inline1234\">https://youtu.be/inline1234</a> inline."
-            ),
+            inline_link.contains("rel=\"external noopener noreferrer\""),
+            "{page}"
+        );
+        assert!(
+            page.contains(">https://youtu.be/inline1234</a> inline."),
             "{page}"
         );
         assert!(!page.contains("<iframe"), "{page}");
@@ -2584,10 +3362,9 @@ category = "Science"
             !assets::precache_entries(&out, vec![path.clone()], &BTreeMap::new()).unwrap()[0]
                 .required
         );
+        // Media is content-addressed and cached on first view, not listed at install time.
         let worker = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        assert!(worker.contains(&path));
-        // The catalog takes the revision from the publish map; it must still be the file's hash.
-        assert_eq!(offline_catalog_revisions(&worker)[&path], hash);
+        assert!(!worker.contains(&path));
         assert_eq!(
             hash,
             crate::model::sha1_hex(std::fs::read(out.join(&path)).unwrap())
@@ -2725,7 +3502,10 @@ category = "Science"
             page.contains("<picture class=\"article-picture\""),
             "{page}"
         );
-        assert!(page.contains(&format!("src=\"{master}\"")), "{page}");
+        assert!(
+            page.contains(&format!("src=\"../../../{master}\"")),
+            "{page}"
+        );
         assert!(page.contains("type=\"image/webp\""), "{page}");
         assert!(page.contains("width=\"640\" height=\"320\""), "{page}");
         assert!(page.contains("fetchpriority=\"high\""), "{page}");
@@ -2745,15 +3525,16 @@ category = "Science"
         assert!(json["content_html"].as_str().unwrap().contains(source));
         assert!(!json["content_html"].as_str().unwrap().contains(&master));
 
-        let worker = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        assert!(worker.contains(&master), "{worker}");
+        // Every rendition is published under its own content hash and cached when first shown.
+        let published = published_media(&out);
+        assert!(published.contains_key(&master), "{published:?}");
         for rendition in &asset.renditions {
             assert!(
-                worker.contains(&format!("assets/images/{}.webp", rendition.hash)),
-                "{worker}"
+                published.contains_key(&format!("assets/images/{}.webp", rendition.hash)),
+                "{published:?}"
             );
         }
-        let revisions = offline_catalog_revisions(&worker);
+        let revisions = published_media(&out);
         for path in std::iter::once(master.clone()).chain(
             asset
                 .renditions
@@ -2776,48 +3557,68 @@ category = "Science"
         build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
 
         let middle = std::fs::read_to_string(out.join("page/3/index.html")).unwrap();
-        assert!(middle.contains("href=\"./\">first</a>"), "{middle}");
-        assert!(middle.contains("href=\"page/2/\">newer</a>"), "{middle}");
-        assert!(middle.contains("href=\"page/4/\">older</a>"), "{middle}");
-        assert!(middle.contains("href=\"page/5/\">last</a>"), "{middle}");
+        assert!(middle.contains("href=\"../../\">first</a>"), "{middle}");
+        assert!(
+            middle.contains("href=\"../../page/2/\">newer</a>"),
+            "{middle}"
+        );
+        assert!(
+            middle.contains("href=\"../../page/4/\">older</a>"),
+            "{middle}"
+        );
+        assert!(
+            middle.contains("href=\"../../page/5/\">last</a>"),
+            "{middle}"
+        );
+        assert!(middle.contains("data-static-first=\"\""), "{middle}");
+        assert!(middle.contains("data-static-next=\"page/4/\""), "{middle}");
+        assert!(!middle.contains("<base "), "{middle}");
         assert!(
             middle.contains("<link rel=\"canonical\" href=\"https://u.github.io/repo/page/3/\">"),
             "{middle}"
         );
         assert!(
-            middle.contains("<link rel=\"first\" href=\"./\">"),
+            middle.contains("<link rel=\"first\" href=\"../../\">"),
             "{middle}"
         );
         assert!(
-            middle.contains("<link rel=\"prev\" href=\"page/2/\">"),
+            middle.contains("<link rel=\"prev\" href=\"../../page/2/\">"),
             "{middle}"
         );
         assert!(
-            middle.contains("<link rel=\"next\" href=\"page/4/\">"),
+            middle.contains("<link rel=\"next\" href=\"../../page/4/\">"),
             "{middle}"
         );
         assert!(
-            middle.contains("<link rel=\"last\" href=\"page/5/\">"),
+            middle.contains("<link rel=\"last\" href=\"../../page/5/\">"),
             "{middle}"
         );
 
         let second = std::fs::read_to_string(out.join("page/2/index.html")).unwrap();
-        assert!(second.contains("href=\"./\">first</a>"), "{second}");
-        assert!(second.contains("href=\"./\">newer</a>"), "{second}");
+        assert!(second.contains("href=\"../../\">first</a>"), "{second}");
+        assert!(second.contains("href=\"../../\">newer</a>"), "{second}");
+        let first = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(first.contains("href=\"./page/2/\">older</a>"), "{first}");
     }
 
     #[test]
     fn pwa_outputs_cover_the_shells_and_the_newest_items() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, sources, store) = fixture(dir.path(), 3, "preferences.offline_items = 2\n");
+        let (config, sources, store) = fixture(
+            dir.path(),
+            3,
+            "preferences.offline_items = 2\nindexing = true\n",
+        );
         let out = dir.path().join("out");
-        let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let mut build_info = info(out.clone());
+        build_info.release = true;
+        let summary = build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         assert_eq!(summary.items, 3);
-        // River, the source archive, six utility/directory pages, and the offline page.
+        // River, combined publisher/feed archive, six utility/directory pages, and the offline page.
         assert_eq!(summary.pages, 1 + 1 + 6 + 1);
         assert!(!out.join("categories/blog").exists());
         let home = std::fs::read_to_string(out.join("index.html")).unwrap();
-        assert!(home.contains("href=\"browse/\""), "{home}");
+        assert!(home.contains("href=\"./browse/\""), "{home}");
         assert!(home.contains(">browse</"), "{home}");
         let document = scraper::Html::parse_document(&home);
         let primary = scraper::Selector::parse(".nav-primary a").unwrap();
@@ -2826,7 +3627,7 @@ category = "Science"
                 .select(&primary)
                 .filter_map(|link| link.value().attr("href"))
                 .collect::<Vec<_>>(),
-            ["", "browse/", "preferences/"]
+            ["./", "./browse/", "./preferences/"]
         );
         let actions = scraper::Selector::parse(".nav-actions a").unwrap();
         assert_eq!(document.select(&actions).count(), 1);
@@ -2839,7 +3640,7 @@ category = "Science"
         assert!(browse.contains("0 tags."), "{browse}");
         assert!(browse.contains("in <code>aggr.toml</code>"), "{browse}");
         assert!(
-            browse.contains("href=\"./?q=source%3A%22blog%22\""),
+            browse.contains("href=\"../?q=source%3A%22blog.example%22\""),
             "{browse}"
         );
         assert!(!browse.contains("explore-nav"), "{browse}");
@@ -2866,7 +3667,7 @@ category = "Science"
             .iter()
             .find(|shortcut| shortcut["name"] == "Browse")
             .unwrap();
-        assert_eq!(browse_shortcut["url"], "browse/");
+        assert_eq!(browse_shortcut["url"], "./browse/");
         assert_eq!(manifest["display"], "standalone");
         assert_eq!(
             manifest["display_override"],
@@ -2878,7 +3679,7 @@ category = "Science"
             manifest["icons"][0]["src"]
                 .as_str()
                 .unwrap()
-                .starts_with("assets/icon-192-")
+                .starts_with("./assets/icon-192-")
         );
         for icon in [
             "icon-192-",
@@ -2919,51 +3720,36 @@ category = "Science"
             !sw.contains("assets/logo-"),
             "the multi-megabyte source icon is not precached"
         );
+        // Preload is only worth enabling if the response is read: starting a navigation the
+        // worker then ignores costs a second request for every page.
         assert!(sw.contains("navigationPreload.enable"));
-        assert!(sw.contains("x-requested-with"));
-        assert!(sw.contains("function firstCached(request, choices, index)"));
-        assert!(!sw.contains("caches.match("));
-        assert!(sw.contains("var REQUIRED_URLS ="));
-        assert!(sw.contains("var REVISIONS = CACHE_NAMESPACE + \"revisions-\" + VERSION"));
-        assert!(sw.contains("if (!response || !response.ok)"));
-        assert!(sw.contains("migratePrecacheAssets"));
-        assert!(sw.contains("var ASSETS = CACHE_NAMESPACE + \"assets\""));
-        assert!(sw.contains("feed|aggr|linkset"), "{sw}");
+        assert!(sw.contains("event.preloadResponse"));
+        // Pages are network-first with a cached fallback; content-addressed assets are not.
+        assert!(sw.contains("function pageResponse(request, preload)"));
+        assert!(sw.contains("function assetResponse(request, name, limit)"));
+        assert!(sw.contains("var OFFLINE = SCOPE + \"offline.html\""));
+        // Nothing is downloaded ahead of the reader any more.
+        assert!(!sw.contains("OFFLINE_CATALOG"));
+        assert!(!sw.contains("OFFLINE_COUNT"));
+        assert!(!sw.contains("search-manifest.json"));
         assert!(sw.contains("\"offline.html\""));
         assert!(sw.contains("\"browse/\""));
-        assert!(sw.contains("\"sources/blog/\""));
-        let statements = sw.replace("\r\n", "\n");
-        let catalog: serde_json::Value = serde_json::from_str(
-            statements
-                .split("var OFFLINE_CATALOG = ")
-                .nth(1)
-                .unwrap()
-                .split(";\n")
-                .next()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(catalog.as_array().unwrap().len(), 3);
-        assert_eq!(catalog[0]["url"], "items/blog/2026-09-03-post-2/");
-        assert!(sw.contains("var OFFLINE_COUNT = 2;"));
-        assert!(
-            catalog[0]["resources"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["url"] == catalog[0]["url"])
-        );
+        // Article pages are cached when opened, not listed at install time.
+        assert!(!sw.contains("\"items/"), "{sw}");
 
         let offline = std::fs::read_to_string(out.join("offline.html")).unwrap();
-        assert!(offline.contains("id=\"offline-articles\""));
-        assert!(offline.contains("id=\"offline-download-status\""));
-        assert!(offline.contains("<link rel=\"manifest\" href=\"manifest.webmanifest\">"));
+        assert!(!offline.contains("id=\"offline-articles\""));
+        assert!(offline.contains("<link rel=\"manifest\" href=\"/repo/manifest.webmanifest\">"));
         assert!(offline.contains("pwa: true"));
-        assert!(offline.contains("<base id=\"aggr-base\" href=\"/repo/\">"));
+        assert!(offline.contains("href=\"/repo/browse/\""), "{offline}");
+        assert!(offline.contains("base: \"/repo/\""), "{offline}");
+        assert!(!offline.contains("<base "), "{offline}");
         assert!(!offline.contains("rel=\"canonical\""));
         assert!(!offline.contains("application/ld+json"));
         let not_found = std::fs::read_to_string(out.join("404.html")).unwrap();
-        assert!(not_found.contains("<base id=\"aggr-base\" href=\"/repo/\">"));
+        assert!(not_found.contains("href=\"/repo/browse/\""), "{not_found}");
+        assert!(not_found.contains("base: \"/repo/\""), "{not_found}");
+        assert!(!not_found.contains("<base "), "{not_found}");
         assert!(!not_found.contains("rel=\"canonical\""));
         assert!(!not_found.contains("property=\"og:url\""));
         assert!(!not_found.contains("application/ld+json"));
@@ -3002,8 +3788,8 @@ category = "Science"
         );
         assert!(river.contains("rel=\"apple-touch-icon\""));
         assert!(river.contains("name=\"theme-color\""));
-        assert!(river.contains("href=\"browse/\""), "{river}");
-        assert!(river.contains("href=\"preferences/\""), "{river}");
+        assert!(river.contains("href=\"./browse/\""), "{river}");
+        assert!(river.contains("href=\"./preferences/\""), "{river}");
         assert!(
             river.contains("aggr.toml <span aria-hidden=\"true\">↗</span></a>"),
             "{river}"
@@ -3052,10 +3838,10 @@ category = "Science"
             original["https://schema.org/archivedAt"][0]["href"],
             "https://u.github.io/repo/items/blog/2026-09-03-post-2/"
         );
-        assert!(out.join("sources/blog/atom.xml").is_file());
-        assert!(out.join("sources/blog/rss.xml").is_file());
-        assert!(out.join("sources/blog/feed.json").is_file());
-        let atom = std::fs::read_to_string(out.join("sources/blog/atom.xml")).unwrap();
+        assert!(out.join("sources/blog.example/atom.xml").is_file());
+        assert!(out.join("sources/blog.example/rss.xml").is_file());
+        assert!(out.join("sources/blog.example/feed.json").is_file());
+        let atom = std::fs::read_to_string(out.join("sources/blog.example/atom.xml")).unwrap();
         assert!(atom.contains("xml:lang=\"en\""), "{atom}");
         assert!(atom.contains("<id>urn:aggr:item:"), "{atom}");
         assert!(atom.contains("<link rel=\"via\""), "{atom}");
@@ -3151,6 +3937,59 @@ category = "Science"
     }
 
     #[test]
+    fn article_tags_publish_from_old_bodies_without_mutating_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let mut item = store.items().unwrap().remove(0);
+        item.front.labels = vec!["AI".into(), "hand picked".into()];
+        item.body =
+            "Video description mentions #interior in prose.\n\n#Jev #ai #programming #coding\n"
+                .into();
+        store
+            .write_item(crate::store::NewItem {
+                dir: "items/blog/2026/09",
+                stem: "2026-09-01-post-0",
+                front: &item.front,
+                body: &item.body,
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let markdown =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0.md")).unwrap();
+        let (front, body) =
+            crate::store::frontmatter::parse::<crate::model::FrontMatter>(&markdown).unwrap();
+        assert_eq!(
+            front.labels,
+            ["ai", "coding", "hand picked", "jev", "programming"]
+        );
+        assert_eq!(body, "Video description mentions #interior in prose.\n");
+        let feed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("feed.json")).unwrap()).unwrap();
+        assert_eq!(
+            feed["items"][0]["tags"],
+            serde_json::json!(["ai", "coding", "hand picked", "jev", "programming"])
+        );
+        let search: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("search-catalog.json")).unwrap())
+                .unwrap();
+        for tag in ["ai", "coding", "hand-picked", "jev", "programming"] {
+            assert!(out.join(format!("tags/{tag}/index.html")).is_file());
+            assert!(
+                search["facets"]["tag"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|facet| facet["value"] == tag && facet["count"] == 1)
+            );
+        }
+        assert_eq!(store.read_item(&item.path).unwrap(), item);
+    }
+
+    #[test]
     fn rendered_titles_preserve_article_and_source_case_with_lowercase_topics() {
         let dir = tempfile::tempdir().unwrap();
         let (config, mut sources, store) = fixture(dir.path(), 1, "");
@@ -3173,7 +4012,7 @@ category = "Science"
         build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
         for (path, title) in [
             ("items/blog/2026-09-01-post-0/index.html", "Post 0"),
-            ("sources/blog/index.html", "The Example Blog"),
+            ("sources/blog.example/index.html", "The Example Blog"),
             ("categories/computer-science/index.html", "computer science"),
             ("tags/rust/index.html", "rust"),
             ("tags/generative-ai/index.html", "generative ai"),
@@ -3240,10 +4079,10 @@ same_as = ["https://social.example/@ada"]
             ),
             "{second}"
         );
-        let source = std::fs::read_to_string(out.join("sources/blog/index.html")).unwrap();
+        let source = std::fs::read_to_string(out.join("sources/blog.example/index.html")).unwrap();
         assert!(
             source.contains(
-                "<meta name=\"description\" content=\"Browse retained readable snapshots from blog in Demo &lt;site&gt;, with original URLs and capture dates.\">"
+                "<meta name=\"description\" content=\"Browse retained readable snapshots from blog.example in Demo &lt;site&gt;, with original URLs and capture dates.\">"
             ),
             "{source}"
         );
@@ -3257,6 +4096,24 @@ same_as = ["https://social.example/@ada"]
             item.contains("Archived readable snapshot of Post 1 from blog.example, first captured 2026-09-02 and preserved by Demo &lt;site&gt;."),
             "{item}"
         );
+        // A link shared into a chat unfurls as the article, not as a notice about the archive:
+        // crawlers keep the archival framing, a reader gets the words.
+        let unfurled = |property: &str| {
+            item.split_once(&format!("<meta {property} content=\""))
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(value, _)| value.to_string())
+                .unwrap_or_default()
+        };
+        for property in [
+            "property=\"og:description\"",
+            "name=\"twitter:description\"",
+        ] {
+            let shared = unfurled(property);
+            assert!(
+                !shared.starts_with("Archived readable snapshot") && !shared.is_empty(),
+                "{property}: {shared}"
+            );
+        }
 
         let schema_start = "<script type=\"application/ld+json\">";
         let schema = home
@@ -3279,7 +4136,7 @@ same_as = ["https://social.example/@ada"]
         let llms = std::fs::read_to_string(out.join("llms.txt")).unwrap();
         assert!(llms.starts_with("# Demo <site>\n\n> Independent reading notes"));
         assert!(llms.contains("[Instance metadata](https://u.github.io/repo/aggr.json)"));
-        assert!(llms.contains("[Sitemap](https://u.github.io/repo/sitemap.xml)"));
+        assert!(!llms.contains("[Sitemap]"));
         assert!(
             llms.contains(
                 "[Original URL to snapshot linkset](https://u.github.io/repo/linkset.json)"
@@ -3292,7 +4149,7 @@ same_as = ["https://social.example/@ada"]
     #[test]
     fn sitemap_uses_local_capture_time_for_a_newly_archived_old_article() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\nindexing = true\n");
         let mut item = store.items().unwrap().remove(0);
         item.front.replicated_at = Some(day(15));
         let stem = item.path.rsplit('/').next().unwrap();
@@ -3310,7 +4167,9 @@ same_as = ["https://social.example/@ada"]
             .unwrap();
 
         let out = dir.path().join("out");
-        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let mut build_info = info(out.clone());
+        build_info.release = true;
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         let sitemap = std::fs::read_to_string(out.join("sitemap.xml")).unwrap();
         let entry = sitemap
             .split("<url>")
@@ -3359,18 +4218,95 @@ same_as = ["https://social.example/@ada"]
     }
 
     #[test]
+    fn indexing_policy_preserves_reader_search_and_discovery() {
+        for (extra, release, development, indexable) in [
+            ("", true, false, false),
+            ("indexing = true\n", true, false, true),
+            ("indexing = true\n", false, false, false),
+            ("indexing = true\n", true, true, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (config, sources, store) = fixture(dir.path(), 1, extra);
+            let out = dir.path().join("out");
+            let mut build_info = info(out.clone());
+            build_info.base_url = Some("https://reads.example/".into());
+            build_info.release = release;
+            build_info.development = development;
+            build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+
+            for path in [
+                "index.html",
+                "browse/index.html",
+                "sources/index.html",
+                "sources/blog.example/index.html",
+                "items/blog/2026-09-01-post-0/index.html",
+                "preferences/index.html",
+                "404.html",
+                "offline.html",
+            ] {
+                let html = std::fs::read_to_string(out.join(path)).unwrap();
+                let utility =
+                    matches!(path, "preferences/index.html" | "404.html" | "offline.html");
+                let directive = if indexable && !utility {
+                    "name=\"robots\" content=\"index,follow,"
+                } else {
+                    "name=\"robots\" content=\"noindex,follow\""
+                };
+                assert!(
+                    html.contains(directive),
+                    "{extra:?}, release={release}, {path}"
+                );
+            }
+            assert_eq!(out.join("sitemap.xml").exists(), indexable);
+            let robots = std::fs::read_to_string(out.join("robots.txt")).unwrap();
+            assert!(robots.contains("Allow: /"));
+            assert_eq!(robots.contains("Sitemap:"), indexable);
+            let descriptor: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(out.join("aggr.json")).unwrap()).unwrap();
+            assert_eq!(descriptor["discovery"].get("sitemap").is_some(), indexable);
+            let inventory = std::fs::read_to_string(out.join("llms.txt")).unwrap();
+            assert_eq!(inventory.contains("[Sitemap]"), indexable);
+            for path in [
+                "search-catalog.json",
+                "opensearch.xml",
+                "linkset.json",
+                "atom.xml",
+                "sources.opml",
+            ] {
+                assert!(out.join(path).is_file(), "{path}");
+            }
+            let search: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(out.join("search-catalog.json")).unwrap())
+                    .unwrap();
+            assert_eq!(search["docs"], 1, "local search retains the article");
+        }
+    }
+
+    #[test]
     fn origin_root_build_advertises_its_sitemap_in_robots() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let (mut config, sources, store) = fixture(dir.path(), 1, "pwa = false\nindexing = true\n");
         let out = dir.path().join("out");
         let mut build_info = info(out.clone());
         build_info.base_url = Some("https://reads.example/".into());
+        build_info.release = true;
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
 
         let robots = std::fs::read_to_string(out.join("robots.txt")).unwrap();
         assert_eq!(
             robots,
             "User-agent: *\nAllow: /\nSitemap: https://reads.example/sitemap.xml\n"
+        );
+
+        config.site.indexing = false;
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        assert!(
+            !out.join("sitemap.xml").exists(),
+            "stale sitemap must be removed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("robots.txt")).unwrap(),
+            "User-agent: *\nAllow: /\n"
         );
     }
 
@@ -3424,10 +4360,14 @@ same_as = ["https://social.example/@ada"]
         let interactive =
             std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
         assert!(
-            interactive.contains("data-interactive-embed=\"https://blog.example/0\""),
+            interactive
+                .contains("<iframe class=\"interactive-viewer\" src=\"https://blog.example/0\""),
             "{interactive}"
         );
-        assert!(!interactive.contains("<iframe"));
+        assert!(
+            interactive.contains("sandbox=\"allow-scripts\" referrerpolicy=\"no-referrer\""),
+            "{interactive}"
+        );
         assert!(
             interactive
                 .contains(">Open original <span aria-hidden=\"true\">↗</span></a></figcaption>"),
@@ -3436,11 +4376,140 @@ same_as = ["https://social.example/@ada"]
         assert!(!interactive.contains("if the interactive view is unavailable"));
         let document =
             std::fs::read_to_string(out.join("items/blog/2026-09-02-post-1/index.html")).unwrap();
-        assert!(document.contains("src=\"https://papers.test/verified.pdf\""));
+        assert!(document.contains("data=\"https://papers.test/verified.pdf\""));
         assert!(document.contains("href=\"https://blog.example/1\""));
         let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(!feed.contains("data-interactive-embed"));
         assert!(!feed.contains("<embed"));
+    }
+
+    #[test]
+    fn stored_documents_publish_same_origin_with_budget_and_offline_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut config, sources, store) = fixture(dir.path(), 1, "");
+        let mut item = store.items().unwrap().remove(0);
+        item.front.link = "http://publisher.invalid/paper.pdf#page=2".into();
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        let mut bytes = vec![b' '; 512 * 1024];
+        bytes[..8].copy_from_slice(b"%PDF-1.7");
+        let asset = crate::document::Asset {
+            source_url: "http://publisher.invalid/paper.pdf".into(),
+            bytes,
+        };
+        store
+            .write_item_with_document(
+                crate::store::NewItem {
+                    dir: directory,
+                    stem,
+                    front: &item.front,
+                    body: "Abstract.",
+                    html: None,
+                    preview: None,
+                    images: &[],
+                },
+                Some(&asset),
+            )
+            .unwrap();
+        let build_info = info(dir.path().join("out"));
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        let hash = crate::model::sha1_hex(&asset.bytes);
+        let local = format!("assets/documents/{hash}.pdf");
+        let page_path = "items/blog/2026-09-01-post-0/index.html";
+        let page = std::fs::read_to_string(build_info.out.join(page_path)).unwrap();
+        assert!(
+            page.contains(&format!("data=\"../../../{local}#page=2\"")),
+            "{page}"
+        );
+        assert!(
+            page.contains("href=\"http://publisher.invalid/paper.pdf#page=2\""),
+            "original provenance remains visible"
+        );
+        assert_eq!(
+            std::fs::read(build_info.out.join(&local)).unwrap(),
+            asset.bytes
+        );
+        assert_eq!(published_media(&build_info.out).get(&local), Some(&hash));
+        let markdown =
+            std::fs::read_to_string(build_info.out.join("items/blog/2026-09-01-post-0.md"))
+                .unwrap();
+        assert!(markdown.contains("*[Open PDF](<http://publisher.invalid/paper.pdf#page=2>)*"));
+        config.site.build_max_bytes =
+            budget::output_bytes(&build_info.out).unwrap() - asset.bytes.len() as u64 / 2;
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        assert!(!build_info.out.join(&local).exists());
+        let page = std::fs::read_to_string(build_info.out.join(page_path)).unwrap();
+        assert!(page.contains("data=\"http://publisher.invalid/paper.pdf#page=2\""));
+        assert!(published_media(&build_info.out).is_empty());
+        assert_eq!(
+            store
+                .read_document(&store.items().unwrap()[0])
+                .unwrap()
+                .unwrap(),
+            asset
+        );
+        let mut changed = store.items().unwrap().remove(0);
+        changed.front.link = "http://publisher.invalid/other.pdf?version=2".into();
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &changed.front,
+                body: &changed.body,
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        config.site.build_max_bytes = 1_000_000_000;
+        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
+        assert!(
+            !build_info.out.join(&local).exists(),
+            "old PDF never replaces a changed document URL"
+        );
+        let page = std::fs::read_to_string(build_info.out.join(page_path)).unwrap();
+        assert!(page.contains("data=\"http://publisher.invalid/other.pdf?version=2\""));
+    }
+
+    #[test]
+    fn subscription_wall_build_keeps_an_honest_archive_lookup_without_sales_offers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let mut item = store.items().unwrap().remove(0);
+        item.front.link = "https://www.ft.com/content/123".into();
+        item.front.content = crate::model::ContentKind::Extracted;
+        item.front.summary = Some("Article URL: https://www.ft.com/content/123 Comments URL: https://news.ycombinator.com/item?id=123 Points: 42 # Comments: 2".into());
+        item.front
+            .extra
+            .insert("archive_lookup_url".into(), "javascript:alert(1)".into());
+        let body = "## Save 50% on Standard Digital\n\nExplore more offers.\n\nPremium Digital\n\nComplete digital access.\n\nExplore our full range of subscriptions.";
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &item.front,
+                body,
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let page =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
+        assert!(page.contains("article-access-notice"), "{page}");
+        assert!(page.contains("https://archive.ph/https://www.ft.com/content/123"));
+        for forbidden in [
+            "Save 50%",
+            "Premium Digital",
+            "Article URL:",
+            "javascript:alert",
+            "This source publishes titles only",
+        ] {
+            assert!(!page.contains(forbidden), "{forbidden}");
+        }
+        assert_eq!(store.items().unwrap()[0].body, body);
     }
 
     #[test]
@@ -3451,13 +4520,22 @@ same_as = ["https://social.example/@ada"]
         let (directory, stem) = item.path.rsplit_once('/').unwrap();
         item.front.link =
             "https://example.com/paper.PDF?token=one&filename=paper.pdf#page=2".into();
-        item.front.content = crate::model::ContentKind::None;
+        item.front.content = crate::model::ContentKind::Feed;
+        let summary = format!(
+            "Article URL: {} Comments URL: https://news.ycombinator.com/item?id=49783495 Points: 120 # Comments: 21",
+            item.front.link
+        );
+        item.front.summary = Some(summary);
+        let feed_body = format!(
+            "Article URL: [{}]({})\n\nComments URL: https://news.ycombinator.com/item?id=49783495\n\nPoints: 120\n\n\\# Comments: 21\n",
+            item.front.link, item.front.link
+        );
         store
             .write_item(crate::store::NewItem {
                 dir: directory,
                 stem,
                 front: &item.front,
-                body: "",
+                body: &feed_body,
                 html: None,
                 preview: None,
                 images: &[],
@@ -3467,16 +4545,66 @@ same_as = ["https://social.example/@ada"]
         build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
         let page =
             std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
-        assert!(page.contains("<embed class=\"document-viewer\""), "{page}");
+        assert!(
+            !page.contains("Article URL:"),
+            "feed bookkeeping leaked into PDF page"
+        );
+        assert!(!page.contains("Comments URL:"));
+        assert!(!page.contains("Points:"));
+        assert!(!page.contains("# Comments:"));
+        assert_eq!(
+            store.items().unwrap()[0].body,
+            feed_body,
+            "build does not rewrite archive"
+        );
+        let document = scraper::Html::parse_document(&page);
+        let viewer = document
+            .select(&scraper::Selector::parse("object.document-viewer").unwrap())
+            .next()
+            .expect("native PDF object has an HTML fallback when loading is blocked");
+        assert_eq!(viewer.value().attr("data"), Some(item.front.link.as_str()));
+        let fallback = viewer
+            .select(&scraper::Selector::parse(".document-fallback a").unwrap())
+            .next()
+            .expect("failed PDF has an actionable inline fallback without JavaScript");
+        assert_eq!(
+            fallback.value().attr("href"),
+            Some(item.front.link.as_str())
+        );
+        assert_eq!(fallback.value().attr("target"), Some("_blank"));
+        assert!(
+            viewer
+                .text()
+                .collect::<String>()
+                .contains("PDF preview unavailable")
+        );
         assert!(page.contains("type=\"application/pdf\""), "{page}");
         assert!(
             page.contains(
-                "src=\"https://example.com/paper.PDF?token=one&amp;filename=paper.pdf#page=2\""
+                "data=\"https://example.com/paper.PDF?token=one&amp;filename=paper.pdf#page=2\""
             ),
             "{page}"
         );
         assert!(page.contains("Open PDF"), "{page}");
         assert!(page.contains(">Open PDF ↗</a></figcaption>"), "{page}");
+        let caption = format!("*[Open PDF](<{}>)*", item.front.link);
+        let markdown =
+            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0.md")).unwrap();
+        assert!(
+            markdown.contains(&caption),
+            "portable Markdown carries the media caption: {markdown}"
+        );
+        let json: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(out.join("items/blog/2026-09-01-post-0.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            json["content_markdown"]
+                .as_str()
+                .unwrap()
+                .contains(&caption),
+            "JSON Markdown carries the same media caption: {json}"
+        );
         assert!(!page.contains("if the viewer is unavailable"), "{page}");
         assert!(
             !page.contains("This source publishes titles only"),
@@ -3529,7 +4657,7 @@ same_as = ["https://social.example/@ada"]
             ))
             .next()
             .expect("article pages advertise the root Atom feed");
-        assert_eq!(atom.value().attr("href"), Some("atom.xml"));
+        assert_eq!(atom.value().attr("href"), Some("../../../atom.xml"));
         assert_eq!(atom.value().attr("title"), Some("Demo <site>"));
         assert_eq!(
             article
@@ -3538,14 +4666,14 @@ same_as = ["https://social.example/@ada"]
                 ))
                 .next()
                 .and_then(|link| link.value().attr("href")),
-            Some("rss.xml")
+            Some("../../../rss.xml")
         );
         assert_eq!(
             article
                 .select(&select("link[rel=\"alternate\"][type=\"text/x-opml\"]"))
                 .next()
                 .and_then(|link| link.value().attr("href")),
-            Some("sources.opml")
+            Some("../../../sources.opml")
         );
         assert_eq!(
             article
@@ -3599,7 +4727,7 @@ same_as = ["https://social.example/@ada"]
             .expect("the entry names its own URL");
         assert_eq!(
             url.value().attr("href"),
-            Some("items/blog/2026-09-02-post-1/")
+            Some("../../../items/blog/2026-09-02-post-1/")
         );
         let authors = entry
             .select(&select(":scope > data.p-author.h-card"))
@@ -3685,8 +4813,8 @@ same_as = ["https://social.example/@ada"]
         );
         let stub_source = std::fs::read_to_string(out.join("sw.js")).unwrap();
         assert!(
-            stub_source.contains("sources\\.opml"),
-            "the worker treats the list as mutable"
+            !stub_source.contains("sources.opml"),
+            "only content-addressed URLs are cached first; the list needs no special case"
         );
     }
 }
