@@ -31,10 +31,6 @@ allow = [
 # stringmetrics (dev, via httpmock) declares no SPDX expression, only an Apache-2.0 LICENSE file;
 # the default threshold recognises it without a clarification.
 confidence-threshold = 0.8
-exceptions = [
-  # aggr's own license does not relax the policy for dependencies.
-  { crate = "aggr", allow = ["FSL-1.1-ALv2"] },
-]
 
 [licenses.private]
 ignore = false

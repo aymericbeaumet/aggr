@@ -6,7 +6,7 @@ A self-updating feed reader that saves articles as Markdown in your Git reposito
 a searchable static site. Follow websites, read on any device, and keep a copy when the original
 disappears. No application server or separate database service to administer.
 
-Source-available and free for personal and internal company use; see [the license](#license).
+Open source under the MIT license; see [the license](#license).
 
 <p>
   <img alt="The aggr reader on a desktop browser: a numbered feed of articles with their source, category, age and reading time" src="docs/images/reader-desktop.png" width="61%">
@@ -125,9 +125,5 @@ step and no dependencies. See [contributing](CONTRIBUTING.md) and
 
 ## License
 
-[FSL-1.1-ALv2](LICENSE): source-available, free for personal and internal company use with no
-trial period. A competing product or service requires separate permission. This is not an OSI
-open-source license today, but it becomes one on a schedule: every version is additionally
-licensed under Apache-2.0 two years after its release. Previously published MIT versions keep
-their MIT terms.
-See [licensing](docs/licensing.md) for examples, contribution terms, and third-party notices.
+[MIT](LICENSE), for every version published.
+See [licensing](docs/licensing.md) for contribution terms and third-party notices.
