@@ -53,10 +53,27 @@ async function lastKnown(request) {
   return (await caches.match(request, { ignoreSearch: true })) || (await caches.match(OFFLINE));
 }
 
+/** A promise held to the same deadline a fetch of our own would get; `null` when it passes. */
+function beforeDeadline(promise, timeout) {
+  return Promise.race([
+    promise,
+    new Promise(function (resolve) {
+      setTimeout(function () { resolve(null); }, timeout);
+    }),
+  ]);
+}
+
 /** Pages: fresh when the network answers, the last copy when it does not. */
-async function pageResponse(request) {
+async function pageResponse(request, preload) {
   try {
-    var response = await fromNetwork(request, NETWORK_TIMEOUT);
+    // A navigation is already in flight before this worker wakes: preload is that request, and
+    // using it saves opening a second one. It still answers to the deadline that lets a slow
+    // network fall back to the last good copy.
+    var response = preload ? await beforeDeadline(preload, NETWORK_TIMEOUT) : undefined;
+    // `event.preloadResponse` resolves to undefined wherever preload is unsupported or off, which
+    // is not the same as missing the deadline: that still owes the reader a request of our own.
+    if (response === undefined) response = await fromNetwork(request, NETWORK_TIMEOUT);
+    else if (response === null) return (await lastKnown(request)) || fromNetwork(request, NETWORK_TIMEOUT);
     if (response && response.ok) {
       var cache = await caches.open(PAGES);
       await cache.put(request, response.clone());
@@ -127,7 +144,7 @@ self.addEventListener("fetch", function (event) {
   if (url.origin !== self.location.origin || url.pathname.indexOf(SCOPE) !== 0) return;
 
   if (request.mode === "navigate" || (request.headers.get("accept") || "").indexOf("text/html") !== -1) {
-    event.respondWith(pageResponse(request));
+    event.respondWith(pageResponse(request, event.preloadResponse));
     return;
   }
   if (immutable(url.pathname)) {

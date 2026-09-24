@@ -310,7 +310,7 @@ fn shared_source_pictures(
     items: &[ItemCtx],
     article_images: &BTreeMap<String, Vec<content::LocalImage>>,
     bodies: &BTreeMap<&str, &str>,
-) -> std::collections::BTreeSet<String> {
+) -> BTreeMap<String, std::collections::BTreeSet<String>> {
     // A picture the article shows itself is the article's own business, however many other
     // articles also show it. Only the pictures chosen for it — its thumbnail and the opening
     // image taken from what came with it — are counted here.
@@ -348,12 +348,18 @@ fn shared_source_pictures(
             .get(&(source, url))
             .is_some_and(|count| *count >= SHARED_PICTURE_ARTICLES)
     };
-    let mut shared = std::collections::BTreeSet::new();
+    // Kept per source. Media is content-addressed, so two sources that legitimately use the same
+    // picture publish it at one URL, and a bare set of URLs would take one source's house banner
+    // away from every other source that happened to run the same photograph once.
+    let mut shared: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
     for item in items {
         if let Some(preview) = &item.preview
             && repeated(&previews, &item.source, &preview.url)
         {
-            shared.insert(preview.url.clone());
+            shared
+                .entry(item.source.clone())
+                .or_default()
+                .insert(preview.url.clone());
         }
         for image in article_images
             .get(&item.path)
@@ -364,8 +370,9 @@ fn shared_source_pictures(
             {
                 continue;
             }
-            shared.insert(image.original.clone());
-            shared.extend(image.variants.iter().map(|variant| variant.url.clone()));
+            let urls = shared.entry(item.source.clone()).or_default();
+            urls.insert(image.original.clone());
+            urls.extend(image.variants.iter().map(|variant| variant.url.clone()));
         }
     }
     shared
@@ -762,11 +769,11 @@ fn build_once(
         .collect();
     let shared_pictures = shared_source_pictures(&archive_items, &article_images, &portable_bodies);
     for ctx in &mut archive_items {
-        if ctx
-            .preview
-            .as_ref()
-            .is_some_and(|preview| shared_pictures.contains(&preview.url))
-        {
+        if ctx.preview.as_ref().is_some_and(|preview| {
+            shared_pictures
+                .get(&ctx.source)
+                .is_some_and(|urls| urls.contains(&preview.url))
+        }) {
             ctx.preview = None;
         }
     }
@@ -1032,7 +1039,11 @@ fn build_once(
                     .unwrap_or_default(),
             )
             // The source's own picture is not this article's opening image.
-            .filter(|lead| !shared_pictures.contains(&lead.url));
+            .filter(|lead| {
+                !shared_pictures
+                    .get(&item.front.source)
+                    .is_some_and(|urls| urls.contains(&lead.url))
+            });
         }
         let dimensions = if portable_html.contains("<img ") {
             let retained_html = store.read_html(item)?;
@@ -3709,9 +3720,12 @@ category = "Science"
             !sw.contains("assets/logo-"),
             "the multi-megabyte source icon is not precached"
         );
+        // Preload is only worth enabling if the response is read: starting a navigation the
+        // worker then ignores costs a second request for every page.
         assert!(sw.contains("navigationPreload.enable"));
+        assert!(sw.contains("event.preloadResponse"));
         // Pages are network-first with a cached fallback; content-addressed assets are not.
-        assert!(sw.contains("function pageResponse(request)"));
+        assert!(sw.contains("function pageResponse(request, preload)"));
         assert!(sw.contains("function assetResponse(request, name, limit)"));
         assert!(sw.contains("var OFFLINE = SCOPE + \"offline.html\""));
         // Nothing is downloaded ahead of the reader any more.

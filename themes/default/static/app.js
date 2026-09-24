@@ -52,7 +52,7 @@ const storage = {
   /** @param {Storage} store @param {string} key @param {string} value */
   write(store, key, value) {
     try {
-      store.setItem(store === localStorage ? key : key, value);
+      store.setItem(key, value);
       return true;
     } catch {
       return false;
@@ -109,7 +109,7 @@ const dates = (() => {
     if (minutes < 60) return minutes + "m ago";
     const hours = Math.floor(minutes / 60);
     if (hours < 24) return hours + "h ago";
-    const days = Math.ceil(hours / 24);
+    const days = Math.floor(hours / 24);
     if (days < 45) return days + "d ago";
     const months = Math.floor(days / 30);
     if (months < 18) return months + "mo ago";
@@ -1085,11 +1085,13 @@ const UPDATE_INTERVAL = 300000;
 function installFeedUpdates() {
   if (!AGGR.content || !$(".rows:not(.search-results)")) return;
   let content = AGGR.content;
+  let wanted = null;
+  let entries = null;
   let pending = false;
   let swapping = false;
 
   async function swap() {
-    if (swapping) return;
+    if (swapping || !wanted) return;
     swapping = true;
     try {
       const response = await fetch(location.href, { cache: "no-store" });
@@ -1102,10 +1104,20 @@ function installFeedUpdates() {
       const pager = page.querySelector("[data-feed-pager]");
       const current = $("[data-feed-pager]");
       if (pager && current) current.replaceWith(document.importNode(pager, true));
+      // The numbered shortcuts point at the newest entries, which are the ones that just changed.
+      if (Array.isArray(entries)) AGGR.entries = entries;
       dates.render();
       applyFeedPaging();
       markNewEntries();
       selection.restore();
+      // Only now are the rows on screen this build's. Recording the version before the swap
+      // landed meant one failed refresh made every later check believe it was already applied,
+      // and the reader kept stale rows until some other build shipped.
+      content = wanted;
+      wanted = null;
+    } catch {
+      // Offline, aborted, or a broken response: `content` stays where it was, so the next check
+      // reports the same new version and asks for it again.
     } finally {
       swapping = false;
     }
@@ -1123,9 +1135,8 @@ function installFeedUpdates() {
       if (!response.ok) return;
       const update = await response.json();
       if (typeof update.content_version !== "string" || update.content_version === content) return;
-      content = update.content_version;
-      // The numbered shortcuts point at the newest entries, which are the ones that just changed.
-      if (Array.isArray(update.entries)) AGGR.entries = update.entries;
+      wanted = update.content_version;
+      entries = Array.isArray(update.entries) ? update.entries : null;
       pending = true;
     } catch {
       return;
@@ -1147,7 +1158,11 @@ function installFeedUpdates() {
 
 function markNewEntries() {
   if (KIND !== "river") return;
-  const rows = selection.rows();
+  // The whole feed, not the slice on screen. Paging hides every row outside the current slice,
+  // so a boundary read from page two records that page's head as the last thing seen, and coming
+  // back to page one finds no boundary at all and marks all of it new.
+  const list = $(".rows:not(.search-results)");
+  const rows = list ? $$(".row", list) : [];
   if (!rows.length) return;
   const urls = rows.map((row) => row.dataset.url || "").filter(Boolean);
   const key = scopeKey("last-seen-entry");

@@ -109,7 +109,7 @@
     if (minutes < 60) return minutes + "m ago";
     var hours = Math.floor(minutes / 60);
     if (hours < 24) return hours + "h ago";
-    var days = Math.ceil(hours / 24);
+    var days = Math.floor(hours / 24);
     if (days < 45) return days + "d ago";
     var months = Math.floor(days / 30);
     if (months < 18) return months + "mo ago";

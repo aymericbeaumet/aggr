@@ -1352,13 +1352,15 @@ export function mount(options) {
     void run();
   });
 
-  if (clear) clear.hidden = !input.value;
   void loadFacets().then(() => suggest());
   const url = new URL(location.href);
   if (url.searchParams.has("q")) {
     input.value = url.searchParams.get("q") || "";
     page = Number(url.searchParams.get("search-page")) || 1;
   }
+  // After the query is restored, not before: a shared `?q=` link arrives with an empty input and
+  // would otherwise be offered no way to clear the search it just ran.
+  if (clear) clear.hidden = !input.value;
   // This module is fetched on the first sign of interest, so the reader may already have typed
   // by the time it arrives. A shared `?q=` link lands here too.
   if (active()) {
