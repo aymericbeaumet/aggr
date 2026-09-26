@@ -67,7 +67,7 @@ jobs:
       #
       # Every run saves under its own key and the next run restores the newest entry by prefix.
       # The path list is checked against the registry in src/cache.rs by a unit test.
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: |
             .aggr/cache/build-v1/discussions-v1
@@ -96,7 +96,7 @@ jobs:
           AGGR_BASE_URL: ${{ steps.pages.outputs.base_url }}
 
       # Saved only after a successful build so a failed run never publishes half-written state.
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@v6
         with:
           path: |
             .aggr/cache/build-v1/discussions-v1
