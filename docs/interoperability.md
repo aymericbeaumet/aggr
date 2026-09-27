@@ -127,6 +127,12 @@ ThumbHash. It gains no WebP renditions. A CDN that answers `auto=format` with AV
 means AVIF cannot be compacted: under `images = "compact"` it keeps its exact bytes, as
 colour-managed and high-bit-depth images do.
 
+AVIF support stops there deliberately, and two gaps follow from never decoding it. An animated AVIF
+sequence is archived whole, bounded only by the file-size limit rather than by the frame and pixel
+budget animated GIF and WebP are held to. And the size comes from the first `ispe` box in the
+container, which in a file that lists a thumbnail or an alpha plane before its primary image can
+be that smaller item's, so the reserved space may be wrong until the picture loads.
+
 ## HTTP extraction and native builds
 
 HTTP requests use reqwest with rustls first. A response explicitly marked
