@@ -27,7 +27,7 @@ pub(super) fn parse(text: &str, document_url: Option<&Url>) -> Result<Document> 
     let result = parse_document(text, document_url);
     let text = text.trim_start_matches('\u{feff}').trim();
     let collection = if text.starts_with('<') {
-        xml_root(text).map_or_else(|_| text.contains("<opml"), |root| root == b"opml")
+        xml_root(text).map_or_else(|_| text.contains("<opml"), |root| root == "opml")
     } else {
         !text.starts_with('{')
     };
@@ -58,7 +58,7 @@ pub(super) fn parse_bytes(bytes: &[u8], document_url: &Url) -> Result<Document> 
                 _ => None,
             }
             .context("source document is not UTF-8 and has no XML encoding declaration")?;
-            encoding_rs::Encoding::for_label(&label)
+            encoding_rs::Encoding::for_label(label.as_bytes())
                 .context("unsupported source document encoding")?
         }
     };
@@ -77,7 +77,7 @@ fn parse_document(text: &str, document_url: Option<&Url>) -> Result<Document> {
     }
     let mut collection = true;
     let sources = if trimmed.starts_with('<') {
-        if xml_root(trimmed)? == b"opml" {
+        if xml_root(trimmed)? == "opml" {
             opml_sources(trimmed)?
         } else {
             collection = false;
@@ -136,12 +136,12 @@ fn list_sources(text: &str) -> Result<Vec<SourceConfig>> {
         .collect()
 }
 
-fn xml_root(text: &str) -> Result<Vec<u8>> {
+fn xml_root(text: &str) -> Result<String> {
     let mut reader = Reader::from_str(text);
     loop {
         match reader.read_event().context("parsing imported XML")? {
             Event::Start(element) | Event::Empty(element) => {
-                return Ok(element.local_name().as_ref().to_vec());
+                return Ok(element.local_name().as_ref().to_string());
             }
             Event::Eof => bail!("imported XML has no root element"),
             _ => {}
@@ -166,7 +166,7 @@ fn opml_sources(text: &str) -> Result<Vec<SourceConfig>> {
         let empty = matches!(event, Event::Empty(_));
         match event {
             Event::Start(element) | Event::Empty(element)
-                if element.local_name().as_ref() == b"outline" =>
+                if element.local_name().as_ref() == "outline" =>
             {
                 let mut url = None;
                 let mut name = None;
@@ -175,20 +175,17 @@ fn opml_sources(text: &str) -> Result<Vec<SourceConfig>> {
                 for attribute in element.attributes() {
                     let attribute = attribute.context("reading OPML outline attributes")?;
                     let value = attribute
-                        .decoded_and_normalized_value(
-                            quick_xml::XmlVersion::Implicit1_0,
-                            reader.decoder(),
-                        )?
+                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)?
                         .trim()
                         .to_string();
                     if value.is_empty() {
                         continue;
                     }
                     match attribute.key.as_ref() {
-                        b"xmlUrl" => url = Some(value),
-                        b"text" => name = Some(value),
-                        b"title" => title = Some(value),
-                        b"category" => category = Some(value),
+                        "xmlUrl" => url = Some(value),
+                        "text" => name = Some(value),
+                        "title" => title = Some(value),
+                        "category" => category = Some(value),
                         _ => {}
                     }
                 }
@@ -219,7 +216,7 @@ fn opml_sources(text: &str) -> Result<Vec<SourceConfig>> {
                 depth = depth
                     .checked_sub(1)
                     .context("unexpected closing OPML element")?;
-                if element.local_name().as_ref() == b"outline" {
+                if element.local_name().as_ref() == "outline" {
                     categories.pop();
                 }
             }

@@ -18,30 +18,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  frontend:
-    name: frontend
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - run: npm ci --prefix web
-      - run: npm --prefix web run verify
-      - name: Enforce the reader bundle budget
-        run: |
-          budget=72000
-          size="$(gzip -c themes/default/static/app.js | wc -c | tr -d '[:space:]')"
-          echo "themes/default/static/app.js: $size bytes gzipped (budget $budget)"
-          if [ "$size" -gt "$budget" ]; then
-            echo "::error file=themes/default/static/app.js::app.js is $size bytes gzipped, over the $budget byte budget; trim the reader or raise the budget deliberately in ci.yml"
-            exit 1
-          fi
-      - name: Check embedded reader assets match their source
-        run: git diff --exit-code -- themes/default/static/app.js themes/default/static/client.css themes/default/static/client.LICENSE
-
   test:
     name: test (${{ matrix.name }})
     strategy:
@@ -56,7 +32,7 @@ jobs:
           - { name: windows-arm64, os: windows-11-arm }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -84,7 +60,7 @@ jobs:
     env:
       AGGR_WEBDRIVER_URL: http://127.0.0.1:9515
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/native-deps
       - uses: Swatinem/rust-cache@v2
@@ -152,7 +128,7 @@ jobs:
   msrv:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: msrv
         run: echo "version=$(perl -ne 'print $1 if /^rust-version = "(.*)"/' Cargo.toml)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
@@ -171,7 +147,7 @@ jobs:
     name: deps (cargo-deny)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
@@ -181,7 +157,7 @@ jobs:
   version:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           cargo="$(perl -ne 'print $1 if /^version = "(.*)"/' Cargo.toml)"
           file="$(tr -d '[:space:]' < VERSION)"
@@ -193,7 +169,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: release
         env:
           GH_TOKEN: ${{ github.token }}

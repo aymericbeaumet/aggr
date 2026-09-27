@@ -81,6 +81,7 @@ async fn run_prevalidated(
         generation: &generation,
     })?;
     if let Some(summary) = crate::cache::restore_render(&cache_dir, &fingerprint, &out)? {
+        site::verify_output_budget(&out, project.config.site.build_max_bytes)?;
         print_summary(summary, &out, base_url.as_deref(), true);
         return Ok(summary);
     }
@@ -100,6 +101,8 @@ async fn run_prevalidated(
         now,
         release: args.release,
         discussions,
+        development: false,
+        render_cache_key: Some(fingerprint.clone()),
         pagefind_cache: Some(cache_dir.clone()),
     };
     let summary = site::build(
@@ -112,6 +115,7 @@ async fn run_prevalidated(
     crate::cache::store_render(&cache_dir, &fingerprint, &rendered, summary)?;
     crate::cache::restore_render(&cache_dir, &fingerprint, &out)?
         .context("the rendered site disappeared from its cache")?;
+    site::verify_output_budget(&out, project.config.site.build_max_bytes)?;
     print_summary(summary, &out, base_url.as_deref(), false);
     Ok(summary)
 }
@@ -152,6 +156,8 @@ pub fn run_ephemeral(
         now,
         release: args.release,
         discussions,
+        development: true,
+        render_cache_key: None,
         pagefind_cache: Some(cache_dir.to_path_buf()),
     };
     let summary = site::build(

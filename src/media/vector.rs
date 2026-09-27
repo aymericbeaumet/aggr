@@ -43,7 +43,7 @@ fn without_publisher_doctype(source: &str) -> Result<Cow<'_, str>> {
         let start = offset + reader.buffer_position() as usize;
         match reader.read_event().context("reading SVG prolog")? {
             Event::DocType(declaration) => {
-                let declaration = std::str::from_utf8(&declaration)?;
+                let declaration = declaration.as_ref();
                 ensure!(
                     declaration.split_ascii_whitespace().next() == Some("svg"),
                     "not an SVG doctype"

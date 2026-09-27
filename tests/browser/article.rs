@@ -29,17 +29,17 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         .await?;
     client.goto(&fixture.base).await?;
     key(client, "g").await?;
-    key(client, "l").await?;
+    key(client, "b").await?;
     wait_for(client, "location.pathname === '/reader/browse/'").await?;
     client.goto(&fixture.base).await?;
-    wait_for(
+    wait_booted_with(
         client,
-        "document.querySelectorAll('[data-row-open]').length === 3 && document.documentElement.classList.contains('swup-enabled')",
+        "document.querySelectorAll('[data-row-open]').length === 3",
     )
     .await?;
     client.execute("sessionStorage.setItem('aggr:last-seen-entry:' + encodeURIComponent('/reader/'), document.querySelectorAll('[data-row-open]')[1].href)", vec![]).await?;
     client.refresh().await?;
-    wait_for(client, "!!document.querySelector('.row') && document.documentElement.classList.contains('swup-enabled')").await?;
+    wait_booted_with(client, "!!document.querySelector('.row')").await?;
     assert_eq!(
         client
             .execute(
@@ -70,7 +70,11 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
       const aligned = background.left === separator.left && background.right === separator.right;
       const color = () => getComputedStyle(cell, '::before').backgroundColor;
       const highlighted = color();
-      const duration = background.transitionDuration;
+      // An entry lights up the moment it arrives and only fades once it stops being new, which is
+      // what a feed that refreshes itself does to the rows it has already shown.
+      const arrival = background.transitionDuration;
+      row.classList.remove('is-new');
+      const duration = getComputedStyle(cell, '::before').transitionDuration;
       const badge = document.querySelector('link[rel~=icon]').href.startsWith('data:');
       requestAnimationFrame(() => {
         const initial = color();
@@ -78,7 +82,7 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
           const middle = color();
           setTimeout(() => {
             const final = color();
-            done({highlighted, initial, middle, final, aligned, duration, badge});
+            done({highlighted, initial, middle, final, aligned, arrival, duration, badge});
           }, 3500);
         }, 2000);
       });
@@ -86,6 +90,10 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
             vec![],
         )
         .await?;
+    assert_eq!(
+        new_item_fade["arrival"], "0s",
+        "a new entry is highlighted on arrival, not animated into place"
+    );
     assert_eq!(new_item_fade["duration"], "5s");
     assert_eq!(
         new_item_fade["badge"], false,
@@ -170,30 +178,10 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         scrolled["y"].as_f64().unwrap_or_default() > 100.0,
         "fixture must exercise a genuinely scrolled feed: {scrolled}"
     );
-    client
-        .execute(
-            r#"
-      window.__aggrTransitionCalls = 0;
-      if (document.startViewTransition) {
-        const start = document.startViewTransition.bind(document);
-        document.startViewTransition = function (update) {
-          window.__aggrTransitionCalls++;
-          return start(update);
-        };
-      }
-    "#,
-            vec![],
-        )
-        .await?;
+    // Opening an article is an ordinary navigation from a scrolled feed: the article has to start
+    // at its own beginning rather than inheriting where the list was left.
     key(client, "o").await?;
     wait_for(client, "!!document.querySelector('.body pre')").await?;
-    assert_eq!(
-        client
-            .execute("return window.__aggrTransitionCalls", vec![])
-            .await?,
-        0,
-        "navigation should replace content without waiting for a page transition"
-    );
     let scroll_samples = client
         .execute_async(
             r#"
@@ -366,7 +354,7 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         headerMeta:head.querySelector('.meta').textContent.replace(/\s+/g, ' ').trim(),
         imageLoading:image.getAttribute('loading'), imageSource:image.getAttribute('src'), imageClass:image.className,
         imagePriority:image.getAttribute('fetchpriority'), imagePlaceholder:picture.style.getPropertyValue('--image-placeholder'),
-        imagePreview:picture.style.getPropertyValue('--image-preview'), pictureLoaded:picture.classList.contains('is-loaded'),
+        imagePreview:picture.style.getPropertyValue('--image-preview'), pictureOpacity:getComputedStyle(image).opacity,
         sourceWidth:picture.querySelector('source')?.getAttribute('width'), sourceHeight:picture.querySelector('source')?.getAttribute('height'),
         sourceSet:picture.querySelector('source')?.getAttribute('srcset'),
         loadedBox:{width:loadedBox.width,height:loadedBox.height}, unloadedBox:{width:unloadedBox.width,height:unloadedBox.height},
@@ -425,7 +413,10 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
             .contains("data:image/png;base64,"),
         "{article}"
     );
-    assert_eq!(article["pictureLoaded"], true);
+    assert_eq!(
+        article["pictureOpacity"], "1",
+        "the picture shows itself as it arrives, with the inlined placeholder behind it"
+    );
     assert_eq!(article["sourceWidth"], Value::Null);
     assert_eq!(article["sourceHeight"], Value::Null);
     assert_eq!(
@@ -442,11 +433,13 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
             "reserved image {axis} must match its loaded box: {article}"
         );
     }
+    // Pages address their assets relative to themselves, so an archive keeps working wherever it
+    // is served from, including straight off a filesystem.
+    let image_source = article["imageSource"].as_str().unwrap_or_default();
     assert!(
-        article["imageSource"]
-            .as_str()
-            .unwrap_or_default()
-            .starts_with("assets/images/"),
+        image_source.contains("assets/images/")
+            && !image_source.starts_with('/')
+            && !image_source.contains("://"),
         "{article}"
     );
     assert_eq!(article["highlighted"], true);
@@ -521,7 +514,7 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
                 <= 1.0,
         "article content and continuation cards must share the same measure: {article}"
     );
-    assert_eq!(article["moreCount"], 2);
+    assert_eq!(article["moreCount"], 4);
     assert_eq!(
         article["moreHeadings"],
         json!(["Coming next", "Discover more"])
@@ -629,9 +622,15 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
     );
     assert_eq!(reading_header["condensed"]["height"], 0.0);
     assert_ne!(reading_header["condensed"]["metadata"], "none");
+    // `scroll-padding-top` clears the bar that never moves. The folding header above an article is
+    // only knowable by measuring it, which reading must not do per frame, so the reader corrects a
+    // jump into the article itself; `a_heading_is_the_way_back_to_its_section` holds that end.
     assert!(
-        reading_header["condensed"]["offset"].as_f64()
-            > reading_header["condensed"]["bottom"].as_f64()
+        reading_header["condensed"]["offset"]
+            .as_f64()
+            .unwrap_or_default()
+            >= 44.0,
+        "a fragment must at least clear the fixed top bar: {reading_header}"
     );
     let title_fold = client.execute_async(r#"
       const done=arguments[arguments.length-1], head=document.querySelector('.itemhead');
@@ -739,14 +738,14 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         "document.querySelectorAll('[data-row-open]').length === 3",
     )
     .await?;
-    wait_for(
-        client,
-        "!!document.activeElement.matches('[data-row-open]')",
-    )
-    .await?;
+    // The article that was open is the row the feed comes back to, marked but not focused.
+    wait_booted_with(client, "!!document.querySelector('.row.is-selected')").await?;
     assert_eq!(
         client
-            .execute("return document.activeElement.href", vec![])
+            .execute(
+                "return document.querySelector('.row.is-selected [data-row-open]').href",
+                vec![]
+            )
             .await?,
         first
     );
@@ -839,7 +838,7 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
       const input = document.createElement('textarea'); document.body.append(input);
       press('editing', 'u', {ctrlKey:true}, input); input.remove();
       const dialog = document.querySelector('#shortcut-help'); dialog.showModal();
-      press('dialog', 'd', {ctrlKey:true}); dialog.close(); document.querySelector('#swup').focus({preventScroll:true});
+      press('dialog', 'd', {ctrlKey:true}); dialog.close(); document.activeElement?.blur();
       const preference = window.AGGRPreferences.values['single-key-shortcuts'];
       window.AGGRPreferences.values['single-key-shortcuts'] = false;
       press('disabledD', 'd'); press('enabledCtrlD', 'd', {ctrlKey:true});
@@ -847,8 +846,7 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
       window.scrollBy = scrollBy;
       const line = parseFloat(getComputedStyle(document.querySelector('.body')).lineHeight);
       const head = document.querySelector('.itemhead').getBoundingClientRect();
-      const bottom = 0;
-      return {movements, prevented, line, halfPage:Math.min(line * 10, Math.max(line, innerHeight - head.bottom - bottom) * 0.5)};
+      return {movements, prevented, line, halfPage:Math.min(line * 10, Math.max(line, innerHeight - head.height) * 0.5)};
     "#,
             vec![],
         )
@@ -881,7 +879,7 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
         .execute(
             r#"
       const article = document.querySelector('article.item');
-      return {current:location.pathname,older:new URL(article.dataset.nextUrl,document.baseURI).pathname};
+      return {current:location.pathname,older:new URL(article.dataset.nextUrl,new URL(window.AGGR.base,location.href)).pathname};
     "#,
             vec![],
         )
@@ -902,12 +900,17 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
             "{key_name} must not navigate between articles"
         );
     }
+    // Stepping past the newest article leaves the archive for the feed rather than stopping dead.
     key(client, "k").await?;
-    assert_eq!(
-        client.current_url().await?.path(),
-        current_path,
-        "k at the newest-article boundary must be a no-op"
-    );
+    wait_booted_with(client, "document.body.dataset.kind === 'river'").await?;
+    client
+        .goto(&format!(
+            "{}{}",
+            fixture.base,
+            current_path.trim_start_matches("/reader/")
+        ))
+        .await?;
+    wait_booted_with(client, "!!document.querySelector('article.item')").await?;
     client
         .execute("document.querySelector('.body a').focus()", vec![])
         .await?;
@@ -933,7 +936,7 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
     assert_eq!(
         client
             .execute(
-                "return new URL(document.querySelector('article.item').dataset.previousUrl,document.baseURI).pathname",
+                "return new URL(document.querySelector('article.item').dataset.previousUrl,new URL(window.AGGR.base,location.href)).pathname",
                 vec![]
             )
             .await?,
@@ -973,21 +976,97 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
         .click()
         .await?;
     wait_for(client, "location.pathname.includes('/page/2/')").await?;
-    wait_for(client, "document.querySelector('[data-row-open]').href.includes('story-42/') && !document.documentElement.classList.contains('is-changing')").await?;
+    wait_booted_with(
+        client,
+        "document.querySelector('[data-row-open]').href.includes('story-42/')",
+    )
+    .await?;
     key(client, "j").await?;
     client.back().await?;
-    wait_for(
+    // Coming back restores the cursor the page was left with. It does not take the keyboard:
+    // focus belongs to whatever the reader does next, not to a row they are only looking at.
+    wait_booted_with(
         client,
-        "location.pathname === '/reader/' && document.querySelector('[data-row-open]')?.href.includes('story-45/') && !!document.activeElement.matches('[data-row-open]') && !document.documentElement.classList.contains('is-changing')",
+        "location.pathname === '/reader/' && document.querySelector('[data-row-open]')?.href.includes('story-45/') && !!document.querySelector('.row.is-selected')",
     )
     .await?;
     assert_eq!(
         client
-            .execute("return document.activeElement.href", vec![])
+            .execute(
+                "return document.querySelector('.row.is-selected [data-row-open]').href",
+                vec![]
+            )
             .await?,
         first
     );
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome WebDriver"]
+async fn a_heading_is_the_way_back_to_its_section() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fixture = Fixture::with_pwa(false)?;
+    let client = browser_client().await?;
+    let result = async {
+        client
+            .goto(&format!("{}items/example/2026-09-01-story-40/", fixture.base))
+            .await?;
+        wait_booted_with(&client, "!!document.querySelector('.body h2[id]')").await?;
+        // The whole heading follows its own anchor, and lands clear of the sticky stack above it
+        // rather than under the article header.
+        let jumped = client
+            .execute(
+                r#"
+      const heading = document.querySelector('.body h2[id]');
+      heading.click();
+      const header = document.querySelector('.itemhead').getBoundingClientRect();
+      const box = heading.getBoundingClientRect();
+      return {hash: decodeURIComponent(location.hash), id: '#' + heading.id, top: box.top, covered: header.bottom, scrolled: scrollY};
+    "#,
+                vec![],
+            )
+            .await?;
+        anyhow::ensure!(
+            jumped["hash"] == jumped["id"],
+            "clicking a heading follows its anchor: {jumped}"
+        );
+        anyhow::ensure!(
+            jumped["scrolled"].as_f64().unwrap_or(0.0) > 0.0
+                && jumped["top"].as_f64().unwrap_or(0.0)
+                    >= jumped["covered"].as_f64().unwrap_or(0.0) - 1.0,
+            "the heading jumped to clears the header above it: {jumped}"
+        );
+        // A link the publisher wrote inside a heading keeps its own behaviour, and a selection is
+        // not a click.
+        let guarded = client
+            .execute(
+                r#"
+      const heading = document.querySelector('.body h2[id]');
+      const before = location.hash;
+      location.hash = '';
+      history.replaceState(history.state, '', location.pathname);
+      const range = document.createRange();
+      range.selectNodeContents(heading);
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
+      heading.click();
+      const selected = location.hash;
+      getSelection().removeAllRanges();
+      return {before, selected};
+    "#,
+                vec![],
+            )
+            .await?;
+        anyhow::ensure!(
+            guarded["selected"] == "",
+            "selecting a heading's words is not a jump: {guarded}"
+        );
+        Ok(())
+    }
+    .await;
+    report_failure(&client, "heading-anchors", &result).await;
+    finish(client, result).await
 }
 
 #[tokio::test]
@@ -1007,14 +1086,14 @@ async fn interactive_originals_and_build_time_code_labels() -> Result<()> {
     git(&archive, &["add", relative])?;
     git(&archive, &["commit", "-qm", "fixture interactive page"])?;
     fixture.build()?;
+    let page = std::fs::read_to_string(
+        fixture
+            .out
+            .join("items/example/2026-09-09-interactive/index.html"),
+    )?;
     anyhow::ensure!(
-        std::fs::read_to_string(
-            fixture
-                .out
-                .join("items/example/2026-09-09-interactive/index.html")
-        )?
-        .contains("data-interactive-embed"),
-        "generated interactive fixture must include its original-link fallback"
+        page.contains("class=\"interactive-viewer\"") && page.contains("Open original"),
+        "the generated page frames the interactive original and still links to it"
     );
     std::fs::write(
         fixture.out.join("interactive.html"),
@@ -1022,21 +1101,21 @@ async fn interactive_originals_and_build_time_code_labels() -> Result<()> {
     )?;
     let client = browser_client().await?;
     let result = async {
+        // The frame is part of the generated page, so the space it occupies is settled before the
+        // original inside it has answered: measure it the moment the document is ready.
         emulate(&client,"Page.addScriptToEvaluateOnNewDocument",json!({"source":r#"
           addEventListener('message',event=>{if(event.data?.interactiveDemo)window.interactiveReport={...event.data,origin:event.origin}});
-          const observer=new MutationObserver(()=>{
+          addEventListener('DOMContentLoaded',()=>{
             const box=document.querySelector('.interactive-frame');
-            if(!box?.querySelector('iframe'))return;
+            if(!box) return;
             const r=box.getBoundingClientRect();
             window.interactiveInitialGeometry={width:r.width,height:r.height};
-            observer.disconnect();
           });
-          observer.observe(document,{childList:true,subtree:true});
         "#})).await?;
         for width in [1280,390] {
             emulate(&client,"Emulation.setDeviceMetricsOverride",json!({"width":width,"height":844,"deviceScaleFactor":1,"mobile":width<600})).await?;
             client.goto(&format!("{}items/example/2026-09-09-interactive/",fixture.base)).await?;
-            wait_for(&client,"window.interactiveReport?.blocked===true && document.querySelector('[data-interactive-embed]').hidden").await?;
+            wait_for(&client,"window.interactiveReport?.blocked===true").await?;
             let state=client.execute(r#"
               const box=document.querySelector('.interactive-frame'),frame=box.querySelector('iframe'),r=box.getBoundingClientRect(),code=document.querySelector('.code-snippet');
               return {width:r.width,height:r.height,before:window.interactiveInitialGeometry,focused:document.activeElement===frame,frames:box.querySelectorAll('iframe').length,sandbox:frame.getAttribute('sandbox'),referrer:frame.referrerPolicy,origin:window.interactiveReport.origin,language:code.dataset.language,label:getComputedStyle(code,'::before').content,labelColor:getComputedStyle(code,'::before').color,source:code.textContent,highlighted:!!code.querySelector('[class*=syntax-keyword],[class*=syntax-storage]'),overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth+1};
@@ -1078,6 +1157,15 @@ async fn recommendation_cards_and_navigation_layout() -> Result<()> {
             anyhow::ensure!(second["top"].as_f64()>first["bottom"].as_f64(), "recommendations stack vertically at every viewport width: {layout}");
             anyhow::ensure!(layout["unusedHeight"].as_f64().unwrap().abs()<1.0, "text-only recommendations fit their content without reserving absent previews: {layout}");
             anyhow::ensure!(layout["headingMargin"].as_f64().unwrap()>=if width>600 {36.0} else {28.0}, "article header needs a little breathing room: {layout}");
+            // A card's stretched link must stop at the card. Reaching past it makes the article
+            // body read and click as whichever recommendation happens to be painted last.
+            let body=client.execute(r#"
+              const prose=document.querySelector('.body');
+              const box=prose.getBoundingClientRect();
+              const over=document.elementFromPoint(box.left+box.width/2,box.top+Math.min(box.height/2,300));
+              return {inside:prose.contains(over),card:!!over.closest('.article-more-card'),link:!!over.closest('a')};
+            "#,vec![]).await?;
+            anyhow::ensure!(body["inside"]==true && body["card"]==false && body["link"]==false, "the article body belongs to the article, not to a recommendation: {body}");
             anyhow::ensure!(layout["padding"].as_array().unwrap().iter().all(|value|value=="12.8px"), "card padding stays compact: {layout}");
             wait_booted(&client).await?;
             for index in [0, 1] {
@@ -1093,21 +1181,18 @@ async fn recommendation_cards_and_navigation_layout() -> Result<()> {
                   return {background:getComputedStyle(card).backgroundColor,cursor:getComputedStyle(card).cursor,decoration:getComputedStyle(card.querySelector('.title')).textDecorationLine};
                 "#,vec![json!(index)]).await?;
                 anyhow::ensure!(hover["background"]==point["background"] && hover["cursor"]=="pointer" && hover["decoration"]=="underline", "card space underlines the title without changing its surface: {hover}");
-                let clicks=client.execute(r#"
-                  const card=document.querySelectorAll('.article-more-card')[arguments[0]],title=card.querySelector('.title'),forwarded=[];
-                  const capture=event=>{forwarded.push({button:event.button,ctrl:event.ctrlKey,shift:event.shiftKey});event.preventDefault();event.stopPropagation()};
-                  title.addEventListener('click',capture);
-                  card.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,ctrlKey:true,shiftKey:true}));
-                  card.dispatchEvent(new MouseEvent('auxclick',{bubbles:true,cancelable:true,button:1}));
-                  const range=document.createRange();range.selectNodeContents(title);getSelection().addRange(range);
-                  card.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));
-                  getSelection().removeAllRanges();
-                  title.removeEventListener('click',capture);
-                  return forwarded;
+                // The card is one stretched link, so its empty space is the article's own anchor
+                // and modifier and middle clicks stay the browser's to interpret.
+                let reach=client.execute(r#"
+                  const card=document.querySelectorAll('.article-more-card')[arguments[0]],title=card.querySelector('.article-more-link');
+                  const r=card.getBoundingClientRect(), at=(x,y)=>document.elementFromPoint(x,y);
+                  const meta=card.querySelector('.meta a'), m=meta?.getBoundingClientRect();
+                  return {blank:at(r.left+4,r.top+4)===title && at(r.right-4,r.bottom-4)===title,
+                          meta:!meta || at(m.left+m.width/2,m.top+m.height/2)?.closest('a')===meta};
                 "#,vec![json!(index)]).await?;
-                anyhow::ensure!(clicks==json!([{"button":0,"ctrl":true,"shift":true},{"button":1,"ctrl":false,"shift":false}]), "card clicks preserve modifiers and leave text selection alone: {clicks}");
+                anyhow::ensure!(reach["blank"]==true && reach["meta"]==true, "card space opens the card's article while its metadata links stay reachable: {reach}");
             }
-            let destination=client.execute("const card=document.querySelector('.article-more-card');const href=card.querySelector('.title').href;card.click();return href",vec![]).await?;
+            let destination=client.execute("const link=document.querySelector('.article-more-card .article-more-link');const href=link.href;link.click();return href",vec![]).await?;
             wait_for(&client,&format!("location.href==={destination}")).await?;
             client.goto(&format!("{}categories/", fixture.base)).await?;
             let nav=client.execute(r#"

@@ -1246,7 +1246,7 @@ mod tests {
                 ("Authorization".into(), "parent".into()),
                 ("Accept".into(), "application/xml".into()),
             ]),
-            images: Some(true),
+            images: Some(crate::config::ImagePolicy::Original),
             ..Default::default()
         };
         let expansion = expand(vec![source], root, &FetchConfig::default(), None, true)
@@ -1257,7 +1257,7 @@ mod tests {
         assert_eq!(source.name.as_deref(), Some("Local"));
         assert_eq!(source.category.as_deref(), Some("science"));
         assert_eq!(source.labels, ["parent", "child"]);
-        assert_eq!(source.images, Some(false));
+        assert_eq!(source.images, Some(crate::config::ImagePolicy::Remote));
         assert_eq!(source.headers.len(), 2);
         assert_eq!(
             source.headers.get("authorization").map(String::as_str),

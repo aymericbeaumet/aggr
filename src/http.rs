@@ -21,6 +21,9 @@ use transport::Received;
 
 pub struct Client {
     inner: reqwest::Client,
+    /// The same client pinned to HTTP/1.1, for origins that negotiate h2 and then break it.
+    http1: tokio::sync::OnceCell<reqwest::Client>,
+    http1_origins: Mutex<HashSet<url::Origin>>,
     compatible: tokio::sync::OnceCell<wreq::Client>,
     compatible_origins: Mutex<HashSet<url::Origin>>,
     max_body_bytes: usize,
@@ -242,6 +245,20 @@ impl Client {
         self.timeout
     }
 
+    /// The ordinary client with h2 disabled, built only when an origin has needed it.
+    fn http1_client(&self) -> Result<reqwest::Client> {
+        reqwest::Client::builder()
+            .user_agent(user_agent())
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(self.timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .gzip(true)
+            .brotli(true)
+            .http1_only()
+            .build()
+            .context("building HTTP/1.1 client")
+    }
+
     pub fn new(config: &FetchConfig) -> Result<Self> {
         install_crypto_provider();
         let inner = reqwest::Client::builder()
@@ -255,6 +272,8 @@ impl Client {
             .context("building HTTP client")?;
         Ok(Self {
             inner,
+            http1: tokio::sync::OnceCell::new(),
+            http1_origins: Mutex::new(HashSet::new()),
             compatible: tokio::sync::OnceCell::new(),
             compatible_origins: Mutex::new(HashSet::new()),
             max_body_bytes: config.max_body_bytes,
@@ -349,7 +368,28 @@ impl Client {
                 .unwrap_or_else(|error| error.into_inner())
                 .contains(&url.origin())
                 || challenged_origin.as_ref() == Some(&url.origin());
-            let mut response = self.send_once(&url, headers.clone(), compatible).await?;
+            let mut response = match self.send_once(&url, headers.clone(), compatible).await {
+                Ok(response) => response,
+                // A server that negotiates h2 and then breaks the stream answers the same request
+                // over HTTP/1.1. Remember the origin so the rest of the run asks for that directly.
+                Err(err) if !compatible && is_http2_protocol_error(&err) => {
+                    let first = self
+                        .http1_origins
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .insert(url.origin());
+                    if !first {
+                        return Err(err);
+                    }
+                    log::debug!(
+                        "{}: retrying over HTTP/1.1 after: {err:#}",
+                        url.origin().ascii_serialization()
+                    );
+                    self.hosts.wait(&url).await;
+                    self.send_once(&url, headers.clone(), compatible).await?
+                }
+                Err(err) => return Err(err),
+            };
             if response.is_challenge() && !compatible && challenged_origin.is_none() {
                 *challenged_origin = Some(url.origin());
                 compatible = true;
@@ -409,6 +449,26 @@ impl Client {
     }
 
     async fn send_once(&self, url: &Url, headers: HeaderMap, compatible: bool) -> Result<Received> {
+        let http1 = !compatible
+            && self
+                .http1_origins
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains(&url.origin());
+        if http1 {
+            let client = self
+                .http1
+                .get_or_try_init(|| async { self.http1_client() })
+                .await?;
+            let response = client
+                .get(url.clone())
+                .headers(headers)
+                .send()
+                .await
+                .map_err(reqwest::Error::without_url)
+                .context("sending HTTP/1.1 request")?;
+            return Ok(Received::ordinary(response));
+        }
         if compatible {
             let client = self
                 .compatible
@@ -513,6 +573,14 @@ pub fn status_code(err: &anyhow::Error) -> Option<u16> {
 }
 
 /// Worth another attempt: 5xx, 429, or a request/body transport failure.
+/// An h2 stream that fails with a protocol error is a transport fault, not an answer: the same
+/// request over HTTP/1.1 is served normally. Matched on the message because neither client
+/// exposes the h2 error itself.
+fn is_http2_protocol_error(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}").to_ascii_lowercase();
+    message.contains("http2 error") && message.contains("protocol error")
+}
+
 fn is_transient(err: &anyhow::Error) -> bool {
     if let Some(HttpStatus(code, _)) = err.downcast_ref::<HttpStatus>() {
         return *code >= 500 || *code == 429;
@@ -694,6 +762,21 @@ mod tests {
         .unwrap();
         let error = client.get(Request::get(&url)).await.unwrap_err();
         assert!(!format!("{error:#}").contains("private-test-secret"));
+    }
+
+    #[test]
+    fn an_h2_protocol_error_is_the_transport_and_nothing_else() {
+        let h2 = anyhow::anyhow!("sending request")
+            .context("http2 error: stream error detected: unspecific protocol error detected");
+        assert!(is_http2_protocol_error(&h2));
+        // Anything the server actually said, including its own words about protocols, is an answer.
+        for other in [
+            "sending request: connection closed before message completed",
+            "http2 error: stream closed",
+            "the page explains the protocol error it returns",
+        ] {
+            assert!(!is_http2_protocol_error(&anyhow::anyhow!(other)), "{other}");
+        }
     }
 
     #[test]

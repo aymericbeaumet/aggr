@@ -1,4 +1,5 @@
-//! Swup navigation: prefetch sharing and cancellation, provider facades, component lifecycles.
+//! Navigation: archive boundaries, the speculation rules the browser prepares pages with, video
+//! provider facades, and the reader's modules across base paths.
 
 use anyhow::{Context as _, Result};
 use fantoccini::{Client, Locator};
@@ -6,22 +7,97 @@ use serde_json::{Value, json};
 use sha1::{Digest as _, Sha1};
 
 use crate::harness::{
-    Fixture, browser_client, catch_panics, emulate, finish, git, phone_session, report_failure,
-    screenshot, wait_booted_with, wait_for,
+    Fixture, browser_client, catch_panics, emulate, finish, git, key, phone_session,
+    report_failure, screenshot, wait_booted_with, wait_for,
 };
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
-async fn prefetch_sharing_and_video_provider_facades() -> Result<()> {
+async fn article_boundary_keys_return_to_feed() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let fixture = Fixture::new()?;
+    let fixture = Fixture::with_pwa(false)?;
+    let archive = fixture.directory.path().join(".aggr/data");
+    for (index, date, title, body) in [
+        (
+            45,
+            "2026-09-09",
+            "Newest boundary article",
+            "The latest dispatch covers navigation at the beginning of the reading sequence. Continue across this entire paragraph to return to the feed.",
+        ),
+        (
+            1,
+            "2026-08-01",
+            "Oldest boundary article",
+            "An earlier essay examines how a reader reaches the archive boundary after browsing the collection. A deliberate gesture beyond this essay returns to the article list.",
+        ),
+    ] {
+        std::fs::write(
+            archive.join(format!(
+                "items/example/2026/09/2026-09-01-story-{index:02}.md"
+            )),
+            format!(
+                "---\ntitle: {title}\nlink: https://publisher.invalid/boundary-{index}\nsource: example\npublished: {date}T12:00:00Z\nfirst_seen: {date}T12:00:00Z\ncontent: extracted\n---\n\n{body}\n"
+            ),
+        )?;
+    }
+    git(&archive, &["add", "items"])?;
+    git(&archive, &["commit", "-qm", "article boundary fixture"])?;
+    fixture.build()?;
     let client = browser_client().await?;
-    let result = catch_panics(prefetch_and_video_contracts(&client, &fixture)).await;
-    report_failure(&client, "prefetch-and-video", &result).await;
+    let result = async {
+        phone_session(&client).await?;
+        // Both ends of the archive: stepping past either one lands on the feed instead of
+        // stopping dead on an article that has no neighbour in that direction.
+        for (index, direction, input) in [(45, "previous", "k"), (1, "next", "j")] {
+            client
+                .goto(&format!(
+                    "{}items/example/2026-09-01-story-{index:02}/",
+                    fixture.base
+                ))
+                .await?;
+            wait_booted_with(&client, "document.querySelector('article.item .body p')").await?;
+            let missing = client
+                .execute(
+                    "return !document.querySelector('article.item').dataset[arguments[0]+'Url']",
+                    vec![json!(direction)],
+                )
+                .await?;
+            anyhow::ensure!(
+                missing == true,
+                "{index} must be the real {direction} archive boundary"
+            );
+            client
+                .execute("document.activeElement?.blur()", vec![])
+                .await?;
+            key(&client, input).await?;
+            wait_booted_with(
+                &client,
+                &format!(
+                    "location.href==={} && document.body.dataset.kind==='river'",
+                    json!(fixture.base)
+                ),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+    .await;
+    report_failure(&client, "article-boundary-navigation", &result).await;
     finish(client, result).await
 }
 
-async fn prefetch_and_video_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
+#[tokio::test]
+#[ignore = "requires a local Chrome WebDriver"]
+async fn video_provider_facades() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fixture = Fixture::new()?;
+    let client = browser_client().await?;
+    let result = catch_panics(video_facade_contracts(&client, &fixture)).await;
+    report_failure(&client, "video-facades", &result).await;
+    finish(client, result).await
+}
+
+async fn video_facade_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
     phone_session(client).await?;
     client.goto(&fixture.base).await?;
     wait_booted_with(
@@ -29,112 +105,6 @@ async fn prefetch_and_video_contracts(client: &Client, fixture: &Fixture) -> Res
         "document.querySelectorAll('[data-row-open]').length === 3",
     )
     .await?;
-    assert_eq!(client.execute(r#"
-      const cached = window.swup.cache.get(location.href);
-      return !!cached && !new DOMParser().parseFromString(cached.html,'text/html').querySelector('#swup [data-bound]');
-    "#, vec![]).await?, true, "the initial page must be cached before event-binding markers are added");
-    let shared_fetch = client.execute_async(r#"
-      const done = arguments[arguments.length-1];
-      const target = new URL('browse/?prefetch-contract=1',document.baseURI);
-      Promise.all([window.swup.fetchPage(target.href), window.swup.fetchPage(target.pathname+target.search)]).then(pages => {
-        done({requests:performance.getEntriesByName(target.href).length, sameHtml:pages[0].html===pages[1].html});
-      }).catch(error => done({error:String(error)}));
-    "#, vec![]).await?;
-    assert_eq!(
-        shared_fetch,
-        json!({"requests":1,"sameHtml":true}),
-        "concurrent prefetch/navigation requests should share one download"
-    );
-    client.execute(r#"
-      const state = {
-        originalFetch:window.fetch, home:location.href,
-        destination:new URL('browse/?prefetch-cancellation=destination',document.baseURI).href,
-        unrelated:new URL('preferences/?prefetch-cancellation=unrelated',document.baseURI).href,
-        requests:{}, aborted:[], release:{}, settled:{}
-      };
-      window.prefetchCancellationContract = state;
-      window.fetch = function(input, options) {
-        const url = new URL(typeof input === 'string' ? input : input.url, document.baseURI);
-        const key = url.searchParams.get('prefetch-cancellation');
-        if (!key) return state.originalFetch.call(window,input,options);
-        state.requests[key] = (state.requests[key] || 0) + 1;
-        return new Promise((resolve,reject) => {
-          const signal = options.signal;
-          const abort = () => {
-            state.aborted.push(key);
-            reject(new DOMException('Canceled','AbortError'));
-          };
-          if (signal.aborted) { abort(); return; }
-          signal.addEventListener('abort',abort,{once:true});
-          state.release[key] = () => {
-            state.originalFetch.call(window,input,options).then(resolve,reject).finally(() => signal.removeEventListener('abort',abort));
-          };
-        });
-      };
-      for (const key of ['destination','unrelated']) {
-        window.swup.fetchPage(state[key],{priority:'low'}).then(
-          () => { state.settled[key] = 'fulfilled'; },
-          () => { state.settled[key] = 'rejected'; }
-        );
-      }
-    "#, vec![]).await?;
-    wait_for(
-        client,
-        "Object.keys(window.prefetchCancellationContract.requests).length === 2",
-    )
-    .await?;
-    client
-        .execute(
-            "window.swup.navigate(window.prefetchCancellationContract.destination)",
-            vec![],
-        )
-        .await?;
-    wait_for(
-        client,
-        "window.prefetchCancellationContract.settled.unrelated === 'rejected'",
-    )
-    .await?;
-    assert_eq!(client.execute(r#"
-      const state = window.prefetchCancellationContract;
-      return {requests:state.requests,aborted:state.aborted,destinationPending:!state.settled.destination};
-    "#, vec![]).await?, json!({
-        "requests":{"destination":1,"unrelated":1},
-        "aborted":["unrelated"],
-        "destinationPending":true
-    }), "navigation must cancel unrelated speculation while retaining its shared destination request");
-    client
-        .execute(
-            "window.prefetchCancellationContract.release.destination()",
-            vec![],
-        )
-        .await?;
-    wait_for(client, "document.body.dataset.kind === 'browse' && window.prefetchCancellationContract.settled.destination === 'fulfilled'").await?;
-    assert_eq!(
-        client
-            .execute(
-                "return window.prefetchCancellationContract.requests.destination",
-                vec![]
-            )
-            .await?,
-        1,
-        "the destination must not download again when speculation becomes navigation"
-    );
-    client
-        .execute(
-            r#"
-      const state = window.prefetchCancellationContract;
-      window.fetch = state.originalFetch;
-      window.swup.cache.delete(state.destination);
-      window.swup.cache.delete(state.unrelated);
-      window.swup.navigate(state.home);
-    "#,
-            vec![],
-        )
-        .await?;
-    wait_for(client, "location.href === window.prefetchCancellationContract.home && document.body.dataset.kind === 'river' && document.querySelectorAll('[data-row-open]').length === 3").await?;
-    client
-        .execute("delete window.prefetchCancellationContract", vec![])
-        .await?;
     for (index, provider, host) in [
         (44, "youtube", "www.youtube-nocookie.com"),
         (43, "twitch", "player.twitch.tv"),
@@ -149,7 +119,7 @@ async fn prefetch_and_video_contracts(client: &Client, fixture: &Fixture) -> Res
         // Every provider, YouTube included, stays a facade until activation.
         wait_for(
             client,
-            "document.querySelector('[data-video-embed]')?.getAttribute('role') === 'button'",
+            "document.querySelector('.video-player[data-video-bound=\"true\"] [data-video-embed]')",
         )
         .await?;
         if provider == "youtube" {
@@ -165,7 +135,7 @@ async fn prefetch_and_video_contracts(client: &Client, fixture: &Fixture) -> Res
         }
         wait_for(
             client,
-            "document.querySelector('[data-video-embed]')?.getAttribute('role') === 'button'",
+            "document.querySelector('.video-player[data-video-bound=\"true\"] [data-video-embed]')",
         )
         .await?;
         assert_eq!(client.execute("return {frames:document.querySelectorAll('iframe').length,providerRequests:performance.getEntriesByType('resource').filter(r=>/youtube|twitch|vimeo/.test(new URL(r.name).hostname)).length}",vec![]).await?,json!({"frames":0,"providerRequests":0}),"video providers must not receive requests before activation");
@@ -224,37 +194,50 @@ async fn prefetch_and_video_contracts(client: &Client, fixture: &Fixture) -> Res
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
-async fn prefetch_reserves_capacity_for_pointer_intent() -> Result<()> {
+async fn speculation_rules_prepare_the_archive_and_nothing_outside_it() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fixture = Fixture::with_pwa(false)?;
     let client = browser_client().await?;
     let result = async {
-        emulate(&client, "Page.addScriptToEvaluateOnNewDocument", json!({"source": r#"
-          window.prefetchProbe={started:[],release:[]};
-          const original=window.fetch;
-          window.fetch=function(input,options){
-            if(options?.priority!=='low')return original.call(this,input,options);
-            const url=new URL(typeof input==='string'?input:input.url,document.baseURI).href;
-            window.prefetchProbe.started.push(url);
-            return new Promise(resolve=>window.prefetchProbe.release.push(resolve)).then(()=>original.call(this,input,options));
-          };
-        "#})).await?;
         client.goto(&fixture.base).await?;
-        wait_for(&client,"window.prefetchProbe.started.length>0").await?;
-        let started=client.execute("const probe=window.prefetchProbe,idle=probe.started.length;const link=[...document.querySelectorAll('[data-row-open]')].at(-1);link.dispatchEvent(new PointerEvent('pointerover',{bubbles:true}));return {idle,target:link.href}",vec![]).await?;
-        wait_for(&client,"window.prefetchProbe.started.length===2").await?;
-        let requests=client.execute("return window.prefetchProbe.started",vec![]).await?;
-        anyhow::ensure!(started["idle"]==1 && requests[1]==started["target"],"one idle request leaves room for immediate pointer intent: started={started}, requests={requests}");
-        client.execute("window.prefetchProbe.release.forEach(resolve=>resolve())",vec![]).await?;
+        wait_booted_with(&client, "document.querySelectorAll('[data-row-open]').length === 3").await?;
+        // Preparing the next page is the browser's job, declared in markup rather than driven by
+        // script. What matters is which links it may take at its word.
+        let speculation = client.execute(r#"
+          const declared = document.querySelector('script[type=speculationrules]');
+          const rules = JSON.parse(declared.textContent);
+          const prefetch = rules.prefetch[0], prerender = rules.prerender[0];
+          const excluded = prefetch.where.and.find(clause => clause.not).not.selector_matches;
+          const matches = (node, selector) => !!node && node.matches(selector);
+          // Every link on this page that leaves the archive, whichever ones the fixture renders.
+          const outward = [...document.querySelectorAll('a[target="_blank"], .u-bookmark-of, .config-link')];
+          return {
+            eagerness:[prefetch.eagerness, prerender.eagerness],
+            article:matches(document.querySelector('.row [data-row-open]'), prerender.where.selector_matches),
+            route:matches(document.querySelector('[data-site-navigation] a[data-route]'), prerender.where.selector_matches),
+            outward:outward.length,
+            kept:outward.filter(link => !link.matches(excluded)).map(link => link.className || link.href)
+          };
+        "#, vec![]).await?;
+        anyhow::ensure!(
+            speculation["eagerness"] == json!(["moderate", "moderate"])
+                && speculation["article"] == true
+                && speculation["route"] == true,
+            "the archive's own pages are the ones worth preparing: {speculation}"
+        );
+        anyhow::ensure!(
+            speculation["outward"].as_u64().unwrap_or(0) > 0 && speculation["kept"] == json!([]),
+            "a link that leaves the archive must never be fetched before someone follows it: {speculation}"
+        );
         Ok(())
     }.await;
-    report_failure(&client, "prefetch-capacity", &result).await;
+    report_failure(&client, "speculation-rules", &result).await;
     finish(client, result).await
 }
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
-async fn svelte_components_preserve_reader_lifecycles() -> Result<()> {
+async fn reader_modules_survive_every_base_path() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     for base_path in ["", "reader/"] {
         let fixture = Fixture::with_base_path(false, base_path)?;
@@ -308,21 +291,25 @@ async fn svelte_components_preserve_reader_lifecycles() -> Result<()> {
                 emulate(&client, "Emulation.setDeviceMetricsOverride", json!({"width":if mobile {390}else{1280},"height":844,"deviceScaleFactor":1,"mobile":mobile})).await?;
                 client.goto(&fixture.base).await?;
                 wait_booted_with(&client, "document.querySelector('.search-command')").await?;
-                client.execute("window.swup.navigate(arguments[0])", vec![json!(format!("{}preferences/", fixture.base))]).await?;
-                wait_for(&client, "!window.swup.navigating && document.querySelector('#theme-mode')").await?;
-                let report = client
-                    .execute_async(
-                        include_str!("../fixtures/component_lifecycle_checks.js"),
-                        vec![json!(fixture.base)],
+                // Preferences survives an ordinary navigation: its controls are server-rendered
+                // and the reader's saved values are applied before paint.
+                client.goto(&format!("{}preferences/", fixture.base)).await?;
+                wait_booted_with(&client, "document.querySelector('#theme')").await?;
+                let controls: serde_json::Value = client
+                    .execute(
+                        "return {count: document.querySelectorAll('[data-preference]').length, \
+                         theme: document.querySelector('#theme').value, \
+                         applied: document.documentElement.dataset.theme};",
+                        vec![],
                     )
                     .await?;
                 anyhow::ensure!(
-                    report.get("error").is_none(),
-                    "component lifecycle ({base_path}): {report}"
+                    controls["count"] == 17,
+                    "every setting renders a control ({base_path}): {controls}"
                 );
                 anyhow::ensure!(
-                    report["cycles"] == 3,
-                    "all navigation cycles completed: {report}"
+                    controls["theme"] == controls["applied"],
+                    "the form shows the value the document is using: {controls}"
                 );
                 client.goto(&format!("{}items/example/2026-09-01-story-36/", fixture.base)).await?;
                 wait_for(&client, "!!document.querySelector('.native-audio.is-enhanced')").await?;
@@ -330,7 +317,7 @@ async fn svelte_components_preserve_reader_lifecycles() -> Result<()> {
                 Ok(())
             }
             .await;
-        report_failure(&client, "component-lifecycle", &result).await;
+        report_failure(&client, "reader-modules", &result).await;
         finish(client, result).await?;
     }
     Ok(())

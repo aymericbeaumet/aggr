@@ -150,6 +150,12 @@ pub fn commit_message(
             ),
         })
         .collect();
+    if report.reprocessed > 0 {
+        body.push(format!(
+            "reprocess: {} stored article bodies",
+            report.reprocessed
+        ));
+    }
     if report.removed > 0 {
         body.push(format!("retention: -{}", report.removed));
     }
@@ -186,7 +192,31 @@ mod tests {
                 .collect(),
             status_changed,
             removed: 0,
+            reprocessed: 0,
         }
+    }
+
+    #[test]
+    fn reprocessed_bodies_are_reported_without_masking_failed_sources() {
+        let mut r = report(
+            vec![("current", Outcome::Error("offline".into()), 0)],
+            false,
+        );
+        r.reprocessed = 3;
+        assert_eq!(r.added(), 3);
+        assert_eq!(r.ok(), 0);
+        assert_eq!(r.errors(), 1);
+        assert!(r.all_failed());
+        assert!(finish(&r).is_err());
+        let message = commit_message(&r, false, "1", None);
+        assert_eq!(message.subject, "aggr: +3 items");
+        assert_eq!(
+            message.body,
+            [
+                "current: error: offline",
+                "reprocess: 3 stored article bodies"
+            ]
+        );
     }
 
     #[test]

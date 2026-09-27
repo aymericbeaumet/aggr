@@ -86,8 +86,19 @@ async fn probe(source: &Source, client: &http::Client) -> Result<String> {
                 } => (meta, items, validators.resolved_url),
                 Fetch::Unchanged { .. } => bail!("unexpected unchanged source without validators"),
             };
+            // A scrape of the page a retired feed left behind counts items just as happily as a
+            // feed does; saying which it was is the difference between health and config rot.
+            let how = if meta.extracted {
+                if items.len() <= 1 {
+                    " (extracted, thin)"
+                } else {
+                    " (extracted)"
+                }
+            } else {
+                ""
+            };
             Ok(format!(
-                "{} item(s){}{}",
+                "{} item(s){how}{}{}",
                 items.len(),
                 meta.title
                     .map(|title| format!("  \"{title}\""))

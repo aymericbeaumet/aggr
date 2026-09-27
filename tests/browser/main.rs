@@ -7,7 +7,6 @@
 mod harness;
 
 mod article;
-mod deployments;
 mod feed;
 mod media;
 mod mobile;

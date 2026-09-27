@@ -6,7 +6,6 @@
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="strict-origin-when-cross-origin">
 <meta name="robots" content="{{ 'index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1' if page.indexable else 'noindex,follow' }}">
-<base id="aggr-base" href="{{ page.root }}">
 <title>{% block title %}{{ page.document_title }}{% endblock %}</title>
 {% if page.description %}<meta name="description" content="{{ page.description }}">{% endif %}
 <meta name="application-name" content="{{ site.title }}">
@@ -18,73 +17,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="{{ site.title }}">
 {% endif %}
-<script id="aggr-preferences">
-window.AGGRPreferences = (function () {
-  var schema = {
-    theme: { initial: "auto", values: ["auto", "light", "dark", "sepia"], attribute: "theme" },
-    "date-format": { initial: "relative", values: ["relative", "iso", "local", "local-time"], attribute: "dateFormat" },
-    "text-size": { initial: "default", values: ["default", "large", "largest"], attribute: "textSize" },
-    "reading-width": { initial: "standard", values: ["narrow", "standard", "wide"], attribute: "readingWidth" },
-    "font-family": { initial: "sans", values: ["sans", "serif", "mono"], attribute: "fontFamily" },
-    "line-spacing": { initial: "standard", values: ["compact", "standard", "relaxed"], attribute: "lineSpacing" },
-    "paragraph-spacing": { initial: "standard", values: ["compact", "standard", "relaxed"], attribute: "paragraphSpacing" },
-    "paragraph-indent": { initial: false, values: [false, true], attribute: "paragraphIndent" },
-    "text-align": { initial: "left", values: ["left", "justify"], attribute: "textAlign" },
-    "letter-spacing": { initial: "normal", values: ["normal", "wide"], attribute: "letterSpacing" },
-    "word-spacing": { initial: "normal", values: ["normal", "wide"], attribute: "wordSpacing" },
-    "scroll-amount": { initial: 10, min: 1, max: 100 },
-    "offline-items": { initial: 30, min: 0, max: 1000 },
-    density: { initial: "compact", values: ["compact", "comfortable"], attribute: "density" },
-    thumbnails: { initial: "show", values: ["show", "hide"], attribute: "thumbnails" },
-    "feed-page-size": { initial: "50", values: ["10", "25", "50"] },
-    motion: { initial: "auto", values: ["auto", "off"], attribute: "motion" },
-    "single-key-shortcuts": { initial: true, values: [true, false] }
-  };
-  function valid(key, value) {
-    if (!Object.prototype.hasOwnProperty.call(schema, key)) return false;
-    var rule = schema[key];
-    return rule.values ? rule.values.indexOf(value) !== -1 : Number.isInteger(value) && value >= rule.min && value <= rule.max;
-  }
-  var defaults = {{ site.preferences | json }};
-  Object.keys(defaults || {}).forEach(function (key) {
-    if (valid(key, defaults[key])) schema[key].initial = defaults[key];
-  });
-  function storedValue(key, value) {
-    if (typeof schema[key].initial === "boolean") return value === "true" ? true : value === "false" ? false : null;
-    if (typeof schema[key].initial === "number") return typeof value === "string" && /^\d+$/.test(value) ? Number(value) : null;
-    return value;
-  }
-  function read() {
-    var state = {};
-    Object.keys(schema).forEach(function (key) {
-      var value;
-      try { value = localStorage.getItem("aggr:" + key); } catch (error) { /* private mode */ }
-      value = storedValue(key, value);
-      state[key] = valid(key, value) ? value : schema[key].initial;
-    });
-    return state;
-  }
-  function validate(payload) {
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Invalid preferences");
-    if (payload.version !== 1 || Object.keys(payload).some(function (key) { return key !== "version" && key !== "preferences"; })) throw new Error("Unsupported preferences version");
-    var source = payload.preferences;
-    if (!source || typeof source !== "object" || Array.isArray(source) || !Object.keys(source).length) throw new Error("Empty preferences");
-    var state = {};
-    Object.keys(source).forEach(function (key) {
-      var value = source[key];
-      if (!valid(key, value)) throw new Error("Invalid preference: " + key);
-      state[key] = value;
-    });
-    return state;
-  }
-  var values = read();
-  Object.keys(schema).forEach(function (key) {
-    if (schema[key].attribute) document.documentElement.dataset[schema[key].attribute] = values[key];
-  });
-  return { schema: schema, values: values, read: read, validate: validate, valid: valid };
-})();
-</script>
-{% include "_dates.html" %}
+<script id="aggr-preferences" type="application/json">{{ site.preference_schema.bootstrap | json }}</script>
+<script src="{{ 'assets/bootstrap.js' | url_for }}"></script>
 <meta name="aggr:network" content="{{ site.network_url }}">
 <meta name="aggr:instance" content="{{ 'aggr.json' | url_for }}">
 <meta name="aggr:source" content="{{ site.config_url or ('aggr.toml' | url_for) }}">
@@ -103,25 +37,25 @@ window.AGGRPreferences = (function () {
 <meta property="og:type" content="{{ 'article' if item else 'website' }}">
 <meta property="og:site_name" content="{{ site.title }}">
 <meta property="og:title" content="{{ page.title }}">
-{% if page.description %}<meta property="og:description" content="{{ page.description }}">{% endif %}
+{% set shared = (item.excerpt if item and item.excerpt else page.description) %}
+{% if shared %}<meta property="og:description" content="{{ shared }}">{% endif %}
 {% if page.canonical_url %}<meta property="og:url" content="{{ page.canonical_url }}">{% endif %}
 <meta property="og:locale" content="{{ site.og_locale }}">
 {% set lead_image = site.base_url and item and item.article_preview %}
 {% if site.base_url %}
-{% if lead_image %}<meta property="og:image" content="{{ site.base_url }}{{ item.article_preview.url | url_for }}"><meta property="og:image:width" content="{{ item.article_preview.width }}"><meta property="og:image:height" content="{{ item.article_preview.height }}">{% if item.preview and item.preview.alt %}<meta property="og:image:alt" content="{{ item.preview.alt }}">{% endif %}
+{% if lead_image %}<meta property="og:image" content="{{ site.base_url }}{{ item.article_preview.url | site_path }}"><meta property="og:image:width" content="{{ item.article_preview.width }}"><meta property="og:image:height" content="{{ item.article_preview.height }}">{% if item.preview and item.preview.alt %}<meta property="og:image:alt" content="{{ item.preview.alt }}">{% endif %}
 {% elif item and item.preview %}<meta property="og:image" content="{{ site.base_url }}{{ item.preview.url }}"><meta property="og:image:width" content="{{ item.preview.width }}"><meta property="og:image:height" content="{{ item.preview.height }}">{% if item.preview.alt %}<meta property="og:image:alt" content="{{ item.preview.alt }}">{% endif %}
-{% else %}<meta property="og:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | url_for }}"><meta property="og:image:alt" content="{{ site.title }} app icon">{% endif %}
+{% else %}<meta property="og:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | site_path }}"><meta property="og:image:alt" content="{{ site.title }} app icon">{% endif %}
 {% endif %}
 <meta name="twitter:card" content="{{ 'summary_large_image' if lead_image else 'summary' }}">
 <meta name="twitter:title" content="{{ page.title }}">
-{% if page.description %}<meta name="twitter:description" content="{{ page.description }}">{% endif %}
+{% if shared %}<meta name="twitter:description" content="{{ shared }}">{% endif %}
 {% if site.base_url %}
-{% if lead_image %}<meta name="twitter:image" content="{{ site.base_url }}{{ item.article_preview.url | url_for }}">{% if item.preview and item.preview.alt %}<meta name="twitter:image:alt" content="{{ item.preview.alt }}">{% endif %}
+{% if lead_image %}<meta name="twitter:image" content="{{ site.base_url }}{{ item.article_preview.url | site_path }}">{% if item.preview and item.preview.alt %}<meta name="twitter:image:alt" content="{{ item.preview.alt }}">{% endif %}
 {% elif item and item.preview %}<meta name="twitter:image" content="{{ site.base_url }}{{ item.preview.url }}">{% if item.preview.alt %}<meta name="twitter:image:alt" content="{{ item.preview.alt }}">{% endif %}
-{% else %}<meta name="twitter:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | url_for }}"><meta name="twitter:image:alt" content="{{ site.title }} app icon">{% endif %}
+{% else %}<meta name="twitter:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | site_path }}"><meta name="twitter:image:alt" content="{{ site.title }} app icon">{% endif %}
 {% endif %}
 <link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
-<link rel="stylesheet" href="{{ 'assets/client.css' | url_for }}">
 <noscript><style>.progressive-image,.preview-image,.article-lead img{color:inherit}</style></noscript>
 {% if page.feed_path is not none %}{% set feed_path = page.feed_path %}{% set feed_title = page.feed_title or site.title %}
 <link rel="alternate" type="application/atom+xml" title="{{ feed_title }}" href="{{ (feed_path ~ 'atom.xml') | url_for }}">
@@ -135,16 +69,27 @@ window.AGGRPreferences = (function () {
 {% if site.pwa %}
 <link rel="manifest" href="{{ 'manifest.webmanifest' | url_for }}">
 {% endif %}
-<script>window.AGGR = {base: {{ page.root | json }}, kind: {{ page.kind | json }}, pwa: {{ site.pwa | json }}, appVersion: {{ build.app_version | json }}, contentVersion: {{ build.content_version | json }}, hasCategories: {{ site.has_categories | json }}, discussions: {{ site.discussions | json }}, entries: {{ site.entry_shortcuts | json }}};</script>
+<script>window.AGGR = {base: {{ page.root | json }}, kind: {{ page.kind | json }}, pwa: {{ site.pwa | json }}, discussions: {{ site.discussions | json }}, entries: {{ site.entry_shortcuts | json }}, assets: {search: {{ ('assets/search.js' | url_for) | json }}, media: {{ ('assets/media.js' | url_for) | json }}}, content: {{ build.content_version | json }}};</script>
+<script type="speculationrules">
+{
+  "prefetch": [{
+    "where": {"and": [
+      {"href_matches": "/*"},
+      {"not": {"selector_matches": "[target], [download], [rel~=external], .u-bookmark-of, .discussion, .config-link, .footer a"}}
+    ]},
+    "eagerness": "moderate"
+  }],
+  "prerender": [{
+    "where": {"selector_matches": ".rows .row [data-row-open], .article-more-link, [data-site-navigation] a[data-route]"},
+    "eagerness": "moderate"
+  }]
+}
+</script>
 {% if schema %}<script type="application/ld+json">{{ schema | json }}</script>{% endif %}
 {% block head %}{% endblock %}
 </head>
 <body data-kind="{{ page.kind }}">
-<div id="pull-refresh" class="pull-refresh" role="status" aria-live="polite" aria-atomic="true" aria-hidden="true" data-nosnippet>
-  <span class="pull-refresh-icon" aria-hidden="true">↓</span>
-  <span id="pull-refresh-label">Pull to refresh</span>
-</div>
-<a class="skip-link" href="#swup">skip to content</a>
+<a class="skip-link" href="#content">skip to content</a>
 <header class="top" data-nosnippet>
   <nav class="nav" data-site-navigation aria-label="Site navigation">
     <a class="brand" data-route="" rel="home" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/favicon-32.png' | url_for }}" alt="" width="20" height="20"><span class="brand-title">{{ site.title | lower }}</span></a>
@@ -163,26 +108,78 @@ window.AGGRPreferences = (function () {
 <nav class="mobile-tabs" data-site-navigation aria-label="Main navigation" data-nosnippet>
   {% for route, label, kinds, icon in [
     ['', 'feed', ['river'], 'M4 5h16M4 12h16M4 19h10'],
-    ['?focus-search=1', 'search', [], 'M21 21l-4.34-4.34M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0'],
     ['browse/', 'browse', ['browse', 'categories', 'category', 'sources', 'source', 'tags', 'tag'], 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z'],
     ['preferences/', 'preferences', ['preferences'], 'M4 7h5m4 0h7M4 17h9m4 0h3M9 4v6M13 14v6']
   ] %}
-  <a data-route="{{ route }}" data-kinds="{{ kinds | join(' ') }}"{% if label == 'search' %} data-search-action aria-keyshortcuts="Meta+K Control+K"{% elif label == 'feed' %} data-feed-action{% endif %} href="{{ route | url_for }}"{% if page.kind in kinds %} aria-current="page"{% endif %}>
+  <a data-route="{{ route }}" data-kinds="{{ kinds | join(' ') }}"{% if label == 'feed' %} data-feed-action{% endif %} href="{{ route | url_for }}"{% if page.kind in kinds %} aria-current="page"{% endif %}>
     <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ icon }}"/></svg>
     <span>{{ label }}</span>
   </a>
   {% endfor %}
 </nav>
-<div data-connection-root></div>
-<span id="aggr-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></span>
-<div data-shortcut-help-root></div>
-<main id="swup" class="main{% if page.paginator %} h-feed{% endif %}" tabindex="-1">
-<span id="aggr-page" data-root="{{ page.root }}" data-kind="{{ page.kind }}" data-app-version="{{ build.app_version }}" data-content-version="{{ build.content_version }}" hidden></span>
+{% macro key_pair(first, second, separator='+', platform='') %}<span class="key-pair"{% if platform %} data-platform-key="{{ platform }}"{% endif %}><kbd>{{ first }}</kbd><small>{{ separator }}</small><kbd>{{ second }}</kbd></span>{% endmacro %}
+<dialog id="shortcut-help" class="shortcut-help" aria-labelledby="shortcut-help-title" aria-keyshortcuts="?" data-nosnippet>
+  <form method="dialog">
+    <header class="shortcut-help-head">
+      <h2 id="shortcut-help-title" tabindex="-1">Keyboard shortcuts</h2>
+      <button class="shortcut-close" value="close" aria-label="Close keyboard shortcuts">×</button>
+    </header>
+    <div class="shortcut-groups">
+      <section aria-labelledby="shortcut-scrolling">
+        <h3 id="shortcut-scrolling">Scrolling</h3>
+        <dl class="shortcut-list">
+          <div><dt class="key-alternatives"><kbd>d</kbd><small>or</small>{{ key_pair('Ctrl', 'd') }}</dt><dd>Scroll down</dd></div>
+          <div><dt class="key-alternatives"><kbd>u</kbd><small>or</small>{{ key_pair('Ctrl', 'u') }}</dt><dd>Scroll up</dd></div>
+          <div><dt>{{ key_pair('Ctrl', 'e') }}</dt><dd>One line down</dd></div>
+          <div><dt>{{ key_pair('Ctrl', 'y') }}</dt><dd>One line up</dd></div>
+          <div><dt>{{ key_pair('g', 'g', 'then') }}</dt><dd>Top of article</dd></div>
+          <div><dt><kbd>G</kbd></dt><dd>Bottom of article</dd></div>
+        </dl>
+      </section>
+      <section aria-labelledby="shortcut-articles">
+        <h3 id="shortcut-articles">Articles</h3>
+        <dl class="shortcut-list">
+          <div><dt><kbd>j</kbd></dt><dd>Older article</dd></div>
+          <div><dt><kbd>k</kbd></dt><dd>Newer article</dd></div>
+          <div><dt><kbd>O</kbd></dt><dd>Open original</dd></div>
+          {% for discussion in site.discussions %}{% if discussion.shortcut %}<div><dt><kbd>{{ discussion.shortcut }}</kbd></dt><dd>Open {{ discussion.name }} discussion / search</dd></div>{% endif %}{% endfor %}
+        </dl>
+      </section>
+      <section aria-labelledby="shortcut-lists">
+        <h3 id="shortcut-lists">Lists</h3>
+        <dl class="shortcut-list">
+          <div><dt class="key-alternatives"><kbd>j</kbd><small>or</small><kbd>↓</kbd></dt><dd>Next item</dd></div>
+          <div><dt class="key-alternatives"><kbd>k</kbd><small>or</small><kbd>↑</kbd></dt><dd>Previous item</dd></div>
+          <div><dt>{{ key_pair('g', 'g', 'then') }}</dt><dd>First item</dd></div>
+          <div><dt><kbd>G</kbd></dt><dd>Last item</dd></div>
+          <div><dt class="key-alternatives"><kbd>o</kbd><small>or</small><kbd>Enter</kbd></dt><dd>Open selected item</dd></div>
+        </dl>
+      </section>
+      <section aria-labelledby="shortcut-navigation">
+        <h3 id="shortcut-navigation">Go to</h3>
+        <dl class="shortcut-list">
+          <div><dt class="key-alternatives">{{ key_pair('g', 'f', 'then') }}<small>or</small>{{ key_pair('g', 'i', 'then') }}</dt><dd>Feed</dd></div>
+          <div><dt>{{ key_pair('g', '1–9', 'then') }}</dt><dd>Open feed entry</dd></div>
+          <div><dt>{{ key_pair('g', 'b', 'then') }}</dt><dd>Browse</dd></div>
+          <div><dt>{{ key_pair('g', 'p', 'then') }}</dt><dd>Preferences</dd></div>
+        </dl>
+      </section>
+      <section aria-labelledby="shortcut-anywhere">
+        <h3 id="shortcut-anywhere">Search and help</h3>
+        <dl class="shortcut-list">
+          <div><dt class="key-alternatives">{{ key_pair('⌘', 'k', platform='apple') }}{{ key_pair('Ctrl', 'k', platform='other') }}<small>or</small><kbd>/</kbd></dt><dd>Global search</dd></div>
+          <div><dt><kbd>?</kbd></dt><dd>Show this help</dd></div>
+          <div><dt><kbd>Esc</kbd></dt><dd>Close this help</dd></div>
+        </dl>
+      </section>
+    </div>
+  </form>
+</dialog>
+<main id="content" class="main{% if page.paginator %} h-feed{% endif %}" tabindex="-1">
 {% if page.paginator %}<data class="p-name" value="{{ page.title }}" hidden></data>{% endif %}
 {% block content %}{% endblock %}
 </main>
 <footer class="footer" data-nosnippet><a href="https://github.com/aymericbeaumet/aggr" target="_blank" rel="noopener noreferrer">built with aggr</a></footer>
-<script src="{{ 'assets/swup.js' | url_for }}" defer></script>
-<script src="{{ 'assets/app.js' | url_for }}" defer></script>
+<script type="module" src="{{ 'assets/app.js' | url_for }}"></script>
 </body>
 </html>

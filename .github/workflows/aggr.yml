@@ -45,7 +45,7 @@ jobs:
     env:
       AGGR_CONFIG: ${{ inputs.config }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `@v1` is the stable workflow contract. Its major-channel input resolves the greatest
       # published v1.x.y binary at run time, independently of workflow changes.
@@ -55,17 +55,19 @@ jobs:
           token: ${{ github.token }}
 
       # Derived state about bytes the site already publishes is safe to carry between runners and
-      # invalidates itself: image receipts and the Pagefind index are keyed by their inputs,
+      # invalidates itself: compressed media, image receipts and the Pagefind index are keyed by their inputs,
       # backoff markers carry their own timestamps, and feed-parser receipts name the parser
-      # version. Without it every run validates every image cold, re-indexes search, fetches
-      # every feed unconditionally and retries known-dead pages.
+      # version, and the budget receipt names the limit it was measured against. Without it every
+      # run validates every image cold, re-indexes search, fetches every feed unconditionally,
+      # retries known-dead pages, and builds an over-budget site twice to find what fits.
       #
       # Raw original-page responses (articles-v1) are private and never leave the runner. The
       # rendered site (render-v1) is not cached here either: its fingerprint changes whenever any
       # item crosses an age band, so a multi-gigabyte entry would be uploaded every run and almost
       # never hit, exhausting the repository's Actions cache quota.
       #
-      # Every run saves under its own key and the next run restores the newest entry by prefix.
+      # Small derived state saves under this run's key; the next run restores the newest entry.
+      # Compressed media has its own cache below, so changing a backoff cannot re-upload images.
       # The path list is checked against the registry in src/cache.rs by a unit test.
       - uses: actions/cache/restore@v4
         with:
@@ -77,17 +79,51 @@ jobs:
             .aggr/cache/build-v1/capture-retries-v1
             .aggr/cache/build-v1/recording-duration-v1
             .aggr/cache/build-v1/feed-parsing
+            .aggr/cache/build-v1/budget-v1
           key: aggr-state-v1-${{ github.repository_id }}-${{ github.run_id }}
           restore-keys: |
             aggr-state-v1-${{ github.repository_id }}-
 
-      # Switches Pages to "GitHub Actions" on first run and reports the URL the site will live at
-      # (the custom domain when one is configured in the repository settings).
+      - id: media-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .aggr/cache/build-v1/deployment-media-v1
+          key: aggr-media-v1-${{ github.repository_id }}-${{ github.run_id }}
+          restore-keys: |
+            aggr-media-v1-${{ github.repository_id }}-
+
+      # Every file in this cache is named by the SHA-256 of what it holds, so its name and size
+      # already commit to its content: the walk answers "did this change?" without reading a byte.
+      # Reading them would hash the whole cache twice on every run.
+      - name: Fingerprint restored media cache
+        id: media-cache-before
+        run: |
+          cat > "$RUNNER_TEMP/aggr-media-cache-fingerprint.py" <<'PY'
+          import hashlib
+          import os
+          import pathlib
+
+          root = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          digest = hashlib.sha256()
+          directory = root / ".aggr/cache/build-v1/deployment-media-v1"
+          files = sorted(path for path in directory.rglob("*") if path.is_file())
+          for path in files:
+              name = path.relative_to(root).as_posix().encode()
+              digest.update(len(name).to_bytes(8, "big"))
+              digest.update(name)
+              digest.update(path.stat().st_size.to_bytes(8, "big"))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"fingerprint={digest.hexdigest()}\n")
+              output.write(f"files={len(files)}\n")
+          print(f"Media cache: {len(files)} files, fingerprint {digest.hexdigest()}")
+          PY
+          python3 "$RUNNER_TEMP/aggr-media-cache-fingerprint.py"
+
+      # Set Settings > Pages > Source to "GitHub Actions" before the first run. GITHUB_TOKEN
+      # cannot enable Pages; this step reads the configured URL (including a custom domain).
       - id: pages
         if: inputs.pages
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
+        uses: actions/configure-pages@v6
 
       # Build starts with a sync. The Pages URL wins over `[site] url`; without Pages the config
       # must name the host.
@@ -95,7 +131,36 @@ jobs:
         env:
           AGGR_BASE_URL: ${{ steps.pages.outputs.base_url }}
 
-      # Saved only after a successful build so a failed run never publishes half-written state.
+      - name: Check GitHub Pages site size
+        if: inputs.pages
+        run: |
+          python3 - "$GITHUB_WORKSPACE/_site" <<'PY'
+          import pathlib
+          import sys
+
+          site = pathlib.Path(sys.argv[1])
+          if not site.is_dir():
+              raise SystemExit("::error::The generated site directory is missing.")
+          size = sum(path.stat().st_size for path in site.rglob("*") if path.is_file())
+          # GitHub documents 1 GB; use decimal bytes, below the larger 1 GiB interpretation.
+          limit = 1_000_000_000
+          print(f"Generated site: {size:,} bytes; GitHub Pages limit: {limit:,} bytes.")
+          if size > limit:
+              raise SystemExit(
+                  f"::error::Generated site is {size:,} bytes, above the {limit:,}-byte Pages limit. "
+                  "Use an aggr release with build-budget support and set [site] build_max_bytes "
+                  "to 1000000000 or less; the build preserves article text and reduces published "
+                  "media to fit. If text and required assets alone exceed this limit, set the "
+                  "workflow input pages: false and host the site artifact elsewhere with a "
+                  "suitable build budget. See docs/build-budget.md in the aggr repository."
+              )
+          PY
+
+      - name: Fingerprint completed media cache
+        id: media-cache-after
+        run: python3 "$RUNNER_TEMP/aggr-media-cache-fingerprint.py"
+
+      # Small derived state is saved only after a successful build.
       - uses: actions/cache/save@v4
         with:
           path: |
@@ -106,10 +171,18 @@ jobs:
             .aggr/cache/build-v1/capture-retries-v1
             .aggr/cache/build-v1/recording-duration-v1
             .aggr/cache/build-v1/feed-parsing
+            .aggr/cache/build-v1/budget-v1
           key: aggr-state-v1-${{ github.repository_id }}-${{ github.run_id }}
 
+      # Immutable cache entries must not accumulate identical media on scheduled no-op runs.
+      - uses: actions/cache/save@v4
+        if: steps.media-cache-after.outputs.files != '0' && (steps.media-cache-restore.outputs.cache-matched-key == '' || steps.media-cache-before.outputs.fingerprint != steps.media-cache-after.outputs.fingerprint)
+        with:
+          path: .aggr/cache/build-v1/deployment-media-v1
+          key: aggr-media-v1-${{ github.repository_id }}-${{ github.run_id }}
+
       - if: inputs.pages
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
@@ -121,4 +194,4 @@ jobs:
 
       - id: deploy
         if: inputs.pages
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

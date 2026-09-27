@@ -1,0 +1,16 @@
+# A small first reader. `aggr init --defaults` lists every general default.
+
+[site]
+title = "My reads"
+# url = "https://reads.example.com" # custom domain; also writes CNAME
+
+[fetch]
+max_items_per_source = 10
+
+[[sources]]
+url = "https://blog.rust-lang.org"
+category = "programming"
+
+[[sources]]
+url = "https://aymericbeaumet.com"
+category = "programming"

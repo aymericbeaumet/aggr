@@ -42,7 +42,7 @@ pub fn from_image(image: &DynamicImage) -> Result<Placeholder> {
     from_hash(&STANDARD.encode(hash))
 }
 
-pub(super) fn from_hash(encoded: &str) -> Result<Placeholder> {
+pub(crate) fn from_hash(encoded: &str) -> Result<Placeholder> {
     ensure!(encoded.len() <= 48, "ThumbHash too large");
     let hash = STANDARD.decode(encoded)?;
     ensure!((5..=32).contains(&hash.len()), "invalid ThumbHash length");

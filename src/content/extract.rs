@@ -18,6 +18,8 @@ use super::strip::{html_to_text, sanitize, strip_active_content};
 pub struct ExtractedArticle {
     pub html: String,
     pub image: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 /// Extract the primary article from a complete origin page. Readability intentionally does not
@@ -28,11 +30,80 @@ pub fn extract_article(page: &str, url: &Url) -> Result<ExtractedArticle> {
         max_elements_to_parse: 100_000,
         ..Default::default()
     };
-    let page = expand_embedded_charts(page);
+    let page = super::normalize::publisher_html(page);
+    let page = super::markdown::normalize_code_blocks(&page);
+    let page = expand_embedded_charts(&page);
     let page = unwrap_noscript_prose(&page);
+    if let Some(html) = code_file_listing(&page) {
+        return Ok(ExtractedArticle {
+            html,
+            image: None,
+            labels: Vec::new(),
+        });
+    }
     let mut readability = Readability::new(page.as_ref(), Some(url.as_str()), Some(config))
         .context("parsing the original article page")?;
+    let mut labels = Vec::new();
+    for meta in readability.doc.select("meta[property]").iter() {
+        if meta
+            .attr("property")
+            .is_some_and(|value| value.eq_ignore_ascii_case("article:tag"))
+            && let Some(label) = meta
+                .attr("content")
+                .and_then(|value| publisher_label(&value))
+        {
+            labels.push(label);
+        }
+    }
+    // rel=tag belongs to this article only; navigation and related-article panels are not topics.
+    if let Some(article) = readability
+        .doc
+        .select("article")
+        .iter()
+        .find(|article| !article.ancestors(None).is("nav, aside"))
+    {
+        for link in article.select("a[rel~=tag]").iter() {
+            if !link.ancestors(None).is("nav, aside")
+                && link
+                    .ancestors(None)
+                    .nodes()
+                    .iter()
+                    .filter(|node| {
+                        node.node_name()
+                            .is_some_and(|name| name.as_ref() == "article")
+                    })
+                    .count()
+                    == 1
+                && let Some(label) = publisher_label(&link.text())
+            {
+                labels.push(label);
+            }
+        }
+        for leading in [true, false] {
+            let mut boundary = article.clone();
+            loop {
+                let children = boundary.children();
+                let child = if leading {
+                    children.first()
+                } else {
+                    children.last()
+                };
+                if child.is_empty() {
+                    break;
+                }
+                if child.is("p, div, footer, ul") && explicit_tag_group(&child.html()) {
+                    child.remove();
+                } else if child.is("div, section, header, footer") {
+                    boundary = child;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    let labels = crate::model::normalize_labels(labels);
     preserve_share_named_media_wrappers(&readability);
+    preserve_cited_notes(&readability);
     // Figure filenames such as `replies.png` can resemble comment widgets to Readability.
     // Explicit image-and-caption structure supplies stronger evidence than those incidental IDs.
     readability.doc.select(
@@ -60,7 +131,136 @@ pub fn extract_article(page: &str, url: &Url) -> Result<ExtractedArticle> {
     Ok(ExtractedArticle {
         html,
         image: article.image,
+        labels,
     })
+}
+
+/// GitHub gists (and blob views built the same way) show a file as a table of highlighted lines
+/// under a header that names it. Readability scores that table below the discussion beneath it,
+/// so the page would be archived as its comments; the files are the article. Several files become
+/// named sections, a single file is just its code.
+fn code_file_listing(page: &str) -> Option<String> {
+    if !page.contains("blob-code-content") {
+        return None;
+    }
+    let document = Html::parse_document(page);
+    let (Ok(listings), Ok(lines), Ok(names)) = (
+        Selector::parse(".blob-code-content"),
+        Selector::parse("td.blob-code"),
+        Selector::parse(
+            ".file-header .gist-blob-name, .file-header [data-path], .file-header strong",
+        ),
+    ) else {
+        return None;
+    };
+    let mut files = Vec::new();
+    for listing in document.select(&listings) {
+        let code = listing
+            .select(&lines)
+            .map(|line| line.text().collect::<String>())
+            .map(|line| line.trim_end_matches(['\r', '\n']).to_string())
+            .collect::<Vec<_>>();
+        if code.iter().all(|line| line.trim().is_empty()) {
+            continue;
+        }
+        let name = listing
+            .ancestors()
+            .filter_map(scraper::ElementRef::wrap)
+            .find_map(|ancestor| ancestor.select(&names).next())
+            .map(|name| name.text().collect::<String>().trim().to_string())
+            .filter(|name| !name.is_empty());
+        files.push((name, code.join("\n")));
+    }
+    if files.is_empty() {
+        return None;
+    }
+    let mut html = String::new();
+    let several = files.len() > 1;
+    for (name, code) in files {
+        if several && let Some(name) = &name {
+            html.push_str(&format!("<h2>{}</h2>\n", escape_html(name)));
+        }
+        let language = name
+            .as_deref()
+            .and_then(|name| name.rsplit_once('.'))
+            .and_then(|(_, extension)| super::highlight::hint_token(extension))
+            .map(|language| format!(" class=\"language-{language}\" data-language=\"{language}\""))
+            .unwrap_or_default();
+        html.push_str(&format!(
+            "<pre><code{language}>{}</code></pre>\n",
+            escape_html(&code)
+        ));
+    }
+    Some(html)
+}
+
+fn publisher_label(text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty() && text.chars().count() <= 128 && !text.chars().any(char::is_control))
+        .then(|| text.to_string())
+}
+
+/// Only a group made of explicitly marked tag links and a short optional label is metadata.
+/// A short ordinary link list or prose surrounding a tag link stays in the article.
+fn explicit_tag_group(html: &str) -> bool {
+    let fragment = Html::parse_fragment(html);
+    let mut outside = String::new();
+    let mut tags = 0;
+    for node in fragment.tree.nodes() {
+        let inside_tag = node
+            .ancestors()
+            .filter_map(scraper::ElementRef::wrap)
+            .any(|ancestor| {
+                ancestor.value().name() == "a"
+                    && ancestor
+                        .value()
+                        .attr("rel")
+                        .is_some_and(|rel| rel.split_whitespace().any(|value| value == "tag"))
+            });
+        match node.value() {
+            scraper::Node::Text(text) if !inside_tag => outside.push_str(text),
+            scraper::Node::Element(element) if element.name() == "a" => {
+                if !element
+                    .attr("rel")
+                    .is_some_and(|rel| rel.split_whitespace().any(|value| value == "tag"))
+                    || publisher_label(
+                        &scraper::ElementRef::wrap(node)
+                            .map(|node| node.text().collect::<String>())
+                            .unwrap_or_default(),
+                    )
+                    .is_none()
+                {
+                    return false;
+                }
+                tags += 1;
+            }
+            scraper::Node::Element(element)
+                if !matches!(
+                    element.name(),
+                    "html"
+                        | "body"
+                        | "p"
+                        | "div"
+                        | "span"
+                        | "footer"
+                        | "ul"
+                        | "li"
+                        | "em"
+                        | "strong"
+                        | "br"
+                ) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    let outside = outside
+        .trim()
+        .trim_end_matches(':')
+        .trim()
+        .to_ascii_lowercase();
+    tags > 0 && matches!(outside.as_str(), "" | "tags" | "topics")
 }
 
 const MAX_CHART_ROWS: usize = 400;
@@ -281,6 +481,35 @@ fn unwrap_noscript_prose(page: &str) -> std::borrow::Cow<'_, str> {
     }
     out.push_str(&page[position..]);
     std::borrow::Cow::Owned(out)
+}
+
+/// A note the prose cites by number is content however link-heavy it is: a citation is often
+/// no more than a title and its link, which Readability's link-density cleaning would discard,
+/// leaving the reference pointing at nothing.
+fn preserve_cited_notes(readability: &Readability) {
+    for anchor in readability.doc.select("a[href^='#']").iter() {
+        let Some(href) = anchor.attr("href") else {
+            continue;
+        };
+        let id = href.trim_start_matches('#');
+        if id.is_empty()
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.'))
+        {
+            continue;
+        }
+        let label = anchor.text();
+        let label = label.trim().trim_matches(['[', ']', '(', ')']);
+        if label.is_empty() || !label.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        // The note and the block that groups the notes: a short list of citations is
+        // link-dense as a whole too.
+        let note = readability.doc.select(&format!("[id=\"{id}\"]"));
+        note.add_class("readability-content");
+        note.parent().add_class("readability-content");
+    }
 }
 
 /// Some publishers wrap every article figure in a `…-sharesheet` container. Readability weighs
@@ -564,6 +793,102 @@ async fn limited_extraction<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cited_notes_survive_link_density_cleaning() {
+        // libroot.org: a citation that is a title and its link, sitting after enough prose.
+        // (Readability unwraps a container holding a single note; two notes keep theirs.)
+        let prose = "<p>Snowden first reached out to Glenn Greenwald in December, requesting that he set up a secure communication channel, though Greenwald did not know how to do so at the time and let the request lapse for several weeks.<a class=\"note-source\" href=\"#n13\">[13]</a> He then turned to Laura Poitras.<a href=\"#n14\">[14]</a></p>".repeat(3);
+        let page = format!(
+            "<html><head><title>Archive</title></head><body><article>{prose}<div class=\"notes\"><div class=\"citation\" id=\"n13\"><div class=\"marker\">[13]:</div><div class=\"text\">Menschen Machen Medien, \"<a href=\"https://mmm.example/snowden\">Snowden und die Datenmisshandlung</a>\", June 2023.</div></div><div class=\"citation\" id=\"n14\"><div class=\"marker\">[14]:</div><div class=\"text\"><a href=\"https://x.example/status/1\">On Twitter</a>, 14 March 2019 (<a href=\"https://archive.example/x\">archived</a>).</div></div></div></article></body></html>"
+        );
+        let url = Url::parse("https://libroot.example/posts/archive").unwrap();
+        let extracted = super::extract_article(&page, &url).unwrap();
+        assert!(extracted.html.contains("id=\"n13\""), "{}", extracted.html);
+        assert!(
+            extracted.html.contains("Menschen Machen Medien"),
+            "{}",
+            extracted.html
+        );
+        let markdown = crate::content::to_markdown(&extracted.html, Some(&url));
+        assert!(
+            markdown.contains("weeks.[^1] He then turned to Laura Poitras.[^2]"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("[^1]: Menschen Machen Medien, \"[Snowden und die Datenmisshandlung](https://mmm.example/snowden)\", June 2023."), "{markdown}");
+        assert!(markdown.contains("[^2]: [On Twitter](https://x.example/status/1), 14 March 2019 ([archived](https://archive.example/x))."), "{markdown}");
+    }
+
+    #[test]
+    fn gist_file_listings_are_the_article_not_their_comments() {
+        let page = concat!(
+            "<html><head><title>Laya on Mac · GitHub</title></head><body>",
+            "<div class=\"file\"><div class=\"file-header\"><a href=\"#file-laya-sh\"><strong class=\"gist-blob-name\">\n laya.sh\n</strong></a></div>",
+            "<div class=\"blob-wrapper\"><div class=\"blob-code-content\"><template class=\"js-file-alert-template\"><div class=\"flash\">This file contains hidden Unicode text.</div></template>",
+            "<table><tr><td class=\"blob-num\">1</td><td class=\"blob-code blob-code-inner js-file-line\">curl <span class=\"pl-s\">https://laya.example/ai/run</span> \\</td></tr>",
+            "<tr><td class=\"blob-num\">2</td><td class=\"blob-code blob-code-inner js-file-line\">  -H <span class=\"pl-s\">&quot;Content-Type: application/json&quot;</span></td></tr>",
+            "<tr><td class=\"blob-num\">3</td><td class=\"blob-code blob-code-inner js-file-line\"></td></tr>",
+            "<tr><td class=\"blob-num\">4</td><td class=\"blob-code blob-code-inner js-file-line\">echo &lt;done&gt;</td></tr></table></div></div></div>",
+            "<div class=\"js-comment-container\"><div class=\"comment-body markdown-body\"><p>Nice! I just wanted to see what Laya does and put it behind an API, which turned out to be a long enough comment for Readability to prefer over the code.</p></div></div>",
+            "</body></html>"
+        );
+        let url =
+            Url::parse("https://gist.github.com/fordnox/e592d0f68b543fd044be8e6d040863a0").unwrap();
+        let extracted = super::extract_article(page, &url).unwrap();
+        assert_eq!(
+            extracted.html,
+            "<pre><code class=\"language-sh\" data-language=\"sh\">curl https://laya.example/ai/run \\\n  -H &quot;Content-Type: application/json&quot;\n\necho &lt;done&gt;</code></pre>\n"
+        );
+        assert!(extracted.image.is_none());
+        let markdown = crate::content::to_markdown(&extracted.html, Some(&url));
+        assert!(markdown.contains("```sh\ncurl https://laya.example/ai/run \\\n  -H \"Content-Type: application/json\"\n\necho <done>\n```"), "{markdown}");
+        assert!(!markdown.contains("Nice!"), "{markdown}");
+
+        // Several files keep their names as sections; a page without line tables is untouched.
+        let two = page.replace("</div></div></div>", "</div></div></div><div class=\"file\"><div class=\"file-header\"><strong class=\"gist-blob-name\">notes.md</strong></div><div class=\"blob-code-content\"><table><tr><td class=\"blob-code\"># Notes</td></tr></table></div></div>");
+        let extracted = super::extract_article(&two, &url).unwrap();
+        assert!(
+            extracted.html.starts_with("<h2>laya.sh</h2>\n<pre>"),
+            "{}",
+            extracted.html
+        );
+        assert!(extracted.html.contains("<h2>notes.md</h2>\n<pre><code class=\"language-md\" data-language=\"md\"># Notes</code></pre>"), "{}", extracted.html);
+        assert!(
+            super::code_file_listing("<html><body><p>No listing here.</p></body></html>").is_none()
+        );
+    }
+
+    #[test]
+    fn article_tags_remove_only_explicit_boundary_link_groups() {
+        let page = "<html><title>Article</title><article><p><a rel='tag'>OpeningTag</a></p><h1>Article</h1><p>This article discusses <a rel='tag'>InlineTag</a> in ordinary prose and should retain that sentence as useful content. Its explanation includes enough substance for the article extractor.</p><p><a href='/other'>Ordinary link</a></p><p>Tags: <a rel='tag'>ClosingTag</a></p></article></html>";
+        let extracted =
+            extract_article(page, &url::Url::parse("https://example.com/post").unwrap()).unwrap();
+        assert_eq!(extracted.labels, ["closingtag", "inlinetag", "openingtag"]);
+        assert!(!extracted.html.contains("OpeningTag"));
+        assert!(!extracted.html.contains("ClosingTag"));
+        assert!(extracted.html.contains("InlineTag"));
+        assert!(extracted.html.contains("Ordinary link"));
+    }
+
+    #[test]
+    fn article_tags_capture_explicit_publisher_metadata_outside_the_body() {
+        let page = "<html><head><title>MCP</title><meta property='article:tag' content='MCP'><meta property='article:tag' content='AI'><meta property='article:tag' content='ai'><meta name='keywords' content='generic, navigation'></head><body><nav><a rel='tag'>Site navigation</a></nav><article><h1>MCP</h1><p>The full article discusses the protocol and explains why its original design causes problems for people using these systems.</p><footer><a rel='tag' href='/tags/security'>Security</a></footer><aside><a rel='tag'>Related post</a></aside></article></body></html>";
+        let extracted =
+            extract_article(page, &url::Url::parse("https://example.com/post").unwrap()).unwrap();
+        assert_eq!(extracted.labels, ["ai", "mcp", "security"]);
+        let unrelated = page
+            .replace("property='article:tag'", "property='site:tag'")
+            .replace("rel='tag' href='/tags/security'", "href='/tags/security'");
+        assert!(
+            extract_article(
+                &unrelated,
+                &url::Url::parse("https://example.com/post").unwrap()
+            )
+            .unwrap()
+            .labels
+            .is_empty()
+        );
+    }
+
     #[test]
     fn noscript_prose_is_the_article_for_a_reader_without_scripts() {
         // onionfutures.com: the whole page is a script shell whose article sits in <noscript>.

@@ -3,7 +3,7 @@
 mod import_formats;
 mod import_graph;
 pub(crate) mod language;
-mod preferences;
+pub mod preferences;
 pub(crate) mod repository_url;
 mod source_entries;
 
@@ -58,6 +58,12 @@ pub struct SiteConfig {
     pub repository: Option<String>,
     /// Public URL of the site (`--release` builds). A custom domain here also writes `CNAME`.
     pub url: Option<Url>,
+    /// Opt into search-engine indexing and sitemaps for release builds.
+    pub indexing: bool,
+    /// Maximum logical bytes in a successful generated site, including search and assets.
+    pub build_max_bytes: u64,
+    /// Publication-age window whose retained media keeps its full quality in the site.
+    pub media_full_quality_days: u32,
     pub out: PathBuf,
     /// Emit install metadata and cache a bounded offline set in a secure context.
     pub pwa: bool,
@@ -99,6 +105,9 @@ impl Default for SiteConfig {
             max_age_days: 365,
             repository: None,
             url: None,
+            indexing: false,
+            build_max_bytes: 1_000_000_000,
+            media_full_quality_days: 30,
             out: PathBuf::from("_site"),
             pwa: true,
             preferences: ReaderPreferences::default(),
@@ -231,8 +240,8 @@ pub struct FetchConfig {
     pub content: ContentMode,
     /// Download a small local preview; explicit refresh fills missing previews on old items.
     pub previews: bool,
-    /// Archive safe article-body raster images and derive lossless responsive renditions.
-    pub images: bool,
+    /// How safe article-body raster images are archived, if at all.
+    pub images: ImagePolicy,
 }
 
 impl Default for FetchConfig {
@@ -247,7 +256,7 @@ impl Default for FetchConfig {
             allow_remote_source_chains: false,
             content: ContentMode::Heavy,
             previews: true,
-            images: true,
+            images: ImagePolicy::Original,
         }
     }
 }
@@ -259,6 +268,128 @@ pub enum ContentMode {
     Heavy,
     Light,
 }
+
+/// What aggr does with an article's images: leave them at the publisher, archive exactly what the
+/// publisher served, or archive one bounded copy of it. The level a compact copy is reduced to
+/// belongs to that mode alone, so no other mode can be given one.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ImagePolicy {
+    /// `"remote"` (or `false`): nothing is downloaded and the reader loads the publisher's URL.
+    Remote,
+    /// `"original"` (or `true`): the publisher's exact bytes, plus lossless responsive renditions.
+    #[default]
+    Original,
+    /// `"compact"`: one bounded JPEG master and no renditions. Images dominate an archive's size,
+    /// so this is the difference between gigabytes and hundreds of megabytes; what it gives up is
+    /// the publisher's exact bytes, which no later run can recover.
+    Compact(crate::media::CompactPolicy),
+}
+
+impl ImagePolicy {
+    /// Whether article images are archived at all under this policy.
+    pub fn archives(self) -> bool {
+        self != Self::Remote
+    }
+
+    /// The bounds a newly archived image is reduced to, if any.
+    pub fn compaction(self) -> Option<crate::media::CompactPolicy> {
+        match self {
+            Self::Compact(policy) => Some(policy),
+            Self::Remote | Self::Original => None,
+        }
+    }
+}
+
+/// `images` is one key with three shapes: a boolean, a mode name, or a compact mode with the
+/// level it is reduced to. Each shape is visited directly so a mistyped key reports itself
+/// instead of collapsing into "matched no variant".
+impl<'de> Deserialize<'de> for ImagePolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Tuned {
+            mode: String,
+            quality: Option<u8>,
+            max_axis: Option<u32>,
+        }
+
+        struct Policy;
+
+        impl<'de> serde::de::Visitor<'de> for Policy {
+            type Value = ImagePolicy;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "\"remote\", \"original\", \"compact\", a boolean, or a table naming a mode",
+                )
+            }
+
+            // The booleans that configurations already carry keep meaning what they meant.
+            fn visit_bool<E: serde::de::Error>(self, archive: bool) -> Result<Self::Value, E> {
+                Ok(if archive {
+                    ImagePolicy::Original
+                } else {
+                    ImagePolicy::Remote
+                })
+            }
+
+            fn visit_str<E: serde::de::Error>(self, mode: &str) -> Result<Self::Value, E> {
+                resolve(mode, None, None).map_err(E::custom)
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let tuned = Tuned::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                resolve(&tuned.mode, tuned.quality, tuned.max_axis)
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+
+        fn resolve(
+            mode: &str,
+            quality: Option<u8>,
+            max_axis: Option<u32>,
+        ) -> Result<ImagePolicy, String> {
+            let leveled = quality.is_some() || max_axis.is_some();
+            match mode {
+                "remote" | "original" if leveled => Err(format!(
+                    "images mode {mode:?} has nothing to tune; \"quality\" and \"max_axis\" belong to \"compact\""
+                )),
+                "remote" => Ok(ImagePolicy::Remote),
+                "original" => Ok(ImagePolicy::Original),
+                "compact" => {
+                    let default = crate::media::CompactPolicy::archive();
+                    let jpeg_quality = quality.unwrap_or(default.jpeg_quality);
+                    let max_axis = max_axis.unwrap_or(default.max_axis);
+                    if !(1..=100).contains(&jpeg_quality) {
+                        return Err(format!("images quality {jpeg_quality} is outside 1-100"));
+                    }
+                    if !(MIN_COMPACT_AXIS..=MAX_COMPACT_AXIS).contains(&max_axis) {
+                        return Err(format!(
+                            "images max_axis {max_axis} is outside {MIN_COMPACT_AXIS}-{MAX_COMPACT_AXIS}"
+                        ));
+                    }
+                    Ok(ImagePolicy::Compact(crate::media::CompactPolicy {
+                        max_axis,
+                        jpeg_quality,
+                    }))
+                }
+                other => Err(format!(
+                    "unknown images mode {other:?}; expected \"remote\", \"original\" or \"compact\""
+                )),
+            }
+        }
+
+        deserializer.deserialize_any(Policy)
+    }
+}
+
+/// A compact master still has to be worth reading on a wide screen, and still has to stay inside
+/// the decoder bounds every archived image is held to.
+const MIN_COMPACT_AXIS: u32 = 320;
+const MAX_COMPACT_AXIS: u32 = 8_192;
 
 /// One normalized source candidate, expanded from a `[[sources]]` group.
 /// Engine-specific options are validated when it resolves to a Source.
@@ -289,7 +420,7 @@ pub struct SourceConfig {
     /// Override `[fetch] previews` for new items from this source.
     pub previews: Option<bool>,
     /// Override `[fetch] images` for new items from this source.
-    pub images: Option<bool>,
+    pub images: Option<ImagePolicy>,
     /// Repository source: data branch of that repository.
     pub branch: Option<String>,
     /// Repository source: only take items from these of its sources (all when empty).
@@ -315,7 +446,7 @@ pub struct Source {
     pub html: bool,
     pub content: ContentMode,
     pub previews: bool,
-    pub images: bool,
+    pub images: ImagePolicy,
     pub engine: Engine,
 }
 
@@ -426,6 +557,9 @@ impl Config {
         if self.site.items_per_page == 0 {
             bail!("[site] items_per_page must be at least 1");
         }
+        if self.site.build_max_bytes == 0 {
+            bail!("[site] build_max_bytes must be at least 1");
+        }
         if self.fetch.concurrency == 0 {
             bail!("[fetch] concurrency must be at least 1");
         }
@@ -475,7 +609,7 @@ impl Config {
         let mut seen_identities = BTreeMap::<String, (usize, String)>::new();
         let mut sources = Vec::with_capacity(self.sources.len());
         for (index, raw) in self.sources.iter().enumerate() {
-            let source = resolve_source(
+            let mut source = resolve_source(
                 raw,
                 self.fetch.content,
                 self.fetch.previews,
@@ -492,6 +626,12 @@ impl Config {
                     slug
                 );
                 continue;
+            }
+            // A derived slug names the publisher, so several feeds from one host arrive at the
+            // same name. Tell them apart with the path that differs rather than making the reader
+            // name each one by hand. An explicit duplicate is still a mistake worth reporting.
+            if raw.slug.is_none() {
+                source.slug = distinct_slug(&source.slug, source.engine.url(), &seen_slugs);
             }
             if !seen_slugs.insert(source.slug.clone()) {
                 bail!(
@@ -608,7 +748,7 @@ fn resolve_source(
     raw: &SourceConfig,
     default_content: ContentMode,
     default_previews: bool,
-    default_images: bool,
+    default_images: ImagePolicy,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Source> {
     let inferred;
@@ -822,8 +962,9 @@ fn validate_slug(slug: &str) -> Result<()> {
     Ok(())
 }
 
-/// Derive a directory-safe slug from the display name, else from the URL's host and path
-/// (`https://www.example.com/blog/feed.xml` → `example-com-blog`).
+/// Derive a directory-safe slug from the display name, else from the source's canonical name
+/// (`https://www.example.com/blog/feed.xml` → `example-com`, and a platform account keeps the
+/// path that names it: `https://youtube.com/@Alice` → `youtube-com-alice`).
 pub fn derive_slug(name: Option<&str>, url: Option<&Url>) -> String {
     if let Some(name) = name {
         let slug = slug::slugify(name);
@@ -831,22 +972,10 @@ pub fn derive_slug(name: Option<&str>, url: Option<&Url>) -> String {
             return truncate_slug(&slug);
         }
     }
-    let Some(url) = url else {
-        return "source".into();
-    };
-    let host = url
-        .host_str()
-        .unwrap_or("")
-        .trim_start_matches("www.")
-        .to_string();
-    let path = url
-        .path_segments()
-        .into_iter()
-        .flatten()
-        .filter(|segment| !segment.is_empty() && !is_feed_noise(segment))
-        .collect::<Vec<_>>()
-        .join("-");
-    let slug = slug::slugify(format!("{host} {path}"));
+    let slug = url
+        .and_then(crate::platform::canonical_name)
+        .map(slug::slugify)
+        .unwrap_or_default();
     if slug.is_empty() {
         "source".into()
     } else {
@@ -854,6 +983,7 @@ pub fn derive_slug(name: Option<&str>, url: Option<&Url>) -> String {
     }
 }
 
+/// Path segments that describe the transport rather than the publisher.
 fn is_feed_noise(segment: &str) -> bool {
     let stem = segment
         .rsplit_once('.')
@@ -863,6 +993,31 @@ fn is_feed_noise(segment: &str) -> bool {
         stem.to_ascii_lowercase().as_str(),
         "feed" | "feeds" | "rss" | "atom" | "index" | "default" | "posts"
     )
+}
+
+/// Keep a derived slug unique: first by adding the feed path that distinguishes it from a
+/// sibling on the same host, then by counting.
+fn distinct_slug(slug: &str, url: Option<&Url>, taken: &BTreeSet<String>) -> String {
+    if !taken.contains(slug) {
+        return slug.to_string();
+    }
+    if let Some(url) = url {
+        let path = url
+            .path_segments()
+            .into_iter()
+            .flatten()
+            .filter(|segment| !segment.is_empty() && !is_feed_noise(segment))
+            .collect::<Vec<_>>()
+            .join("-");
+        let extended = truncate_slug(&slug::slugify(format!("{slug} {path}")));
+        if !extended.is_empty() && extended != slug && !taken.contains(&extended) {
+            return extended;
+        }
+    }
+    (2..)
+        .map(|suffix| truncate_slug(&format!("{slug}-{suffix}")))
+        .find(|candidate| !taken.contains(candidate))
+        .unwrap_or_else(|| slug.to_string())
 }
 
 fn truncate_slug(slug: &str) -> String {
@@ -911,6 +1066,7 @@ mod tests {
         let config =
             Config::parse("[[sources]]\nurl = \"https://example.com/feed.xml\"\n").unwrap();
         assert_eq!(config.site.title, "aggr");
+        assert!(!config.site.indexing);
         assert_eq!(config.store.branch, "aggr");
         assert_eq!(config.fetch.concurrency, 16);
         let sources = config.resolve_sources(&no_env).unwrap();
@@ -1033,7 +1189,7 @@ images = false
             sources[3].headers,
             [("Authorization".into(), "Bearer secret".into())]
         );
-        assert!(!sources[3].images);
+        assert!(!sources[3].images.archives());
         assert!(sources.iter().all(|s| s.content == ContentMode::Light));
     }
 
@@ -1231,10 +1387,27 @@ images = false
     }
 
     #[test]
-    fn rejects_duplicate_slugs() {
+    fn derived_slugs_stay_distinct_and_explicit_duplicates_are_rejected() {
+        // Two feeds from one publisher share a canonical name, so the path that differs names
+        // them apart; a feed endpoint carries no identity, so the second falls back to counting.
         let config = Config::parse(
-            "[[sources]]\nurl = \"https://example.com/feed.xml\"\n\
+            "[[sources]]\nurl = \"https://example.com/blog/feed.xml\"\n\
+             [[sources]]\nurl = \"https://example.com/notes/feed.xml\"\n\
              [[sources]]\nurl = \"https://www.example.com/rss\"\n",
+        )
+        .unwrap();
+        let slugs: Vec<_> = config
+            .resolve_sources(&no_env)
+            .unwrap()
+            .into_iter()
+            .map(|source| source.slug)
+            .collect();
+        assert_eq!(slugs, ["example-com", "example-com-notes", "example-com-2"]);
+
+        // A slug the reader set by hand twice is a mistake, not something to paper over.
+        let config = Config::parse(
+            "[[sources]]\nslug = \"mine\"\nurl = \"https://a.example/feed.xml\"\n\
+             [[sources]]\nslug = \"mine\"\nurl = \"https://b.example/feed.xml\"\n",
         )
         .unwrap();
         let err = config.resolve_sources(&no_env).unwrap_err();
@@ -1252,24 +1425,34 @@ images = false
     fn derives_slugs() {
         let url = |s: &str| Url::parse(s).unwrap();
         assert_eq!(derive_slug(Some("Rust Blog"), None), "rust-blog");
+        // An ordinary site is named by its domain: the feed's path says nothing more.
         assert_eq!(
             derive_slug(None, Some(&url("https://blog.rust-lang.org/feed.xml"))),
             "blog-rust-lang-org"
         );
         assert_eq!(
             derive_slug(None, Some(&url("https://www.example.com/blog/feed/"))),
-            "example-com-blog"
+            "example-com"
         );
+        assert_eq!(
+            derive_slug(None, Some(&url("https://hnrss.org/frontpage"))),
+            "hnrss-org"
+        );
+        // A platform shares one host between publishers, so the account's path names the source.
         assert_eq!(
             derive_slug(
                 None,
                 Some(&url("https://github.com/rust-lang/rust/releases.atom"))
             ),
-            "github-com-rust-lang-rust-releases-atom"
+            "github-com-rust-lang"
         );
         assert_eq!(
-            derive_slug(None, Some(&url("https://hnrss.org/frontpage"))),
-            "hnrss-org-frontpage"
+            derive_slug(None, Some(&url("https://www.youtube.com/@SomeChannel"))),
+            "youtube-com-somechannel"
+        );
+        assert_eq!(
+            derive_slug(None, Some(&url("https://www.reddit.com/r/rust/.rss"))),
+            "reddit-com-r-rust"
         );
         assert_eq!(derive_slug(Some("   "), None), "source");
         let long = "a".repeat(40) + "-" + &"b".repeat(40);
@@ -1359,6 +1542,12 @@ images = false
         assert_eq!(config.site.max_age_days, compiled.site.max_age_days);
         assert_eq!(config.site.repository, compiled.site.repository);
         assert_eq!(config.site.url, compiled.site.url);
+        assert_eq!(config.site.indexing, compiled.site.indexing);
+        assert_eq!(config.site.build_max_bytes, compiled.site.build_max_bytes);
+        assert_eq!(
+            config.site.media_full_quality_days,
+            compiled.site.media_full_quality_days
+        );
         assert_eq!(config.site.out, compiled.site.out);
         assert_eq!(config.site.pwa, compiled.site.pwa);
         assert_eq!(config.site.identity, compiled.site.identity);
@@ -1470,13 +1659,90 @@ images = false
     #[test]
     fn article_images_are_local_by_default_and_sources_can_opt_out() {
         let config = Config::parse("[[sources]]\nurl = 'https://example.com/feed'\n").unwrap();
-        assert!(config.fetch.images);
-        assert!(config.sources().unwrap()[0].images);
+        assert_eq!(config.fetch.images, ImagePolicy::Original);
+        assert_eq!(config.sources().unwrap()[0].images, ImagePolicy::Original);
         let config = Config::parse("[fetch]\nimages = false\n[[sources]]\nurl = 'https://a.example/feed'\n[[sources]]\nurl = 'https://b.example/feed'\nimages = true\n").unwrap();
         let sources = config.sources().unwrap();
-        assert!(!sources[0].images);
-        assert!(sources[1].images);
+        assert_eq!(sources[0].images, ImagePolicy::Remote);
+        assert_eq!(sources[1].images, ImagePolicy::Original);
         assert!(Config::parse("[[sources]]\nurl = './other.toml'\nimages = true\n").is_ok());
+    }
+
+    #[test]
+    fn images_name_a_mode_and_a_compact_archive_carries_its_level() {
+        let config = Config::parse(
+            "[fetch]\nimages = \"compact\"\n[[sources]]\nurl = 'https://a.example/feed'\n[[sources]]\nurl = 'https://b.example/feed'\nimages = \"original\"\n[[sources]]\nurl = 'https://c.example/feed'\nimages = \"remote\"\n",
+        )
+        .unwrap();
+        let default = crate::media::CompactPolicy::archive();
+        assert_eq!(config.fetch.images, ImagePolicy::Compact(default));
+        let sources = config.sources().unwrap();
+        assert_eq!(sources[0].images, ImagePolicy::Compact(default));
+        assert_eq!(sources[1].images, ImagePolicy::Original);
+        assert_eq!(sources[2].images, ImagePolicy::Remote);
+        assert_eq!(sources[0].images.compaction(), Some(default));
+        assert_eq!(ImagePolicy::Original.compaction(), None);
+        assert!(!ImagePolicy::Remote.archives() && ImagePolicy::Original.archives());
+
+        // The booleans that existing configurations carry keep meaning what they meant.
+        let config = Config::parse(
+            "[fetch]\nimages = false\n[[sources]]\nurl = 'https://a.example/feed'\nimages = true\n",
+        )
+        .unwrap();
+        assert_eq!(config.fetch.images, ImagePolicy::Remote);
+        assert_eq!(config.sources().unwrap()[0].images, ImagePolicy::Original);
+    }
+
+    #[test]
+    fn a_compact_level_is_tunable_per_source_and_refuses_what_it_cannot_honor() {
+        let config = Config::parse(
+            "[fetch]\nimages = { mode = \"compact\", quality = 55 }\n[[sources]]\nurl = 'https://a.example/feed'\n[[sources]]\nurl = 'https://b.example/feed'\nimages = { mode = \"compact\", quality = 90, max_axis = 2400 }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.fetch.images.compaction(),
+            Some(crate::media::CompactPolicy {
+                max_axis: crate::media::CompactPolicy::archive().max_axis,
+                jpeg_quality: 55,
+            })
+        );
+        let sources = config.sources().unwrap();
+        assert_eq!(
+            sources[1].images.compaction(),
+            Some(crate::media::CompactPolicy {
+                max_axis: 2400,
+                jpeg_quality: 90,
+            })
+        );
+
+        // Each rejection names the key it is talking about.
+        for (toml, expected) in [
+            ("images = \"tiny\"", "unknown images mode"),
+            ("images = { mode = \"compact\", quality = 0 }", "1-100"),
+            ("images = { mode = \"compact\", quality = 200 }", "1-100"),
+            ("images = { mode = \"compact\", max_axis = 16 }", "max_axis"),
+            (
+                "images = { mode = \"compact\", max_axis = 90000 }",
+                "max_axis",
+            ),
+            (
+                "images = { mode = \"original\", quality = 60 }",
+                "nothing to tune",
+            ),
+            (
+                "images = { mode = \"compact\", qualty = 60 }",
+                "unknown field",
+            ),
+        ] {
+            let error = Config::parse(&format!("[fetch]\n{toml}\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "{toml} reported {error:?}, which does not mention {expected:?}"
+            );
+        }
+        assert!(Config::parse("[fetch]\nimages = 3\n").is_err());
     }
 
     #[test]

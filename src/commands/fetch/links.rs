@@ -182,7 +182,7 @@ mod tests {
         let configured = |slug: &str| Source {
             slug: slug.into(),
             content: ContentMode::Light,
-            images: false,
+            images: crate::config::ImagePolicy::Remote,
             engine: Engine::Feed {
                 url: Url::parse(&server.url(format!("/{slug}"))).unwrap(),
             },

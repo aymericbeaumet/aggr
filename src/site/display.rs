@@ -26,11 +26,32 @@ pub fn title(value: &str, fallback: &str) -> String {
         })
         .collect();
     let cleaned = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned = unwrap_emphasis(&cleaned);
     if cleaned.is_empty() {
         fallback.to_string()
     } else {
-        cleaned
+        cleaned.to_string()
     }
+}
+
+/// A publisher that writes its posts in Markdown can emit the markers with the headline, and a
+/// title emphasised from end to end is emphasising nothing: `**Know Who Spoke When**` is the
+/// title, asterisks and all. Markers around part of a title are the author's own — `` `zig cc` ``
+/// names a command, and `via ___ Supervision` is a blank to fill in — so only a pair wrapping the
+/// whole of it comes off, and only when the rest carries no more of them.
+fn unwrap_emphasis(title: &str) -> &str {
+    for marker in ["**", "__", "*", "_", "`"] {
+        let Some(inner) = title
+            .strip_prefix(marker)
+            .and_then(|rest| rest.strip_suffix(marker))
+        else {
+            continue;
+        };
+        if !inner.trim().is_empty() && !inner.contains(marker) {
+            return inner;
+        }
+    }
+    title
 }
 
 /// The display-only contract shared by static metadata and search result components.
@@ -42,12 +63,15 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated: Option<String>,
     pub source_slug: String,
+    pub source_query: String,
     pub source_display: String,
     pub source_title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<Category>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feed_display: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub feed_sources: Vec<super::context::SourceMembershipCtx>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub is_aggregated: bool,
     pub word_count: usize,
@@ -55,10 +79,6 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consumption: Option<Consumption>,
     pub discussions: Vec<Discussion>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub points: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub comments: Option<Comments>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -73,13 +93,6 @@ pub struct Discussion {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct Comments {
-    pub url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub count: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -143,7 +156,13 @@ impl From<&super::context::ItemCtx> for Metadata {
                 .updated
                 .filter(|date| *date != item.date)
                 .map(|date| date.to_rfc3339()),
-            source_slug: item.source.clone(),
+            source_slug: item.publisher_source.clone(),
+            source_query: item
+                .source_memberships
+                .iter()
+                .find(|source| source.slug == item.publisher_source)
+                .map(|source| source.query_value.clone())
+                .unwrap_or_else(|| item.publisher_source.clone()),
             source_display: item.source_display.clone(),
             source_title: item.source_title.clone(),
             category: item.category.as_ref().map(|name| Category {
@@ -151,6 +170,12 @@ impl From<&super::context::ItemCtx> for Metadata {
                 slug: super::context::category_slug(name),
             }),
             feed_display: item.is_aggregated.then(|| item.feed_display.clone()),
+            feed_sources: item
+                .source_memberships
+                .iter()
+                .filter(|source| source.slug != item.publisher_source)
+                .cloned()
+                .collect(),
             is_aggregated: item.is_aggregated,
             word_count: item.word_count,
             reading_minutes: item.reading_minutes,
@@ -170,16 +195,6 @@ impl From<&super::context::ItemCtx> for Metadata {
                     score: discussion.score,
                 })
                 .collect(),
-            points: count(item.extra.get("points")),
-            comments: item
-                .extra
-                .get("comments_url")
-                .and_then(serde_yaml_ng::Value::as_str)
-                .filter(|url| public_url(url))
-                .map(|url| Comments {
-                    url: url.to_owned(),
-                    count: count(item.extra.get("num_comments")),
-                }),
         }
     }
 }
@@ -239,6 +254,39 @@ mod tests {
     fn preserves_languages_punctuation_and_text_presentation() {
         let value = "Café 日本語 العربية हिन्दी #1 * 2 + 3 = 5 ∑ ∞ ↔ ↕ © ® ™ ❤︎";
         assert_eq!(title(value, "Untitled"), value);
+    }
+
+    #[test]
+    fn a_title_emphasised_end_to_end_keeps_only_its_words() {
+        // huggingface.co: the post is written in Markdown and the headline arrives with it.
+        assert_eq!(
+            title(
+                "**Know Who Spoke When: Build Real-Time, Multi-Speaker AI with NVIDIA Nemotron 3 Diarization**",
+                "Untitled",
+            ),
+            "Know Who Spoke When: Build Real-Time, Multi-Speaker AI with NVIDIA Nemotron 3 Diarization"
+        );
+        for (value, expected) in [
+            ("__Bold all through__", "Bold all through"),
+            ("*Whole thing*", "Whole thing"),
+            ("`one command`", "one command"),
+            // The author's own markers: a command mid-title, a blank to fill in, emphasis on two
+            // separate words, and a title that is nothing but markers.
+            (
+                "`zig cc`: a Powerful Drop-In Replacement for GCC/Clang",
+                "`zig cc`: a Powerful Drop-In Replacement for GCC/Clang",
+            ),
+            (
+                "Bootstrapping Labels via ___ Supervision",
+                "Bootstrapping Labels via ___ Supervision",
+            ),
+            ("*This* and *that*", "*This* and *that*"),
+            ("Using `make` to compile", "Using `make` to compile"),
+            ("**", "**"),
+            ("****", "****"),
+        ] {
+            assert_eq!(title(value, "Untitled"), expected, "{value}");
+        }
     }
 
     #[test]

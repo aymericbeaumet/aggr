@@ -1,4 +1,4 @@
-//! The service worker: precache contracts, app updates in place, and reading offline.
+//! The service worker: registration, the precached shell, and reading offline what has been read.
 
 use std::sync::atomic::Ordering;
 
@@ -58,8 +58,8 @@ async fn service_worker_contracts(client: &Client, fixture: &Fixture) -> Result<
         cursor
     );
 
-    // The worker's caching rules are covered by web/src/sw.test.ts; the browser confirms the real
-    // registration: it succeeds, its worker takes control, and a precached shell is served offline.
+    // The browser confirms the real registration: it succeeds, its worker takes control, and the
+    // precached shell is served with no network.
     wait_for(client, "!!navigator.serviceWorker.controller").await?;
     let registration = client
         .execute_async(
@@ -88,9 +88,10 @@ async fn service_worker_contracts(client: &Client, fixture: &Fixture) -> Result<
     client
         .goto(&format!("{}offline.html", fixture.base))
         .await?;
+    // The shell is precached, so the page that explains the situation is itself readable offline.
     wait_for(
         client,
-        "!navigator.onLine && !!document.querySelector('#offline-articles')",
+        "!navigator.onLine && document.querySelector('.listhead h1')?.textContent === 'Offline'",
     )
     .await?;
     set_offline(client, false).await?;
@@ -113,16 +114,16 @@ async fn service_worker_contracts(client: &Client, fixture: &Fixture) -> Result<
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
-async fn app_update_keeps_reading_position_and_offline_reading() -> Result<()> {
+async fn what_has_been_read_stays_readable_offline() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fixture = Fixture::new()?;
     let client = browser_client().await?;
-    let result = catch_panics(app_update_and_offline_contracts(&client, &fixture)).await;
-    report_failure(&client, "app-update-offline", &result).await;
+    let result = catch_panics(offline_reading_contracts(&client, &fixture)).await;
+    report_failure(&client, "offline-reading", &result).await;
     finish(client, result).await
 }
 
-async fn app_update_and_offline_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
+async fn offline_reading_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
     phone_session(client).await?;
     emulate(
         client,
@@ -138,7 +139,6 @@ async fn app_update_and_offline_contracts(client: &Client, fixture: &Fixture) ->
     .await?;
     client.goto(&fixture.base).await?;
     wait_booted(client).await?;
-    // The worker must control the page before an app update can be offered to it.
     wait_for(client, "!!navigator.serviceWorker.controller").await?;
     client
         .execute("localStorage.setItem('aggr:theme','dark')", vec![])
@@ -151,10 +151,9 @@ async fn app_update_and_offline_contracts(client: &Client, fixture: &Fixture) ->
     .await?;
     client.goto(&fixture.base).await?;
     assert_eq!(
-        client
-            .execute("return window.swup.options.native", vec![])
-            .await?,
-        false
+        client.execute("return typeof window.swup", vec![]).await?,
+        "undefined",
+        "no navigation framework runs between the reader and the browser"
     );
     screenshot(client, "mobile-dark").await?;
     client
@@ -163,163 +162,51 @@ async fn app_update_and_offline_contracts(client: &Client, fixture: &Fixture) ->
         .click()
         .await?;
     wait_for(client, "!!document.querySelector('.body pre')").await?;
-    client
-        .execute("history.replaceState(history.state,'',location.pathname+'?reading=1#article');window.readingSentinel=42;window.scrollTo(0,300)", vec![])
-        .await?;
-    let reading_url = client.current_url().await?;
-    fixture.deploy_app_update()?;
-    client.execute_async("const done=arguments[arguments.length-1];navigator.serviceWorker.getRegistration().then(r=>r.update()).then(()=>done(true),e=>done(e.message))", vec![]).await?;
+    // What has been read is what is kept: the worker caches the pages someone opened, and their
+    // content-addressed pictures, and never downloads an archive ahead of them.
+    client.execute("window.scrollTo(0,300)", vec![]).await?;
+    let read_article = client.current_url().await?;
     wait_for(
         client,
-        "document.documentElement.dataset.updateState === 'ready'",
+        "document.querySelector('.progressive-image')?.naturalWidth === 640",
     )
     .await?;
-    assert_eq!(
-        client
-            .execute("return window.readingSentinel", vec![])
-            .await?,
-        42
-    );
-    assert_eq!(client.execute("return window.scrollY", vec![]).await?, 300);
-    client
-        .find(Locator::Css("#pwa-refresh"))
-        .await?
-        .click()
-        .await?;
-    wait_for(
-        client,
-        "document.title.includes('Updated reading room') && window.scrollY === 300",
-    )
-    .await?;
-    assert_eq!(
-        client.current_url().await?,
-        reading_url,
-        "updating the app must retain the article, query, hash, and reading position"
-    );
-    assert_eq!(
-        client
-            .execute("return window.readingSentinel || null", vec![])
-            .await?,
-        Value::Null,
-        "the update button must load the newly activated version"
-    );
-    client.find(Locator::Css(".brand")).await?.click().await?;
-    wait_for(client, "document.title.includes('Updated reading room')").await?;
-    assert_eq!(
-        client
-            .execute("return window.readingSentinel || null", vec![])
-            .await?,
-        Value::Null
-    );
-
-    fixture.offline.store(true, Ordering::Relaxed);
-    client.refresh().await?;
+    client.goto(&fixture.base).await?;
     wait_for(
         client,
         "document.querySelectorAll('[data-row-open]').length === 3",
     )
     .await?;
-    client
-        .find(Locator::Css("[data-row-open]"))
-        .await?
-        .click()
-        .await?;
-    wait_for(client, "!!document.querySelector('.body pre')").await?;
-    fixture.offline.store(false, Ordering::Relaxed);
 
+    fixture.offline.store(true, Ordering::Relaxed);
     set_offline(client, true).await?;
-    wait_for(
-        client,
-        "!navigator.onLine && !document.querySelector('#connection-status').hidden",
-    )
-    .await?;
-    client.refresh().await?;
+    wait_for(client, "!navigator.onLine").await?;
+    client.goto(read_article.as_str()).await?;
     wait_for(client, "!!document.querySelector('.body pre')").await?;
     wait_for(
         client,
         "document.querySelector('.progressive-image')?.naturalWidth === 640",
     )
     .await?;
-    wait_for(
-        client,
-        "document.querySelector('#connection-status').textContent.includes('Offline')",
-    )
-    .await?;
-    assert!(
-        client
-            .execute(
-                "return document.querySelector('#connection-status').textContent",
-                vec![]
-            )
-            .await?
-            .as_str()
-            .unwrap_or_default()
-            .contains("Offline")
+    assert_eq!(
+        client.execute("return navigator.onLine", vec![]).await?,
+        false,
+        "the article opened before must read the same way with no network"
     );
-    set_offline(client, false).await?;
-    wait_for(client, "navigator.onLine").await?;
-    client
-        .goto(&format!("{}preferences/", fixture.base))
-        .await?;
-    wait_for(
-        client,
-        "location.pathname.endsWith('/preferences/') && !!document.querySelector('#theme-mode')",
-    )
-    .await?;
-    client.execute("const control=document.querySelector('#offline-items');control.value='1';control.dispatchEvent(new Event('change',{bubbles:true}))", vec![]).await?;
-    wait_for(client, "document.querySelector('#offline-download-status').textContent.startsWith('Available offline: 1 of 1')").await?;
-    client.execute_async(r#"
-      const done=arguments[arguments.length-1];
-      const namespace='aggr:'+encodeURIComponent('/reader/')+':';
-      Promise.all([caches.delete(namespace+'pages'),caches.delete(namespace+'images')]).then(()=>done(true));
-    "#, vec![]).await?;
-    set_offline(client, true).await?;
+    screenshot(client, "mobile-dark").await?;
+    // An article nobody opened was never downloaded, and says so instead of failing blankly.
     client
         .goto(&format!(
-            "{}items/example/2026-09-01-story-45/",
+            "{}items/example/2026-09-01-story-30/",
             fixture.base
         ))
         .await?;
-    wait_for(client, "!!document.querySelector('.body pre') && document.querySelector('.progressive-image')?.naturalWidth === 640").await?;
-    assert_eq!(
-        client.execute("return navigator.onLine", vec![]).await?,
-        false
-    );
-    client
-        .goto(&format!("{}offline.html", fixture.base))
-        .await?;
     wait_for(
         client,
-        "document.querySelectorAll('#offline-articles li').length === 1",
+        "document.querySelector('.listhead h1')?.textContent === 'Offline'",
     )
     .await?;
-    assert_eq!(
-        client
-            .execute(
-                "return document.querySelector('#offline-articles a').href.includes('story-45/')",
-                vec![]
-            )
-            .await?,
-        true
-    );
-    client
-        .goto(&format!("{}preferences/", fixture.base))
-        .await?;
-    wait_for(
-        client,
-        "document.querySelector('#offline-items')?.value === '1'",
-    )
-    .await?;
-    client.execute("const control=document.querySelector('#offline-items');control.value='0';control.dispatchEvent(new Event('change',{bubbles:true}))", vec![]).await?;
-    wait_for(client, "document.querySelector('#offline-download-status').textContent.startsWith('Automatic downloads are off')").await?;
-    let protected_count=client.execute_async(r#"
-      const done=arguments[arguments.length-1];
-      caches.open('aggr:'+encodeURIComponent('/reader/')+':offline-articles').then(cache=>cache.keys()).then(keys=>done(keys.length));
-    "#, vec![]).await?;
-    assert_eq!(
-        protected_count, 0,
-        "offline selection changes must reach the worker and clear protected resources"
-    );
+    fixture.offline.store(false, Ordering::Relaxed);
     set_offline(client, false).await?;
     Ok(())
 }

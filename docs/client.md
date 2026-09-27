@@ -1,141 +1,65 @@
 # Client development and search
 
-Rust and MiniJinja render the complete static reader. Svelte and TypeScript run only in the browser,
-where they own search, preferences, shortcut help, connection/update status, and podcast controls.
-Swup owns page navigation. Site generation never executes JavaScript or invokes a frontend compiler:
-`cargo build`, `aggr sync`, `aggr build`, and normal `aggr dev` use embedded assets without Node.
-There is no SvelteKit server, JavaScript SSR engine, or external search service.
+Rust and MiniJinja render the complete static reader. The browser client is four hand-written
+files with no build step and no dependencies: editing one and reloading is the whole loop.
+Site generation never executes JavaScript or invokes a frontend compiler, so `cargo build`,
+`aggr sync`, `aggr build` and `aggr dev` need no Node. Search is a build-time Pagefind index;
+there is no search service.
 
-## Development
+## The client
 
-Frontend source lives in `web/`. Install its locked dependencies with `npm ci --prefix web`.
-`make client-check` runs type checks and tests; `make client-build` writes the committed
-`themes/default/static/app.js` and `client.css`. Rebuild these files after source changes. CI
-rebuilds and compares them, while normal Cargo builds embed the existing files without invoking npm.
+| File | Loaded | What it owns |
+|---|---|---|
+| `themes/default/static/bootstrap.js` | render-blocking, every page | Applies saved preferences and rewrites dates before the first paint, so nothing flashes and no date column starts empty. The only blocking script, and deliberately small. |
+| `themes/default/static/app.js` | deferred module, every page | Keyboard shortcuts and the selection cursor, feed page slicing, the preferences form, relative-date upkeep, the shortcut dialog, and the two lazy imports below. |
+| `themes/default/static/search.js` | on first search intent | The query language, the completion menu, and the result list on top of Pagefind's low-level API. |
+| `themes/default/static/media.js` | on article pages with media | The podcast player, provider video facades, and playback-time readouts. |
 
-For immediate frontend feedback, run `make client-dev`, then run the reader with:
+Everything else is the platform. Navigation is ordinary multi-page navigation, with
+`<script type="speculationrules">` for prefetching and `@view-transition` for the transition.
+The reading progress bar and the folding article header are scroll-driven animations. Rows open
+through a stretched link, so modifier and middle clicks behave natively. Keyboard help is a
+`<dialog>` opened by an invoker command. Anything without universal support sits behind
+`@supports` or a feature check and degrades to plain HTML.
+
+Each file opens with `// @ts-check`. `types/aggr.d.ts` declares the contracts they share with the
+templates, and `jsconfig.json` makes editors type-check them with no toolchain installed. Hashed
+asset names are never rewritten inside file contents, so the lazy modules are imported through
+URLs the template resolves into `window.AGGR.assets`.
+
+A prerendered page runs before anyone has seen it, so `app.js` waits for `prerenderingchange`
+before writing session state, history or a worker registration.
+
+## Preferences
+
+`src/config/preferences.rs` holds one typed table. It produces the validation rules embedded as
+JSON in `#aggr-preferences` and the grouped `<form>` on `/preferences/`. Nothing redeclares a
+setting: adding one there adds its control, its validation and its default everywhere.
+
+`bootstrap.js` reads the rules, applies stored values to `documentElement.dataset` before paint,
+and exposes `window.AGGRPreferences`. `app.js` handles changes, cross-tab sync, and import and
+export. Values live in `localStorage` under `aggr:<setting>`.
+
+## Offline
+
+A 55-line service worker keeps the shell installable, caches pages as the reader opens them, and
+serves `offline.html` for anything unvisited. Content-addressed assets are served from the cache;
+everything else is revalidated. Nothing is downloaded ahead of the reader, and there is no offline
+search index.
+
+## Browser regression tests
+
+The browser suite uses a local ChromeDriver and a temporary, pinned article archive:
 
 ```sh
-AGGR_VITE_URL=http://127.0.0.1:5173 cargo run -- dev --config examples/aggr.toml
+chromedriver --port=9515 --allowed-ips=127.0.0.1
+# In another terminal:
+AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser -- --ignored
 ```
 
-The development server replaces the compiled client references in its HTTP responses with Vite's
-module entry and HMR client. Static HTML, media, and data remain served by aggr. The environment
-setting accepts a local HTTP origin only and has no effect on production builds. Svelte component
-edits update through HMR; changes to document-level reader services reload the page.
-
-The production bundle is self-contained, with one separate component stylesheet. Keep imported
-images and internal runtime chunks out of the bundle: Rust hashes and renames static files without
-rewriting references inside their contents. Pagefind is a separate, versioned runtime loaded by URL.
-
-## Component and service ownership
-
-The client has two lifetimes: a persistent application scope for preferences, update/offline services,
-connection controls and shortcut help; and a replaceable page scope for search, the preferences panel,
-and media. Each scope cancels pending work synchronously and awaits all disposers before replacement.
-Swup and live feed replacement share that contract. A fetched feed rechecks the page, version, and
-scope after disposal so a concurrent navigation cannot install obsolete HTML.
-
-The preference service wraps the prepaint bootstrap schema and validator; it does not define another
-set of defaults. Svelte subscriptions update controls after local edits, imports, and cross-tab storage
-events. Theme changes do not reload the search index; page-size changes refresh results and date
-changes update the component model. File and clipboard results cannot affect a disposed panel.
-
-Navigation canonicalization goes through one adapter, updating the address bar, Swup history, and
-selection URL together. The actual Swup instance is stored explicitly: before initialization,
-`window.swup` can refer to the named `<main>` element. Selection persists by article URL, with Svelte rendering search selection
-and the static adapter handling ordinary rows. Search owns its date text and localized tooltip;
-minute/visibility ticks update its model instead of replacing Svelte's text nodes.
-
-Application-release state, content versions, and offline download state are distinct. Typed watchers
-coalesce update checks, ignore stale completions, and release timers/listeners on disposal. A pending
-release does not stop content refresh. While search is active, its hidden static fallback keeps its
-original content version; clearing the search refreshes that fallback when necessary.
-
-Interactive templates require `data-preferences-root`, `data-shortcut-help-root`,
-`data-connection-root`, and `data-audio-component`. Components mount into owned regions; they do not
-hydrate MiniJinja output. Native media nodes are restored on disposal. Article content stays statically rendered and
-native audio keeps its source, controls, and original-link fallback.
-
-Rust precomputes a shared `metadata` view for static feeds, articles, recommendations, and opaque
-search display data. `Metadata.svelte` renders the same source/category/date/reading/discussion/points/
-comments fields. Static and Svelte markup remain separate;
-parity tests cover their shared data, optional fields, escaping, and separators.
-
-The reader entry (`web/src/reader.ts`) wires small, individually tested modules under
-`web/src/reader/`: `dom` (`$`, `$$`, `el`, `setStyle`), `page-head` (the per-page `<head>` metadata
-a navigation carries over), `margin-notes` (same-page footnotes copied beside their references when
-the viewport has a margin column), `article-header` (fold and reading-progress arithmetic),
-`entries` (feed entry keys, age bands, and merging newly delivered entries), `pagination`
-(`feed-page` URLs and pager layout), `pull-refresh` (the touch pull-to-refresh state machine), and
-`shortcuts` (goto routes, external shortcuts, and scroll distances). Every start-up step runs through
-`safely(step, fn)` from `web/src/lifecycle.ts`: a throw is recorded on `window.__aggrErrors`,
-reported with `console.error`, and does not stop the next step, and the browser harness reads that
-list. `mountOver(target, mounts)` from `web/src/mount-over.ts` snapshots the server-rendered
-children before mounting components over them and puts them back when a mount throws or when the
-overlay is restored, so the no-JavaScript markup is never lost. `announce(text)` from
-`web/src/announce.ts` writes status text into the one polite live region (`#aggr-announcer`),
-clearing it first so a repeated message is announced again.
-
-## Ownership and navigation
-
-The shared header contains `feed | browse | preferences`, with `aggr.toml` on the right and
-regular-weight, full-opacity labels and an underline for the selected section. Article pages select
-no section: feed is current only on the feed itself. At widths up to
-40rem, only the brand and aggr.toml remain at the top. A persistent four-tab bar provides feed,
-search, browse, and preferences at the viewport bottom. Browse groups categories, sources, and tags;
-Search focuses the shared field and preserves its query. Mobile feed rows omit numbers and use the
-full available width. Mobile metadata follows the title and uses the full row width; search
-excerpts show at most two lines below it. Pagination stays on one line with plain text controls
-and 44px touch targets. The bar's background reaches the screen
-edge; the home-indicator inset is applied once inside the bar. Content clearance uses its measured
-height plus 12px, with a matching CSS fallback before JavaScript. The software keyboard hides the
-bar without moving article content. Tapping the current tab dismisses an editor and returns to the
-top without opening search or starting another navigation. Pressed feedback changes only the surface
-color, with no transform, delay, or layout shift. Sources remain visible beneath individual article titles.
-Browser click tests must scroll offscreen controls using native `scrollIntoView` before clicking:
-WebDriver can consider a target visible even when the fixed bar covers it. Assert clearance rather
-than hiding the bar; native scrolling and focus already honor the root scroll padding.
-
-Swup navigations skip animation frames and transition delays. Intent from touch, pointer, or focus
-promotes queued requests; idle work warms tab destinations and adjacent recommendations. Speculation
-is bounded to two active requests, eight queued URLs, and 32 cached pages, and respects offline and
-data-saving modes. Cached destinations can render immediately; uncached pages still require a
-network response. Components and index fragments load only when needed.
-
-Article recommendations stack vertically at every viewport width, with Coming next above Discover
-more. Cards retain their natural heights and the shared feed metadata and previews. Card backgrounds
-open the article with the same modifier-click behavior as feed rows; hovering underlines the title
-without changing the surface color. Metadata links keep their own destinations and hover feedback.
-
-Each feed renders a search form above its first article. Svelte mounts into `data-search-root` and
-`data-search-results`; it does not hydrate Rust HTML. The original `data-static-feed` remains
-available until a search begins. Query changes hide both the original feed and previous search
-results immediately; only the current completed response becomes visible. Background index refreshes
-keep the current keyed rows mounted until replacement results arrive, preserving keyboard focus. Clearing the query
-restores the feed. Article pages and no-JavaScript navigation
-stay statically functional. Full-text search requires JavaScript.
-
-Dispose search components and media listeners before Swup or a live feed update replaces content.
-Preserve keyboard selection by article URL, preserve focus while results change, and never allow
-an older request to overwrite a newer query. Components must not attach listeners to an abandoned
-page. Keep application-release refresh state separate from content and index changes.
-When canonicalizing a query, update Swup's history-state URL along with the address bar. Only an
-actual query edit cancels pending Back-navigation row restoration; passive canonicalization waits
-for the matching result rows before restoring their saved selection and focus.
-
-The site title returns home without focusing search; reselecting the current page scrolls to its top.
-Cmd/Ctrl+K focuses the feed search, navigating home if necessary. Explicit focus scrolls to the top
-only when the input is not completely visible between the sticky header and the viewport/tab bar.
-Restoring an editor after a live feed update preserves its saved scroll position. Mouse hover reveals syntax help
-without moving the articles; focus and touch do not open it. The grey input has the same geometry
-before and after mounting, with an inline clear control and no search icon. Category, source, and tag links
-open the main feed with a quoted qualifier in `?q=`. Their directory pages explain each grouping;
-scoped archive URLs render static feeds with the corresponding qualifier visible. Focusing a
-scoped archive field preserves its URL until editing. Removing the scope or clearing the entire
-field returns to global search/the main feed. Active searches use `?q=` and
-`search-page` in a shareable URL, with the existing feed-size preference controlling pagination.
-Search URLs use the main feed and `?q=` exclusively; separate facet query parameters are not supported.
+Set `AGGR_CHROME_BINARY` if Chrome is outside its usual location and `AGGR_BROWSER_TIMEOUT_SECS`
+(default 45) when a loaded machine needs longer waits. CI installs matching browser and driver
+versions; failure screenshots and logs are saved under `target/browser-artifacts/`.
 
 ## Query syntax
 
@@ -162,13 +86,22 @@ full text. The parser is `web/src/search/query.ts`.
 
 Unqualified words search the indexed title and full text. Quoted phrases match together; a leading
 minus excludes a word, phrase, or facet. `category:`, `source:`, `tag:`, and `type:` accept stable
-identifiers or unique matching labels. Completion inserts a quoted readable label when it differs
-from the identifier; labels equivalent to the identifier retain its spelling. Duplicate labels or
-labels colliding with another identifier use the stable identifier, shown in the suggestion for
-disambiguation. Exact identifiers take precedence; ambiguous labels produce an explanation instead
-of silently including several sources. Initial shared queries also replace eligible internal IDs
-with readable labels after the manifest loads, unless the user has already edited the query.
-Source means the configured or retained feed, including aggregator feeds. Repeated positive values
+identifiers or unique matching labels. Source links, completion, and canonicalized queries always
+use the hostname identifier, for example `source:"hnrss.org"`; friendly source names are presentation
+labels in source directories and optional manual aliases. Publisher and `via` labels beneath article
+titles use the same canonical hostname, never subscription paths. Other facets can insert readable unique labels. Duplicate labels
+or labels colliding with another identifier retain their stable identifiers; exact identifiers win,
+and ambiguous manual aliases produce an explanation.
+Source includes both the publisher and every configured or retained feed that supplied the article.
+A canonical article has denormalized source memberships: it appears once globally and once in each
+matching hostname collection. Publisher and feed IDs both use the lowercase/punycode hostname,
+excluding trailing dots, conventional `www.`, paths, and ports. Other subdomains remain distinct;
+provider aliases do not merge actual domains. All subscriptions or accounts on one host aggregate
+into one source filter, and publisher/feed memberships collapse when their hosts match. Feed hosts
+come from configured URLs or persisted endpoint/site metadata, never archived slugs. An origin with
+no trusted HTTP(S) metadata contributes no guessed membership; a known article publisher still does.
+Archived source IDs, article paths, original URLs, and discussion provenance remain unchanged.
+Repeated positive values
 within a facet mean any of those values; different facets combine with AND. Exclusions remove matches.
 Content types are `article`, `podcast`, `video`, `audio`, `image`, and `document`; they describe the
 primary content, not incidental images embedded in an article.
@@ -182,6 +115,10 @@ values from the current index instead of a validation error, including when open
 query URL. Invalid recognized qualifiers keep results hidden and show an explanation.
 Queries are limited to 4096 characters and 16 clauses, with explicit errors rather than truncation.
 
+The syntax reminder under the field is a pointer affordance for someone already typing: it appears
+only while the field has focus and the pointer is over it, and never on touch or from the keyboard
+alone. It overlays the page without moving the feed, and `aria-describedby` reaches it regardless.
+
 Completion replaces only the token at the cursor. It suggests qualifier names, source/category/tag/type
 values with contextual counts and date shortcuts. Articles appear exclusively in the result list;
 completing or submitting free text never opens an article suggestion. Value lists
@@ -189,6 +126,17 @@ are scrollable without an arbitrary cutoff; completed values stop suggesting the
 and touch selection are supported; Escape closes open suggestions, and a further Escape blurs the
 search field, never clearing the query. Composition input does not launch partial searches. Enter and Tab accept the
 highlighted stable option identity, even when labels coincide or asynchronous counts reorder values.
+Accepting a qualifier leaves the menu open on the values it accepts, so `sour` and Enter reach the
+sources in two keystrokes. The arrows walk open suggestions and the results the rest of the time,
+with the keyboard staying in the field either way; the first result is selected by default and Enter
+opens it once the token at the cursor has nothing left to complete. Results are the feed filtered
+and share its one cursor: the first is selected as soon as they render, leaving the field returns
+them to the ordinary `j`/`k`/`o` shortcuts, and clearing the query hands the cursor back to the
+feed. The static feed waits hidden behind the results, so a cursor may only ever rest on a row
+whose container is on screen.
+Opening a result and coming back reloads the document, so the last rendered page is kept in
+`sessionStorage` under the site path and drawn before the index has reloaded; the live query still
+runs and replaces it, and a placeholder only appears when there is nothing to keep.
 Suggestions and counts honor every remaining clause after removing the edited token. While that
 context loads, unrelated archive-wide values remain hidden. Obsolete requests cannot replace a newer
 context, survive clearing/navigation, or apply to another index version.
@@ -224,34 +172,9 @@ before another query can hydrate that document. Unrelated documents still hydrat
 Display preparation is memoized by snapshot identity, avoiding repeated metadata parsing without
 reusing highlights from a previous query.
 
-## Offline search
-
-Enabling automatic offline articles also downloads the complete archive search index. The stable
-`search-manifest.json` describes its version, relative base URL, document count, byte total, facet
-vocabulary, and each required file's size and SHA256 digest. Immutable `pagefind/<version>/` URLs
-keep the runtime and chunks together. The build publishes no unversioned runtime aliases.
-The compact catalogue is network-first. Offline, the worker derives it from the same verified
-manifest that selected the complete index, so cached newer vocabulary cannot select an incomplete
-replacement. It does not require a separately retained catalogue file.
-
-The worker downloads into a protected cache with two concurrent slots and commits readiness only
-after all required files have been verified. Progress and article readiness are reported separately.
-An incomplete update retains the previous complete index. Interrupted downloads resume, quota
-failures are reported, and ordinary runtime eviction does not trim complete indexes. A missing
-resource invalidates readiness instead of turning an incomplete search into a successful zero count.
-
-Changing a positive article limit resizes article saving without downloading an unchanged index
-again. Setting the limit to zero cancels automatic downloads and removes their protected caches;
-ordinary browsing caches remain bounded independently.
-
-The full index contains searchable text from all retained articles. That does not make every reader
-page or its media available offline: results use the worker's verified saved-article list to distinguish
-saved pages. Search must not download every result page or media asset to make these annotations.
-
 ## Current contracts
 
-Custom templates must provide the documented Svelte roots and preference bootstrap. Preference
-imports require `{ "version": 1, "preferences": { ... } }`; shared links carry this envelope in
+Custom templates must keep the documented markers and the preference bootstrap. Preference imports
+require `{ "version": 1, "preferences": { ... } }`; shared links carry this envelope in
 `#aggr-state=`. Versionless payloads, prefixed import keys, and query-string preference imports are
 rejected. Stored Markdown is authoritative; builds do not replay historical renderers to repair it.
-

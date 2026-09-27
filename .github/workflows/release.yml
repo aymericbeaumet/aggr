@@ -22,7 +22,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: version
         env:
           TAG: ${{ github.ref_name }}
@@ -54,7 +54,7 @@ jobs:
           - { name: windows-arm64, os: windows-11-arm }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/native-deps
       - uses: Swatinem/rust-cache@v2
@@ -69,10 +69,11 @@ jobs:
           ARCHIVE: aggr-${{ matrix.name }}
         run: |
           mkdir dist
+          cp LICENSE target/release/
           if [[ "$ARCHIVE" == aggr-windows-* ]]; then
-            (cd target/release && 7z a "../../dist/$ARCHIVE.zip" aggr.exe)
+            (cd target/release && 7z a "../../dist/$ARCHIVE.zip" aggr.exe LICENSE)
           else
-            tar -C target/release -czf "dist/$ARCHIVE.tar.gz" aggr
+            tar -C target/release -czf "dist/$ARCHIVE.tar.gz" aggr LICENSE
           fi
       - uses: actions/upload-artifact@v7
         with:
@@ -84,7 +85,7 @@ jobs:
     needs: [verify, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v7
         with:
           path: dist

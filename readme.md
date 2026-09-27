@@ -1,160 +1,129 @@
 # aggr [![ci](https://github.com/aymericbeaumet/aggr/actions/workflows/ci.yml/badge.svg)](https://github.com/aymericbeaumet/aggr/actions/workflows/ci.yml)
 
-Your own git-backed snapshot of the feeds you follow.
+[**Live demo**](https://aggr.aymericbeaumet.com) · [Create your reader](#create-your-reader) · [Browse the archive](https://github.com/aymericbeaumet/aggr-instance/tree/aggr)
 
-Point aggr at the websites you read. It discovers their feeds, saves every new article once as
-readable Markdown on an append-only git branch, and publishes a fast, searchable, installable
-static reader. No service, no database, no account, no tracking: the repository and its history
-are yours.
+A self-updating feed reader that saves articles as Markdown in your Git repository and publishes
+a searchable static site. Follow websites, read on any device, and keep a copy when the original
+disappears. No application server or separate database service to administer.
 
-## Try it in two minutes
+Open source under the MIT license; see [the license](#license).
 
-[Fork the working instance](https://github.com/aymericbeaumet/aggr-instance/fork), then:
+<p>
+  <img alt="The aggr reader on a desktop browser: a numbered feed of articles with their source, category, age and reading time" src="docs/images/reader-desktop.png" width="61%">
+  <img alt="The same reader on a phone: the same articles, with feed, browse and preferences tabs along the bottom" src="docs/images/reader-mobile.png" width="20%">
+</p>
 
-1. Open the fork's **Actions** tab and enable workflows if GitHub asks.
-2. Edit `aggr.toml` on the default branch.
-3. Open **Actions → aggr → Run workflow**.
+## Why aggr?
 
-That's it. The workflow enables GitHub Pages, appends fetched items to the orphan `aggr` branch,
-builds the reader, and deploys it. Scheduled workflows in a fork must remain enabled.
+- **Own the archive.** Readable Markdown, original links, and capture dates live on a separate
+  Git branch. Inspect, back up, or move the files with ordinary Git tools.
+- **Hermetic after a sync.** Fetching is the only step that reaches the network. Once a sync has
+  run, the site is a pure function of your repository and the binary: article text, images and the
+  search index are all built from files you already have, so a rebuild is reproducible, works
+  offline, and cannot be changed by a publisher editing or deleting the original.
+- **Run your own reader.** A small `aggr.toml` and a scheduled workflow fetch sources and publish
+  static files. GitHub Pages is the ready-made path; other Git and static hosts work too.
+- **Keep reading.** Full-text search, mobile installation, keyboard navigation, and every page
+  you have opened still readable with no network. New deployments update open feeds without
+  interrupting an article.
+- **Follow other instances.** Copy selected articles from another aggr repository into your own
+  independent archive, preserving their original links.
 
-Prefer to run it locally first?
+Fetching runs on a schedule; the open reader checks for completed deployments every 15 seconds.
+This is automatic updating, not a real-time delivery guarantee.
+
+## Create your reader
+
+1. [Fork the working instance](https://github.com/aymericbeaumet/aggr-instance/fork), keeping
+   **Copy the main branch only** selected to start without the demo's archive.
+2. Replace `aggr.toml` with the [small starter configuration](examples/starter.toml), then edit its
+   title and sources. A website URL is enough; aggr discovers the feed.
+3. In **Settings → Pages → Build and deployment**, set **Source** to **GitHub Actions**.
+4. Open **Actions**, enable workflows, and run **aggr** on `main`. When it finishes, open the
+   deployment link. Without a custom domain, it is `https://<you>.github.io/<repo>/`.
+
+Edit the configuration before enabling Actions so the first run uses your sources.
+The starter considers at most ten recent entries per source per run. Builds default to a 1 GB
+limit: all article text takes priority, recent images keep their archived quality, and images
+older than 30 days are compressed for publication. Media that cannot fit stays linked to its
+publisher. The original Git archive is unchanged. See [build budgets](docs/build-budget.md).
+The default GitHub setup publishes the reader and its archive publicly.
+
+To try it locally instead:
 
 ```sh
-mise use -g github:aymericbeaumet/aggr   # or grab a binary from Releases
+mise use -g github:aymericbeaumet/aggr   # or download a binary from Releases
 mkdir reads && cd reads && git init
 aggr init
-aggr dev                                  # http://127.0.0.1:7319
+aggr dev                             # http://127.0.0.1:7319
 ```
 
-## Write your reading list
-
-A website URL is enough — no need to hunt for the feed:
-
-```toml
-[site]
-title = "My reads"
-
-[[sources]]
-category = "programming"
-url = """
-https://blog.rust-lang.org
-https://martinfowler.com
-https://simonwillison.net
-https://www.youtube.com/@ThePrimeTimeagen
-"""
-
-[[sources]]
-category = "news"
-url = "https://hnrss.org/frontpage?points=100"
-```
-
-aggr tries the URL as a feed, follows feed-discovery metadata, probes the conventional endpoints,
-and falls back to reading the page's article list. Podcast and video show pages (Apple Podcasts,
-Spotify, Deezer, YouTube, SoundCloud, and more) resolve to the publisher's real RSS. OPML files,
-URL lists, other aggr instances, and other `aggr.toml` files all work as sources too.
-
-Options like `name`, `labels`, `images`, and `previews` go in the same table. See
-[configuring sources](docs/sources.md) and the commented
-[`config.default.toml`](config.default.toml), which is the complete reference.
-
-## What you get
-
-- a responsive, installable PWA with unified search, comfortable typography, keyboard navigation,
-  and a precached shell; updates arrive without interrupting reading;
-- build-time full-text search over clean article prose, including lookup by a pasted original URL;
-- a recent feed plus source, category, and `#tag` archives, each with Atom, RSS, and JSON Feed;
-- original-page extraction by default, keeping the upstream URL and capture time as provenance;
-- local, lossless copies of safe article images, with responsive renditions and instant previews;
-- selectable offline reading of the newest articles, images included;
-- immutable item versions in append-only git history, for as long as that history is retained.
-
-aggr preserves readable article or feed content rather than a complete copy of the original
-website. Scripts, styles, page chrome, and response headers are excluded. If an original-page fetch
-fails, the saved item may contain feed content, a summary, or only its metadata.
-
-Everyone builds an independent snapshot. Public instances expose the same discovery format, and
-one instance can copy items from another, so useful parts of the web can survive in many ordinary
-git repositories instead of one proprietary service.
-
-## Commands
-
-| Command | Purpose |
-|---|---|
-| `aggr init [--github] [--defaults]` | Write a minimal config, optionally the GitHub workflow; `--defaults` copies the full reference config. |
-| `aggr sync [--fetch-only] [--dry-run] [--refresh] [--reprocess]` | Fetch new items. Normally commit and push them; `--fetch-only` writes locally without either, while `--dry-run` writes nothing. |
-| `aggr build [--release] [--out DIR] [--data-ref REF]` | Sync and render, or render a pinned data ref without fetches, commits, or pushes. |
-| `aggr dev [--release] [--port 7319]` | Sync and build in an isolated cache, serve from memory, watch, and live-reload. Never commits or pushes. |
-| `aggr clean [--dry-run] [--out DIR]` | Remove disposable dev state, build cache, and owned output. `--dry-run` lists exact targets. |
-| `aggr check` | Validate the config and probe every source. |
-| `aggr completions <SHELL>` | Generate shell completions. |
-
-`--reprocess` re-derives stored bodies from the HTML retained beside them, so content cleanup
-added since an item was captured reaches the archive without refetching. Use it after upgrading.
-
-Build uses a repository-local cache; dev uses a separate OS-standard cache keyed by the config
-path, so repeated runs are nearly instant. Cleanup only ever touches targets it can prove
-disposable: archived articles, git refs and history, and hand-made files are never removed.
+`dev` does not commit or push. See [source configuration](docs/sources.md) for OPML, podcasts,
+video channels, collections, and image options, or [hosting](docs/hosting.md) for deployment.
 
 ## Git is the database
 
-Your primary branch keeps only the config, optional provider workflow, and optional theme. The
-unrelated `aggr` branch stores Markdown, stripped HTML, source validators, and append-only dedupe
-keys. A no-op sync creates no commit, one broken source does not block healthy sources, and the
-data branch is never force-pushed. Deleting or retaining items creates ordinary commits, so
-versions in older reachable commits remain intact.
+```text
+Your sources → scheduled sync → Markdown on the aggr branch → static reader
+```
 
-The precise branch, ref, recovery, concurrency, and hand-editing contract is in
-[the git model](docs/git-model.md).
+The main branch holds configuration; the unrelated `aggr` branch holds captured articles and
+optional media. A no-op sync creates no commit. One broken source does not stop healthy sources.
+Data history is append-only: retention removes files from the current tree, but older commits
+remain available. It does not shrink the accumulated Git history.
 
-## Documentation
+```text
+items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.md
+items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.html
+items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.preview-202cd0284a4a.webp
+---
+title: Announcing a Maintainer in Residence
+link: https://blog.rust-lang.org/2026/09/22/maintainer-in-residence/
+source: blog-rust-lang-org
+published: 2026-09-22T00:00:00Z
+first_seen: 2026-09-24T00:01:38Z
+content: extracted
+---
+```
 
-| | |
+[Inspect real stored files](https://github.com/aymericbeaumet/aggr-instance/tree/aggr) or read the
+[Git contract](docs/git-model.md). In a September 2026 snapshot, the 50-source demo held 2,314
+article Markdown files and 4.38 GB of archive files, 99% of those bytes in images. Six incremental
+runs had a median render time of 41 seconds and a total job time of 6 minutes 12 seconds.
+See [the measurements and hosting limits](docs/benchmarks.md) before choosing your configuration.
+
+## Know the tradeoffs
+
+- Reading state and preferences stay in each browser; there is no cross-device read-state sync.
+- Captures preserve readable content, not complete websites. Failed extraction can leave a feed
+  summary or metadata; reading offline covers the pages you have opened, not the whole archive, and
+  never the video or audio they embed.
+- Public hosting republishes captured content. Search-engine indexing is opt-in, but `noindex`
+  is not access control or permission to republish. Original links and attribution remain visible.
+  See [publication and privacy](docs/hosting.md#publication-and-search-indexing).
+- Git history and saved media grow. Retention bounds the current archive, not past commits;
+  hosting limits and scheduled-run delays still apply.
+
+## How is it different?
+
+| Project | Focus |
 |---|---|
-| [Configuring sources](docs/sources.md) | source syntax, discovery, podcasts, images, previews, collections, mirroring |
-| [The reader](docs/reading.md) | search, sharing a passage, preferences, offline, keyboard |
-| [Hosting](docs/hosting.md) | GitHub Pages, scheduling, other git/static hosts, discoverability |
-| [Themes](docs/themes.md) | template contract and reader behaviour |
-| [Git model](docs/git-model.md) | branch, ref, recovery, and hand-editing contract |
-| [Interoperability](docs/interoperability.md) | discovery, provenance, and preservation boundaries |
-| [Performance](docs/performance.md) | fetch/build pipeline limits and caches |
-| [Client development](docs/client.md) | frontend commands, ownership, and search contracts |
+| [Miniflux](https://miniflux.app) / [FreshRSS](https://freshrss.org) | Server-backed feed reading. They offer APIs or exports; aggr stores the archive directly as files in Git and serves a static reader. |
+| [Bubo](https://github.com/georgemandis/bubo-rss) | A minimal static page of feed links. aggr also captures article content for reading and archiving. |
+| [wallabag](https://wallabag.org) | Saving articles to read later. aggr centers on following sources automatically. |
+| [ArchiveBox](https://github.com/ArchiveBox/ArchiveBox) | Broader web preservation, including scheduled feed imports. aggr centers on a feed reader and Markdown history in Git. |
 
-## Contributing
+## Documentation and contributing
 
-```sh
-npm ci --prefix web
-make check
-cargo run -- dev --config examples/aggr.toml
-```
+[Sources](docs/sources.md) · [Reader](docs/reading.md) · [Commands](docs/commands.md) ·
+[Hosting](docs/hosting.md) · [Themes](docs/themes.md) · [Git model](docs/git-model.md) ·
+[Interoperability](docs/interoperability.md) · [Performance](docs/performance.md)
 
-A theme is a `templates/` plus `static/` directory rendered with
-[MiniJinja](https://github.com/mitsuhiko/minijinja); project-local files override the embedded
-default, so changing one template does not require copying the rest. The reader uses Svelte,
-TypeScript, and Vite, while Rust generates the complete static site. Frontend contributors rebuild
-the committed assets with `make client-build`, or use `make client-dev` with
-`AGGR_VITE_URL=http://127.0.0.1:5173` for live updates. Normal Cargo builds and published binaries
-use embedded assets and require no Node runtime.
-
-The browser regression suite uses a local ChromeDriver and a temporary, pinned article archive:
-
-```sh
-chromedriver --port=9515 --allowed-ips=127.0.0.1
-# In another terminal:
-AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser -- --ignored
-```
-
-Set `AGGR_CHROME_BINARY` if Chrome is outside its usual location and `AGGR_BROWSER_TIMEOUT_SECS`
-(default 45) when a loaded machine needs longer waits. CI installs matching browser and driver
-versions; failure screenshots and logs are saved under `target/browser-artifacts/`.
-
-Issues and pull requests are welcome. If aggr improves your reading workflow, star the repository
-and share your reader—the easiest way for someone else to begin is often to fork one that already
-works.
+Rust generates the site; the browser client is hand-written HTML, CSS and JavaScript with no build
+step and no dependencies. See [contributing](CONTRIBUTING.md) and
+[client development](docs/client.md).
 
 ## License
 
-[MIT](LICENSE), copyright Aymeric Beaumet. Dependency licenses, RustSec advisories, and duplicate
-crate versions are checked against [`deny.toml`](deny.toml) with `cargo deny check`, which CI runs
-in its `deps` job; the notices of the embedded client bundle are in
-[`themes/default/static/client.LICENSE`](themes/default/static/client.LICENSE).
+[MIT](LICENSE), for every version published.
+See [licensing](docs/licensing.md) for contribution terms and third-party notices.

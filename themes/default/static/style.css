@@ -119,33 +119,6 @@ body {
   color: var(--fg);
   font: 16px/1.5 var(--font);
 }
-.pull-refresh {
-  position: fixed;
-  z-index: 1;
-  top: max(0.35rem, env(safe-area-inset-top));
-  left: 50%;
-  min-height: 2rem;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  color: var(--nav-fg);
-  font-size: 0.8rem;
-  font-weight: 650;
-  white-space: nowrap;
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(-50%, -130%) scale(0.96);
-  transition: opacity 140ms ease, transform 180ms ease;
-}
-.pull-refresh-icon { font-size: 1.05rem; line-height: 1; transition: transform 160ms ease; }
-html[data-pull-state="pulling"] .pull-refresh,
-html[data-pull-state="armed"] .pull-refresh,
-html[data-pull-state="refreshing"] .pull-refresh {
-  opacity: 1;
-  transform: translate(-50%, 0) scale(1);
-}
-html[data-pull-state="armed"] .pull-refresh-icon { transform: rotate(180deg); }
-html[data-pull-state="refreshing"] .pull-refresh-icon { animation: pull-refresh-spin 700ms linear infinite; }
 html[data-pull-state="pulling"] .top,
 html[data-pull-state="pulling"] .main,
 html[data-pull-state="armed"] .top,
@@ -160,38 +133,8 @@ html[data-pull-state="settling"] .main {
   transform: translateY(var(--pull-distance, 0));
   transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
 }
-@keyframes pull-refresh-spin { to { transform: rotate(360deg); } }
 [hidden] { display: none !important; }
 ::selection { background: color-mix(in srgb, var(--warm) 32%, transparent); color: var(--fg); }
-
-/* Selecting article text offers one action: a link that reselects the same words for whoever
-   opens it. It follows the selection and never covers it. */
-.selection-share {
-  position: absolute;
-  z-index: 3;
-  display: flex;
-  padding: 0.2rem;
-  border-radius: 0.5rem;
-  background: var(--nav-bg);
-  box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
-}
-.selection-share[hidden] { display: none; }
-.selection-share-action {
-  min-height: 2rem;
-  padding: 0 0.85rem;
-  border: 0;
-  border-radius: 0.35rem;
-  background: none;
-  color: var(--nav-fg);
-  font: inherit;
-  font-size: 0.8rem;
-  line-height: 2rem;
-  cursor: pointer;
-}
-.selection-share-action:is(:hover, :focus-visible) { background: rgb(255 255 255 / 0.14); }
-@media (prefers-reduced-motion: no-preference) {
-  .selection-share { transition: opacity 0.12s ease; }
-}
 a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 a, button, input, select { -webkit-tap-highlight-color: color-mix(in srgb, var(--accent) 22%, transparent); }
@@ -271,6 +214,11 @@ pre code { background: none; padding: 0; }
 .brand-title { text-transform: lowercase; }
 .brand-icon { display: block; width: 1em; height: 1em; object-fit: contain; object-position: center; align-self: center; flex: 0 0 auto; }
 .nav .config-link { padding-right: 0; }
+/* The arrow glyph has almost no left bearing, so a plain space between it and the label reads as
+   none. Give every external marker explicit room instead. */
+.config-link > span[aria-hidden="true"],
+.article-resources a > span[aria-hidden="true"],
+.interactive-reader figcaption a > span[aria-hidden="true"] { margin-inline-start: 0.2em; }
 .nav a:focus-visible { background: color-mix(in srgb, var(--nav-fg) 16%, var(--nav-bg)); text-decoration: underline; }
 html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .browse-intro { max-width: 65ch; margin: 0.45rem 0 0; line-height: 1.5; }
@@ -287,60 +235,11 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .browse-entry-meta > span + span::before { content: "·"; margin-right: 0.4em; }
 .browse-entry-error { margin-top: 0.2rem; }
 
-.connection-status {
-  position: fixed;
-  z-index: 4;
-  left: max(0.75rem, env(safe-area-inset-left));
-  right: max(0.75rem, env(safe-area-inset-right));
-  bottom: max(0.75rem, env(safe-area-inset-bottom));
-  width: auto;
-  max-width: 40rem;
-  margin-inline: auto;
-  min-height: var(--tap-target);
-  padding: 0.35rem 0.75rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.75rem;
-  color: var(--fg);
-  background: color-mix(in srgb, var(--warm) 15%, var(--panel));
-  border: 1px solid var(--control-border);
-  border-radius: 6px;
-  box-shadow: 0 0.35rem 1.25rem rgb(0 0 0 / 0.25);
-  font-size: 0.875rem;
-}
-.connection-status button { min-height: var(--tap-target); padding: 0 0.75rem; color: var(--fg); background: var(--panel); border: 1px solid var(--control-border); border-radius: 4px; font: inherit; cursor: pointer; }
-.connection-status.is-update {
-  left: auto;
-  width: max-content;
-  max-width: calc(100vw - max(0.75rem, env(safe-area-inset-left)) - max(0.75rem, env(safe-area-inset-right)));
-  min-height: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  box-shadow: none;
-}
-.connection-status #pwa-refresh {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  min-height: 44px;
-  min-width: 0;
-  max-width: 100%;
-  padding: 0.5rem 1rem;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--warm) 18%, var(--panel));
-  box-shadow: 0 0.2rem 0.8rem rgb(0 0 0 / 0.18);
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-.connection-status #pwa-refresh:hover { background: color-mix(in srgb, var(--warm) 30%, var(--panel)); }
-
 /* keyboard help */
 .shortcut-help {
   position: fixed;
   inset: 0;
-  width: min(42rem, calc(100% - 2rem));
+  width: min(62rem, calc(100% - 2rem));
   max-height: calc(100dvh - max(1rem, env(safe-area-inset-top)) - max(1rem, env(safe-area-inset-bottom)));
   margin: auto;
   padding: 0;
@@ -368,9 +267,16 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .shortcut-list dt, .shortcut-list dd { margin: 0; padding: 0.3rem 0; }
 .shortcut-list dd { color: var(--muted); overflow-wrap: anywhere; }
 .shortcut-list kbd { display: inline-block; min-width: 1.6em; margin-right: 0.15rem; padding: 0.08rem 0.3rem; text-align: center; color: var(--fg); background: var(--code); border: 1px solid var(--faint); border-radius: 3px; box-shadow: 0 1px 0 var(--faint); }
-.key-alternatives { display: inline-flex; align-items: center; flex-wrap: wrap; max-width: 10rem; gap: 0.15rem 0; }
+/* Alternatives for one action read as one mapping: they stay on a line and the key column, sized
+   to its widest content, grows to hold them rather than wrapping them into a second row. */
+.key-alternatives { display: inline-flex; align-items: center; flex-wrap: nowrap; white-space: nowrap; gap: 0.15rem 0; }
 .key-alternatives small { margin: 0 0.35rem 0 0.2rem; color: var(--muted); font-size: 0.78em; }
 .key-pair { display: inline-flex; align-items: center; white-space: nowrap; }
+/* A mapping that differs by platform shows the one the reader can actually press. The other
+   platform's is the fallback, so a page whose enhancement never ran still names a working key. */
+[data-platform-key="apple"] { display: none; }
+[data-platform="apple"] [data-platform-key="apple"] { display: inline-flex; }
+[data-platform="apple"] [data-platform-key="other"] { display: none; }
 .key-pair small { margin: 0 0.25rem 0 0.1rem; color: var(--muted); font-size: 0.78em; }
 
 /* content column */
@@ -407,12 +313,17 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .row {
   --row-divider: var(--faint);
   --row-inset: 1.25rem;
+  /* Rows bleed past the column by this much; the rule and the new-entry highlight stop at the
+     column edge, flush with the search field, and the copy keeps the same clearance from the
+     rule's end as from its start. */
+  --row-bleed: 0.75rem;
   --rank-font: 0.875rem/1.4 var(--mono);
   --row-rule-start: calc((var(--row-inset) - var(--rank-indent, 0ch) + 3px) / 2);
+  --row-rule-end: var(--row-bleed);
   position: relative;
   isolation: isolate;
-  margin-inline: -0.75rem;
-  padding: var(--row-padding) var(--row-inset);
+  margin-inline: calc(-1 * var(--row-bleed));
+  padding: var(--row-padding) calc(var(--row-rule-end) + var(--row-inset) - var(--row-rule-start)) var(--row-padding) var(--row-inset);
   scroll-margin-block: 4rem 6rem;
 }
 .row::before {
@@ -430,8 +341,8 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .row::after, .row > .cell::before {
   content: "";
   position: absolute;
-  inset: 0 var(--row-inset);
-  inset-inline-start: var(--row-rule-start);
+  inset-block: 0;
+  inset-inline: var(--row-rule-start) var(--row-rule-end);
   font: var(--rank-font);
   pointer-events: none;
 }
@@ -444,8 +355,14 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
   z-index: -1;
   transition: background-color 5s ease-out;
 }
-html.swup-enabled .row:has([data-row-open]), html.swup-enabled .article-more-card { cursor: pointer; }
-html.swup-enabled :is(.row, .article-more-card):where(:hover):not(:has(a:not(.title):hover, button:hover, input:hover, select:hover, textarea:hover, label:hover, summary:hover, [role="button"]:hover, [role="link"]:hover, [contenteditable]:hover)) .title { text-decoration: underline; }
+.row:has([data-row-open]), .article-more-card { cursor: pointer; }
+:is(.row, .article-more-card):where(:hover):not(:has(a:not(.title):hover, button:hover, input:hover, select:hover, textarea:hover, label:hover, summary:hover, [role="button"]:hover, [role="link"]:hover, [contenteditable]:hover)) .title { text-decoration: underline; }
+/* The whole row opens its article: one stretched link, with native modifier and middle clicks.
+   Both cards below stretch their link the same way, and both must contain it: an overlay with no
+   positioned ancestor of its own covers the article it sits under instead of its own card. */
+.row:has([data-row-open]), .article-more-card { position: relative; }
+.row [data-row-open]::after, .article-more-card .article-more-link::after { content: ""; position: absolute; inset: 0; z-index: 0; }
+.row :is(.meta, .preview-media), .row a:not(.title), .article-more-card .meta { position: relative; z-index: 1; }
 .row.is-selected .title,
 .row.is-selected .title:hover,
 .row.is-selected .title:focus-visible { text-decoration: none; }
@@ -513,12 +430,12 @@ body[data-kind="item"] .main {
 .itemhead::before { content: ""; position: absolute; z-index: -1; inset: 0; background: var(--bg); box-shadow: 0 1px 0 var(--faint); }
 .itemhead-progress { position: absolute; left: 0; bottom: -1px; width: 100%; height: 1px; background: color-mix(in srgb, var(--warm) 52%, var(--faint)); transform: scaleX(0); will-change: transform; transform-origin: left; pointer-events: none; }
 .itemhead-fade { position: absolute; top: calc(100% + 1px); left: 0; width: 100%; height: 3rem; background: linear-gradient(to bottom, var(--bg), color-mix(in srgb, var(--bg) 65%, transparent) 45%, transparent); opacity: var(--header-progress, 0); pointer-events: none; }
-.itemhead h1 { max-width: none; --title-scale: calc(1 - 0.4 * var(--header-progress, 0)); height: calc(var(--header-title-height) * var(--title-scale)); font-size: clamp(1.65rem, 4vw, 2.25rem); line-height: 1.2; margin: 0 0 calc(var(--header-title-gap, 0.65rem) * (1 - var(--header-progress, 0)) + 0.2rem * var(--header-progress, 0)); letter-spacing: -0.025em; overflow-wrap: anywhere; text-wrap: pretty; }
+.itemhead h1 { max-width: none; font-size: clamp(1.65rem, 4vw, 2.25rem); line-height: 1.2; margin: 0 0 calc(var(--header-title-gap, 0.65rem) * (1 - var(--header-progress, 0)) + 0.2rem * var(--header-progress, 0)); letter-spacing: -0.025em; overflow-wrap: anywhere; text-wrap: pretty; }
 .itemhead-title { display: block; transform: scale(var(--title-scale)); transform-origin: top left; }
 .itemhead-title-term { display: inline-block; width: max-content; max-width: 100%; vertical-align: top; }
 .itemhead h1:focus { outline: none; }
 .tag { color: inherit; background: none; border: 0; padding: 0; border-radius: 0; font-weight: 400; }
-.item-tags { height: calc(var(--item-tags-height) * (1 - var(--header-progress, 0))); overflow: hidden; opacity: calc(1 - var(--header-progress, 0)); margin-top: calc(0.45rem * (1 - var(--header-progress, 0))); font-size: 0.875rem; line-height: 1.2; color: var(--muted); }
+.item-tags { overflow: hidden; opacity: calc(1 - var(--header-progress, 0)); margin-top: calc(0.45rem * (1 - var(--header-progress, 0))); font-size: 0.875rem; line-height: 1.2; color: var(--muted); }
 .item-tags-inner { display: flex; flex-wrap: wrap; gap: 0.3rem 0.45rem; }
 .article-resources { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.45rem 1rem; margin: -0.25rem 0 1.5rem; font-size: 0.8125rem; line-height: 1.5; }
 .article-resources-label { color: var(--muted); }
@@ -603,13 +520,20 @@ body[data-kind="item"] .main {
 .body p:has(> :is(img, picture, video, iframe):first-child) { text-indent: 0; }
 .body ul, .body ol { padding-inline-start: 1.55em; }
 .body li + li { margin-top: 0.25em; }
-.body li > p { margin-block: 0.35em; }
+.body li > :is(ul, ol) { margin-block: 0.25em 0; }
+.body li > p { margin-block: 0.25em; }
+.body li > p:first-child { margin-block-start: 0; }
+.body li > p:last-child { margin-block-end: 0; }
 .body :is(h1, h2, h3, h4, h5, h6) { line-height: 1.3; margin: 1.75em 0 0.6em; text-wrap: pretty; break-after: avoid; }
 /* Headings are anchors, not links: a hover marker sits in the margin without moving the title. */
 .body :is(h1, h2, h3, h4, h5, h6)[id] { position: relative; cursor: pointer; }
-.body :is(h1, h2, h3, h4, h5, h6)[id]::before { content: "#"; position: absolute; right: 100%; top: 0; margin-right: 0.3em; color: var(--muted); font-weight: 400; opacity: 0; pointer-events: none; }
-.body :is(h1, h2, h3, h4, h5, h6)[id]:hover::before { opacity: 1; }
-.body :is(h1, h2, h3, h4, h5, h6)[id]:target::before { opacity: 1; color: var(--accent-strong); }
+/* The whole heading is the way back to it, so it points like one; the marker beside it stays the
+   visible affordance and the thing a reader can copy. */
+.body :is(h1, h2, h3, h4, h5, h6)[id] { cursor: pointer; }
+.body :is(h1, h2, h3, h4, h5, h6)[id] :is(a:not(.heading-anchor), button, code) { cursor: auto; }
+.body .heading-anchor { position: absolute; right: 100%; top: 0; margin-right: 0.3em; color: var(--muted); font-weight: 400; text-decoration: none; opacity: 0; cursor: pointer; }
+.body :is(h1, h2, h3, h4, h5, h6):hover > .heading-anchor, .body .heading-anchor:focus-visible { opacity: 1; }
+.body :is(h1, h2, h3, h4, h5, h6)[id]:target > .heading-anchor { opacity: 1; color: var(--accent-strong); }
 .body .article-figure { margin: 1.5em 0; }
 .body .article-figure > .article-picture { margin-block: 0; }
 .body figcaption { margin-top: 0.6em; color: var(--muted); font-size: 0.85em; font-style: italic; line-height: 1.5; text-align: center; text-wrap: pretty; }
@@ -646,11 +570,23 @@ body[data-kind="item"] .main {
 .body td, .body th { border: 1px solid var(--faint); padding: 0.25em 0.5em; }
 
 /* Comrak's standard footnotes stay compact and easy to navigate on every viewport. */
-.body .footnote-ref { font-size: 0.72em; line-height: 0; vertical-align: super; }
-.body .footnote-ref a, .body .footnote-backref { color: var(--accent-strong); text-decoration: none; }
+.body :is(.footnote-ref, .citation-ref) { font-size: 0.72em; line-height: 0; vertical-align: super; }
+.body :is(.footnote-ref, .citation-ref) a, .body .footnote-backref { color: var(--accent-strong); text-decoration: none; }
 .body .footnotes { clear: both; margin-top: 1.75rem; padding-top: 0.65rem; color: var(--muted); border-top: 1px solid var(--faint); font-size: 0.875rem; line-height: 1.5; }
 .body .footnotes ol { margin: 0; padding-inline-start: 1.4rem; }
-.body .footnotes li:target { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+/* Following a note, or a note's way back, says which one: the pair lights up wherever it is,
+   whether the notes are a list under the article or margin notes beside it. `:target` carries it
+   without JavaScript; `data-footnote-active` pairs the halves the fragment cannot reach. */
+.body .footnotes li:target,
+.body .footnotes li[data-footnote-active],
+.body .footnote-margin-note[data-footnote-active] { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.body .footnote-ref:has(a:target) + .footnote-margin-note { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.body :is(.footnote-ref, .citation-ref) a:target,
+.body :is(.footnote-ref, .citation-ref)[data-footnote-active] a {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 0.25em;
+  padding-inline: 0.25em;
+}
 .body .footnotes p { margin-block: 0.35rem; }
 
 /* Semantic notes become sidenotes only when the reading column has a real gutter. */
@@ -677,10 +613,6 @@ body[data-kind="item"] .main {
 .interactive-reader { margin: 0 0 1.5rem; }
 .interactive-frame { position: relative; width: 100%; height: clamp(24rem, 70svh, 48rem); overflow: hidden; background: var(--code); border: 1px solid var(--faint); border-radius: .4rem; }
 .interactive-frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
-.interactive-preview { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .5rem; padding: 1rem; text-align: center; }
-.interactive-preview[hidden] { display: none; }
-.interactive-preview small, .interactive-reader figcaption { color: var(--muted); font-size: .8rem; }
-.interactive-reader figcaption { margin-top: .5rem; }
 .article-more-link.title { margin-bottom: .3rem; font-size: var(--row-title-size); line-height: 1.3; }
 .sha { font-family: var(--mono); }
 
@@ -690,7 +622,7 @@ body[data-kind="item"] .main {
 .preferences input[type="checkbox"] { width: 1.25rem; height: 1.25rem; accent-color: var(--accent-strong); }
 .preferences .setting small { font-weight: 400; }
 .preferences-intro { margin: 0.35rem 0 1rem; color: var(--muted); font-size: 0.875rem; }
-.preferences-body { display: grid; gap: 1rem; }
+.preferences-body { display: grid; gap: 1.6rem; }
 .preferences-group { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; min-width: 0; padding: 0.6rem 1rem; border: 1px solid var(--faint); border-radius: 0.65rem; background: color-mix(in srgb, var(--panel) 65%, var(--bg)); }
 .preferences-group h2 { margin: 0; padding: 0.4rem 0 0.55rem; font-size: 0.875rem; color: var(--muted); font-weight: 650; }
 .preferences-group p { margin: 0; }
@@ -704,7 +636,6 @@ body[data-kind="item"] .main {
 .setting small { max-width: 34rem; margin-top: 0.15rem; color: var(--muted); font-size: 0.875rem; font-weight: 400; }
 .setting-label, .preferences-group-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; min-width: 0; }
 .setting-label > label { font-weight: 500; }
-.shortcut-setting a { display: inline-flex; align-items: center; min-height: var(--tap-target); text-decoration: underline; text-underline-offset: 0.2em; }
 .preference-help { display: inline-block; font-weight: 400; }
 .preference-help summary { display: grid; place-items: center; width: 1.5rem; height: 1.5rem; border: 1px solid var(--control-border); border-radius: 50%; color: var(--muted); font-size: 0.8rem; line-height: 1; cursor: help; list-style: none; }
 .preference-help summary::-webkit-details-marker { display: none; }
@@ -777,11 +708,12 @@ body[data-kind="item"] .main {
   .nav .brand { min-width: 0; }
   .brand-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .nav .config-link { white-space: nowrap; }
-  .connection-status { bottom: calc(var(--bottom-nav-offset) + 0.75rem); }
-  .connection-status.is-update { left: max(0.75rem, env(safe-area-inset-left)); }
   .article-more { grid-template-columns: 1fr; }
   .shortcut-groups { grid-template-columns: max-content minmax(0, 1fr); }
   .shortcut-groups section:nth-child(odd) dd { padding-right: 0; }
+  /* One line of alternatives needs room it does not have here, and a dialog that fits the screen
+     is worth more than a mapping on one line. */
+  .key-alternatives { flex-wrap: wrap; white-space: normal; }
 }
 
 @media (max-width: 22.5rem) {
@@ -806,8 +738,10 @@ body[data-kind="item"] .main {
   }
   .row .title { min-height: var(--tap-target); padding: 0.2rem 0; }
   .meta .domain { min-height: 2rem; }
+  .meta .domain a { display: inline-block; min-height: 2rem; align-content: center; }
   .meta > * { min-height: 2rem; }
   html[data-density="comfortable"] .meta .domain,
+  html[data-density="comfortable"] .meta .domain a,
   html[data-density="comfortable"] .meta > * { min-height: var(--tap-target); }
   .views a, .pager a {
     justify-content: center;
@@ -819,7 +753,7 @@ body[data-kind="item"] .main {
   .body .footnote-ref a { position: relative; }
   .body .footnote-ref a::before { content: ""; position: absolute; width: var(--tap-target); height: var(--tap-target); inset: 50% auto auto 50%; transform: translate(-50%, -50%); }
   .body .footnote-backref { display: inline-flex; align-items: center; justify-content: center; min-width: var(--tap-target); min-height: var(--tap-target); }
-  .domain, .page-header a, .meta a, .views a, .pager a { text-decoration: underline; text-underline-offset: 0.14em; }
+  .page-header a, .meta a, .views a, .pager a { text-decoration: underline; text-underline-offset: 0.14em; }
   .itemhead .meta a { text-decoration: none; }
 }
 
@@ -958,7 +892,7 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   .row::before { background: Highlight; forced-color-adjust: none; }
 }
 
-/* The tab surface meets the screen edge; only its controls clear the home indicator. */
+/* The fixed wrapper measures the floating tab surface and its home-indicator clearance. */
 .mobile-tabs { display: none; }
 [data-site-navigation] a { transition: none; -webkit-tap-highlight-color: transparent; }
 /* Navigation stays visible; search belongs to the feed it filters. */
@@ -969,7 +903,7 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
 .nav .menu-link, .nav .config-link { font-weight: 400; opacity: 1; }
 .nav a[aria-current] { text-decoration: underline; text-underline-offset: .18em; }
 .nav-separator { opacity: .5; font-weight: 400; }
-.feed-toolbar { min-width: 0; margin: 0.6rem 0 1rem; }
+.feed-toolbar { position: sticky; top: var(--top-nav-offset); z-index: 2; min-width: 0; margin: 0 0 1rem; padding: 0.6rem 0; background: var(--bg); }
 .feed-search { display: flex; align-items: center; margin: 0; width: 100%; min-width: 0; }
 /* One selector list for the server-rendered field and the mounted one, so their geometry cannot drift. */
 .feed-search input[type="search"], .search-input-line #q { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; color: var(--fg); background: var(--search-bg, var(--code)); border: 1px solid var(--faint); border-radius: .35rem; padding: .55rem 2.75rem .55rem .7rem; font: inherit; }
@@ -995,42 +929,53 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
 .search-control small { flex: none; color: var(--muted); }
 .search-control .search-query-help { position: absolute; z-index: 21; bottom: calc(100% + .4rem); inset-inline-start: 0; box-sizing: border-box; max-width: min(38rem, 100%); padding: .5rem .65rem; border: 1px solid var(--faint); border-radius: .35rem; color: var(--muted); background: var(--bg); box-shadow: 0 3px 12px #0002; font-size: .75rem; line-height: 1.5; }
 .search-control .search-query-help[hidden] { display: none; }
-.search-error, .search-offline { font-size: .85rem; margin: .4rem 0; }
+.search-error { font-size: .85rem; margin: .4rem 0; }
 .search-error { color: var(--warm); }
 .meta .source-resolved { color: var(--warm); }
 @media (max-width: 40rem) {
   .nav { column-gap: 0.2rem; }
   .nav-primary, .nav-actions { column-gap: 0.1rem; }
-  :root { --bottom-nav-offset: calc(50px + var(--mobile-safe-area)); }
+  :root { --bottom-nav-offset: calc(68px + var(--mobile-safe-area)); }
   .nav { flex-wrap: nowrap; }
   .nav .brand { flex: 1; overflow: hidden; }
   .nav .nav-primary, .footer { display: none; }
   .nav-actions { flex: none; }
-  /* Platform tab bars are a compact row above the home indicator, not a tall panel. */
   .mobile-tabs {
-    position: fixed; inset: auto 0 0; z-index: 5;
-    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-    padding: 0 env(safe-area-inset-right) var(--mobile-safe-area) env(safe-area-inset-left);
-    border-top: 1px solid var(--faint); background: var(--bg); color: var(--muted);
-    contain: layout paint;
+    position: fixed; inset: auto 0 0; z-index: 5; isolation: isolate;
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    padding: 4px max(20px, calc(env(safe-area-inset-right) + 4px)) calc(12px + var(--mobile-safe-area)) max(20px, calc(env(safe-area-inset-left) + 4px));
+    color: var(--muted); pointer-events: none;
+  }
+  /* The keyboard covers the bottom of the screen; the bar would float on top of it, over the
+     results being typed for. It keeps its box so nothing else moves. */
+  html.is-keyboard-open .mobile-tabs { visibility: hidden; }
+  .mobile-tabs::before {
+    content: ""; position: absolute; z-index: -1;
+    inset: 0 max(16px, env(safe-area-inset-right)) calc(8px + var(--mobile-safe-area)) max(16px, env(safe-area-inset-left));
+    border: 1px solid color-mix(in srgb, var(--fg) 16%, var(--faint)); border-radius: 999px;
+    background: var(--bg); box-shadow: 0 3px 16px #0002;
   }
   @supports (backdrop-filter: blur(20px)) {
-    .mobile-tabs {
-      background: color-mix(in srgb, var(--bg) 78%, transparent);
-      backdrop-filter: saturate(180%) blur(20px);
+    .mobile-tabs::before {
+      background: color-mix(in srgb, var(--bg) 88%, transparent);
+      backdrop-filter: saturate(150%) blur(20px);
     }
   }
   .mobile-tabs a {
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-    height: 49px; min-width: 0; padding: 3px 0; color: inherit;
-    font-size: 10px; font-weight: 500; line-height: 1.2; text-decoration: none;
-    letter-spacing: 0.01em;
+    display: grid; grid-template-rows: 24px 14px; align-content: center; justify-items: center; gap: 2px;
+    height: 52px; min-width: 0; padding: 0 3px; border-radius: 999px; color: inherit;
+    font-size: 10px; font-weight: 500; line-height: 14px; text-decoration: none;
+    letter-spacing: 0.01em; pointer-events: auto;
     touch-action: manipulation; -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
   }
-  .mobile-tabs a:active { opacity: 1; background: color-mix(in srgb, var(--warm) 12%, var(--bg)); }
-  /* Colour alone marks the current tab, the way a platform tab bar does. */
-  .mobile-tabs a[aria-current] { color: var(--warm); }
+  .mobile-tabs a > svg { display: block; width: 24px; height: 24px; align-self: center; }
+  .mobile-tabs a > span { display: block; line-height: 14px; white-space: nowrap; }
+  .mobile-tabs a:is(:hover, :focus, :active) { text-decoration: none; }
+  .mobile-tabs a[aria-current] { color: var(--warm); background: color-mix(in srgb, var(--fg) 10%, transparent); }
+  .mobile-tabs a:active, .mobile-tabs a[data-pressed] { opacity: 1; background: color-mix(in srgb, var(--warm) 20%, var(--bg)); }
   .mobile-tabs a:focus-visible { outline: 2px solid var(--warm); outline-offset: -3px; }
+  article[data-swipe-navigation] :is(p, h1, h2, h3, h4, h5, h6, li, blockquote):not(:has(pre, table, .table-scroll, audio, video, iframe, object, embed, canvas, [data-no-swipe])) { touch-action: pan-y pinch-zoom; }
   .mobile-tabs[data-keyboard-open] { visibility: hidden; pointer-events: none; }
   /* Touch reading: links read as links by colour, without the desktop underline, and taps do not
      flash the platform's default highlight rectangle. */
@@ -1040,17 +985,18 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   .feed-search input[type="search"] { font-size: 1rem; }
   .row .rank { display: none; }
   .row-heading { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }
-  html .row .row-copy > :is(.meta, .excerpt, .search-excerpt, .search-saved-status) { padding-left: 0; }
+  html .row .row-copy > :is(.meta, .excerpt, .search-excerpt) { padding-left: 0; }
   .row { --mobile-preview-size: 3rem; min-height: var(--tap-target); padding-block: max(var(--row-padding), 0.625rem); }
   html[data-density="comfortable"] .row { --mobile-preview-size: 3.5rem; }
   html .row .row-content { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 0.25rem 0.625rem; min-height: 0; }
   html:not([data-thumbnails="hide"]) .row .row-content:has(.preview-media) { grid-template-columns: minmax(0, 1fr) var(--mobile-preview-size); }
   .row .row-copy { display: contents; }
   .row .row-heading { grid-column: 1; grid-row: 1; }
-  .row .row-heading .title { line-height: 1.35; }
+  .row .row-heading .title { min-height: 0; padding: 0; line-height: 1.35; }
   .row .preview-media { grid-column: 2; grid-row: 1; width: var(--mobile-preview-size); height: var(--mobile-preview-size); }
-  .row .row-copy > :is(.meta, .excerpt, .search-excerpt, .search-saved-status) { grid-column: 1 / -1; }
+  .row .row-copy > :is(.meta, .excerpt, .search-excerpt) { grid-column: 1 / -1; }
   .row .meta { grid-row: 2; gap: 0 0.65em; font-size: 0.8125rem; line-height: 1.35; }
+  .row .meta > *, .row .meta .domain, .row .meta .domain a { min-height: 1.5rem; }
   .row .meta > .meta-field:has(> .domain) { flex-basis: 100%; font-size: 0.875rem; }
   .row .meta > .meta-field + .meta-field::before { content: none; }
   .row :is(.excerpt, .search-excerpt) { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
@@ -1065,11 +1011,95 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
 .document-placeholder { position: absolute; inset: 0; display: grid; place-content: center; color: var(--muted); text-align: center; }
 .document-placeholder svg { width: 3rem; height: 4rem; margin: 0 auto 0.5rem; fill: none; stroke: currentColor; stroke-width: 1.2; }
 .document-viewer { position: absolute; inset: 0; display: block; width: 100%; height: 100%; border: 0; }
-.document-reader figcaption { margin-top: 0.5rem; color: var(--muted); font-size: 0.875rem; }
+.document-fallback { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .5rem; min-height: 100%; padding: 1.5rem; background: var(--code); color: var(--fg); text-align: center; }
+.document-fallback p { margin: 0; }
+.document-fallback a { display: inline-flex; align-items: center; min-height: var(--tap-target); }
+.document-reader figcaption, .interactive-reader figcaption { margin-top: 0.5rem; color: var(--muted); font-size: 0.875rem; font-style: italic; text-align: center; }
 @media print { .document-frame { display: none; } }
 
 @media (forced-colors: active) {
-  .mobile-tabs a[aria-current] { color: LinkText; }
-  .mobile-tabs a:active { background: Highlight; color: HighlightText; }
+  .mobile-tabs::before { border-color: CanvasText; background: Canvas; }
+  .mobile-tabs a[aria-current] { color: LinkText; outline: 1px solid LinkText; outline-offset: -2px; }
+  .mobile-tabs a:active, .mobile-tabs a[data-pressed] { background: Highlight; color: HighlightText; }
 }
 @media print { .mobile-tabs { display: none; } }
+
+/* ---------------------------------------------------------------- platform behaviour */
+
+/* Cross-document navigation animates itself; motion preferences still win. */
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-motion="off"]) { view-transition-name: none; }
+  html:not([data-motion="off"]) .top { view-transition-name: top-nav; }
+  html:not([data-motion="off"]) .mobile-tabs { view-transition-name: mobile-tabs; }
+}
+html[data-motion="off"]::view-transition-group(*),
+html[data-motion="off"]::view-transition-old(*),
+html[data-motion="off"]::view-transition-new(*) { animation: none; }
+
+/* Reading progress and the folding article header follow the scroll position directly, with no
+   script and no per-frame work. Browsers without scroll timelines simply do not fold. */
+@property --header-progress {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+
+@supports (animation-timeline: scroll(root)) {
+  @media (prefers-reduced-motion: no-preference) {
+    html:not([data-motion="off"]) body[data-kind="item"] .itemhead-progress {
+      animation: aggr-reading-progress linear both;
+      animation-timeline: scroll(root block);
+    }
+  }
+  body[data-kind="item"] .itemhead {
+    animation: aggr-header-fold linear both;
+    animation-timeline: scroll(root block);
+    animation-range: 0 10rem;
+  }
+  /* The title is scaled rather than re-typeset: shrinking its font would re-wrap the lines, and
+     the header would jump by a whole line in the middle of the fold. Both it and the tags give up
+     their box against their own natural height, so nothing here has to count lines. */
+  body[data-kind="item"] .itemhead-title { display: block; transform-origin: left top; transform: scale(calc(1 - 0.4 * var(--header-progress, 0))); }
+  @supports (height: calc-size(auto, size)) {
+    body[data-kind="item"] .itemhead h1 { height: calc-size(auto, size * (1 - 0.4 * var(--header-progress, 0))); overflow: hidden; }
+    body[data-kind="item"] .item-tags { height: calc-size(auto, size * (1 - var(--header-progress, 0))); }
+  }
+  body[data-kind="item"] .item-tags-inner { min-height: 0; overflow: hidden; }
+}
+
+@keyframes aggr-reading-progress {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@keyframes aggr-header-fold {
+  to { --header-progress: 1; }
+}
+
+/* ---------------------------------------------------------------- search results */
+
+/* Ranks are numbered by the stylesheet, so the result list needs no per-row arithmetic. */
+.rows.search-results { counter-reset: rank var(--rank-offset, 0); }
+.rows.search-results .row { counter-increment: rank; }
+.rows.search-results .rank::before { content: counter(rank) "."; }
+
+/* A live query hides the static feed it replaces. */
+body[data-searching] [data-static-feed] { display: none; }
+
+/* The syntax reminder answers a question the reader is in the middle of asking, so it waits for
+   both halves of asking it: the field has their attention and the pointer is on it. Hovering on
+   the way past is not a question, and touch and keyboard never open it at all. */
+.search-query-help { display: none; }
+@media (hover: hover) and (pointer: fine) {
+  .search-control:has(#q:hover:focus) .search-query-help { display: block; }
+}
+
+.search-completions[hidden], .search-error[hidden], .search-clear[hidden] { display: none; }
+
+/* ---------------------------------------------------------------- interactive originals */
+
+.interactive-viewer { display: block; width: 100%; height: 100%; border: 0; }
+
+/* The preference controls are grouped only so they can be disabled until the script that saves
+   them is running; the grouping itself should be invisible. */
+.preferences-controls { min-width: 0; margin: 0; padding: 0; border: 0; }
+.preferences-controls:disabled { opacity: 0.6; }

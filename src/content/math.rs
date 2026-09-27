@@ -167,6 +167,15 @@ fn environment(chars: &[char], pos: &mut usize) -> Option<String> {
             | "split"
             | "multline"
             | "eqnarray"
+            | "equation"
+            // A matrix reads as its rows; the brackets around them are the shape, not the values.
+            | "matrix"
+            | "bmatrix"
+            | "pmatrix"
+            | "vmatrix"
+            | "Vmatrix"
+            | "Bmatrix"
+            | "smallmatrix"
     ) {
         return None;
     }
@@ -206,7 +215,16 @@ fn environment(chars: &[char], pos: &mut usize) -> Option<String> {
             out.push_str(text.trim());
         }
     }
-    Some(out)
+    // A matrix keeps the delimiters that say what it is; the rows alone would read as prose.
+    let (open, close) = match name.trim_end_matches('*') {
+        "bmatrix" => ("[", "]"),
+        "pmatrix" => ("(", ")"),
+        "vmatrix" => ("|", "|"),
+        "Vmatrix" => ("\u{2016}", "\u{2016}"),
+        "Bmatrix" => ("{", "}"),
+        _ => return Some(out),
+    };
+    Some(format!("{open}{out}{close}"))
 }
 
 /// The literal characters of the `{…}` group at `pos`, for names that must not be translated.
@@ -320,6 +338,7 @@ fn command(chars: &[char], pos: &mut usize) -> Option<String> {
         *pos += 1;
         return match first {
             '{' | '}' | '%' | '_' | '$' | '&' | '#' => Some(first.into()),
+            ' ' => Some(" ".into()),
             ',' | ';' | ':' | '!' => Some("\u{2009}".into()),
             '\\' => Some(" ".into()),
             '|' => Some("\u{2016}".into()),
@@ -348,6 +367,18 @@ fn command(chars: &[char], pos: &mut usize) -> Option<String> {
             }
             Some(format!("\u{221a}{}", parenthesized(&argument(chars, pos)?)))
         }
+        // `\mathcal{L}` is a letter in another hand; Unicode has that hand.
+        "mathcal" | "mathscr" => {
+            let inner = argument(chars, pos)?;
+            let mut letters = inner.chars();
+            let (Some(letter), None) = (letters.next(), letters.next()) else {
+                return None;
+            };
+            SCRIPT
+                .iter()
+                .find(|(from, _)| *from == letter)
+                .map(|(_, to)| (*to).to_string())
+        }
         "mathbb" => {
             let inner = argument(chars, pos)?;
             let mut letters = inner.chars();
@@ -359,16 +390,22 @@ fn command(chars: &[char], pos: &mut usize) -> Option<String> {
                 .find(|(from, _)| *from == letter)
                 .map(|(_, to)| (*to).to_string())
         }
+        // A font is presentation the reader's own type already provides; the argument is the text.
         "mathrm" | "mathit" | "mathbf" | "mathsf" | "mathtt" | "boldsymbol" | "bm" | "text"
-        | "textrm" | "textit" | "textbf" | "operatorname" => argument(chars, pos),
-        "hat" | "bar" | "vec" | "tilde" | "dot" | "ddot" | "overline" => {
+        | "textrm" | "textit" | "textbf" | "texttt" | "textsf" | "textnormal" | "emph"
+        | "operatorname" => argument(chars, pos),
+        "hat" | "bar" | "vec" | "tilde" | "dot" | "ddot" | "overline" | "widehat" | "widetilde"
+        | "overrightarrow" | "overleftarrow" => {
             let inner = argument(chars, pos)?;
             let mut letters = inner.chars();
             let (Some(letter), None) = (letters.next(), letters.next()) else {
                 return None;
             };
             let accent = match name.as_str() {
-                "hat" => '\u{302}',
+                "hat" | "widehat" => '\u{302}',
+                "overrightarrow" => '\u{20d7}',
+                "overleftarrow" => '\u{20d6}',
+                "widetilde" => '\u{303}',
                 "bar" | "overline" => '\u{304}',
                 "vec" => '\u{20d7}',
                 "tilde" => '\u{303}',
@@ -377,7 +414,8 @@ fn command(chars: &[char], pos: &mut usize) -> Option<String> {
             };
             Some(format!("{letter}{accent}"))
         }
-        "left" | "right" | "big" | "Big" | "bigl" | "bigr" | "Bigl" | "Bigr" => {
+        "left" | "right" | "big" | "Big" | "bigl" | "bigr" | "Bigl" | "Bigr" | "bigg" | "Bigg"
+        | "biggl" | "biggr" | "Biggl" | "Biggr" | "middle" => {
             // The delimiter follows: `\left(`, `\left\{`, or `\left.` for none.
             match chars.get(*pos)? {
                 '.' => {
@@ -394,9 +432,35 @@ fn command(chars: &[char], pos: &mut usize) -> Option<String> {
                 }
             }
         }
-        "quad" | "qquad" | "displaystyle" | "textstyle" | "scriptstyle" | "nonumber" => {
-            Some(" ".into())
+        // A box, a rule, a brace or a colour is presentation around the argument.
+        "boxed" | "underline" | "underbrace" | "overbrace" | "mathring" => argument(chars, pos),
+        // `\color{red}{x}` names the colour first; `\textcolor{red}{x}` too.
+        "color" | "textcolor" => {
+            let _colour = argument(chars, pos)?;
+            Some(argument(chars, pos).unwrap_or_default())
         }
+        // `\overset{a}{b}` and `\stackrel{a}{b}` set the first over the second; the second reads.
+        "overset" | "stackrel" | "underset" => {
+            let _over = argument(chars, pos)?;
+            argument(chars, pos)
+        }
+        "binom" | "dbinom" | "tbinom" => {
+            let upper = argument(chars, pos)?;
+            let lower = argument(chars, pos)?;
+            Some(format!("({upper} choose {lower})"))
+        }
+        "xrightarrow" | "xleftarrow" => {
+            let label = argument(chars, pos)?;
+            let arrow = if name == "xrightarrow" { "→" } else { "←" };
+            Some(if label.trim().is_empty() {
+                arrow.to_string()
+            } else {
+                format!(" {arrow}[{}] ", label.trim())
+            })
+        }
+        "quad" | "qquad" | "displaystyle" | "textstyle" | "scriptstyle" | "nonumber" | "small"
+        | "large" | "Large" | "LARGE" | "scriptsize" | "footnotesize" | "normalsize" | "limits"
+        | "nolimits" => Some(" ".into()),
         _ => SYMBOLS
             .iter()
             .find(|(from, _)| *from == name)
@@ -497,14 +561,63 @@ const SUBSCRIPTS: &[(char, char)] = &[
     ('x', 'ₓ'),
 ];
 
+/// `\mathcal` letters, as Unicode writes them. Only the letters a reader meets in prose.
+const SCRIPT: &[(char, char)] = &[
+    ('A', '𝒜'),
+    ('B', 'ℬ'),
+    ('C', '𝒞'),
+    ('D', '𝒟'),
+    ('E', 'ℰ'),
+    ('F', 'ℱ'),
+    ('G', '𝒢'),
+    ('H', 'ℋ'),
+    ('I', 'ℐ'),
+    ('J', '𝒥'),
+    ('K', '𝒦'),
+    ('L', 'ℒ'),
+    ('M', 'ℳ'),
+    ('N', '𝒩'),
+    ('O', '𝒪'),
+    ('P', '𝒫'),
+    ('Q', '𝒬'),
+    ('R', 'ℛ'),
+    ('S', '𝒮'),
+    ('T', '𝒯'),
+    ('U', '𝒰'),
+    ('V', '𝒱'),
+    ('W', '𝒲'),
+    ('X', '𝒳'),
+    ('Y', '𝒴'),
+    ('Z', '𝒵'),
+];
+
 const BLACKBOARD: &[(char, char)] = &[
+    ('A', '𝔸'),
+    ('B', '𝔹'),
+    ('C', 'ℂ'),
+    ('D', '𝔻'),
+    ('E', '𝔼'),
+    ('F', '𝔽'),
+    ('G', '𝔾'),
+    ('H', 'ℍ'),
+    ('I', '𝕀'),
+    ('J', '𝕁'),
+    ('K', '𝕂'),
+    ('L', '𝕃'),
+    ('M', '𝕄'),
     ('N', 'ℕ'),
-    ('Z', 'ℤ'),
+    ('O', '𝕆'),
+    ('P', 'ℙ'),
     ('Q', 'ℚ'),
     ('R', 'ℝ'),
-    ('C', 'ℂ'),
-    ('P', 'ℙ'),
-    ('E', '𝔼'),
+    ('S', '𝕊'),
+    ('T', '𝕋'),
+    ('U', '𝕌'),
+    ('V', '𝕍'),
+    ('W', '𝕎'),
+    ('X', '𝕏'),
+    ('Y', '𝕐'),
+    ('Z', 'ℤ'),
 ];
 
 const FUNCTIONS: &[&str] = &[
@@ -605,6 +718,28 @@ const SYMBOLS: &[(&str, &str)] = &[
     ("vdots", "⋮"),
     ("mid", "|"),
     ("vert", "|"),
+    ("lvert", "|"),
+    ("rvert", "|"),
+    ("lbrack", "["),
+    ("rbrack", "]"),
+    ("backslash", "\\"),
+    ("gt", ">"),
+    ("lt", "<"),
+    ("gets", "←"),
+    ("uparrow", "↑"),
+    ("downarrow", "↓"),
+    ("intercal", "ᵀ"),
+    ("ddots", "⋱"),
+    ("triangleq", "≜"),
+    ("succ", "≻"),
+    ("prec", "≺"),
+    ("bigoplus", "⨁"),
+    ("bigotimes", "⨂"),
+    ("circledast", "⊛"),
+    ("colonequals", "≔"),
+    ("mod", " mod "),
+    ("bmod", " mod "),
+    ("pmod", " mod "),
     ("Vert", "‖"),
     ("langle", "⟨"),
     ("rangle", "⟩"),
@@ -728,10 +863,18 @@ mod tests {
 
     #[test]
     fn unknown_tex_stays_as_source_in_a_code_span() {
-        let html = render_markdown("$\\begin{bmatrix} 1 & 0 \\end{bmatrix}$\n");
+        let html = render_markdown("$\\begin{tikzpicture} \\draw (0,0); \\end{tikzpicture}$\n");
+        assert!(html.contains("<code class=\"math\">"), "{html}");
+        // A matrix reads as its values, inside the delimiters that say it is one.
+        let matrix = render_markdown("$\\begin{bmatrix} 1 & 0 \\end{bmatrix}$\n");
         assert!(
-            html.contains("<code class=\"math\">\\begin{bmatrix} 1 &amp; 0 \\end{bmatrix}</code>"),
-            "{html}"
+            matrix.contains("<span class=\"math\">[1 0]</span>"),
+            "{matrix}"
+        );
+        let vector = render_markdown("$\\begin{pmatrix} x \\end{pmatrix}$\n");
+        assert!(
+            vector.contains("<span class=\"math\">(x)</span>"),
+            "{vector}"
         );
         assert_eq!(to_unicode("\\sqrt[3]{x}"), None);
         assert_eq!(to_unicode("{unclosed"), None);

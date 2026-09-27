@@ -14,12 +14,16 @@ pub(super) fn write(
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
     let syntaxes = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
     let bounded = code.len() <= 100 * 1024 && code.lines().all(|line| line.len() <= 2_000);
-    let detected = match language.and_then(hint_token) {
+    let token = language.and_then(hint_token);
+    let detected = match token.as_deref() {
+        Some("text" | "txt" | "plain" | "plaintext" | "none" | "nohighlight" | "no-highlight") => {
+            None
+        }
         // The publisher's own word for the language wins: a grammar may only be a close relative,
         // and a language Sublime has no grammar for still deserves its name on the block.
         Some(token) => Some(Detected {
-            syntax: grammar(syntaxes, &token),
-            label: display_name(&token),
+            syntax: grammar(syntaxes, token),
+            label: display_name(token),
         }),
         None => bounded.then(|| infer(syntaxes, code)).flatten(),
     };
@@ -52,9 +56,9 @@ pub(super) fn write(
     output.write_str("</span>")
 }
 
-/// The normalized language token a publisher declared, or `None` when there is no hint or the hint
-/// explicitly says the block is plain text.
-fn hint_token(hint: &str) -> Option<String> {
+/// Normalize publisher tokens without coupling accepted languages to the bundled grammar set.
+/// Plain-text tokens remain explicit so they can override inheritance and content inference.
+pub(super) fn hint_token(hint: &str) -> Option<String> {
     let token = hint.split_whitespace().next()?.to_ascii_lowercase();
     let token = token.strip_prefix("language-").unwrap_or(&token);
     let token = token.strip_prefix("lang-").unwrap_or(token);
@@ -62,15 +66,13 @@ fn hint_token(hint: &str) -> Option<String> {
         .strip_prefix("{.")
         .and_then(|token| token.strip_suffix('}'))
         .unwrap_or(token);
-    let token =
-        token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '+' && ch != '#');
     // The hint is printed back to the reader, so it has to look like a language and nothing else.
     (!token.is_empty()
-        && token.len() <= 24
+        && token.len() <= 64
+        && token.bytes().any(|byte| byte.is_ascii_alphanumeric())
         && token
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"+#._-".contains(&byte))
-        && !matches!(token, "text" | "txt" | "plain" | "plaintext" | "none"))
+            .all(|byte| byte.is_ascii_alphanumeric() || b"+#._-".contains(&byte)))
     .then(|| token.to_string())
 }
 
@@ -122,12 +124,14 @@ const LANGUAGE_LABELS: &[(&str, &str)] = &[
     ("console", "Shell"),
     ("terminal", "Shell"),
     ("js", "JavaScript"),
+    ("javascript", "JavaScript"),
     ("mjs", "JavaScript"),
     ("cjs", "JavaScript"),
     ("node", "JavaScript"),
     ("nodejs", "JavaScript"),
     ("jsx", "JSX"),
     ("ts", "TypeScript"),
+    ("typescript", "TypeScript"),
     ("tsx", "TSX"),
     ("py", "Python"),
     ("python3", "Python"),
@@ -211,6 +215,17 @@ fn infer<'a>(syntaxes: &'a SyntaxSet, code: &str) -> Option<Detected<'a>> {
             syntax: Some(syntax),
             label: display_name(&syntax.name),
         });
+    }
+    // A terminal session can print whole files. Its opening prompt establishes the surrounding
+    // language before markers in YAML, Python, or other command output compete for a score.
+    if first.strip_prefix("$ ").is_some_and(|command| {
+        command
+            .trim_start()
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_alphabetic() || "./~_$\"'".contains(ch))
+    }) {
+        return Some(Detected::named(syntaxes, "console"));
     }
     if (text.starts_with('{') || text.starts_with('['))
         && let Ok(value) = serde_json::from_str::<serde_json::Value>(text)
@@ -524,6 +539,51 @@ mod tests {
                 "{hint}"
             );
         }
+    }
+
+    #[test]
+    fn explicit_plain_text_suppresses_content_inference() {
+        for hint in [
+            "text",
+            "txt",
+            "plain",
+            "plaintext",
+            "none",
+            "nohighlight",
+            "no-highlight",
+            "language-none",
+        ] {
+            let html = snippet(Some(hint), "{\"message\": \"not a JSON listing\"}");
+            assert!(label(&html).is_none(), "{hint}: {html}");
+            assert!(!html.contains("syntax-"), "{hint}: {html}");
+        }
+    }
+
+    #[test]
+    fn terminal_transcripts_outrank_the_language_of_printed_files() {
+        for code in [
+            "$ cat task.yaml\napiVersion: ax.io/v1alpha1\nkind: Workspace\nmetadata:\n  name: golang\nspec:\n  git:\n    - repo: https://example.com/go.git\n      branch: main\n---\nkind: Task\nspec:\n  workspaces:\n    - name: golang\n$ ax apply -f task.yaml\nworkspace.ax.io/golang created\n$ ax get tasks\nNAME PHASE\ntest Running\n$ ax suspend task test\ntask.ax.io/test suspended\n",
+            "$ cat response.json\n{\"ready\": true, \"count\": 2}\n$ echo done\ndone\n",
+            "$ cat app.py\ndef first():\n    return 1\ndef second():\n    return 2\n$ python app.py\n",
+        ] {
+            let html = snippet(None, code);
+            assert_eq!(label(&html).as_deref(), Some("Shell"), "{html}");
+            let document = scraper::Html::parse_fragment(&html);
+            assert_eq!(document.root_element().text().collect::<String>(), code);
+        }
+    }
+
+    #[test]
+    fn printed_shell_examples_do_not_override_the_surrounding_language() {
+        let code = "---\nkind: Task\nmetadata:\n  name: example\nspec:\n  example: |\n    $ echo hello\n    hello\n    $ echo done\n    done\n";
+        assert_eq!(label(&snippet(None, code)).as_deref(), Some("YAML"));
+        let transcript =
+            "$ cat task.yaml\nkind: Task\nmetadata:\n  name: example\n$ ax apply -f task.yaml\n";
+        assert_eq!(
+            label(&snippet(Some("yaml"), transcript)).as_deref(),
+            Some("YAML")
+        );
+        assert!(label(&snippet(Some("text"), transcript)).is_none());
     }
 
     #[test]

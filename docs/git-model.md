@@ -75,6 +75,12 @@ status.toml                                            sources currently failing
   sanitized again before display. Page chrome, HTTP response metadata, and media files are not
   archived, so this is not WARC-equivalent preservation.
 
+Normalized URL keys retain nondefault ports: `example.com:8080` and `example.com:9090` are
+separate endpoints. HTTP URLs with nondefault ports also keep their scheme. Older versions dropped
+all ports from URL keys. Retained items still match through their stored original links, but an
+already-deleted custom-port item without another matching entry-ID or title/date key may be
+rediscovered because its old `seen.txt` hash cannot recover the port.
+
 The original URL and first capture time (`first_seen`) live in each Markdown file's front matter.
 A copied aggr item also records `replicated_at`, the time it entered the current repository. A
 heavy source attempts to extract the original article; if that request or extraction fails, aggr

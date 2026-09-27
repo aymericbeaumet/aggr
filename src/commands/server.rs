@@ -20,8 +20,6 @@ use crate::git::Worktree;
 
 const DEV_KEY_FILE: &str = ".aggr-dev-key";
 
-mod client;
-
 type SiteFiles = BTreeMap<String, Arc<Vec<u8>>>;
 
 #[derive(Clone)]
@@ -527,7 +525,6 @@ async fn host(
     base: &str,
     reload: broadcast::Sender<()>,
 ) -> Result<()> {
-    let client = client::ClientDev::from_env()?.map(Arc::new);
     let base = base.to_string();
     let run = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -540,9 +537,8 @@ async fn host(
         let base = base.clone();
         let run = run.clone();
         let reload = reload.clone();
-        let client = client.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle(stream, &site, &base, &run, &reload, client.as_deref()).await {
+            if let Err(err) = handle(stream, &site, &base, &run, &reload).await {
                 log::debug!("dev server: {err:#}");
             }
         });
@@ -813,7 +809,6 @@ async fn handle(
     base: &str,
     run: &str,
     reload: &broadcast::Sender<()>,
-    client: Option<&client::ClientDev>,
 ) -> Result<()> {
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
@@ -853,9 +848,6 @@ async fn handle(
         .is_some_and(|extension| extension == "html")
     {
         body = Arc::new(inject_reload(&body, base, run));
-        if let Some(client) = client {
-            body = Arc::new(client.inject(&body));
-        }
     }
     let cache_headers = if file
         .extension()
@@ -881,7 +873,7 @@ async fn handle(
 
 fn inject_reload(body: &[u8], base: &str, run: &str) -> Vec<u8> {
     let script = format!(
-        "<script>(function(){{if(window.AGGR)window.AGGR.pwa=false;var b=new URL({0:?},location.origin),u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistration(b).then(function(r){{if(r)r.unregister()}});if('caches'in window){{var p='aggr:'+encodeURIComponent(b.pathname)+':';caches.keys().then(function(k){{k.filter(function(x){{return x.indexOf(p)===0}}).forEach(function(x){{caches.delete(x)}})}})}}new EventSource('{0}__aggr/reload?run={1}').onmessage=function(){{if(!window.dispatchEvent(new Event('aggr:build',{{cancelable:true}})))return;var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();</script>",
+        "<script>(function(){{var b=new URL({0:?},location.origin),u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistration(b).then(function(r){{if(r)r.unregister()}});if('caches'in window){{var p='aggr:'+encodeURIComponent(b.pathname)+':';caches.keys().then(function(k){{k.filter(function(x){{return x.indexOf(p)===0}}).forEach(function(x){{caches.delete(x)}})}})}}new EventSource('{0}__aggr/reload?run={1}').onmessage=function(){{var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();</script>",
         base, run
     );
     let html = String::from_utf8_lossy(body);
@@ -960,6 +952,7 @@ pub fn content_type(path: &Path) -> &'static str {
         Some("css") => "text/css; charset=utf-8",
         Some("js") => "text/javascript; charset=utf-8",
         Some("json") => "application/json",
+        Some("pdf") => "application/pdf",
         Some("webmanifest") => "application/manifest+json",
         Some("xml") => "application/xml",
         Some("md") => "text/markdown; charset=utf-8",
@@ -1406,6 +1399,10 @@ mod tests {
         );
         assert_eq!(content_type(Path::new("x.json")), "application/json");
         assert_eq!(
+            content_type(Path::new("assets/documents/paper.pdf")),
+            "application/pdf"
+        );
+        assert_eq!(
             content_type(Path::new("items/source/post.json")),
             "application/ld+json; charset=utf-8"
         );
@@ -1450,11 +1447,9 @@ mod tests {
         let html = String::from_utf8(html).unwrap();
         assert!(html.contains("new EventSource('/repo/__aggr/reload?run=run-1')"));
         assert!(html.contains("caches.delete"));
-        assert!(html.contains("window.AGGR.pwa=false"));
         assert!(html.contains("__aggr_dev"));
-        assert!(html.contains(
-            "if(!window.dispatchEvent(new Event('aggr:build',{cancelable:true})))return;"
-        ));
+        assert!(!html.contains("window.AGGR"));
+        assert!(!html.contains("aggr:build"));
         assert!(html.contains("n.searchParams.set('__aggr_dev',Date.now());location.replace(n)"));
         assert!(html.ends_with("</body>"));
     }

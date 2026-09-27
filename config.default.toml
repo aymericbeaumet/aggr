@@ -26,9 +26,18 @@ max_age_days = 365
 # Public URL used by `aggr build --release` (the workflow passes it automatically for
 # *.github.io). A custom domain here also writes the CNAME file GitHub Pages needs.
 # url = "https://reads.example.com"
+# Allow search-engine indexing and emit a sitemap in release builds. This does not control access.
+indexing = false
+# Maximum generated-site bytes, including text, search, and assets (1 decimal GB by default).
+# Every retained article stays readable; media is compressed or left at its publisher to fit.
+build_max_bytes = 1000000000
+# Keep recent articles' local media intact; compact older images in the generated site only.
+# The archive's full-quality masters and Git history are never changed by a build.
+media_full_quality_days = 30
 # Output directory of `aggr build`.
 out = "_site"
-# In a secure context, emit install metadata and cache a bounded offline reading set.
+# In a secure context, emit install metadata and register the service worker that keeps
+# pages you have read available offline.
 pwa = true
 
 # Initial reader settings. Every preference and its default is documented here.
@@ -51,9 +60,8 @@ feed_page_size = 50 # 10, 25, 50
 motion = "auto" # auto, off
 single_key_shortcuts = true
 scroll_amount = 10 # 1–100 lines for d/u, capped at half the available viewport
-# Recent-article download count; 0 disables automatic downloads, maximum 1000.
-# Positive values also save the complete archive search index; only the newest N
-# article pages and retained images are available to read offline.
+# Retired: the reader caches the pages it opens instead of downloading an archive. Still accepted
+# so existing configurations keep parsing, but it no longer reaches the browser.
 offline_items = 30
 
 # Optional public identity for Schema.org metadata. `type` is "person" or "organization".
@@ -118,12 +126,28 @@ content = "heavy"
 # Preview failures never prevent an article from being retained. Enabled mirrored previews reuse
 # their existing local bytes without contacting the publisher.
 previews = true
-# Archive article images and repair missing copies during ordinary sync/build/dev, including
-# retained items absent from the latest feed. Existing local masters are reused. Failed image
-# requests warn and retry after a one-hour backoff; exact raster originals remain the fallback.
-# SVG diagrams are converted to safe local PNGs with no external resources.
-# Responsive copies use lossless encoding; every local image gets an inline ThumbHash preview.
-images = true
+# What to do with article images. "remote" downloads nothing and leaves them at the publisher;
+# "original" archives the publisher's exact bytes and derives lossless responsive copies;
+# "compact" archives one bounded JPEG instead and derives none. `true` and `false` remain
+# accepted spellings of "original" and "remote".
+# Images are most of an archive's size, so "compact" is the difference between gigabytes and
+# hundreds of megabytes. It cannot be undone: the publisher's bytes are not kept, and changing
+# the mode later does not re-download what earlier runs already stored.
+# Tune the reduction with a table; quality is 1-100 and max_axis is 320-8192:
+#   images = { mode = "compact", quality = 72, max_axis = 1600 }
+# Transparency is compacted to PNG rather than flattened onto a JPEG background. An animated GIF
+# larger than max_axis is resized and re-encoded as a GIF, keeping its frames, timing and loop;
+# one that already fits usually keeps its exact bytes, because re-encoding a frame-differenced
+# animation tends to cost more than it saves. The smaller result always wins.
+# What compaction cannot re-encode without losing more than size keeps its exact bytes under every
+# mode: colour-managed and high-depth originals, AVIF (which aggr archives without decoding),
+# animated WebP and APNG (which aggr cannot write), and animations beyond 400 frames.
+# Archiving also repairs missing copies during ordinary sync/build/dev, including retained items
+# absent from the latest feed. Existing local masters are reused. Failed image requests warn and
+# retry after a one-hour backoff; exact raster originals remain the fallback. SVG diagrams are
+# converted to safe local PNGs with no external resources. Every local image gets an inline
+# ThumbHash preview.
+images = "original"
 
 # Each table's `url` names one or more resources: websites, RSS/Atom/JSON feeds, aggr TOML,
 # OPML subscriptions, or newline-separated URL lists. Resources can be local paths or remote
@@ -136,7 +160,8 @@ images = true
 # [[sources]]
 # url = "https://blog.rust-lang.org"
 # name = "Rust Blog"          # display name; the feed title when unset
-# slug = "rust-blog"          # directory under items/; derived from name or url when unset
+# slug = "rust-blog"          # directory under items/; from the name, else the source's
+#                             # canonical name (example.com, youtube.com/@channel)
 # category = "rust"           # optional; an item belongs to at most one category
 # An item has one category and any number of labels. Source labels are merged with feed labels.
 # labels = ["programming", "rust"]
@@ -144,7 +169,8 @@ images = true
 # html = false               # skip the raw HTML sibling for this source; `[store] html = false` skips it everywhere
 # content = "heavy"          # override `[fetch] content` with `"heavy"` or `"light"`
 # previews = false           # override `[fetch] previews` for this source
-# images = false             # override `[fetch] images` for this source
+# images = "compact"         # override `[fetch] images` for this source; takes the same values,
+#                             # including `{ mode = "compact", quality = 60 }`
 
 # Group URLs with shared options. Use another table when the options differ.
 # [[sources]]

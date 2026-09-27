@@ -84,6 +84,45 @@ fn unfinished_broadcast(player: &Value) -> bool {
     ended.is_none()
 }
 
+/// The channel that published `video`, as the profile URL it publishes under. A watch URL names
+/// the video and never its channel, so the page is the only place an item's publisher appears —
+/// and the only way a video reads the same whoever linked it. Read from the requested video's own
+/// player, never a recommendation's, and only when the page agrees which video it is showing.
+pub fn owner_profile(page: &str, video: &Url) -> Option<String> {
+    let id = super::video_id(video)?;
+    player_responses(page)
+        .filter(|player| {
+            player
+                .pointer("/videoDetails/videoId")
+                .and_then(Value::as_str)
+                == Some(id.as_str())
+        })
+        .find_map(|player| {
+            let handle = player
+                .pointer("/microformat/playerMicroformatRenderer/ownerProfileUrl")
+                .and_then(Value::as_str)
+                .and_then(profile_url);
+            handle.or_else(|| {
+                let channel = player
+                    .pointer("/videoDetails/channelId")
+                    .and_then(Value::as_str)
+                    .filter(|channel| !channel.is_empty())?;
+                profile_url(&format!("https://www.youtube.com/channel/{channel}"))
+            })
+        })
+}
+
+/// A profile URL aggr can name a publisher by: a YouTube account path, nothing else. The page is
+/// untrusted input, so an owner pointing anywhere but YouTube is discarded rather than shown.
+fn profile_url(value: &str) -> Option<String> {
+    let url = Url::parse(value.trim()).ok()?;
+    if crate::platform::host(&url)? != "youtube.com" {
+        return None;
+    }
+    let account = crate::platform::account_path(&url)?;
+    Some(format!("https://www.youtube.com/{account}"))
+}
+
 fn matches_video(value: &str, id: &str) -> bool {
     Url::parse(value)
         .ok()
@@ -137,6 +176,44 @@ mod tests {
 
     fn player(value: Value) -> String {
         format!("<script>var ytInitialPlayerResponse = {value};</script>")
+    }
+
+    #[test]
+    fn youtube_owner_profile_names_the_requested_video_own_channel() {
+        let owner = player(json!({
+            "videoDetails": {"videoId": "requested", "channelId": "UC123"},
+            "microformat": {"playerMicroformatRenderer": {
+                "ownerProfileUrl": "http://www.youtube.com/@Veritasium"
+            }},
+        }));
+        assert_eq!(
+            owner_profile(&owner, &video()).as_deref(),
+            Some("https://www.youtube.com/@Veritasium")
+        );
+
+        // Without a handle the channel id still names the account.
+        let channel = player(json!({
+            "videoDetails": {"videoId": "requested", "channelId": "UC123"},
+        }));
+        assert_eq!(
+            owner_profile(&channel, &video()).as_deref(),
+            Some("https://www.youtube.com/channel/UC123")
+        );
+
+        // A recommendation's player describes somebody else's video.
+        let other = player(json!({
+            "videoDetails": {"videoId": "other", "channelId": "UC999"},
+        }));
+        assert_eq!(owner_profile(&other, &video()), None);
+
+        // The page is untrusted input: an owner hosted elsewhere is not this publisher.
+        let foreign = player(json!({
+            "videoDetails": {"videoId": "requested"},
+            "microformat": {"playerMicroformatRenderer": {
+                "ownerProfileUrl": "https://evil.example/@someone"
+            }},
+        }));
+        assert_eq!(owner_profile(&foreign, &video()), None);
     }
 
     #[test]

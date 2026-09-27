@@ -4,6 +4,7 @@ use url::Url;
 #[derive(Debug, Clone, Serialize)]
 pub struct DocumentCtx {
     pub url: String,
+    pub local_url: Option<String>,
 }
 
 impl DocumentCtx {
@@ -14,7 +15,10 @@ impl DocumentCtx {
 
     pub fn from_url(link: &str) -> Option<Self> {
         let url = Url::parse(link).ok()?;
-        crate::preview::is_pdf_url(&url).then(|| Self { url: url.into() })
+        crate::preview::is_pdf_url(&url).then(|| Self {
+            url: url.into(),
+            local_url: None,
+        })
     }
 }
 

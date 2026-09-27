@@ -29,6 +29,8 @@ pub struct RawItem {
     pub preview: Option<crate::preview::Thumbnail>,
     /// Exact article image masters and verified lossless renditions for newly retained items.
     pub images: Vec<crate::media::Asset>,
+    /// A bounded PDF retained alongside the article, including bytes carried by replicas.
+    pub document: Option<crate::document::Asset>,
     pub extra: BTreeMap<String, serde_yaml_ng::Value>,
 }
 
@@ -214,6 +216,45 @@ impl ArticleImage {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Document {
+    pub file: String,
+    pub source: String,
+}
+
+impl Document {
+    /// Restrict the companion to this item and a credential-free HTTP(S) publisher URL.
+    pub fn is_valid_for(&self, stem: &str) -> bool {
+        let Some(hash) = self
+            .file
+            .strip_prefix(&format!("{stem}.document-"))
+            .and_then(|suffix| suffix.strip_suffix(".pdf"))
+        else {
+            return false;
+        };
+        !stem.is_empty()
+            && !self.file.starts_with('.')
+            && !self.file.contains(['/', '\\', ':'])
+            && hash.len() == 12
+            && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && url::Url::parse(&self.source).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.fragment().is_none()
+            })
+    }
+}
+
+fn deserialize_document<'de, D>(deserializer: D) -> Result<Option<Document>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml_ng::Value::deserialize(deserializer)?;
+    Ok(serde_yaml_ng::from_value(value).ok())
+}
+
 /// The YAML block at the top of every item file. Defaults are skipped on write so the table
 /// GitHub renders stays short.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -242,6 +283,12 @@ pub struct FrontMatter {
     /// File name of the raw HTML sibling, when one was written.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_document",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub document: Option<Document>,
     #[serde(
         default,
         deserialize_with = "deserialize_preview",
@@ -323,13 +370,14 @@ const TRACKING_PARAMS: &[&str] = &[
     "fbclid", "gclid", "mc_cid", "mc_eid", "ref", "ref_src", "source", "yclid", "_hsenc", "_hsmi",
 ];
 
-/// Canonical form of a link for dedupe: https, no `www.`, tracking parameters and fragment
-/// dropped, sorted query, no trailing slash.
+/// Canonical form for dedupe: default-port HTTP becomes HTTPS; nondefault ports keep their
+/// scheme. Drop `www.`, tracking parameters, fragments and trailing slashes; sort query pairs.
 pub fn normalize_link(link: &str) -> String {
     let Ok(mut url) = url::Url::parse(link.trim()) else {
         return link.trim().to_string();
     };
-    if url.scheme() == "http" {
+    // Upgrading HTTP on port 443 would erase that nondefault endpoint as HTTPS's default.
+    if url.scheme() == "http" && url.port().is_none() {
         let _ = url.set_scheme("https");
     }
     if let Some(host) = url.host_str() {
@@ -337,7 +385,6 @@ pub fn normalize_link(link: &str) -> String {
         let host = host.strip_prefix("www.").unwrap_or(&host).to_string();
         let _ = url.set_host(Some(&host));
     }
-    let _ = url.set_port(None);
     url.set_fragment(None);
     let mut pairs: Vec<(String, String)> = url
         .query_pairs()
@@ -503,6 +550,46 @@ mod tests {
             "https://example.com/x"
         );
         assert_eq!(normalize_link("  not a url "), "not a url");
+    }
+
+    #[test]
+    fn nondefault_ports_keep_distinct_link_identities() {
+        for (link, expected) in [
+            ("http://example.com:80/post/", "https://example.com/post"),
+            ("https://example.com:443/post/", "https://example.com/post"),
+            (
+                "https://example.com:8443/post/",
+                "https://example.com:8443/post",
+            ),
+            (
+                "http://example.com:8080/post/",
+                "http://example.com:8080/post",
+            ),
+            (
+                "http://example.com:443/post/",
+                "http://example.com:443/post",
+            ),
+        ] {
+            assert_eq!(normalize_link(link), expected, "{link}");
+        }
+        let links = [
+            "https://example.com/post",
+            "https://example.com:8080/post",
+            "https://example.com:9090/post",
+            "http://example.com:443/post",
+        ];
+        let keys = links.map(|link| {
+            dedupe_keys(&RawItem {
+                link: link.into(),
+                ..Default::default()
+            })
+        });
+        for (index, key) in keys.iter().enumerate() {
+            assert_eq!(key.len(), 1);
+            for other in &keys[index + 1..] {
+                assert_ne!(key, other);
+            }
+        }
     }
 
     #[test]

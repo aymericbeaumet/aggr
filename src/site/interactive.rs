@@ -35,20 +35,72 @@ impl InteractiveCtx {
 /// stripping executable content; rendering can offer the separately sandboxed live original.
 #[cfg(test)]
 pub(crate) fn is_interactive_document(page: &str) -> bool {
-    mentions_canvas(page) && is_interactive_document_in(&Html::parse_document(page))
+    mentions_interactive_markup(page) && is_interactive_document_in(&Html::parse_document(page))
 }
 
-/// The byte pre-check in front of [`is_interactive_document_in`]: a page without a `<canvas`
-/// tag is never an application, and most pages never need the parsed checks.
-pub(crate) fn mentions_canvas(page: &str) -> bool {
-    page.as_bytes()
-        .windows(7)
-        .any(|tag| tag.eq_ignore_ascii_case(b"<canvas"))
+/// The byte pre-check in front of [`is_interactive_document_in`]: a page with neither a `<canvas`
+/// nor a `<figure` has nothing the archive could be missing, and never needs the parsed checks.
+pub(crate) fn mentions_interactive_markup(page: &str) -> bool {
+    let has = |needle: &[u8]| {
+        page.as_bytes()
+            .windows(needle.len())
+            .any(|tag| tag.eq_ignore_ascii_case(needle))
+    };
+    has(b"<canvas") || has(b"<figure")
 }
 
 /// The parsed half of [`is_interactive_document`], for callers that already hold the document
-/// and passed [`mentions_canvas`].
+/// and passed [`mentions_interactive_markup`]. Either shape means the page's own pictures are drawn by a
+/// script the archive never runs.
 pub(crate) fn is_interactive_document_in(document: &Html) -> bool {
+    is_canvas_application(document) || draws_its_figures_with_scripts(document)
+}
+
+/// Figures a script mounts: the element names a module in a `data-` attribute and holds only the
+/// fallback text the publisher wrote for readers who never run it. One such figure is an aside;
+/// a page built out of them has no pictures at all without its scripts.
+fn draws_its_figures_with_scripts(document: &Html) -> bool {
+    static SELECTORS: OnceLock<Option<(Selector, Selector, Selector)>> = OnceLock::new();
+    let Some((figures, media, scripts)) = SELECTORS.get_or_init(|| {
+        Some((
+            Selector::parse("figure").ok()?,
+            Selector::parse("img, picture, video, audio, svg, canvas, object, embed, iframe")
+                .ok()?,
+            Selector::parse("script").ok()?,
+        ))
+    }) else {
+        return false;
+    };
+    if !document.select(scripts).any(executable_script) {
+        return false;
+    }
+    document
+        .select(figures)
+        .filter(|figure| {
+            outside_chrome(*figure)
+                && figure.select(media).next().is_none()
+                && figure
+                    .descendants()
+                    .filter_map(ElementRef::wrap)
+                    .any(mounts_a_module)
+        })
+        .take(2)
+        .count()
+        == 2
+}
+
+/// An element that names a script module to fill itself with.
+fn mounts_a_module(element: ElementRef<'_>) -> bool {
+    element.value().attrs().any(|(name, value)| {
+        name.starts_with("data-")
+            && value
+                .split(['?', '#'])
+                .next()
+                .is_some_and(|path| path.ends_with(".js") || path.ends_with(".mjs"))
+    })
+}
+
+fn is_canvas_application(document: &Html) -> bool {
     static SELECTORS: OnceLock<Option<(Selector, Selector, Selector)>> = OnceLock::new();
     let Some((canvases, scripts, controls)) = SELECTORS.get_or_init(|| {
         Some((
@@ -124,6 +176,42 @@ fn executable_script(element: ElementRef<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn figures_a_script_mounts_are_pictures_the_archive_cannot_keep() {
+        // brand.io: every figure names a module and carries only the fallback text.
+        let page = r#"<html><body><article>
+<figure class="interactive"><figcaption>Spymark</figcaption><div class="embed-root" data-embed-src="/article/spymarks/_embeds/1.js"><p class="embed-fallback">“Spymark”</p></div></figure>
+<p>Prose between them.</p>
+<figure class="interactive"><div class="embed-root" data-embed-src="/article/spymarks/_embeds/2.js"><p class="embed-fallback">Compare the original and marked image.</p></div></figure>
+</article><script type="module" src="/assets/site.js"></script></body></html>"#;
+        assert!(is_interactive_document(page));
+
+        // One such figure is an aside, not a page built out of them.
+        let single = page.replace(
+            r#"<figure class="interactive"><div class="embed-root" data-embed-src="/article/spymarks/_embeds/2.js"><p class="embed-fallback">Compare the original and marked image.</p></div></figure>"#,
+            "",
+        );
+        assert!(!is_interactive_document(&single));
+
+        // A figure that carries its own picture is archived as that picture.
+        let pictured = page.replace(
+            r#"<p class="embed-fallback">“Spymark”</p>"#,
+            r#"<img src="/hero.png" alt="Spymark">"#,
+        );
+        assert!(!is_interactive_document(&pictured));
+
+        // A data attribute that names anything but a module is ordinary markup.
+        let ordinary = page.replace(".js", ".json");
+        assert!(!is_interactive_document(&ordinary));
+
+        // Without a script to run, the figures are all the page ever had.
+        let scriptless = page.replace(
+            r#"<script type="module" src="/assets/site.js"></script>"#,
+            "",
+        );
+        assert!(!is_interactive_document(&scriptless));
+    }
 
     const CONTROLS: &str =
         "<label>Shape<select></select></label><input type=range><button>Reset</button>";

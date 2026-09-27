@@ -81,12 +81,17 @@ async fn responsive_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     )
     .await?;
     client.goto(&fixture.base).await?;
+    // Navigation is the browser's own here too: no framework takes the page over, and the
+    // speculation rules are what prepare the next one.
     assert_eq!(
         client
-            .execute("return window.swup.options.native", vec![])
+            .execute(
+                "return {framework:typeof window.swup, rules:JSON.parse(document.querySelector('script[type=speculationrules]').textContent).prerender[0].eagerness}",
+                vec![]
+            )
             .await?,
-        false,
-        "desktop navigation must also skip full-page transition snapshots"
+        json!({"framework":"undefined","rules":"moderate"}),
+        "desktop navigation stays the browser's, prepared by speculation rules"
     );
     let desktop_density = client
         .execute(

@@ -1,5 +1,11 @@
 # Fetch and build performance
 
+For a pinned public-instance snapshot, actual workflow durations, storage breakdown and
+reproduction commands, see [archive and deployment measurements](benchmarks.md). Keep archive
+files, historical Git storage, published-site size and cache space separate when planning capacity.
+The [build budget](build-budget.md) limits published bytes through media selection and older-image
+compression; it does not prune article text or reduce the archive's Git storage.
+
 `sync`, `build`, and `dev` share the same fetch pipeline. Config loading performs no requests for
 ordinary remote feed/page URLs; only known or explicitly declared collections expand before fetching. Sources use the configured
 `fetch.concurrency` limit; article requests within each source use `fetch.article_concurrency`.
@@ -62,6 +68,35 @@ bucket replaces its oldest receipt. Cache hits never rewrite timestamps. Warm hi
 the small inline PNG from its validated hash without decoding the master. The first validation
 remains a cold operation, and large cold images are deliberately validated one at a time.
 
+A site larger than its limit converges in two complete builds: one to measure the overflow, one to
+fit. What the first one really measures is how much of the limit everything that is not optional
+media needs, and that moves slowly, so a build that fits records it under `budget-v1` and the next
+one starts there. A twentieth of that measurement is held back because an archive grows between
+runs: guessing a little low publishes marginally less media, while guessing high costs the whole
+second build. The exact retry still decides whether the guess was right, so an impossible limit
+refuses as before. On a 3,000-item instance this took a release build from 239.6 s + 221.5 s to a
+single 294.9 s pass, publishing 39 fewer media groups out of 12,210.
+
+`build_max_bytes` is what a host will accept for a published site, so only a publishing build
+measures it. A development snapshot (`aggr dev` without `--release`) is served from a local cache
+and skips the check: when an archive is larger than the limit, measuring it costs a second complete
+build, which on a 3,000-item instance was 205 s followed by 319 s. `aggr dev --release` still
+applies the budget, and its snapshot keeps every archived rendition rather than the published
+selection, so the local cache holds more bytes than the site would.
+
+Every stage that is CPU-bound runs on the machine's parallelism rather than a fixed slot count.
+Reading the archive (one file read and parse per item) and re-deriving stored bodies both run on the
+shared worker pool. `sync` and `build` own the machine while they fetch, so article conversion and
+persistence take a slot per worker; `dev` fetches in the background while it rebuilds, so it takes
+half and leaves the rest to the build a reader is waiting for. Sizing both to the full worker count
+measured worse on an eight-core machine: the background sync and the rebuild oversubscribed it and
+the build phase grew from 167 s to 322 s.
+
+Re-deriving stored bodies (`--reprocess`) reads each retained HTML companion and converts it again.
+The conversion is pure CPU per item and runs on the shared worker pool; applying the results stays
+on the calling thread in archive order, so the transaction and the written bytes never depend on
+scheduling. On a 3,318-item archive the conversion alone measured 48 s of single-threaded work.
+
 Static article pages and portable representations render with at most eight scoped CPU workers,
 limited by available parallelism or by `AGGR_BUILD_WORKERS`. `parallel::map` hands inputs to those
 workers through a shared claim cursor (each thread takes the next unclaimed input, so a few slow
@@ -98,11 +133,34 @@ version, but never the application-release fingerprint.
 `src/cache.rs` is the registry of every `.aggr/cache/build-v1` namespace; `Namespace::ci_cached`
 decides which ones the reusable workflow carries between runners, and a unit test holds the
 workflow's `actions/cache` paths to that list. Only derived state about bytes the site already
-publishes qualifies, because it invalidates itself: `validated-images-v2` (content-keyed receipts),
+publishes qualifies, because it invalidates itself: `deployment-media-v1` (validated compressed
+publication copies), `validated-images-v2` (content-keyed receipts),
 `pagefind-v1` (index keyed by its input fingerprint), `feed-parsing` (parser-version receipts that
-gate conditional GET), and the timestamped backoff markers in `discussions-v1`, `image-failures-v1`,
-`capture-retries-v1` and `recording-duration-v1`. Each run saves under its own key and the next run
-restores the newest entry; the save runs only after a successful build.
+gate conditional GET), `budget-v1` (what a fitting build needed for everything but media, under the
+limit it was measured against), and the timestamped backoff markers in `discussions-v1`,
+`image-failures-v1`, `capture-retries-v1` and `recording-duration-v1`.
+
+Compressed media uses its own `aggr-media-v1-…` Actions cache, separate from the smaller mutable
+state in `aggr-state-v1-…`. After restore and after a successful build, the workflow hashes the
+sorted relative file paths and sizes of `deployment-media-v1`. Every file there is named by the
+SHA-256 of what it holds, so its name already commits to its content and the walk answers "did this
+change?" without reading a byte; reading them would hash the whole cache twice on every run.
+It saves a new media entry only when those bytes changed or no entry was restored; an empty cache
+is not uploaded. File timestamps and changes to source backoffs do not trigger media uploads.
+The smaller derived-state cache still saves after each successful build. Both restore the newest
+matching entry on the next run; neither saves a failed build's state.
+
+The compression cache is keyed by source content and encoding policy, so unchanged older media
+can reuse validated publication copies without repeating compression on a fresh runner. A corrupt,
+missing or evicted entry is recomputed from the stored master. The age cutoff and deployment budget
+decide which copies to publish, independently of the reusable encoded bytes. See
+[build-budget caching](build-budget.md#reusing-compressed-media).
+
+Actions caches are evictable performance aids, never the archive or a backup. New media entries
+are complete snapshots, not incremental uploads; a changed snapshot still transfers its cache
+contents, and retained snapshots consume the repository's cache quota. Separating media avoids
+copying it merely because a small backoff marker changed. The before/after fingerprints also read
+all cached media bytes twice, so cache transfer, hashing and encoding should be measured separately.
 
 `articles-v1` holds raw original-page responses. It is private to the machine that fetched it and is
 never uploaded. `render-v1` is not cached on Actions either: the fingerprint folds each item's age
@@ -122,8 +180,8 @@ sweep is best-effort: a path that cannot be removed is logged at debug and retri
 and no sweep failure ever fails the sync. The marker lives in the git-excluded cache, so a run that
 finds nothing new still leaves no trace in the repository.
 
-A warm run on Actions therefore still renders every page, but skips cold image validation and
-Pagefind indexing, fetches feeds conditionally, and honours the image, capture and duration
+A warm run on Actions therefore still renders every page, but reuses unchanged image compression,
+skips cold image validation and Pagefind indexing, fetches feeds conditionally, and honours the image, capture and duration
 backoffs. Expect rendering to dominate the build; the cold image validation that took about seven
 minutes on a 1,120-item instance disappears once the receipt cache restores. The first run after a
 cache eviction is cold again.
@@ -134,18 +192,16 @@ and warm versus cold caches determine the result.
 
 ## Reader startup and search
 
-The production reader remains a precompiled Svelte/TypeScript bundle embedded in the Rust binary.
-Normal Cargo builds and deployed sites require no Node runtime. Vite handles frontend development
-without rebuilding Rust; the complete static HTML remains the first paint and no-JavaScript fallback.
+The reader is four hand-written files embedded in the Rust binary, with no build step. Only the
+small pre-paint bootstrap blocks rendering; the core module is deferred, and search and media are
+fetched on demand. The complete static HTML remains the first paint and the no-JavaScript fallback.
 
-Search completion uses `search-catalog.json` (version, base, document count, and facets), avoiding the
-much larger offline manifest's file/digest list. Pagefind initialization and filter files wait until
-an actual query needs them. The full manifest remains authoritative for verified offline storage;
-the worker derives an offline catalogue from its last complete manifest. See [client development](client.md) for search and cache ownership.
+Search completion uses `search-catalog.json` (version, base, document count, and facets). Pagefind's
+runtime and its filter files wait until an actual query needs them, so a reader who never searches
+downloads none of it. See [client development](client.md) for the search contract.
 
-Idle route warming uses one request slot; hover, focus, or touch intent can immediately use a
-second. Actual navigation cancels unrelated speculative requests and reuses a destination already
-in flight. Search result images stay under Svelte ownership without a second static enhancement scan.
+Prefetching is the browser's: a `speculationrules` document rule with moderate eagerness, which
+lets the browser spend its own budget and cancel work the reader moved away from.
 
 ## Measuring changes
 
