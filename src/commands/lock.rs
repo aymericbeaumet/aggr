@@ -122,8 +122,39 @@ fn conflict_message(recorded: &str, subject: &str, target: &Path) -> String {
 mod tests {
     use super::*;
 
+    /// Run the calling test again in a process of its own, where nothing else is running.
+    ///
+    /// A lock belongs to the open file description, and every process another test thread spawns
+    /// holds a copy of it until its `exec` closes close-on-exec descriptors. So a lock released
+    /// here stays held for a moment by someone else's `git`, and taking it straight back fails.
+    /// Measured on one Mac, 2,000 release-and-retake cycles failed 0 times alone and 1,919 times
+    /// beside a thread spawning `true`. Separate aggr commands are separate processes, so this is
+    /// only ever a hazard for a test sharing one with spawners.
+    fn alone(test: &str) -> bool {
+        const MARKER: &str = "AGGR_LOCK_TEST_ALONE";
+        if std::env::var_os(MARKER).is_some() {
+            return true;
+        }
+        let name = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &name, "--test-threads=1", "--nocapture"])
+            .env(MARKER, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{name} failed in its own process:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
     #[test]
     fn a_held_lock_refuses_a_second_owner_and_names_the_holder() {
+        if !alone("a_held_lock_refuses_a_second_owner_and_names_the_holder") {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("aggr.lock");
         let target = Path::new("/repo");
