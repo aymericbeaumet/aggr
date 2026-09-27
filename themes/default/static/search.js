@@ -866,6 +866,9 @@ function createEngine(base) {
           throw error;
         });
       memberships.set(key, members);
+      // Bounded like the other caches. Evicting one costs a single search the next time it is
+      // needed, and a count already under way holds its own copy.
+      if (memberships.size > 256) memberships.delete(memberships.keys().next().value);
     }
     return members;
   }
