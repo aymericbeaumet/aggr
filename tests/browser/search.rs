@@ -408,15 +408,15 @@ async fn rich_search_across_the_query_language() -> Result<()> {
     report_failure(&client, "rich-search", &result).await;
     if result.is_err() {
         eprintln!("search state: {}", client.execute("return {error:document.querySelector('.search-error')?.textContent,status:document.querySelector('#search-status')?.textContent,rows:document.querySelectorAll('.search-results .row').length}", vec![]).await.unwrap_or(Value::Null));
-        let published: Value = std::fs::read(fixture.out.join("search-manifest.json"))
+        let published: Value = std::fs::read(fixture.out.join("search-catalog.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or(Value::Null);
         eprintln!(
-            "published search manifest: {}",
+            "published search catalogue: {}",
             json!({"version":published["version"],"docs":published["docs"]})
         );
-        eprintln!("browser search manifest: {}", client.execute_async("const done=arguments[arguments.length-1];fetch(new URL('search-manifest.json',new URL(window.AGGR.base,location.href)),{cache:'no-store'}).then(r=>r.json()).then(m=>done({version:m.version,docs:m.docs})).catch(e=>done(String(e)))",vec![]).await.unwrap_or(Value::Null));
+        eprintln!("browser search catalogue: {}", client.execute_async("const done=arguments[arguments.length-1];fetch(new URL('search-catalog.json',new URL(window.AGGR.base,location.href)),{cache:'no-store'}).then(r=>r.json()).then(m=>done({version:m.version,docs:m.docs})).catch(e=>done(String(e)))",vec![]).await.unwrap_or(Value::Null));
     }
     let _ = set_offline(&client, false).await;
     finish(client, result).await
@@ -555,6 +555,23 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         22,
     )
     .await?;
+    // A qualifier completed after a phrase and an exclusion has no single count map to read, so
+    // each value is counted by intersecting its documents with the matches, after pruning to the
+    // values every term's own search saw. Whatever that leaves on offer has to be exactly what
+    // choosing it would leave, and nothing may be offered with nothing behind it.
+    let rest = "comfortably \"current page\" -\"rare exclusion\" category:engineering tag:reading";
+    client.execute("const q=document.querySelector('#q');q.focus();q.value=arguments[0];q.setSelectionRange(q.value.length,q.value.length);q.dispatchEvent(new Event('input',{bubbles:true}))", vec![json!(format!("{rest} source:"))]).await?;
+    wait_for(client, "[...document.querySelectorAll('.search-completion')].some(entry=>entry.dataset.completionId==='source:publisher.invalid'&&entry.querySelector('small')?.textContent.endsWith(' · 43'))").await?;
+    let offered: Vec<(String, usize)> = serde_json::from_value(client.execute("return [...document.querySelectorAll('.search-completion')].filter(entry=>/^source:./.test(entry.dataset.completionId)).map(entry=>[entry.dataset.completionId,Number(entry.querySelector('small').textContent.split(' · ').pop())])", vec![]).await?)?;
+    anyhow::ensure!(
+        !offered.is_empty(),
+        "a compound query offers the sources it matches"
+    );
+    for (completion, count) in offered {
+        anyhow::ensure!(count > 0, "{completion} is offered with nothing behind it");
+        search_query(client, &format!("{rest} {completion}"), count).await?;
+    }
+
     search_query(client, "comfortably \"current page\" -\"rare exclusion\" source:publisher.invalid category:engineering tag:reading", 43).await?;
     anyhow::ensure!(
         client

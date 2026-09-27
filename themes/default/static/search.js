@@ -670,6 +670,39 @@ function buildFilters(query, catalogue) {
   return filters;
 }
 
+/**
+ * The most index work search keeps in flight at once, whoever asks for it. Browsers already queue
+ * past six connections to one origin over HTTP/1.1, so more would only move the queue out of reach,
+ * and six keep small fragments moving over HTTP/2 as well.
+ */
+const INDEX_REQUESTS = 6;
+
+/** Run tasks with at most `size` in flight, in the order they were asked for. */
+function limiter(size) {
+  let active = 0;
+  /** @type {{task: () => Promise<any>, resolve: (value: any) => void, reject: (error: any) => void}[]} */
+  const waiting = [];
+  const next = () => {
+    while (active < size && waiting.length) {
+      const { task, resolve, reject } = /** @type {(typeof waiting)[number]} */ (waiting.shift());
+      active++;
+      Promise.resolve()
+        .then(task)
+        .then(resolve, reject)
+        .finally(() => {
+          active--;
+          next();
+        });
+    }
+  };
+  /** @template T @param {() => Promise<T>} task @returns {Promise<T>} */
+  return (task) =>
+    new Promise((resolve, reject) => {
+      waiting.push({ task, resolve, reject });
+      next();
+    });
+}
+
 function createEngine(base) {
   /** @type {Promise<any> | undefined} */
   let catalogue;
@@ -678,6 +711,10 @@ function createEngine(base) {
   const searches = new Map();
   const hydrated = new Map();
   const loading = new Map();
+  /** Which documents carry each facet value; the same for every query, so kept apart from them. */
+  const memberships = new Map();
+  // Every search and fragment load passes through here, so separate callers cannot add up to more.
+  const limit = limiter(INDEX_REQUESTS);
 
   /** The catalogue is fetched fresh so a cached page never points at a retired index. */
   function loadCatalogue() {
@@ -732,7 +769,7 @@ function createEngine(base) {
     const key = JSON.stringify([term, options]);
     let pending = searches.get(key);
     if (!pending) {
-      pending = client.search(term, options).catch((error) => {
+      pending = limit(() => client.search(term, options)).catch((error) => {
         searches.delete(key);
         throw error;
       });
@@ -751,7 +788,7 @@ function createEngine(base) {
     if (data) return data;
     const previous = loading.get(result.id) ?? Promise.resolve();
     data = previous
-      .then(() => result.data())
+      .then(() => limit(() => result.data()))
       .then((value) => ({
         url: value.url,
         meta: { ...value.meta },
@@ -807,7 +844,31 @@ function createEngine(base) {
     const results = matches[0].results.filter(
       (result) => required.every((ids) => ids.has(result.id)) && !excluded.has(result.id),
     );
-    return { results, filters: matches.length === 1 ? matches[0].filters : undefined };
+    return {
+      results,
+      filters: matches.length === 1 ? matches[0].filters : undefined,
+      // Each positive term's own counts. The results are a subset of every one of those searches,
+      // so a value any of them never saw cannot occur among the results.
+      bounds: matches.slice(0, positive.length).map((match) => match.filters),
+    };
+  }
+
+  /** The IDs of every document carrying one facet value, fetched once per page. */
+  function membership(client, field, value) {
+    const key = field + "\u0000" + value;
+    let members = memberships.get(key);
+    if (!members) {
+      // Straight to the index rather than through `search`: kept as bare IDs here, a membership
+      // would only evict the query results that cache exists for.
+      members = limit(() => client.search(null, { filters: { [field]: value } }))
+        .then((found) => new Set(found.results.map((result) => result.id)))
+        .catch((error) => {
+          memberships.delete(key);
+          throw error;
+        });
+      memberships.set(key, members);
+    }
+    return members;
   }
 
   return {
@@ -842,15 +903,21 @@ function createEngine(base) {
           .filter((facet) => facet.count > 0);
       const ids = new Set(matches.results.map((result) => result.id));
       if (!ids.size) return [];
-      // A compound text query has no single count map; intersect filter memberships instead of
-      // hydrating every match merely to count.
+      // A compound text query has no single count map, so each value's documents are intersected
+      // with the matches. Only values every positive term's own search counted can be among them;
+      // that prunes an archive's hundreds of sources to the handful the query touches before any
+      // membership is asked for, and the shared limit bounds what remains.
+      const bounds = matches.bounds.map((filters) => filters?.[field]).filter(Boolean);
+      const candidates = facets.filter((facet) =>
+        bounds.every((counts) => (counts[facet.value] || 0) > 0),
+      );
       const counted = await Promise.all(
-        facets.map(async (facet) => {
-          const members = await search(client, null, { filters: { [field]: facet.value } });
-          return {
-            ...facet,
-            count: members.results.reduce((total, result) => total + Number(ids.has(result.id)), 0),
-          };
+        candidates.map(async (facet) => {
+          const members = await membership(client, field, facet.value);
+          const [small, large] = members.size < ids.size ? [members, ids] : [ids, members];
+          let count = 0;
+          for (const id of small) if (large.has(id)) count++;
+          return { ...facet, count };
         }),
       );
       return counted.filter((facet) => facet.count > 0);
