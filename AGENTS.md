@@ -238,7 +238,9 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   the account path only on the platform hosts listed in
   `src/platform.rs`, where one domain is shared between unrelated publishers. `src/platform.rs` is
   the only place that knows host aliases, account path shapes, or which hosts use opaque
-  identifiers; never re-derive any of that elsewhere. A publisher label names the account the
+  identifiers; never re-derive any of that elsewhere. A platform's reserved routes
+  (`src/platform/reserved.rs`) are copied from what it publishes — its own source, robots.txt, or
+  API docs — and never extended by hand; drop a robots.txt entry that serves a member's profile. A publisher label names the account the
   article itself identifies, so it reads the same whoever linked it; only where nothing names one
   does the subscription that carried it, and then the bare host, stand in. A `via` label names the
   subscription. Grouping an item under its publisher host must not overwrite its label with the

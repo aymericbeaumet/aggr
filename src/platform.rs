@@ -8,6 +8,8 @@
 //! Only the hosts listed here keep their path, plus the `@handle` convention, which identifies an
 //! account unambiguously on federated hosts that cannot be listed in advance.
 
+mod reserved;
+
 use url::Url;
 
 /// Front-matter extra holding the profile URL a page named for its own publisher, captured when
@@ -25,14 +27,35 @@ struct Platform {
     /// First segments that name one entry in the catalogue rather than whoever publishes it. An
     /// episode belongs to a show; it is not an account of its own.
     entries: &'static [&'static str],
+    /// First segments the platform serves itself, copied from what it publishes; see [`reserved`].
+    reserved: &'static [&'static str],
+    /// Whether a first segment of digits alone is one piece of content rather than an account.
+    numbered: bool,
 }
 
-const fn platform(host: &'static str, prefixes: &'static [&'static str]) -> Platform {
+impl Platform {
+    /// A page the platform serves itself, or one piece of content, is nobody's account however it
+    /// is spelled: Medium's own `@me` is a page, not a member.
+    fn serves(&self, segment: &str) -> bool {
+        self.reserved
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(segment))
+            || (self.numbered && segment.bytes().all(|byte| byte.is_ascii_digit()))
+    }
+}
+
+const fn platform(
+    host: &'static str,
+    prefixes: &'static [&'static str],
+    reserved: &'static [&'static str],
+) -> Platform {
     Platform {
         host,
         prefixes,
         opaque: false,
         entries: &[],
+        reserved,
+        numbered: false,
     }
 }
 
@@ -43,21 +66,29 @@ const fn catalogue(host: &'static str) -> Platform {
         prefixes: &[],
         opaque: true,
         entries: &["episode", "episodes"],
+        reserved: &[],
+        numbered: false,
     }
 }
 
 const PLATFORMS: &[Platform] = &[
-    platform("bsky.app", &["profile"]),
-    platform("codeberg.org", &[]),
-    platform("github.com", &[]),
-    platform("gitlab.com", &[]),
-    platform("medium.com", &[]),
-    platform("reddit.com", &["r", "user"]),
-    platform("soundcloud.com", &[]),
-    platform("twitch.tv", &[]),
-    platform("vimeo.com", &[]),
-    platform("x.com", &[]),
-    platform("youtube.com", &["channel", "user", "c"]),
+    platform("bsky.app", &["profile"], &[]),
+    platform("codeberg.org", &[], reserved::CODEBERG),
+    platform("github.com", &[], reserved::GITHUB),
+    platform("gitlab.com", &[], reserved::GITLAB),
+    platform("medium.com", &[], reserved::MEDIUM),
+    platform("reddit.com", &["r", "user"], &[]),
+    platform("soundcloud.com", &[], reserved::SOUNDCLOUD),
+    platform("twitch.tv", &[], reserved::TWITCH),
+    // Vimeo's OpenAPI description (github.com/vimeo/openapi, `api.yaml`) gives
+    // `https://vimeo.com/258684937` as a video's link and `https://vimeo.com/staff` as a member's:
+    // members are named, and a number alone is a video.
+    Platform {
+        numbered: true,
+        ..platform("vimeo.com", &[], reserved::VIMEO)
+    },
+    platform("x.com", &[], reserved::X),
+    platform("youtube.com", &["channel", "user", "c"], &[]),
     catalogue("castbox.fm"),
     catalogue("overcast.fm"),
     catalogue("pocketcasts.com"),
@@ -106,6 +137,10 @@ pub fn account_path(url: &Url) -> Option<String> {
         .filter(|segment| !segment.is_empty())
         .collect();
     let first = segments.first()?;
+    let platform = host(url).and_then(platform_of);
+    if platform.is_some_and(|platform| platform.serves(first)) {
+        return None;
+    }
 
     // An `@handle` names an account wherever it appears, including on the federated hosts that
     // cannot be listed here.
@@ -116,7 +151,7 @@ pub fn account_path(url: &Url) -> Option<String> {
         return Some((*first).to_string());
     }
 
-    let platform = platform_of(host(url)?)?;
+    let platform = platform?;
     // A catalogue path is one opaque identifier however many segments it takes, and the locale
     // or section in front of it is part of reaching that entry.
     if platform.opaque {
@@ -305,6 +340,94 @@ mod tests {
             ("https://www.reddit.com/about", "reddit.com"),
         ] {
             assert_eq!(name(url), expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_route_the_platform_serves_itself_is_nobody_s_account() {
+        for (url, expected) in [
+            // Each of these used to invent a publisher named after the platform's own page.
+            ("https://medium.com/p/9f2a1b3c4d5e", "medium.com"),
+            ("https://medium.com/m/signin", "medium.com"),
+            ("https://x.com/i/web/status/123", "x.com"),
+            ("https://twitter.com/i/web/status/123", "x.com"),
+            ("https://www.twitch.tv/videos/12345", "twitch.tv"),
+            ("https://vimeo.com/842317905", "vimeo.com"),
+            (
+                "https://vimeo.com/channels/staffpicks/842317905",
+                "vimeo.com",
+            ),
+            (
+                "https://github.com/marketplace/actions/checkout",
+                "github.com",
+            ),
+            ("https://github.com/customer-stories/figma", "github.com"),
+            ("https://gitlab.com/explore/projects", "gitlab.com"),
+            ("https://codeberg.org/explore/repos", "codeberg.org"),
+            ("https://soundcloud.com/discover", "soundcloud.com"),
+            // A route is matched however it is capitalised, and wins over the handle convention.
+            ("https://medium.com/@me/lists", "medium.com"),
+            ("https://github.com/Marketplace", "github.com"),
+        ] {
+            assert_eq!(name(url), expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_member_named_like_nothing_the_platform_reserves_keeps_their_path() {
+        for (url, expected) in [
+            (
+                "https://medium.com/@alice/some-post-1a2b",
+                "medium.com/@alice",
+            ),
+            (
+                "https://medium.com/better-programming/post",
+                "medium.com/better-programming",
+            ),
+            (
+                "https://www.twitch.tv/example_channel",
+                "twitch.tv/example_channel",
+            ),
+            // Vimeo names its members; only a number alone is a video.
+            ("https://vimeo.com/staff", "vimeo.com/staff"),
+            ("https://vimeo.com/user12345678", "vimeo.com/user12345678"),
+            // robots.txt blocks these three from crawlers, yet each serves a member's profile.
+            (
+                "https://github.com/ekansa/Open-Context-Data",
+                "github.com/ekansa",
+            ),
+            (
+                "https://github.com/Explodingstuff",
+                "github.com/Explodingstuff",
+            ),
+            (
+                "https://github.com/account-login",
+                "github.com/account-login",
+            ),
+            ("https://vimeo.com/flarepoint", "vimeo.com/flarepoint"),
+        ] {
+            assert_eq!(name(url), expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn reserved_routes_are_sorted_unique_and_lowercase_as_their_sources_give_them() {
+        // Lists are copied, never extended by hand; keeping them in a canonical order makes a
+        // refresh from the source a reviewable diff.
+        for platform in PLATFORMS {
+            let routes = platform.reserved;
+            assert!(
+                routes.windows(2).all(|pair| pair[0] < pair[1]),
+                "{} routes are not sorted and unique",
+                platform.host
+            );
+            assert!(
+                routes
+                    .iter()
+                    .all(|route| *route == route.to_ascii_lowercase()),
+                "{} routes must be lowercase; matching already ignores case",
+                platform.host
+            );
         }
     }
 

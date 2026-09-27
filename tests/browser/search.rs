@@ -131,7 +131,7 @@ async fn contextual_source_completion_and_item_types() -> Result<()> {
         for (query, label, expected) in [
             ("category:engineering source:", "Example", json!({
                 "Example": "source · publisher.invalid · 45", local_publisher: "source · 1",
-                "twitch.tv/videos": "source · 1", "vimeo.com/123456789": "source · 1",
+                "twitch.tv": "source · 1", "vimeo.com": "source · 1",
                 "youtube.com": "source · 1",
             })),
             ("category:news source:", "Underscore_", json!({

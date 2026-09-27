@@ -72,6 +72,17 @@ url = "https://www.youtube.com/@SomeChannel"    # -> sources/youtube-com-somecha
 url = "https://open.spotify.com/show/abc123"    # -> sources/spotify-com-show-abc123/
 ```
 
+A platform's own pages are not accounts, so a link to one reads as the platform alone:
+`medium.com/p/<id>`, `x.com/i/web/status/<id>`, `twitch.tv/videos/<id>` and a Vimeo video's
+`vimeo.com/<number>` are all published by their host rather than by a member named `p`, `i` or
+`videos`. Those routes are copied from what each platform publishes, never guessed:
+GitLab's and Forgejo's reserved-name lists in their own source, the top-level paths of the other
+platforms' `robots.txt`, and the platform's API documentation where it names a content path
+robots.txt leaves out. A robots.txt also blocks individual members, so any entry that serves a
+profile stays an account. `src/platform/reserved.rs` records each list's source and what was
+dropped from it. A route missing from those sources still reads as an account, which is the
+safer mistake: a guessed route would quietly fold a real publisher into its host.
+
 A catalogue names its shows with identifiers nobody reads, so the reader sees the show's own title
 in that slot (`spotify.com/underscore`) while the identity underneath stays the real path.
 
