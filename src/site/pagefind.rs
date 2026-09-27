@@ -55,7 +55,40 @@ struct SearchDisplay<'a> {
     metadata: super::display::Metadata,
     excerpt: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    preview: Option<&'a super::context::PreviewCtx>,
+    preview: Option<SearchPreview<'a>>,
+}
+
+/// What a search row needs to draw a thumbnail. The ThumbHash stays out: the build has already
+/// decoded it into `data_url`, nothing in the reader reads the hash, and every document would
+/// otherwise carry it hex-encoded in the index.
+#[derive(Serialize)]
+struct SearchPreview<'a> {
+    url: &'a str,
+    width: u32,
+    height: u32,
+    alt: Option<&'a str>,
+    color: Option<&'a str>,
+    placeholder: SearchPlaceholder<'a>,
+}
+
+#[derive(Serialize)]
+struct SearchPlaceholder<'a> {
+    data_url: &'a str,
+}
+
+impl<'a> From<&'a super::context::PreviewCtx> for SearchPreview<'a> {
+    fn from(preview: &'a super::context::PreviewCtx) -> Self {
+        Self {
+            url: &preview.url,
+            width: preview.width,
+            height: preview.height,
+            alt: preview.alt.as_deref(),
+            color: preview.color.as_deref(),
+            placeholder: SearchPlaceholder {
+                data_url: &preview.placeholder.data_url,
+            },
+        }
+    }
 }
 
 impl SearchDocument {
@@ -74,7 +107,7 @@ impl SearchDocument {
             serde_json::to_vec(&SearchDisplay {
                 metadata: super::display::Metadata::from(item),
                 excerpt: &item.excerpt,
-                preview: item.preview.as_ref(),
+                preview: item.preview.as_ref().map(SearchPreview::from),
             })
             .map(hex::encode)
             .unwrap_or_default(),
@@ -622,6 +655,34 @@ mod tests {
         let metadata = serde_json::to_value(super::super::display::Metadata::from(&item)).unwrap();
         assert!(metadata["comments"].get("count").is_none());
         assert!(metadata.get("updated").is_none());
+    }
+
+    #[test]
+    fn search_display_draws_a_thumbnail_without_carrying_its_thumbhash() {
+        let mut item = item();
+        item.preview = Some(super::super::context::PreviewCtx {
+            url: "assets/previews/abc.webp".into(),
+            width: 640,
+            height: 360,
+            alt: None,
+            color: Some("#285a8c".into()),
+            placeholder: crate::media::placeholder::Placeholder {
+                hash: "3OcRJYB4d3h/iIeHeEh3eIhw+j2w".into(),
+                data_url: "data:image/png;base64,AAAA".into(),
+            },
+        });
+        let document = document(&item, "Searchable prose.");
+        let display: serde_json::Value = serde_json::from_slice(
+            &hex::decode(&document.meta["aggr_display"]).expect("hex display metadata"),
+        )
+        .expect("JSON display metadata");
+
+        assert_eq!(
+            display["preview"]["placeholder"],
+            serde_json::json!({ "data_url": "data:image/png;base64,AAAA" })
+        );
+        assert_eq!(display["preview"]["width"], 640);
+        assert_eq!(display["preview"]["color"], "#285a8c");
     }
 
     #[test]

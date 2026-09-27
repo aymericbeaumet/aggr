@@ -622,7 +622,6 @@ function renderRow(result, context) {
     const media = element("span", {
       class: "preview-media",
       "data-preview-bound": "true",
-      "data-thumbhash": preview.placeholder?.hash,
     });
     const background = placeholderBackground(preview.placeholder?.data_url);
     if (background) media.style.setProperty("--image-preview", background);

@@ -467,7 +467,9 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
         page.contains("<picture class=\"article-picture\""),
         "{page}"
     );
-    assert!(page.contains("data-thumbhash=\""), "{page}");
+    // The ThumbHash arrives already decoded into the inline preview; the page carries no hash for
+    // a client to decode, because nothing in the reader would.
+    assert!(!page.contains("data-thumbhash"), "{page}");
     assert!(
         page.contains("--image-preview:url('data:image/png;base64,"),
         "{page}"

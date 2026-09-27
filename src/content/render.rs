@@ -313,8 +313,7 @@ fn video_facade(inner: &str, images: &[LocalImage]) -> Option<String> {
         match thumbnail.and_then(|url| images.iter().find(|image| image.source == url)) {
             Some(image) => {
                 placeholder = format!(
-                    " data-thumbhash=\"{}\" style=\"--image-placeholder: {}; --image-preview: url('{}')\"",
-                    escape_html(&image.placeholder.hash),
+                    " style=\"--image-placeholder: {}; --image-preview: url('{}')\"",
                     escape_html(&image.color),
                     image.placeholder.data_url
                 );
@@ -639,8 +638,7 @@ fn render_image_tag(
         String::new()
     };
     format!(
-        "<picture class=\"article-picture{badge_class}\" data-thumbhash=\"{}\" style=\"--image-width:{}px;--image-ratio:{} / {};--image-placeholder:{};--image-preview:url('{}')\">{source}{tag}</picture>",
-        escape_html(&local.placeholder.hash),
+        "<picture class=\"article-picture{badge_class}\" style=\"--image-width:{}px;--image-ratio:{} / {};--image-placeholder:{};--image-preview:url('{}')\">{source}{tag}</picture>",
         local.width,
         local.width,
         local.height,
@@ -1463,10 +1461,9 @@ mod tests {
             html.contains("<picture class=\"article-picture\""),
             "{html}"
         );
-        assert!(
-            html.contains(&format!("data-thumbhash=\"{}\"", image.placeholder.hash)),
-            "{html}"
-        );
+        // The ThumbHash reaches the page already decoded, as the inline preview below; the hash
+        // itself had no reader once the client decoder went.
+        assert!(!html.contains("data-thumbhash"), "{html}");
         assert!(
             html.contains(
                 "style=\"--image-width:1200px;--image-ratio:1200 / 800;--image-placeholder:#285a8c;--image-preview:url('data:image/png;base64,"

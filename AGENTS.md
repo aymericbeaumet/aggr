@@ -308,7 +308,8 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - Reserve media geometry before loading or player activation, including failure and reduced-motion
   paths. Use validated dimensions or a stable fallback ratio; keep posters until players are ready.
   Generate ThumbHashes from decoded local images and embed their validated tiny PNG previews in
-  HTML; placeholders must not wait for JavaScript or a separate network request. Archive every
+  HTML; placeholders must not wait for JavaScript or a separate network request. The hash is the
+  build's cached form, not output: no page or search document carries it. Archive every
   raster format that decodes without a system library. AVIF needs an AV1 decoder and is archived
   undecoded instead: exact bytes, the size its `ispe` box states, and a flat stand-in preview, so
   the picture and its geometry survive without a new build dependency. Preserve intact

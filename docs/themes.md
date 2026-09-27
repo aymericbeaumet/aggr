@@ -114,13 +114,12 @@ optional object:
 | `width`, `height` | Intrinsic image dimensions in pixels. |
 | `alt` | Optional image description. |
 | `color` | Optional validated `#rrggbb` dominant color for a loading placeholder. |
-| `placeholder.hash` | Base64 ThumbHash generated from the oriented image. |
+| `placeholder.hash` | Base64 ThumbHash generated from the oriented image; `data_url` is decoded from it, and the build caches it. The default theme does not emit it. |
 | `placeholder.data_url` | Inline PNG decoded from the ThumbHash during the Rust build. |
 
 ```jinja
 {% if item.preview %}
 <span class="preview-media"
-      data-thumbhash="{{ item.preview.placeholder.hash }}"
       style="--preview-color: {{ item.preview.color }}; --image-preview: url('{{ item.preview.placeholder.data_url }}')">
   <img src="{{ item.preview.url | url_for }}"
        width="{{ item.preview.width }}" height="{{ item.preview.height }}"
@@ -159,7 +158,7 @@ skip expensive full-width WebP conversion while retaining bounded responsive cop
 or profiled/high-bit-depth image keeps its master and a ThumbHash placeholder. The first image uses `loading="eager"`
 and `fetchpriority="high"`; subsequent images use native lazy loading. Preserve
 `.article-picture`, `.progressive-image`, intrinsic dimensions,
-`data-thumbhash`, `--image-preview`, `--image-placeholder`, and loading attributes when styling or post-processing the generated
+`--image-preview`, `--image-placeholder`, and loading attributes when styling or post-processing the generated
 body.
 
 Linked status badges keep compact intrinsic dimensions and never become article heroes or feed
