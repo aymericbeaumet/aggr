@@ -51,9 +51,8 @@ highlight = "all"
 # Known duplicate generations, listed by their older version so a third one warns again. Remove an
 # entry when cargo-deny reports that the skipped crate was not encountered.
 skip = [
-  # RustCrypto 0.10 → 0.11: aggr and syntect use sha2/sha1 0.10 beside the 0.11 line.
+  # RustCrypto 0.10 → 0.11: aggr is on sha2 0.11, while sha1 and syntect keep the 0.10 line.
   { crate = "digest@0.10", reason = "sha1/sha2 0.10 generation" },
-  { crate = "sha2@0.10", reason = "sha1/sha2 0.10 generation" },
   { crate = "block-buffer@0.10", reason = "sha1/sha2 0.10 generation" },
   { crate = "crypto-common@0.1", reason = "sha1/sha2 0.10 generation" },
   { crate = "cpufeatures@0.2", reason = "sha1/sha2 0.10 generation" },

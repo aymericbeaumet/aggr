@@ -9,7 +9,7 @@ use anyhow::{Context as _, Result};
 use pagefind::api::PagefindIndex;
 use serde::Serialize;
 use sha1::{Digest as _, Sha1};
-use sha2::{Digest as _, Sha256};
+use sha2::Sha256;
 
 use super::context::ItemCtx;
 use crate::cache::Namespace;

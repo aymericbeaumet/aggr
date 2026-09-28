@@ -69,7 +69,7 @@ jobs:
       # Small derived state saves under this run's key; the next run restores the newest entry.
       # Compressed media has its own cache below, so changing a backoff cannot re-upload images.
       # The path list is checked against the registry in src/cache.rs by a unit test.
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: |
             .aggr/cache/build-v1/discussions-v1
@@ -85,7 +85,7 @@ jobs:
             aggr-state-v1-${{ github.repository_id }}-
 
       - id: media-cache-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .aggr/cache/build-v1/deployment-media-v1
           key: aggr-media-v1-${{ github.repository_id }}-${{ github.run_id }}
@@ -161,7 +161,7 @@ jobs:
         run: python3 "$RUNNER_TEMP/aggr-media-cache-fingerprint.py"
 
       # Small derived state is saved only after a successful build.
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@v6
         with:
           path: |
             .aggr/cache/build-v1/discussions-v1
@@ -175,7 +175,7 @@ jobs:
           key: aggr-state-v1-${{ github.repository_id }}-${{ github.run_id }}
 
       # Immutable cache entries must not accumulate identical media on scheduled no-op runs.
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@v6
         if: steps.media-cache-after.outputs.files != '0' && (steps.media-cache-restore.outputs.cache-matched-key == '' || steps.media-cache-before.outputs.fingerprint != steps.media-cache-after.outputs.fingerprint)
         with:
           path: .aggr/cache/build-v1/deployment-media-v1
