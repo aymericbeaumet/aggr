@@ -286,9 +286,7 @@ fn is_clock(value: &str) -> bool {
 
 /// A time after an ISO day: `06:49`, `06:49:16`, `06:49:16.850Z`, `06:49:16+02:00`.
 fn is_time(value: &str) -> bool {
-    let clock_end = value
-        .find(|ch: char| matches!(ch, 'Z' | 'z' | '+' | '-'))
-        .unwrap_or(value.len());
+    let clock_end = value.find(['Z', 'z', '+', '-']).unwrap_or(value.len());
     let (clock, zone) = value.split_at(clock_end);
     is_clock(clock)
         && (zone.is_empty()
