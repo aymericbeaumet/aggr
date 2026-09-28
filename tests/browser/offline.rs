@@ -22,6 +22,29 @@ async fn disabled_shortcuts_service_worker_checks_and_manifest_identity() -> Res
     finish(client, result).await
 }
 
+/// Wait for the worker to take control of the page; when it never does, report how far each
+/// registration got, since a worker stuck installing and one that never claimed fail alike.
+async fn wait_controlled(client: &Client) -> Result<()> {
+    let Err(error) = wait_for(client, "!!navigator.serviceWorker.controller").await else {
+        return Ok(());
+    };
+    let registrations = client
+        .execute_async(
+            r#"
+      const done = arguments[arguments.length - 1];
+      navigator.serviceWorker.getRegistrations().then(
+        list => done(list.map(registration => ({scope: registration.scope,
+          installing: registration.installing?.state ?? null, waiting: registration.waiting?.state ?? null,
+          active: registration.active?.state ?? null}))),
+        failure => done(String(failure)));
+    "#,
+            vec![],
+        )
+        .await
+        .unwrap_or(Value::Null);
+    Err(error.context(format!("service worker registrations: {registrations}")))
+}
+
 async fn service_worker_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
     phone_session(client).await?;
     // Single-key shortcuts are off here, so `j` must leave the feed cursor alone.
@@ -60,7 +83,7 @@ async fn service_worker_contracts(client: &Client, fixture: &Fixture) -> Result<
 
     // The browser confirms the real registration: it succeeds, its worker takes control, and the
     // precached shell is served with no network.
-    wait_for(client, "!!navigator.serviceWorker.controller").await?;
+    wait_controlled(client).await?;
     let registration = client
         .execute_async(
             r#"
@@ -139,7 +162,7 @@ async fn offline_reading_contracts(client: &Client, fixture: &Fixture) -> Result
     .await?;
     client.goto(&fixture.base).await?;
     wait_booted(client).await?;
-    wait_for(client, "!!navigator.serviceWorker.controller").await?;
+    wait_controlled(client).await?;
     client
         .execute("localStorage.setItem('aggr:theme','dark')", vec![])
         .await?;
