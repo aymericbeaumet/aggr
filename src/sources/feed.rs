@@ -627,7 +627,7 @@ pub fn parse(bytes: &[u8], base: &Url) -> Result<Feed> {
         .build()
         .parse(normalized.as_ref())
         .context("parsing feed")?;
-    restore_entry_media(&mut feed, normalized.as_ref());
+    restore_entry_media(&mut feed, normalized.as_ref(), base);
     Ok(feed)
 }
 
@@ -641,13 +641,17 @@ struct EntryMedia {
     /// The first non-empty `media:description`, and whether it declares itself HTML.
     description: Option<(String, bool)>,
     thumbnails: Vec<String>,
+    /// Each `<enclosure>`: its URL as written, media type and byte length.
+    enclosures: Vec<(String, Option<String>, Option<u64>)>,
 }
 
 /// feed-rs keeps a media object only when it holds content, a title or a description: an
-/// `<itunes:duration>` or episode `<itunes:image>` on its own is dropped, and so is a `media:group` or bare `media:*` that has
-/// a description and thumbnails but no `media:content` (YouTube's descriptions, Atom thumbnails).
-/// The same facts are read from the XML and put back wherever the parsed entry lacks them.
-fn restore_entry_media(feed: &mut Feed, bytes: &[u8]) {
+/// `<itunes:duration>` or episode `<itunes:image>` on its own is dropped, and so is a `media:group`
+/// or bare `media:*` that has a description and thumbnails but no `media:content` (YouTube's
+/// descriptions, Atom thumbnails). It also keeps an `<enclosure>` only when no `media:content`
+/// came first, so a podcast that adds an image or video loses its audio. The same facts are read
+/// from the XML and put back wherever the parsed entry lacks them.
+fn restore_entry_media(feed: &mut Feed, bytes: &[u8], base: &Url) {
     let found = entry_media(bytes);
     // Entries are matched by position, so a disagreement about how many there are leaves feed-rs
     // alone rather than giving one entry another's media.
@@ -655,18 +659,45 @@ fn restore_entry_media(feed: &mut Feed, bytes: &[u8]) {
         return;
     }
     for (entry, media) in feed.entries.iter_mut().zip(found) {
-        if let Some(seconds) = media.duration {
-            // The duration describes what plays: the object holding the audio or video, unless
-            // that already says how long it is. feed-rs keeps iTunes data in an object of its own,
-            // apart from the enclosure it describes.
-            let playable = entry.media.iter().position(|object| {
-                object.content.iter().any(|content| {
-                    content
-                        .content_type
-                        .as_ref()
-                        .is_some_and(|kind| matches!(kind.ty().as_str(), "audio" | "video"))
-                })
+        for (url, kind, size) in media.enclosures {
+            let Ok(url) = Url::parse(&url).or_else(|_| base.join(&url)) else {
+                continue;
+            };
+            let listed = entry
+                .media
+                .iter()
+                .flat_map(|object| object.content.iter())
+                .any(|content| content.url.as_ref() == Some(&url));
+            if listed {
+                continue;
+            }
+            let mut object = feed_rs::model::MediaObject::default();
+            object.content.push(feed_rs::model::MediaContent {
+                url: Some(url),
+                content_type: kind.and_then(|kind| kind.parse().ok()),
+                height: None,
+                width: None,
+                duration: None,
+                size,
+                rating: None,
             });
+            entry.media.push(object);
+        }
+        if let Some(seconds) = media.duration {
+            // The duration describes what plays: the object holding the audio (an iTunes
+            // duration is a podcast's), else the video, unless that already says how long it is.
+            // feed-rs keeps iTunes data in an object of its own, apart from the enclosure.
+            let holding = |kind: &str| {
+                entry.media.iter().position(|object| {
+                    object.content.iter().any(|content| {
+                        content
+                            .content_type
+                            .as_ref()
+                            .is_some_and(|content_type| content_type.ty() == kind)
+                    })
+                })
+            };
+            let playable = holding("audio").or_else(|| holding("video"));
             let duration = Some(Duration::from_secs(seconds));
             match playable {
                 Some(index) => {
@@ -795,19 +826,19 @@ fn entry_media(bytes: &[u8]) -> Vec<EntryMedia> {
                     }
                     (MEDIA_RSS_NAMESPACE, "thumbnail") => thumbnail(&element, "url", media),
                     (ITUNES_NAMESPACE, "image") => thumbnail(&element, "href", media),
+                    ("", "enclosure") => enclosure(&element, media),
                     _ => {}
                 }
             }
             Event::Empty(element) => {
-                let attribute = match (namespace.as_str(), element.local_name().as_ref()) {
-                    (MEDIA_RSS_NAMESPACE, "thumbnail") => "url",
-                    (ITUNES_NAMESPACE, "image") => "href",
-                    _ => continue,
+                let Some(media) = entries.last_mut().filter(|_| open.is_some()) else {
+                    continue;
                 };
-                if open.is_some()
-                    && let Some(media) = entries.last_mut()
-                {
-                    thumbnail(&element, attribute, media);
+                match (namespace.as_str(), element.local_name().as_ref()) {
+                    (MEDIA_RSS_NAMESPACE, "thumbnail") => thumbnail(&element, "url", media),
+                    (ITUNES_NAMESPACE, "image") => thumbnail(&element, "href", media),
+                    ("", "enclosure") => enclosure(&element, media),
+                    _ => {}
                 }
             }
             Event::End(_) => {
@@ -819,6 +850,27 @@ fn entry_media(bytes: &[u8]) -> Vec<EntryMedia> {
             Event::Eof => return entries,
             _ => {}
         }
+    }
+}
+
+/// An RSS `<enclosure url type length>`, kept as written: `restore_entry_media` resolves it.
+fn enclosure(element: &quick_xml::events::BytesStart<'_>, media: &mut EntryMedia) {
+    let attribute = |name: &str| {
+        element
+            .try_get_attribute(name)
+            .ok()
+            .flatten()
+            .and_then(|value| {
+                value
+                    .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                    .ok()
+            })
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    if let Some(url) = attribute("url") {
+        let size = attribute("length").and_then(|length| length.parse().ok());
+        media.enclosures.push((url, attribute("type"), size));
     }
 }
 
@@ -1494,6 +1546,19 @@ Second paragraph.</media:description></media:group>
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn a_podcast_duration_goes_to_the_audio_even_behind_a_video() {
+        let xml = r#"<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:media="http://search.yahoo.com/mrss/"><channel><title>Show</title>
+          <item><guid>a</guid><title>A</title><link>https://example.com/a</link><media:content url="https://example.com/a.mp4" type="video/mp4"/><enclosure url="https://example.com/a.mp3" type="audio/mpeg" length="1"/><itunes:duration>1:01</itunes:duration></item>
+        </channel></rss>"#;
+        let (_, items) = parse(xml, "https://example.com/feed.xml");
+        assert_eq!(
+            items[0].extra["audio_url"].as_str(),
+            Some("https://example.com/a.mp3")
+        );
+        assert_eq!(items[0].extra["duration_seconds"].as_u64(), Some(61));
     }
 
     #[test]

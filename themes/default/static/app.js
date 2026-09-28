@@ -67,6 +67,15 @@ const storage = {
   },
 };
 
+/** The element id a fragment names; one that is not valid percent-encoding names itself. */
+function fragmentId(hash) {
+  try {
+    return decodeURIComponent(hash.slice(1));
+  } catch {
+    return hash.slice(1);
+  }
+}
+
 /** Per-site key, so several readers on one origin never share session state. */
 const scopeKey = (name) => "aggr:" + name + ":" + encodeURIComponent(new URL(BASE).pathname);
 
@@ -859,7 +868,7 @@ const navigation = (() => {
 
   /** Put the reader where the page they arrived at expects them, and the keyboard with it. */
   function arrive(saved, hash) {
-    const id = hash ? decodeURIComponent(hash.slice(1)) : "";
+    const id = hash ? fragmentId(hash) : "";
     const target = id ? document.getElementById(id) : null;
     const place = () => {
       if (saved !== undefined) window.scrollTo({ top: saved, behavior: "instant" });
@@ -907,8 +916,24 @@ const navigation = (() => {
     else location.assign(href);
   }
 
+  let slow = 0;
+  /** Say a page is on its way once it has taken longer than a glance, and stop saying so. */
+  function waiting(on) {
+    clearTimeout(slow);
+    if (on) slow = setTimeout(() => document.documentElement.setAttribute("data-navigating", ""), 150);
+    else document.documentElement.removeAttribute("data-navigating");
+  }
+
+  /** The reader chose to stay: a page still on its way must not replace this one when it lands. */
+  function cancel() {
+    token += 1;
+    pending = false;
+    waiting(false);
+  }
+
   /** The page on screen, asked for again: its top, with nothing left mid-edit. */
   function top() {
+    cancel();
     const active = document.activeElement;
     if (active instanceof HTMLElement && editing(active)) active.blur();
     window.scrollTo({ top: 0, behavior: "instant" });
@@ -932,13 +957,12 @@ const navigation = (() => {
     }
     const mine = ++token;
     pending = true;
-    const slow = setTimeout(() => document.documentElement.setAttribute("data-navigating", ""), 150);
+    waiting(true);
     const record = load(url.href);
     const page = await record.page.catch(() => null);
     if (mine !== token) return;
     pending = false;
-    clearTimeout(slow);
-    document.documentElement.removeAttribute("data-navigating");
+    waiting(false);
     if (!page) return fallback(url.href, traverse);
     const next = record.parsed || parse(page.html);
     // The parsed page is taken apart by the swap; the next visit parses its own copy.
@@ -1090,6 +1114,7 @@ const navigation = (() => {
       if (address(hit.url.href) === current) {
         // A fragment of this page is the browser's own jump; the entry it leaves keeps its place.
         if (hit.url.hash) {
+          cancel();
           scrolls.set(entry, window.scrollY);
           return;
         }
@@ -1312,7 +1337,7 @@ function installReadingHeader() {
 function installFootnoteTargets() {
   const paired = () => {
     for (const marked of $$("[data-footnote-active]")) marked.removeAttribute("data-footnote-active");
-    const id = decodeURIComponent(location.hash.slice(1));
+    const id = fragmentId(location.hash);
     if (!id) return;
     const note = document.getElementById(id);
     if (!note) return;
@@ -1382,7 +1407,7 @@ function installHeadingAnchors() {
   // tall the folding header is without measuring it on every frame. Correct it once the page has
   // settled, and on every later jump.
   const settle = () => {
-    const id = decodeURIComponent(location.hash.slice(1));
+    const id = fragmentId(location.hash);
     if (id && document.getElementById(id)?.closest(".body")) jump(id, false);
   };
   window.addEventListener("hashchange", settle, { signal: pageScope.signal });
