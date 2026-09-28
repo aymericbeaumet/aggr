@@ -76,8 +76,6 @@ skip = [
   { crate = "phf_codegen@0.13", reason = "cssparser 0.36/0.37 and markup5ever 0.38/0.39 generation" },
   { crate = "phf_generator@0.13", reason = "phf_codegen 0.13" },
   { crate = "phf_shared@0.13", reason = "phf 0.13" },
-  # feed-rs is held at 2.x (see Cargo.toml); its quick-xml is one release behind aggr's.
-  { crate = "quick-xml@0.41", reason = "feed-rs 2" },
   # hashbrown: indexmap 1 (serde_yaml via pagefind) and pagefind's own 0.16 beside 0.17.
   { crate = "hashbrown@0.12", reason = "indexmap 1 via serde_yaml (pagefind)" },
   { crate = "hashbrown@0.16", reason = "pagefind" },

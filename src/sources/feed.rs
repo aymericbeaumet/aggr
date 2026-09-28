@@ -622,11 +622,214 @@ fn dedupe(mut urls: Vec<Url>) -> Vec<Url> {
 /// RSS, Atom or JSON Feed bytes; relative links resolve against the URL the body came from.
 pub fn parse(bytes: &[u8], base: &Url) -> Result<Feed> {
     let normalized = normalize_podcast_durations(bytes);
-    feed_rs::parser::Builder::new()
+    let mut feed = feed_rs::parser::Builder::new()
         .base_uri(Some(base.as_str()))
         .build()
         .parse(normalized.as_ref())
-        .context("parsing feed")
+        .context("parsing feed")?;
+    restore_entry_media(&mut feed, normalized.as_ref());
+    Ok(feed)
+}
+
+const ITUNES_NAMESPACE: &str = "http://www.itunes.com/dtds/podcast-1.0.dtd";
+const MEDIA_RSS_NAMESPACE: &str = "http://search.yahoo.com/mrss/";
+
+/// What an entry's own media elements say, read from the XML rather than from feed-rs.
+#[derive(Debug, Default, PartialEq)]
+struct EntryMedia {
+    duration: Option<u64>,
+    /// The first non-empty `media:description`, and whether it declares itself HTML.
+    description: Option<(String, bool)>,
+    thumbnails: Vec<String>,
+}
+
+/// feed-rs keeps a media object only when it holds content, a title or a description: an
+/// `<itunes:duration>` or episode `<itunes:image>` on its own is dropped, and so is a `media:group` or bare `media:*` that has
+/// a description and thumbnails but no `media:content` (YouTube's descriptions, Atom thumbnails).
+/// The same facts are read from the XML and put back wherever the parsed entry lacks them.
+fn restore_entry_media(feed: &mut Feed, bytes: &[u8]) {
+    let found = entry_media(bytes);
+    // Entries are matched by position, so a disagreement about how many there are leaves feed-rs
+    // alone rather than giving one entry another's media.
+    if found.is_empty() || found.len() != feed.entries.len() {
+        return;
+    }
+    for (entry, media) in feed.entries.iter_mut().zip(found) {
+        if let Some(seconds) = media.duration {
+            // The duration describes what plays: the object holding the audio or video, unless
+            // that already says how long it is. feed-rs keeps iTunes data in an object of its own,
+            // apart from the enclosure it describes.
+            let playable = entry.media.iter().position(|object| {
+                object.content.iter().any(|content| {
+                    content
+                        .content_type
+                        .as_ref()
+                        .is_some_and(|kind| matches!(kind.ty().as_str(), "audio" | "video"))
+                })
+            });
+            let duration = Some(Duration::from_secs(seconds));
+            match playable {
+                Some(index) => {
+                    let object = &mut entry.media[index];
+                    if object.duration.is_none()
+                        && object
+                            .content
+                            .iter()
+                            .all(|content| content.duration.is_none())
+                    {
+                        object.duration = duration;
+                    }
+                }
+                None if entry.media.iter().all(|object| object.duration.is_none()) => {
+                    media_object(entry, 0).duration = duration;
+                }
+                None => {}
+            }
+        }
+        if let Some((text, html)) = media.description
+            && !entry
+                .media
+                .iter()
+                .any(|object| object.description.is_some())
+            && let Ok(content_type) = if html { "text/html" } else { "text/plain" }.parse()
+        {
+            media_object(entry, 0).description = Some(Text {
+                content_type,
+                src: None,
+                content: text,
+            });
+        }
+        if !media.thumbnails.is_empty()
+            && entry
+                .media
+                .iter()
+                .all(|object| object.thumbnails.is_empty())
+        {
+            media_object(entry, 0).thumbnails = media
+                .thumbnails
+                .into_iter()
+                .map(|uri| feed_rs::model::MediaThumbnail {
+                    image: feed_rs::model::Image {
+                        uri,
+                        title: None,
+                        link: None,
+                        width: None,
+                        height: None,
+                        description: None,
+                    },
+                    time: None,
+                })
+                .collect();
+        }
+    }
+}
+
+/// The entry's media object at `index`, or a new one when it has none.
+fn media_object(entry: &mut Entry, index: usize) -> &mut feed_rs::model::MediaObject {
+    if entry.media.is_empty() {
+        entry.media.push(feed_rs::model::MediaObject::default());
+    }
+    let index = index.min(entry.media.len() - 1);
+    &mut entry.media[index]
+}
+
+/// Each RSS `<item>` or Atom `<entry>`, in document order, with the media elements inside it.
+/// Anything the reader cannot follow yields nothing, which leaves the parsed feed as it is.
+fn entry_media(bytes: &[u8]) -> Vec<EntryMedia> {
+    use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
+
+    let mentions = |needle: &[u8]| bytes.windows(needle.len()).any(|part| part == needle);
+    if !mentions(ITUNES_NAMESPACE.as_bytes()) && !mentions(MEDIA_RSS_NAMESPACE.as_bytes()) {
+        return Vec::new();
+    }
+    let mut reader = NsReader::from_reader(bytes);
+    let mut entries = Vec::new();
+    let mut depth = 0usize;
+    let mut open: Option<usize> = None;
+    loop {
+        let Ok((namespace, event)) = reader.read_resolved_event() else {
+            return Vec::new();
+        };
+        let namespace = match namespace {
+            ResolveResult::Bound(namespace) => namespace.as_ref().to_string(),
+            _ => String::new(),
+        };
+        match event {
+            Event::Start(element) => {
+                depth += 1;
+                let name = element.local_name().as_ref().to_string();
+                if open.is_none() {
+                    if matches!(name.as_str(), "item" | "entry") {
+                        open = Some(depth);
+                        entries.push(EntryMedia::default());
+                    }
+                    continue;
+                }
+                let Some(media) = entries.last_mut() else {
+                    continue;
+                };
+                match (namespace.as_str(), name.as_str()) {
+                    (ITUNES_NAMESPACE, "duration") => {
+                        let Some((_, text)) = podcast_duration_text(&mut reader) else {
+                            return Vec::new();
+                        };
+                        depth -= 1;
+                        media.duration = media
+                            .duration
+                            .or_else(|| crate::media_duration::parse(&text))
+                            .filter(|seconds| *seconds > 0);
+                    }
+                    (MEDIA_RSS_NAMESPACE, "description") => {
+                        let html = element
+                            .try_get_attribute("type")
+                            .ok()
+                            .flatten()
+                            .is_some_and(|kind| kind.value.as_ref() == "html");
+                        let Some((_, text)) = podcast_duration_text(&mut reader) else {
+                            return Vec::new();
+                        };
+                        depth -= 1;
+                        if media.description.is_none() && !text.trim().is_empty() {
+                            media.description = Some((text.trim().to_string(), html));
+                        }
+                    }
+                    (MEDIA_RSS_NAMESPACE, "thumbnail") => thumbnail(&element, "url", media),
+                    (ITUNES_NAMESPACE, "image") => thumbnail(&element, "href", media),
+                    _ => {}
+                }
+            }
+            Event::Empty(element) => {
+                let attribute = match (namespace.as_str(), element.local_name().as_ref()) {
+                    (MEDIA_RSS_NAMESPACE, "thumbnail") => "url",
+                    (ITUNES_NAMESPACE, "image") => "href",
+                    _ => continue,
+                };
+                if open.is_some()
+                    && let Some(media) = entries.last_mut()
+                {
+                    thumbnail(&element, attribute, media);
+                }
+            }
+            Event::End(_) => {
+                if open == Some(depth) {
+                    open = None;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            Event::Eof => return entries,
+            _ => {}
+        }
+    }
+}
+
+/// A `media:thumbnail url` or an episode's `itunes:image href`.
+fn thumbnail(element: &quick_xml::events::BytesStart<'_>, attribute: &str, media: &mut EntryMedia) {
+    if let Ok(Some(url)) = element.try_get_attribute(attribute)
+        && let Ok(url) = url.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+        && !url.trim().is_empty()
+    {
+        media.thumbnails.push(url.trim().to_string());
+    }
 }
 
 fn normalize_podcast_durations(bytes: &[u8]) -> Cow<'_, [u8]> {
@@ -989,9 +1192,14 @@ fn text_to_html(text: &str) -> String {
         .join("\n")
 }
 
-/// feed-rs names RSS `<author>` persons "author" and keeps `mail@host (Real Name)` as the email.
+/// RSS writes an author as `mail@host (Real Name)`. feed-rs splits it into an email and a name
+/// that keeps the parentheses; a person with no name at all may still carry one in its email.
 fn person_name(person: &feed_rs::model::Person) -> Option<String> {
-    let name = person.name.trim();
+    let name = person.name.as_deref().unwrap_or_default().trim();
+    let name = name
+        .strip_prefix('(')
+        .and_then(|name| name.strip_suffix(')'))
+        .map_or(name, str::trim);
     if !name.is_empty() && name != "author" {
         return Some(name.to_string());
     }
@@ -1060,11 +1268,7 @@ line two</content>
 
     fn parse(text: &str, url: &str) -> (SourceMeta, Vec<RawItem>) {
         let url = Url::parse(url).unwrap();
-        let feed = feed_rs::parser::Builder::new()
-            .base_uri(Some(url.as_str()))
-            .build()
-            .parse(text.as_bytes())
-            .unwrap();
+        let feed = super::parse(text.as_bytes(), &url).unwrap();
         convert(&feed, &url)
     }
 
@@ -1246,6 +1450,49 @@ Second paragraph.</media:description></media:group>
             raw.content_html
                 .unwrap()
                 .contains("<pod:duration>12:00</pod:duration>")
+        );
+    }
+
+    #[test]
+    fn media_the_parser_drops_is_restored_to_its_own_entry_without_overriding_it() {
+        let xml = r#"<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:media="http://search.yahoo.com/mrss/"><channel><title>Mixed</title>
+          <item><guid>a</guid><title>A</title><link>https://example.com/a</link><media:content url="https://example.com/a.mp4" type="video/mp4" duration="30"/><itunes:duration>99</itunes:duration></item>
+          <item><guid>b</guid><title>B</title><link>https://example.com/b</link><enclosure url="https://example.com/b.mp3" type="audio/mpeg" length="1"/><itunes:duration>1:01</itunes:duration><media:thumbnail url="https://example.com/b.jpg"/></item>
+          <item><guid>c</guid><title>C</title><link>https://example.com/c</link><media:group><media:description type="html">&lt;p&gt;Notes&lt;/p&gt;</media:description></media:group></item>
+        </channel></rss>"#;
+        let (_, items) = parse(xml, "https://example.com/feed.xml");
+        let field = |item: &RawItem, key: &str| item.extra.get(key).cloned();
+        // The parser's own duration stands; one it dropped comes back to the entry it was in.
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| field(item, "duration_seconds").and_then(|value| value.as_u64()))
+                .collect::<Vec<_>>(),
+            [Some(30), Some(61), None]
+        );
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| field(item, "thumbnail")
+                    .and_then(|value| value.as_str().map(str::to_string)))
+                .collect::<Vec<_>>(),
+            [None, Some("https://example.com/b.jpg".to_string()), None]
+        );
+        assert_eq!(
+            items[2].content_html, None,
+            "a media description is not article content"
+        );
+        let found = entry_media(xml.as_bytes());
+        assert_eq!(
+            found[2].description,
+            Some(("<p>Notes</p>".to_string(), true))
+        );
+        // A document the reader cannot follow restores nothing rather than guessing.
+        assert!(
+            entry_media(
+                b"<rss xmlns:media=\"http://search.yahoo.com/mrss/\"><item><title>x</item>"
+            )
+            .is_empty()
         );
     }
 

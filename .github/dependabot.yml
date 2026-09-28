@@ -15,8 +15,3 @@ updates:
       # The challenge-fallback transport tracks BoringSSL; its upgrades are validated by hand.
       - dependency-name: wreq
       - dependency-name: wreq-util
-      # 3.0.0 treats an item's iTunes media object as empty unless it has a title, description or
-      # content, so an episode whose only iTunes tag is its duration loses it. Stay on 2.x until
-      # `MediaObject::is_not_empty` counts the duration upstream.
-      - dependency-name: feed-rs
-        update-types: ["version-update:semver-major"]
