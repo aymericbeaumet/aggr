@@ -751,7 +751,7 @@ const navigation = (() => {
 
   /** A request for the page at `key`, remembered once it has arrived. */
   function request(key) {
-    const record = { time: Date.now(), page: Promise.resolve(null), parsed: null, ready: false, refreshing: false };
+    const record = { time: Date.now(), page: Promise.resolve(null), parsed: null, ready: false };
     record.page = fetch(key, { headers: { accept: "text/html" }, credentials: "same-origin" }).then(
       async (response) => {
         const type = response.headers.get("content-type") || "";
@@ -775,26 +775,26 @@ const navigation = (() => {
   }
 
   /**
-   * The page at `href`. One fetched before is shown as it was, however long ago, and fetched again
-   * behind it once it is older than PAGE_LIFETIME: a list catches up with the build by itself once
-   * on screen, and an article rarely changes. Only a page never fetched is waited for.
+   * The page at `href`: from memory while it is fresh or still on its way, else from the network.
+   * A page fetched longer ago than PAGE_LIFETIME may belong to an earlier build or release, so it
+   * is fetched again, and its old copy stands in only when the network cannot answer. The pages a
+   * screen links to most are kept fresh while it is open (see `speculate`), so this rarely waits.
    */
   function load(href) {
     const key = address(href);
     const cached = pages.get(key);
-    if (cached) {
+    if (cached && !(cached.ready && Date.now() - cached.time >= PAGE_LIFETIME)) {
       remember(key, cached);
-      if (cached.ready && !cached.refreshing && Date.now() - cached.time >= PAGE_LIFETIME) {
-        cached.refreshing = true;
-        const fresh = request(key);
-        fresh.page.then(
-          () => pages.get(key) === cached && remember(key, fresh),
-          () => (cached.refreshing = false),
-        );
-      }
       return cached;
     }
     const record = request(key);
+    if (cached) {
+      record.page = record.page.catch(() => {
+        record.time = cached.time;
+        record.ready = true;
+        return cached.page;
+      });
+    }
     record.page.catch(() => {
       if (pages.get(key) === record) pages.delete(key);
     });
@@ -1110,17 +1110,34 @@ const navigation = (() => {
     );
   }
 
+  /** The tabs and the neighbouring articles: where a reader is most likely to go from here. */
+  function nearest() {
+    const article = $("article.item");
+    return [
+      ...$$("[data-site-navigation] a[data-route]").map(
+        (link) => /** @type {HTMLAnchorElement} */ (link).href,
+      ),
+      ...[article?.dataset.nextUrl, article?.dataset.previousUrl]
+        .filter(Boolean)
+        .map((neighbour) => new URL(neighbour || "", BASE).href),
+    ];
+  }
+
   /** Fetch what this page makes likely next, once the page itself has settled. */
   function speculate() {
     speculated = 0;
     const signal = pageScope.signal;
+    // A screen left open, or an app brought back, keeps its nearest pages fresh, so following one
+    // of them never waits on a copy that has gone stale.
+    const refresh = () => {
+      if (!document.hidden && !frugal()) for (const href of nearest()) prefetch(href);
+    };
+    const timer = setInterval(refresh, PAGE_LIFETIME / 2);
+    document.addEventListener("visibilitychange", refresh, { signal });
+    signal.addEventListener("abort", () => clearInterval(timer));
     idle(() => {
       if (signal.aborted || frugal()) return;
-      for (const link of $$("[data-site-navigation] a[data-route]"))
-        prefetch(/** @type {HTMLAnchorElement} */ (link).href, true);
-      const article = $("article.item");
-      for (const neighbour of [article?.dataset.nextUrl, article?.dataset.previousUrl])
-        if (neighbour) prefetch(new URL(neighbour, BASE).href, true);
+      for (const href of nearest()) prefetch(href, true);
       if (!("IntersectionObserver" in window)) return;
       // A row the reader lingers over, rather than every row that scrolls past.
       const timers = new Map();
