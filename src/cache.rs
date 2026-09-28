@@ -246,6 +246,7 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("content-access", "content/access.rs"),
         source!("content-aggregator", "content/aggregator.rs"),
         source!("content-cleanup", "content/cleanup.rs"),
+        source!("content-dates", "content/dates.rs"),
         source!("content-extract", "content/extract.rs"),
         source!("content-markdown", "content/markdown.rs"),
         source!("content-module", "content/module.rs"),

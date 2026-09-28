@@ -196,7 +196,9 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   chrome below one is still reachable and the picture is never the price of reaching it. A follow
   widget's label survives its button as a colon introducing nothing; a label above the list, quote,
   picture or link it announces is doing its job and stays.
-  Remove compact bylines only from a leading prose paragraph with a matching publication date.
+  Remove compact bylines only from a leading prose paragraph, and sign-offs only from the last,
+  when their date names the item's own day or month; read dates through `content/dates.rs`,
+  which accepts a line only when all of it is the date.
 - Preserve explicitly captioned image figures before Readability classifies incidental IDs such as
   `replies.png` as boilerplate, and rename share-named wrappers that hold media but no share links.
   Script-drawn charts with inline data become tables; feed-only captures are retried with a daily,

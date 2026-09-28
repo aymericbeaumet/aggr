@@ -177,7 +177,13 @@ before extraction so its picture survives; genuine share widgets with intent or 
 still removed.
 
 Shared boundary cleanup removes a compact leading `By Name Name MM.DD.YY` paragraph only when its
-date matches the item's publication date. A standalone editorial note at either document
+date matches the item's publication date, and a closing sign-off such as `Eric Gullichsen,
+September 2026` on the same terms: the last paragraph, a name and a date and nothing else. A lone
+date line at either boundary goes when it names the item's own day. Dates are read in the forms
+publishers write them (`27 Sep, 2026`, `September 27th, 2026 at 3:04 pm`, `2026-09-27`,
+`27.09.2026`, RFC 3339 and 2822 stamps) and to the precision written: `September 2026` matches any
+day that month, and an ambiguous `04/05/2026` matches either reading. A line reads as a date only
+when all of it is one, so prose that mentions a date stays. A standalone editorial note at either document
 boundary such as `This article was updated on 08 September 2026.` is removed too, because the
 item metadata already shows publication and update times; the same words inside prose stay. It preserves headings, quotations, code, normal prose,
 later bylines, and existing front matter. Builds apply the same cleanup to older archived bodies
