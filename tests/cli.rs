@@ -1655,7 +1655,10 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(site.join("feed.json").exists());
     assert!(site.join(".nojekyll").exists());
     assert!(site.join("browse/index.html").exists());
-    assert!(site.join("sources/127.0.0.1/index.html").exists());
+    // The feed is served from another host, but it names demo.example as its website and every
+    // article lives there: the source is demo.example's own feed, not a feed host aggregating it.
+    assert!(site.join("sources/demo.example/index.html").exists());
+    assert!(!site.join("sources/127.0.0.1/index.html").exists());
     assert!(site.join("sources/index.html").exists());
     assert!(!site.join("sources/atom.xml").exists());
     assert!(!site.join("sources/rss.xml").exists());
@@ -1684,7 +1687,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(browse.contains("id=\"categories\""), "{browse}");
     assert!(browse.contains("id=\"tags\""), "{browse}");
     assert!(
-        browse.contains("href=\"../?q=source%3A%22127.0.0.1%22\""),
+        browse.contains("href=\"../?q=source%3A%22demo.example%22\""),
         "{browse}"
     );
     assert!(

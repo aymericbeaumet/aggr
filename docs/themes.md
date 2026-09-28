@@ -315,6 +315,10 @@ publisher: `youtube.com/@channel` reads, filters and archives under that name, a
 watch URL does not, and the source's own resolved metadata supplies it. `sources[].listed` is
 false for an account nobody configured, so the directory stays the list of whole sites and feeds
 while every source keeps its page and its search value.
+A subscription reached through a directory or a feed host (a podcast's Apple Podcasts or Spotify
+listing, a feed served from another domain) is the publisher's own when its feed names a website
+and every article it brought is published there: it joins that website's collection, and its
+articles carry no `via`. An aggregator whose articles come from many sites is unaffected.
 Inferred publishers expose `sources[].engine = "publisher"` and are excluded from subscription OPML. The navigation bar
 omits individual source details; feed entries retain them. Only `.source-resolved` uses the palette's
 orange; `via` keeps the muted metadata color.
