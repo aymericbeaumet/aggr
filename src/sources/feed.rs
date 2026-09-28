@@ -641,8 +641,8 @@ struct EntryMedia {
     /// The first non-empty `media:description`, and whether it declares itself HTML.
     description: Option<(String, bool)>,
     thumbnails: Vec<String>,
-    /// Each `<enclosure>`: its URL as written, media type and byte length.
-    enclosures: Vec<(String, Option<String>, Option<u64>)>,
+    /// Each `<enclosure>`: its resolved URL, media type and byte length.
+    enclosures: Vec<(Url, Option<String>, Option<u64>)>,
 }
 
 /// feed-rs keeps a media object only when it holds content, a title or a description: an
@@ -652,7 +652,7 @@ struct EntryMedia {
 /// came first, so a podcast that adds an image or video loses its audio. The same facts are read
 /// from the XML and put back wherever the parsed entry lacks them.
 fn restore_entry_media(feed: &mut Feed, bytes: &[u8], base: &Url) {
-    let found = entry_media(bytes);
+    let found = entry_media(bytes, base);
     // Entries are matched by position, so a disagreement about how many there are leaves feed-rs
     // alone rather than giving one entry another's media.
     if found.is_empty() || found.len() != feed.entries.len() {
@@ -660,9 +660,6 @@ fn restore_entry_media(feed: &mut Feed, bytes: &[u8], base: &Url) {
     }
     for (entry, media) in feed.entries.iter_mut().zip(found) {
         for (url, kind, size) in media.enclosures {
-            let Ok(url) = Url::parse(&url).or_else(|_| base.join(&url)) else {
-                continue;
-            };
             let listed = entry
                 .media
                 .iter()
@@ -765,8 +762,9 @@ fn media_object(entry: &mut Entry, index: usize) -> &mut feed_rs::model::MediaOb
 }
 
 /// Each RSS `<item>` or Atom `<entry>`, in document order, with the media elements inside it.
-/// Anything the reader cannot follow yields nothing, which leaves the parsed feed as it is.
-fn entry_media(bytes: &[u8]) -> Vec<EntryMedia> {
+/// URLs resolve as feed-rs resolves them: against the `xml:base` in scope, else the feed's own
+/// address. Anything the reader cannot follow yields nothing, which leaves the parsed feed as it is.
+fn entry_media(bytes: &[u8], base: &Url) -> Vec<EntryMedia> {
     use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
 
     let mentions = |needle: &[u8]| bytes.windows(needle.len()).any(|part| part == needle);
@@ -777,6 +775,8 @@ fn entry_media(bytes: &[u8]) -> Vec<EntryMedia> {
     let mut entries = Vec::new();
     let mut depth = 0usize;
     let mut open: Option<usize> = None;
+    // The `xml:base` in force, with the depth of the element that declared it.
+    let mut bases: Vec<(usize, Url)> = vec![(0, base.clone())];
     loop {
         let Ok((namespace, event)) = reader.read_resolved_event() else {
             return Vec::new();
@@ -788,6 +788,9 @@ fn entry_media(bytes: &[u8]) -> Vec<EntryMedia> {
         match event {
             Event::Start(element) => {
                 depth += 1;
+                if let Some(declared) = declared_base(&element, &bases) {
+                    bases.push((depth, declared));
+                }
                 let name = element.local_name().as_ref().to_string();
                 if open.is_none() {
                     if matches!(name.as_str(), "item" | "entry") {
@@ -799,34 +802,32 @@ fn entry_media(bytes: &[u8]) -> Vec<EntryMedia> {
                 let Some(media) = entries.last_mut() else {
                     continue;
                 };
+                let scope = &bases[bases.len() - 1].1;
                 match (namespace.as_str(), name.as_str()) {
-                    (ITUNES_NAMESPACE, "duration") => {
-                        let Some((_, text)) = podcast_duration_text(&mut reader) else {
-                            return Vec::new();
-                        };
-                        depth -= 1;
-                        media.duration = media
-                            .duration
-                            .or_else(|| crate::media_duration::parse(&text))
-                            .filter(|seconds| *seconds > 0);
-                    }
-                    (MEDIA_RSS_NAMESPACE, "description") => {
+                    (ITUNES_NAMESPACE, "duration") | (MEDIA_RSS_NAMESPACE, "description") => {
                         let html = element
                             .try_get_attribute("type")
                             .ok()
                             .flatten()
                             .is_some_and(|kind| kind.value.as_ref() == "html");
+                        // Reading the text consumes the element's end: leave it as its end would.
                         let Some((_, text)) = podcast_duration_text(&mut reader) else {
                             return Vec::new();
                         };
                         depth -= 1;
-                        if media.description.is_none() && !text.trim().is_empty() {
+                        bases.retain(|(declared, _)| *declared <= depth);
+                        if name == "duration" {
+                            media.duration = media
+                                .duration
+                                .or_else(|| crate::media_duration::parse(&text))
+                                .filter(|seconds| *seconds > 0);
+                        } else if media.description.is_none() && !text.trim().is_empty() {
                             media.description = Some((text.trim().to_string(), html));
                         }
                     }
-                    (MEDIA_RSS_NAMESPACE, "thumbnail") => thumbnail(&element, "url", media),
-                    (ITUNES_NAMESPACE, "image") => thumbnail(&element, "href", media),
-                    ("", "enclosure") => enclosure(&element, media),
+                    (MEDIA_RSS_NAMESPACE, "thumbnail") => thumbnail(&element, "url", scope, media),
+                    (ITUNES_NAMESPACE, "image") => thumbnail(&element, "href", scope, media),
+                    ("", "enclosure") => enclosure(&element, scope, media),
                     _ => {}
                 }
             }
@@ -834,10 +835,12 @@ fn entry_media(bytes: &[u8]) -> Vec<EntryMedia> {
                 let Some(media) = entries.last_mut().filter(|_| open.is_some()) else {
                     continue;
                 };
+                let scope = declared_base(&element, &bases)
+                    .unwrap_or_else(|| bases[bases.len() - 1].1.clone());
                 match (namespace.as_str(), element.local_name().as_ref()) {
-                    (MEDIA_RSS_NAMESPACE, "thumbnail") => thumbnail(&element, "url", media),
-                    (ITUNES_NAMESPACE, "image") => thumbnail(&element, "href", media),
-                    ("", "enclosure") => enclosure(&element, media),
+                    (MEDIA_RSS_NAMESPACE, "thumbnail") => thumbnail(&element, "url", &scope, media),
+                    (ITUNES_NAMESPACE, "image") => thumbnail(&element, "href", &scope, media),
+                    ("", "enclosure") => enclosure(&element, &scope, media),
                     _ => {}
                 }
             }
@@ -846,6 +849,7 @@ fn entry_media(bytes: &[u8]) -> Vec<EntryMedia> {
                     open = None;
                 }
                 depth = depth.saturating_sub(1);
+                bases.retain(|(declared, _)| *declared <= depth);
             }
             Event::Eof => return entries,
             _ => {}
@@ -853,34 +857,61 @@ fn entry_media(bytes: &[u8]) -> Vec<EntryMedia> {
     }
 }
 
-/// An RSS `<enclosure url type length>`, kept as written: `restore_entry_media` resolves it.
-fn enclosure(element: &quick_xml::events::BytesStart<'_>, media: &mut EntryMedia) {
-    let attribute = |name: &str| {
-        element
-            .try_get_attribute(name)
-            .ok()
-            .flatten()
-            .and_then(|value| {
-                value
-                    .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                    .ok()
-            })
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    };
-    if let Some(url) = attribute("url") {
-        let size = attribute("length").and_then(|length| length.parse().ok());
-        media.enclosures.push((url, attribute("type"), size));
-    }
+/// The base an element's own `xml:base` declares, resolved against the one in force around it.
+fn declared_base(
+    element: &quick_xml::events::BytesStart<'_>,
+    bases: &[(usize, Url)],
+) -> Option<Url> {
+    let declared = element.try_get_attribute("xml:base").ok().flatten()?;
+    let declared = declared
+        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+        .ok()?;
+    let around = &bases.last()?.1;
+    Url::parse(declared.trim())
+        .or_else(|_| around.join(declared.trim()))
+        .ok()
 }
 
-/// A `media:thumbnail url` or an episode's `itunes:image href`.
-fn thumbnail(element: &quick_xml::events::BytesStart<'_>, attribute: &str, media: &mut EntryMedia) {
-    if let Ok(Some(url)) = element.try_get_attribute(attribute)
-        && let Ok(url) = url.normalized_value(quick_xml::XmlVersion::Implicit1_0)
-        && !url.trim().is_empty()
-    {
-        media.thumbnails.push(url.trim().to_string());
+fn attribute(element: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<String> {
+    element
+        .try_get_attribute(name)
+        .ok()
+        .flatten()
+        .and_then(|value| {
+            value
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .ok()
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// An RSS `<enclosure url type length>`, its URL resolved against `base`.
+fn enclosure(element: &quick_xml::events::BytesStart<'_>, base: &Url, media: &mut EntryMedia) {
+    let Some(url) = attribute(element, "url") else {
+        return;
+    };
+    let Ok(url) = Url::parse(&url).or_else(|_| base.join(&url)) else {
+        return;
+    };
+    let size = attribute(element, "length").and_then(|length| length.parse().ok());
+    media
+        .enclosures
+        .push((url, attribute(element, "type"), size));
+}
+
+/// A `media:thumbnail url` or an episode's `itunes:image href`, resolved against `base`.
+fn thumbnail(
+    element: &quick_xml::events::BytesStart<'_>,
+    name: &str,
+    base: &Url,
+    media: &mut EntryMedia,
+) {
+    if let Some(url) = attribute(element, name) {
+        let resolved = Url::parse(&url)
+            .or_else(|_| base.join(&url))
+            .map_or(url, |url| url.to_string());
+        media.thumbnails.push(resolved);
     }
 }
 
@@ -1534,7 +1565,8 @@ Second paragraph.</media:description></media:group>
             items[2].content_html, None,
             "a media description is not article content"
         );
-        let found = entry_media(xml.as_bytes());
+        let base = Url::parse("https://example.com/feed.xml").unwrap();
+        let found = entry_media(xml.as_bytes(), &base);
         assert_eq!(
             found[2].description,
             Some(("<p>Notes</p>".to_string(), true))
@@ -1542,9 +1574,36 @@ Second paragraph.</media:description></media:group>
         // A document the reader cannot follow restores nothing rather than guessing.
         assert!(
             entry_media(
-                b"<rss xmlns:media=\"http://search.yahoo.com/mrss/\"><item><title>x</item>"
+                b"<rss xmlns:media=\"http://search.yahoo.com/mrss/\"><item><title>x</item>",
+                &base
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn restored_media_urls_resolve_against_the_xml_base_in_scope() {
+        let xml = r#"<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel xml:base="https://cdn.example.net/show/"><title>Show</title>
+          <item xml:base="episodes/"><guid>a</guid><title>A</title><link>https://example.com/a</link><media:content url="https://example.com/a.mp4" type="video/mp4"/><enclosure url="a.mp3" type="audio/mpeg" length="1"/><itunes:image href="a.jpg"/></item>
+          <item><guid>b</guid><title>B</title><link>https://example.com/b</link><media:content url="https://example.com/b.mp4" type="video/mp4"/><enclosure xml:base="/other/" url="b.mp3" type="audio/mpeg" length="1"/></item>
+        </channel></rss>"#;
+        let (_, items) = parse(xml, "https://example.com/feed.xml");
+        assert_eq!(
+            items[0].extra["audio_url"].as_str(),
+            Some("https://cdn.example.net/show/episodes/a.mp3")
+        );
+        assert_eq!(
+            items[1].extra["audio_url"].as_str(),
+            Some("https://cdn.example.net/other/b.mp3"),
+            "an element's own xml:base applies to it, and the item's scope ends with the item"
+        );
+        let found = entry_media(
+            xml.as_bytes(),
+            &Url::parse("https://example.com/feed.xml").unwrap(),
+        );
+        assert_eq!(
+            found[0].thumbnails,
+            ["https://cdn.example.net/show/episodes/a.jpg"]
         );
     }
 
