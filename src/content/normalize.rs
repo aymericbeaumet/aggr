@@ -49,9 +49,17 @@ pub(super) fn publisher_html(html: &str) -> String {
         if !tag.closing
             && matches!(tag.name.as_str(), "a" | "span")
             && let Some(decoded) = protected_text(raw)
-            && let Some(end) = protected_element_end(html, start, &tag.name)
+            && let Some(end) = placeholder_end(html, start, &tag.name)
         {
             out.push_str(&escape_html(&decoded));
+            position = end;
+            continue;
+        }
+        if !tag.closing
+            && let Some(frame) = video_facade_frame(&tag.name, raw)
+            && let Some(end) = placeholder_end(html, start, &tag.name)
+        {
+            out.push_str(&frame);
             position = end;
             continue;
         }
@@ -70,13 +78,51 @@ pub(super) fn publisher_html(html: &str) -> String {
     out
 }
 
-fn protected_element_end(html: &str, start: usize, name: &str) -> Option<usize> {
+fn placeholder_end(html: &str, start: usize, name: &str) -> Option<usize> {
     // Real placeholders are tiny. Bound malformed/unclosed wrappers before Readability runs.
     let mut end = start.saturating_add(16 * 1024).min(html.len());
     while !html.is_char_boundary(end) {
         end -= 1;
     }
     element_bounds(&html[start..end], 0, name).map(|(_, _, end)| start + end)
+}
+
+/// A video facade (`<lite-youtube>`, `<lite-vimeo>`) is a custom element a script upgrades into
+/// a player on click; without scripting it shows nothing, and Readability drops it as empty. It
+/// becomes the plain embed it stands for, which the Markdown conversion links to the video.
+fn video_facade_frame(name: &str, tag: &str) -> Option<String> {
+    let player = match name {
+        "lite-youtube" => "https://www.youtube.com/embed/",
+        "lite-vimeo" => "https://player.vimeo.com/video/",
+        _ => return None,
+    };
+    let id = attribute_value(tag, "videoid")?.trim();
+    if !(1..=64).contains(&id.len())
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    // Facade libraries name the video differently; a play label reads "Play: <title>".
+    let title = ["title", "videotitle", "playlabel"]
+        .iter()
+        .filter_map(|attribute| attribute_value(tag, attribute))
+        .map(super::strip::decode_entities)
+        .map(|value| {
+            let value = value.trim();
+            value
+                .strip_prefix("Play:")
+                .or_else(|| value.strip_prefix("Play video:"))
+                .unwrap_or(value)
+                .trim()
+                .to_string()
+        })
+        .find(|value| !value.is_empty());
+    let title = title.map_or_else(String::new, |title| {
+        format!(" title=\"{}\"", escape_html(&title))
+    });
+    Some(format!("<iframe src=\"{player}{id}\"{title}></iframe>"))
 }
 
 fn protected_text(tag: &str) -> Option<String> {
@@ -193,6 +239,63 @@ mod tests {
         .unwrap();
         let markdown = crate::content::to_markdown(&extracted.html, None);
         assert!(markdown.contains("`io_uring_enter()`"), "{markdown}");
+    }
+
+    #[test]
+    fn video_facades_become_the_embeds_they_stand_for() {
+        assert_eq!(
+            publisher_html(
+                r#"<p><lite-youtube videoid="GAkIytR7vcc" js-api="js-api" title="WWC26-NA - 2026 in LLMs (so far)" playlabel="Play: WWC26-NA - 2026 in LLMs (so far)"> </lite-youtube></p>"#
+            ),
+            r#"<p><iframe src="https://www.youtube.com/embed/GAkIytR7vcc" title="WWC26-NA - 2026 in LLMs (so far)"></iframe></p>"#
+        );
+        // The fallback a facade carries goes with it; the play label names an untitled video.
+        assert_eq!(
+            publisher_html(
+                r#"<lite-youtube videoid="dQw4w9WgXcQ" playlabel="Play: Q&amp;A"><a href="https://youtube.com/watch?v=dQw4w9WgXcQ" class="lty-playbtn"><span class="lyt-visually-hidden">Play Video</span></a></lite-youtube>"#
+            ),
+            r#"<iframe src="https://www.youtube.com/embed/dQw4w9WgXcQ" title="Q&amp;A"></iframe>"#
+        );
+        assert_eq!(
+            publisher_html(r#"<lite-vimeo videoid="364402896"></lite-vimeo>"#),
+            r#"<iframe src="https://player.vimeo.com/video/364402896"></iframe>"#
+        );
+        // Without a usable video id there is nothing to embed: the markup stays as published.
+        for html in [
+            r#"<lite-youtube title="No id"></lite-youtube>"#,
+            r#"<lite-youtube videoid="a/b?c"></lite-youtube>"#,
+            r#"<lite-youtube videoid="abc">"#,
+            r#"<youtube-player videoid="abc"></youtube-player>"#,
+        ] {
+            assert_eq!(publisher_html(html), html);
+        }
+    }
+
+    #[test]
+    fn a_video_facade_survives_extraction_as_a_link_to_the_video() {
+        let url =
+            url::Url::parse("https://simonwillison.net/2026/Sep/27/2026-in-llms-so-far/").unwrap();
+        let page = r#"<html><head><title>2026 in LLMs so far</title></head><body><div id="primary"><div class="entry entryPage"><h2>2026 in LLMs so far</h2><p>On Friday I gave the closing keynote at the conference in San Jose, tying together the key trends from the past year into a chronological exploration of everything that happened. The video <a href="https://www.youtube.com/watch?v=GAkIytR7vcc">is on YouTube</a>; here are my annotated slides and notes to accompany the talk.</p>
+<p><lite-youtube videoid="GAkIytR7vcc" js-api="js-api" title="WWC26-NA - 2026 in LLMs (so far)" playlabel="Play: WWC26-NA - 2026 in LLMs (so far)"> </lite-youtube></p>
+<p>And as an <a href="https://simonwillison.net/tags/annotated-talks/">annotated presentation</a>:</p>
+<p>The rest of the talk is long enough to be an article in its own right, with several paragraphs of discussion about models, agents, tooling and everything else that happened this year.</p></div></div></body></html>"#;
+        let extracted = crate::content::extract::extract_article(page, &url).unwrap();
+        let markdown = crate::content::to_markdown(&extracted.html, Some(&url));
+        assert!(
+            markdown.contains(
+                "notes to accompany the talk.\n\n[WWC26-NA - 2026 in LLMs (so far)](https://www.youtube.com/watch?v=GAkIytR7vcc)\n\nAnd as an"
+            ),
+            "{markdown}"
+        );
+        // A feed that carries the facade in its content converts the same way.
+        let markdown = crate::content::to_markdown(
+            r#"<p>Watch:</p><p><lite-vimeo videoid="364402896" videotitle="Talk"></lite-vimeo></p>"#,
+            None,
+        );
+        assert!(
+            markdown.contains("[Talk](https://player.vimeo.com/video/364402896)"),
+            "{markdown}"
+        );
     }
 
     #[test]

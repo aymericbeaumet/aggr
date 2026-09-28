@@ -95,6 +95,29 @@ pub fn is_status_badge(source: &str) -> bool {
     matches(source, true)
 }
 
+/// A site icon is the identity a page sets beside a link, never article artwork: a favicon
+/// service's rendition of some domain's icon, or the icon file a site serves itself.
+pub fn is_site_icon(source: &str) -> bool {
+    let Ok(url) = Url::parse(source) else {
+        return false;
+    };
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let path = url.path().to_ascii_lowercase();
+    let file = path.rsplit('/').next().unwrap_or_default();
+    match host.as_str() {
+        "google.com" | "www.google.com" => path.starts_with("/s2/favicons"),
+        "icons.duckduckgo.com" | "favicon.yandex.net" | "icon.horse" => true,
+        "favicons.githubusercontent.com" => true,
+        _ if host.ends_with(".gstatic.com") => path.starts_with("/favicon"),
+        _ => file.starts_with("favicon.") || file.starts_with("apple-touch-icon"),
+    }
+}
+
+/// An image that can stand for the article: neither a status badge nor a site icon.
+pub fn is_artwork(source: &str) -> bool {
+    !is_status_badge(source) && !is_site_icon(source)
+}
+
 #[derive(Debug, Clone)]
 pub struct MediaLimits {
     /// Maximum bytes accepted from one HTTP response and one generated rendition.
@@ -1814,6 +1837,32 @@ mod tests {
         ] {
             assert!(!is_status_badge(source));
         }
+    }
+
+    #[test]
+    fn recognizes_site_icons_without_excluding_logos_or_artwork() {
+        for source in [
+            "https://www.google.com/s2/favicons?domain=news.ycombinator.com&sz=128",
+            "https://t0.gstatic.com/faviconV2?client=SOCIAL&url=https://example.com",
+            "https://icons.duckduckgo.com/ip3/example.com.ico",
+            "https://example.com/favicon.ico",
+            "https://example.com/static/apple-touch-icon-180x180.png",
+        ] {
+            assert!(is_site_icon(source), "{source}");
+            assert!(!is_artwork(source), "{source}");
+        }
+        for source in [
+            "https://example.com/logo.svg",
+            "https://www.google.com/images/branding/googlelogo.png",
+            "https://example.com/posts/favicon-design-history.jpg",
+            "https://example.com/icons/app.png",
+        ] {
+            assert!(!is_site_icon(source), "{source}");
+            assert!(is_artwork(source), "{source}");
+        }
+        assert!(!is_artwork(
+            "https://img.shields.io/badge/build-passing-green"
+        ));
     }
 
     #[test]

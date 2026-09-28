@@ -257,7 +257,7 @@ fn derived_preview(
 ) -> Result<Option<PreparedPreview>> {
     for asset in assets
         .iter()
-        .filter(|asset| !crate::media::is_status_badge(&asset.source_url))
+        .filter(|asset| crate::media::is_artwork(&asset.source_url))
         .take(12)
     {
         let retained = asset

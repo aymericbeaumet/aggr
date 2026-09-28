@@ -99,6 +99,8 @@ pub fn strip_article_metadata(
 ) -> String {
     let markdown = strip_boundary_controls(markdown);
     let markdown = strip_leading_metadata(&markdown, title, published, source_slug);
+    let markdown = strip_site_icons(&markdown);
+    let markdown = strip_leading_kind_label(&markdown);
     let markdown = strip_trailing_signature(&markdown, published);
     let markdown = strip_boundary_controls(&markdown);
     let markdown = strip_separator_rows(&markdown);
@@ -1282,6 +1284,99 @@ fn strip_trailing_signature(markdown: &str, published: Option<DateTime<Utc>>) ->
     format!("{kept}\n")
 }
 
+/// `![](https://www.google.com/s2/favicons?domain=…)`: a site icon is the page's decoration for
+/// the link beside it, not article content. It goes wherever it sits, with the space that set it
+/// apart; an icon that was a whole link takes the link, and one that was a whole line the line.
+fn strip_site_icons(markdown: &str) -> String {
+    use comrak::nodes::NodeValue;
+    if !markdown.contains("![") {
+        return markdown.to_string();
+    }
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    let mut lines = vec![0];
+    lines.extend(markdown.match_indices('\n').map(|(index, _)| index + 1));
+    let mut ranges = Vec::new();
+    for node in root.descendants() {
+        let icon = matches!(
+            &node.data.borrow().value,
+            NodeValue::Image(image) if crate::media::is_site_icon(&image.url)
+        );
+        if !icon {
+            continue;
+        }
+        let target = node
+            .parent()
+            .filter(|parent| {
+                matches!(parent.data.borrow().value, NodeValue::Link(_))
+                    && parent.children().count() == 1
+            })
+            .unwrap_or(node);
+        let position = target.data.borrow().sourcepos;
+        let (Some(&start_line), Some(&end_line)) = (
+            lines.get(position.start.line.wrapping_sub(1)),
+            lines.get(position.end.line.wrapping_sub(1)),
+        ) else {
+            continue;
+        };
+        let start = start_line + position.start.column.saturating_sub(1);
+        let end = end_line + position.end.column;
+        if start < end && end <= markdown.len() && markdown.get(start..end).is_some() {
+            ranges.push(start..end);
+        }
+    }
+    if ranges.is_empty() {
+        return markdown.to_string();
+    }
+    let mut out = markdown.to_string();
+    for range in ranges.iter().rev() {
+        let (mut start, mut end) = (range.start, range.end);
+        let line_start = out[..start].rfind('\n').map_or(0, |at| at + 1);
+        let line_end = out[end..].find('\n').map_or(out.len(), |at| end + at);
+        if out[line_start..start].trim().is_empty() && out[end..line_end].trim().is_empty() {
+            start = line_start;
+            end = (line_end + 1).min(out.len());
+            if out[end..].starts_with('\n') {
+                end += 1;
+            }
+        } else if out[..start].ends_with(' ') {
+            start -= 1;
+        } else if out[end..].starts_with(' ') {
+            end += 1;
+        }
+        out.replace_range(start..end, "");
+    }
+    out
+}
+
+/// `[Comment](https://simonwillison.net/elsewhere/comment/) [My comment](…) on …`: the kind of
+/// post, set before its opening link and linked to the index of every post of that kind. The link
+/// text names the page it leads to and another link follows it; a link opening the prose does
+/// neither.
+fn strip_leading_kind_label(markdown: &str) -> String {
+    after_kind_label(markdown.trim_start_matches('\n'))
+        .map_or_else(|| markdown.to_string(), str::to_string)
+}
+
+fn after_kind_label(body: &str) -> Option<&str> {
+    let (label, rest) = body.strip_prefix('[')?.split_once("](")?;
+    let (target, after) = rest.split_once(')')?;
+    let after = after.strip_prefix(' ')?;
+    if !(1..=3).contains(&label.split_whitespace().count())
+        || label.chars().count() > 40
+        || label.contains(['[', ']', '\n', '`', '*', '_'])
+        || !(after.starts_with('[') || after.starts_with("!["))
+    {
+        return None;
+    }
+    let target = url::Url::parse(target.split_whitespace().next()?).ok()?;
+    let page = target
+        .path_segments()?
+        .rfind(|segment| !segment.is_empty())?;
+    let page = page.strip_suffix(".html").unwrap_or(page);
+    (slug::slugify(label) == slug::slugify(page)).then_some(after)
+}
+
 /// A publisher's date line that sits behind a one-line lede (`Looking back on the first year.`
 /// / `Posted 2026-09-15` / the article): the lede is prose to keep, the labelled date is not.
 /// Only a labelled date qualifies; a bare date behind prose stays.
@@ -2068,6 +2163,49 @@ mod tests {
                 "The last real paragraph.\n",
                 "{sign_off}"
             );
+        }
+    }
+
+    #[test]
+    fn strips_the_post_kind_label_and_site_icon_opening_a_link_post() {
+        // simonwillison.net opens each "elsewhere" post with its kind and the linked site's icon.
+        let stored = "[Comment](https://simonwillison.net/elsewhere/comment/) ![](https://www.google.com/s2/favicons?domain=news.ycombinator.com&sz=128) [My comment](https://news.ycombinator.com/item?id=49851693#49871741) on [S3 Is the Future, S3 Is the Past](https://news.ycombinator.com/item?id=49851693) — Hacker News\n\nOne thing I find notable about S3 today.\n";
+        assert_eq!(
+            strip_article_metadata(
+                stored,
+                "S3 Is the Future, S3 Is the Past",
+                None,
+                "simonwillison-net"
+            ),
+            "[My comment](https://news.ycombinator.com/item?id=49851693#49871741) on [S3 Is the Future, S3 Is the Past](https://news.ycombinator.com/item?id=49851693) — Hacker News\n\nOne thing I find notable about S3 today.\n"
+        );
+        let captured = to_markdown(
+            "<div><p><a href=\"https://simonwillison.net/elsewhere/release/\">Release</a> <img src=\"https://www.google.com/s2/favicons?domain=github.com&amp;sz=128\" alt=\"\" width=\"14\" height=\"14\"> <a href=\"https://github.com/simonw/llm/releases/tag/0.30\">llm 0.30</a> — the new release.</p><p>Details follow.</p></div>",
+            None,
+        );
+        assert_eq!(
+            strip_article_metadata(&captured, "llm 0.30", None, "simonwillison-net"),
+            "[llm 0.30](https://github.com/simonw/llm/releases/tag/0.30) — the new release.\n\nDetails follow.\n"
+        );
+    }
+
+    #[test]
+    fn site_icons_go_wherever_they_sit_and_other_opening_links_stay() {
+        assert_eq!(
+            strip_site_icons(
+                "Read on ![](https://icons.duckduckgo.com/ip3/lwn.net.ico) [LWN](https://lwn.net/).\n\n[![](https://example.com/favicon.ico)](https://example.com/) \n\n![](https://www.google.com/s2/favicons?domain=a.com)\n\nText with ![a diagram](https://example.com/diagram.png).\n\n```\n![](https://example.com/favicon.ico)\n```\n"
+            ),
+            "Read on [LWN](https://lwn.net/).\n\nText with ![a diagram](https://example.com/diagram.png).\n\n```\n![](https://example.com/favicon.ico)\n```\n"
+        );
+        for opening in [
+            // Prose opening with a link: the link does not name its own target.
+            "[Rust](https://www.rust-lang.org/) [1.90](https://blog.rust-lang.org/) shipped today.\n",
+            // The label names its target but introduces prose, not another link.
+            "[Comment](https://example.com/comment/) is what I wrote here.\n",
+            // A label that is a sentence, not a kind.
+            "[Why we moved to a monorepo this year](https://example.com/why-we-moved-to-a-monorepo-this-year/) [part two](https://example.com/2)\n",
+        ] {
+            assert_eq!(strip_leading_kind_label(opening), opening, "{opening}");
         }
     }
 

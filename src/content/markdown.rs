@@ -313,12 +313,9 @@ fn link_embedded_frames(html: &str) -> String {
                 .and_then(|id| Url::parse(&format!("https://www.youtube.com/watch?v={id}")).ok())
                 .unwrap_or(url);
             let title = attribute_value(tag_html, "title")
-                .map(str::trim)
+                .map(|title| super::strip::decode_entities(title).trim().to_string())
                 .filter(|title| !title.is_empty())
-                .map_or_else(
-                    || url.host_str().unwrap_or("embedded content").to_string(),
-                    String::from,
-                );
+                .unwrap_or_else(|| url.host_str().unwrap_or("embedded content").to_string());
             out.push_str(&format!(
                 "<p><a href=\"{}\">{}</a></p>",
                 escape_html(url.as_str()),

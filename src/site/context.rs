@@ -309,7 +309,7 @@ impl ArticlePreviewCtx {
         images
             .iter()
             .find(|image| {
-                !crate::media::is_status_badge(&image.source)
+                crate::media::is_artwork(&image.source)
                     && image.width >= MIN_LEAD_WIDTH
                     && !body_sources.contains(&image.source)
                     && !body_originals.contains(image.original.as_str())

@@ -199,6 +199,10 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   Remove compact bylines only from a leading prose paragraph, and sign-offs only from the last,
   when their date names the item's own day or month; read dates through `content/dates.rs`,
   which accepts a line only when all of it is the date.
+- Turn script-upgraded video facades (`lite-youtube`, `lite-vimeo`) into the embeds they stand for
+  before Readability runs; drop site icons (`media::is_site_icon`) everywhere and never use one as
+  an item preview (`media::is_artwork`), and drop a leading post-kind label link only when its text
+  names its own target and another link follows it.
 - Preserve explicitly captioned image figures before Readability classifies incidental IDs such as
   `replies.png` as boilerplate, and rename share-named wrappers that hold media but no share links.
   Script-drawn charts with inline data become tables; feed-only captures are retried with a daily,

@@ -176,6 +176,18 @@ media and no sharing links (Apple Newsroom's `image-sharesheet` figures, for exa
 before extraction so its picture survives; genuine share widgets with intent or social links are
 still removed.
 
+A video facade (`<lite-youtube videoid>`, `<lite-vimeo videoid>`) is an empty custom element a
+publisher script upgrades into a player, so Readability discards it. Before extraction it becomes
+the YouTube or Vimeo embed it stands for, titled from its `title`, `videotitle` or play label, and
+the Markdown keeps it as a link to the video, which the reader plays inline. Retained HTML from
+before this change no longer holds the facade; only a refresh re-captures those items.
+
+Site icons are page decoration, not content: images from favicon services (Google's `s2/favicons`,
+`gstatic` favicon URLs, DuckDuckGo's icon service) and `favicon.*` or `apple-touch-icon*` files are
+dropped from the body with the space that set them apart, and never become an item's preview. A
+post-kind label opening the article, a link whose text names the page it leads to and that is
+followed by another link (Simon Willison's `Comment` before `My comment on …`), is dropped too.
+
 Shared boundary cleanup removes a compact leading `By Name Name MM.DD.YY` paragraph only when its
 date matches the item's publication date, and a closing sign-off such as `Eric Gullichsen,
 September 2026` on the same terms: the last paragraph, a name and a date and nothing else. A lone
