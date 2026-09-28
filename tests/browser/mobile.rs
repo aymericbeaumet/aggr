@@ -722,6 +722,18 @@ async fn mobile_physical_taps_navigate_once_without_delay() -> Result<()> {
             anyhow::ensure!(state["touchAction"]=="manipulation" && state["decoration"]=="none","tabs expose immediate touch activation without link decoration: {state}");
         }
         screenshot(&client,"mobile-physical-tap-navigation").await?;
+        client.goto(&fixture.base).await?;
+        wait_booted_with(&client,"!!document.querySelector('.row .published-date')").await?;
+        // A row is one target: touching its metadata text, away from any link in it, opens it.
+        let row=client.execute("const row=document.querySelector('.row');const date=row.querySelector('.published-date');const box=date.getBoundingClientRect();return {x:box.left+box.width/2,y:box.top+box.height/2,url:row.querySelector('[data-row-open]').href,feed:location.href}",vec![]).await?;
+        let point=(row["x"].as_f64().context("date x")?,row["y"].as_f64().context("date y")?);
+        touch(&client,"touchStart",Some(point)).await?;
+        touch(&client,"touchEnd",None).await?;
+        wait_booted_with(&client,&format!("location.href==={} && document.body.dataset.kind==='item'",row["url"])).await?;
+        // Its tags read as a line of words rather than a column of tap-sized boxes.
+        let tags=client.execute("const tags=[...document.querySelectorAll('.item-tags .tag')];return {count:tags.length,heights:tags.every(tag=>tag.getBoundingClientRect().height<=33),widths:tags.every(tag=>getComputedStyle(tag).minWidth==='auto'||getComputedStyle(tag).minWidth==='0px')}",vec![]).await?;
+        anyhow::ensure!(tags["heights"]==true && tags["widths"]==true,"tags keep their own width and a compact height on touch: {tags}");
+
         Ok(())
     }.await;
     report_failure(&client, "mobile-physical-taps", &result).await;

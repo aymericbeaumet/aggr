@@ -594,7 +594,12 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
           opacity:parseFloat(getComputedStyle(tags).opacity), height:tags.getBoundingClientRect().height,
           metadata:getComputedStyle(head.querySelector('.meta')).display,
           separate:tags.getBoundingClientRect().top >= head.querySelector('.meta').getBoundingClientRect().bottom,
-          offset:parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop), bottom:head.getBoundingClientRect().bottom};
+          offset:parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop), bottom:head.getBoundingClientRect().bottom,
+          titleBox:head.querySelector('h1').getBoundingClientRect().height,
+          compact:(() => { const node = head.querySelector('.itemhead-title-compact'), box = node.getBoundingClientRect(), frame = head.getBoundingClientRect();
+            return {height:box.height, opacity:parseFloat(getComputedStyle(node).opacity), inside:box.top >= frame.top - 0.5 && box.bottom <= frame.bottom + 0.5,
+              text:node.textContent.trim()}; })(),
+          titleOpacity:parseFloat(getComputedStyle(title).opacity), titleText:title.textContent.trim()};
       }
       (async () => done({expanded:await sample(0),quarter:await sample(40),half:await sample(80),
         condensed:await sample(520),reverseHalf:await sample(80),restored:await sample(0)}))();
@@ -621,6 +626,22 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         reading_header["restored"]["size"]
     );
     assert_eq!(reading_header["condensed"]["height"], 0.0);
+    // Folded, the whole title is still there, set smaller across the full width: the large title
+    // gives way to a compact copy, and the header closes to exactly that copy's height.
+    let condensed = &reading_header["condensed"];
+    assert!(
+        (condensed["titleBox"].as_f64().unwrap_or(f64::MAX)
+            - condensed["compact"]["height"].as_f64().unwrap_or_default())
+        .abs()
+            < 1.0
+            && condensed["compact"]["opacity"] == 1.0
+            && condensed["compact"]["inside"] == true
+            && condensed["compact"]["text"] == condensed["titleText"]
+            && condensed["titleOpacity"] == 0.0
+            && reading_header["expanded"]["titleOpacity"] == 1.0
+            && reading_header["expanded"]["compact"]["opacity"] == 0.0,
+        "the folded header shows the whole title, smaller: {reading_header}"
+    );
     assert_ne!(reading_header["condensed"]["metadata"], "none");
     // `scroll-padding-top` clears the bar that never moves. The folding header above an article is
     // only knowable by measuring it, which reading must not do per frame, so the reader corrects a

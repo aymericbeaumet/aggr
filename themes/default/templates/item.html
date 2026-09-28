@@ -21,6 +21,7 @@
   {% for author in item.authors %}<data class="p-author h-card" value="{{ author }}" hidden></data>{% endfor %}
   <header class="itemhead">
     <h1 class="p-name" tabindex="-1"><span class="itemhead-title">{% for word in item.title | split(' ') %}{% if not loop.first %} {% endif %}{% if '/' in word %}<span class="itemhead-title-term">{{ word }}</span>{% else %}{{ word }}{% endif %}{% endfor %}</span></h1>
+    <span class="itemhead-title-compact" aria-hidden="true">{{ item.title }}</span>
     {% include "_metadata.html" %}
     {% if item.labels %}<div class="item-tags" aria-label="Topics"><div class="item-tags-inner">{% for label in item.labels %}<a class="tag p-category" rel="tag" href="{{ (label | slug) | facet_url('tag') }}">#{{ label }}</a>{% endfor %}</div></div>{% endif %}
     <span class="itemhead-progress" aria-hidden="true"></span>

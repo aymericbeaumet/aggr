@@ -695,7 +695,7 @@ const navigation = (() => {
   /** A page fetched longer ago than this is fetched again rather than shown. */
   const PAGE_LIFETIME = 5 * 60000;
   /** Pages one screen may fetch before anyone asks for them. */
-  const SPECULATION_LIMIT = 10;
+  const SPECULATION_LIMIT = 16;
   /** Where each history entry was scrolled to, by the key its state carries. */
   const scrolls = new Map();
   /**
@@ -749,21 +749,15 @@ const navigation = (() => {
 
   const parse = (html) => new DOMParser().parseFromString(html, "text/html");
 
-  /** The page at `href`, from memory while it is fresh, else from the network. */
-  function load(href) {
-    const key = address(href);
-    const cached = pages.get(key);
-    if (cached && Date.now() - cached.time < PAGE_LIFETIME) {
-      pages.delete(key);
-      pages.set(key, cached);
-      return cached;
-    }
-    const record = { time: Date.now(), page: Promise.resolve(null), parsed: null };
+  /** A request for the page at `key`, remembered once it has arrived. */
+  function request(key) {
+    const record = { time: Date.now(), page: Promise.resolve(null), parsed: null, ready: false, refreshing: false };
     record.page = fetch(key, { headers: { accept: "text/html" }, credentials: "same-origin" }).then(
       async (response) => {
         const type = response.headers.get("content-type") || "";
         if (!response.ok || !type.includes("text/html")) throw new Error("not a page");
         const page = { url: response.url || key, html: await response.text() };
+        record.ready = true;
         // Parsing is the one step left between the tap and the swap; do it while nothing waits.
         idle(() => {
           if (pages.get(key) === record && !record.parsed) record.parsed = parse(page.html);
@@ -771,11 +765,40 @@ const navigation = (() => {
         return page;
       },
     );
+    return record;
+  }
+
+  function remember(key, record) {
+    pages.delete(key);
+    pages.set(key, record);
+    while (pages.size > PAGE_LIMIT) pages.delete(pages.keys().next().value);
+  }
+
+  /**
+   * The page at `href`. One fetched before is shown as it was, however long ago, and fetched again
+   * behind it once it is older than PAGE_LIFETIME: a list catches up with the build by itself once
+   * on screen, and an article rarely changes. Only a page never fetched is waited for.
+   */
+  function load(href) {
+    const key = address(href);
+    const cached = pages.get(key);
+    if (cached) {
+      remember(key, cached);
+      if (cached.ready && !cached.refreshing && Date.now() - cached.time >= PAGE_LIFETIME) {
+        cached.refreshing = true;
+        const fresh = request(key);
+        fresh.page.then(
+          () => pages.get(key) === cached && remember(key, fresh),
+          () => (cached.refreshing = false),
+        );
+      }
+      return cached;
+    }
+    const record = request(key);
     record.page.catch(() => {
       if (pages.get(key) === record) pages.delete(key);
     });
-    pages.set(key, record);
-    while (pages.size > PAGE_LIMIT) pages.delete(pages.keys().next().value);
+    remember(key, record);
     return record;
   }
 
@@ -924,8 +947,38 @@ const navigation = (() => {
     else document.documentElement.removeAttribute("data-navigating");
   }
 
+  /** The row or card whose link is on its way, lit until its page replaces it. */
+  let opening = null;
+
+  /**
+   * Answer the tap before the page arrives: the tab or menu entry chosen becomes current, and the
+   * row or card followed stays lit.
+   */
+  function acknowledge(link) {
+    opening?.removeAttribute("data-opening");
+    opening = link?.closest(".row, .article-more-card") || null;
+    opening?.setAttribute("data-opening", "");
+    if (!link?.closest("[data-site-navigation]") || !link.hasAttribute("data-route")) return;
+    const route = link.getAttribute("data-route");
+    for (const entry of $$("[data-site-navigation] a[data-kinds]")) {
+      if (entry.getAttribute("data-route") === route) entry.setAttribute("aria-current", "page");
+      else entry.removeAttribute("aria-current");
+    }
+  }
+
+  /** Take an answer back: the page on screen is the current one again. */
+  function unacknowledge() {
+    opening?.removeAttribute("data-opening");
+    opening = null;
+    for (const entry of $$("[data-site-navigation] a[data-kinds]")) {
+      if ((entry.dataset.kinds || "").split(" ").includes(KIND)) entry.setAttribute("aria-current", "page");
+      else entry.removeAttribute("aria-current");
+    }
+  }
+
   /** The reader chose to stay: a page still on its way must not replace this one when it lands. */
   function cancel() {
+    if (pending) unacknowledge();
     token += 1;
     pending = false;
     waiting(false);
@@ -943,7 +996,7 @@ const navigation = (() => {
    * Show the page at `href`. `replace` stands in for the current history entry; `traverse` means
    * Back or Forward already moved the address bar, and the page has to catch up with it.
    */
-  async function go(href, { replace = false, traverse = false } = {}) {
+  async function go(href, { replace = false, traverse = false, from = null } = {}) {
     const url = new URL(href, location.href);
     if (!installed || !routable(url)) {
       if (replace) location.replace(url.href);
@@ -958,6 +1011,7 @@ const navigation = (() => {
     const mine = ++token;
     pending = true;
     waiting(true);
+    acknowledge(from);
     const record = load(url.href);
     const page = await record.page.catch(() => null);
     if (mine !== token) return;
@@ -988,6 +1042,7 @@ const navigation = (() => {
     }
     current = address(location.href);
     swap(next, main, context);
+    opening = null;
     pageScope = new AbortController();
     const saved = traverse
       ? (scrolls.get(entry) ?? history.state?.aggr?.scroll)
@@ -1008,7 +1063,7 @@ const navigation = (() => {
   /**
    * A tab answers the touch that lands on it, including one that lands while the page is still
    * gliding from a fling: the platform spends that touch on stopping the scroll and never sends
-   * the click, so the release is the activation. Only a touch that stayed on its tab counts.
+   * the click, so the release is the activation, on whichever tab it lifts from.
    */
   function installTabActivation() {
     const tabs = $(".mobile-tabs");
@@ -1018,19 +1073,20 @@ const navigation = (() => {
       "touchstart",
       (event) => {
         const touch = event.touches.length === 1 ? event.touches[0] : null;
+        pressed = touch ? { y: touch.clientY } : null;
         const target = event.target;
-        const link = touch && target instanceof Element ? target.closest("a[href]") : null;
-        pressed = link && touch ? { link, x: touch.clientX, y: touch.clientY } : null;
+        const link = target instanceof Element ? target.closest("a[href]") : null;
         if (link instanceof HTMLAnchorElement) prefetch(link.href);
       },
       { passive: true },
     );
+    // A finger sliding along the bar still means the tab it lifts from, as on a native tab bar;
+    // one travelling up or down is scrolling the page instead.
     tabs.addEventListener(
       "touchmove",
       (event) => {
         const touch = event.touches[0];
-        if (pressed && touch && Math.hypot(touch.clientX - pressed.x, touch.clientY - pressed.y) > 12)
-          pressed = null;
+        if (pressed && touch && Math.abs(touch.clientY - pressed.y) > 24) pressed = null;
       },
       { passive: true },
     );
@@ -1038,16 +1094,17 @@ const navigation = (() => {
     tabs.addEventListener(
       "touchend",
       (event) => {
-        const hit = pressed;
+        const touched = pressed;
         pressed = null;
-        if (!hit || event.touches.length) return;
+        if (!touched || event.touches.length) return;
         const touch = event.changedTouches[0];
         const under = touch ? document.elementFromPoint(touch.clientX, touch.clientY) : null;
-        if (!under || under.closest("a[href]") !== hit.link) return;
+        const link = under?.closest("a[href]");
+        if (!(link instanceof HTMLAnchorElement) || !tabs.contains(link)) return;
         // Cancelling the release cancels the click the platform would have sent after it, so
         // one tap stays one navigation.
         event.preventDefault();
-        hit.link.click();
+        link.click();
       },
       { passive: false },
     );
@@ -1078,7 +1135,7 @@ const navigation = (() => {
             setTimeout(() => {
               observer.unobserve(link);
               prefetch(link.href, true);
-            }, 500),
+            }, 250),
           );
         }
       });
@@ -1123,7 +1180,7 @@ const navigation = (() => {
         return;
       }
       event.preventDefault();
-      void go(hit.url.href);
+      void go(hit.url.href, { from: hit.link });
     });
     // Intent: a press is a promise of a click, and a pointer resting on a link is a likely one.
     document.addEventListener(
@@ -1285,8 +1342,8 @@ function loadMedia() {
 /**
  * Reading progress and the folding header are scroll-driven animations in the stylesheet. Where
  * the browser has no scroll timelines, the bar follows the scroll from here, on its own transform.
- * Where it has them but no `calc-size()` (Safari), the header's natural heights are measured once
- * per resize, so the scaled title gives back the height it no longer uses.
+ * Where it has them, the compact title the header folds into is measured once per resize, and so
+ * are the header's natural heights where `calc-size()` is missing (Safari).
  */
 function installReadingHeader() {
   const header = $("body[data-kind='item'] .itemhead");
@@ -1310,11 +1367,15 @@ function installReadingHeader() {
     paint();
     return;
   }
-  if (CSS.supports("height: calc-size(auto, size)") || !("ResizeObserver" in window)) return;
-  const measured = [
-    [$(".itemhead-title", header), "--title-height"],
-    [$(".item-tags-inner", header), "--tags-height"],
-  ];
+  if (!("ResizeObserver" in window)) return;
+  // The compact title the header folds into, set across the full width: its height is the one the
+  // box closes to. Without calc-size() the natural heights are measured as well.
+  const measured = [[$(".itemhead-title-compact", header), "--compact-height"]];
+  if (!CSS.supports("height: calc-size(auto, size)"))
+    measured.push(
+      [$(".itemhead-title", header), "--title-height"],
+      [$(".item-tags-inner", header), "--tags-height"],
+    );
   // The untransformed border box: the title is scaled, and whole pixels would jolt the fold.
   const observer = new ResizeObserver((entries) => {
     for (const entry of entries) {
