@@ -189,8 +189,9 @@ for a source table that had none is hidden. Selecting article text mounts a
 
 When extending the default script, keep these relationships intact:
 
-- `#swup` is the replaced main content. Persistent navigation and connection status stay outside
-  it. `#aggr-page` supplies the current page root and kind after navigation.
+- `<main id="content">` is the content replaced when a page is swapped in. Persistent navigation
+  stays outside it. The `#aggr-page` JSON in the head supplies the page root, kind and assets
+  (`window.AGGR`) after navigation.
 - Primary navigation links use `data-route` and `data-kinds` for destination and active state.
   `browse`, `preferences`, and aggr.toml are visible in the desktop header. Mobile navigation uses
   feed, browse, and preferences in a fixed, inset rounded bar with a selected-tab surface.
@@ -261,9 +262,9 @@ programmatic main focus with `data-navigation-focus`, suppressing only the large
 outline after a page change. Ordinary links, form controls, and the skip link must remain usable
 with a keyboard.
 
-Navigation is ordinary multi-page navigation. A `speculationrules` document rule lets the browser
-prefetch likely destinations on its own budget, and `@view-transition` animates the change where
-the browser supports it. Search display data is precomputed and hex-encoded because Pagefind indexes
+The default script swaps pages in place, without an animation, and fetches likely destinations
+ahead within fixed bounds. Links stay ordinary links and anything it cannot swap falls back to
+ordinary navigation; see [client development](client.md). Search display data is precomputed and hex-encoded because Pagefind indexes
 even zero-weight metadata values; decoding it for display must not leak implementation keys into
 search matches.
 

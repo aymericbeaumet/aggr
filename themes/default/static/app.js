@@ -12,7 +12,14 @@
 const AGGR = /** @type {AppContext} */ (window.AGGR || {});
 const PREFS = window.AGGRPreferences;
 const BASE = new URL(AGGR.base || "./", document.baseURI).href;
-const KIND = AGGR.kind || document.body.dataset.kind || "";
+/** The kind of page on screen; moving to another page in place changes it. */
+let KIND = AGGR.kind || document.body.dataset.kind || "";
+
+/**
+ * Everything a page sets up for itself (listeners on its own content, polling, players) belongs to
+ * the page rather than the document: moving to another page in place ends it through this.
+ */
+let pageScope = new AbortController();
 
 /**
  * @template {Element} [T=HTMLElement]
@@ -208,8 +215,8 @@ const selection = (() => {
     $$(".rows:not([aria-busy='true']) .row:not([hidden])").filter((row) => !row.closest("[hidden]"));
   const link = (row) => (row ? $("[data-row-open]", row) : null);
 
-  function key() {
-    const url = new URL(location.href);
+  function key(href = location.href) {
+    const url = new URL(href);
     url.hash = "";
     return (
       "aggr:list-cursor:" +
@@ -225,7 +232,7 @@ const selection = (() => {
       return {};
     }
   };
-  const write = (state) => storage.write(sessionStorage, key(), JSON.stringify(state));
+  const write = (state, href) => storage.write(sessionStorage, key(href), JSON.stringify(state));
 
   // One cursor for the whole page: the list on screen may change under it, and a row left marked
   // in a list that is no longer shown would put a second cursor behind the first.
@@ -243,6 +250,8 @@ const selection = (() => {
     write({ url: target.href });
     if (focus) target.focus({ preventScroll: true });
     if (scroll) row.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    // The row under the cursor is the one Enter opens next.
+    navigation.prefetch(target.href);
     return true;
   }
 
@@ -254,11 +263,12 @@ const selection = (() => {
       const all = rows();
       return select((which === "first" ? all[0] : all.at(-1)) || null, true, true);
     },
-    save() {
+    /** Remember the cursor for the page at `href`, which is the one being left. */
+    save(href = location.href) {
       const all = rows();
       if (!all.length) return;
       const selected = link(all.find((row) => row.classList.contains("is-selected")));
-      if (selected) write({ url: selected.href });
+      if (selected) write({ url: selected.href }, href);
     },
     /** Reselect the remembered row, else the first one. Never steals focus on load. */
     restore() {
@@ -484,7 +494,7 @@ function installKeyboard() {
         if (target.top) {
           if (KIND === "item") window.scrollTo({ top: 0, behavior: "instant" });
           else selection.edge("first");
-        } else location.assign(target.url);
+        } else navigation.go(target.url);
       }
       return;
     }
@@ -530,7 +540,7 @@ function installKeyboard() {
         const url = direction === 1 ? article?.dataset.nextUrl : article?.dataset.previousUrl;
         event.preventDefault();
         // Stepping past either end of the archive returns to the feed rather than stopping dead.
-        location.assign(new URL(url || "", BASE).href);
+        navigation.go(new URL(url || "", BASE).href);
         return;
       }
       if (selection.move(direction)) event.preventDefault();
@@ -602,7 +612,7 @@ function revealSearchField(field) {
 function focusSearch() {
   const field = /** @type {HTMLInputElement | null} */ ($("#q"));
   if (!field) {
-    location.assign(new URL("?focus-search=1", BASE).href);
+    navigation.go(new URL("?focus-search=1", BASE).href);
     return;
   }
   loadSearch();
@@ -613,13 +623,23 @@ function focusSearch() {
 }
 
 let searchModule;
+/** Each page's search controls, mounted once. */
+const searchMounts = new WeakMap();
 /** The search engine is a separate file, fetched with the page that can use it. */
 function loadSearch() {
-  if (searchModule || !AGGR.assets?.search || !$("[data-search-root]")) return searchModule;
-  searchModule = import(new URL(AGGR.assets.search, document.baseURI).href)
-    .then((module) => module.mount({ base: BASE, dates, selection, preferences: PREFS }))
+  const root = $("[data-search-root]");
+  if (!AGGR.assets?.search || !root) return undefined;
+  if (searchMounts.has(root)) return searchMounts.get(root);
+  const signal = pageScope.signal;
+  searchModule ??= import(new URL(AGGR.assets.search, document.baseURI).href);
+  const mounted = searchModule
+    .then((module) => {
+      if (signal.aborted || !root.isConnected) return;
+      module.mount({ base: BASE, dates, selection, preferences: PREFS, signal, navigate: navigation.go });
+    })
     .catch((error) => console.error("aggr: search", error));
-  return searchModule;
+  searchMounts.set(root, mounted);
+  return mounted;
 }
 
 function installSearchIntent() {
@@ -646,6 +666,497 @@ function installSearchIntent() {
   }
 }
 
+/* ------------------------------------------------------------------ navigation */
+
+/**
+ * Following a link inside the archive swaps the page in place instead of loading a new document:
+ * the header, the tab bar and the scripts already running stay, and a page fetched while the finger
+ * was still coming down is on screen in the frame after it lifts. Links stay ordinary links, so
+ * modifier clicks, new tabs and readers without JavaScript get plain navigation, and anything this
+ * cannot swap (another site, a file, an error page, no network) falls back to it.
+ *
+ * Scroll positions are this module's to keep: the browser would restore them before the page they
+ * belong to had arrived.
+ */
+const navigation = (() => {
+  const root = new URL(BASE);
+  /** Fetched pages by address, least recently used first. */
+  const pages = new Map();
+  const PAGE_LIMIT = 24;
+  /** A page fetched longer ago than this is fetched again rather than shown. */
+  const PAGE_LIFETIME = 5 * 60000;
+  /** Pages one screen may fetch before anyone asks for them. */
+  const SPECULATION_LIMIT = 10;
+  /** Where each history entry was scrolled to, by the key its state carries. */
+  const scrolls = new Map();
+  /**
+   * Where each list was last left, by address. Like a native tab, a list reached again through
+   * its tab picks up where the reader was; asking for the list already on screen goes to its top.
+   */
+  const places = new Map();
+  const PLACE_LIMIT = 50;
+  let current = address(location.href);
+  let entry = "";
+  let token = 0;
+  /** Whether a page is on its way: until it lands, the one on screen is no longer current. */
+  let pending = false;
+  let speculated = 0;
+  let installed = false;
+
+  /** A page's address without its fragment: two fragments of one page are one page. */
+  function address(href) {
+    const url = new URL(href, location.href);
+    url.hash = "";
+    return url.href;
+  }
+
+  const newKey = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const stateWith = (fields) => ({ ...(history.state || {}), aggr: { key: entry, ...fields } });
+
+  /** Pages of this archive, as opposed to its files (feeds, Markdown, TOML) and other sites. */
+  const routable = (url) =>
+    url.origin === root.origin &&
+    url.pathname.startsWith(root.pathname) &&
+    (url.pathname.endsWith("/") || url.pathname.endsWith(".html"));
+
+  function linkIn(event) {
+    const target = event.target;
+    const link = target instanceof Element ? target.closest("a[href]") : null;
+    if (!(link instanceof HTMLAnchorElement)) return null;
+    if (link.hasAttribute("download") || (link.target && link.target !== "_self")) return null;
+    if (link.relList.contains("external")) return null;
+    const url = new URL(link.href);
+    return routable(url) ? { link, url } : null;
+  }
+
+  /** A reader who asked the browser to save data, or who is on a slow link, gets no guesses. */
+  const frugal = () => {
+    const connection = /** @type {any} */ (navigator).connection;
+    return Boolean(connection?.saveData) || /2g$/.test(connection?.effectiveType || "");
+  };
+
+  const idle = (run) =>
+    "requestIdleCallback" in window ? requestIdleCallback(run, { timeout: 1500 }) : setTimeout(run, 250);
+
+  const parse = (html) => new DOMParser().parseFromString(html, "text/html");
+
+  /** The page at `href`, from memory while it is fresh, else from the network. */
+  function load(href) {
+    const key = address(href);
+    const cached = pages.get(key);
+    if (cached && Date.now() - cached.time < PAGE_LIFETIME) {
+      pages.delete(key);
+      pages.set(key, cached);
+      return cached;
+    }
+    const record = { time: Date.now(), page: Promise.resolve(null), parsed: null };
+    record.page = fetch(key, { headers: { accept: "text/html" }, credentials: "same-origin" }).then(
+      async (response) => {
+        const type = response.headers.get("content-type") || "";
+        if (!response.ok || !type.includes("text/html")) throw new Error("not a page");
+        const page = { url: response.url || key, html: await response.text() };
+        // Parsing is the one step left between the tap and the swap; do it while nothing waits.
+        idle(() => {
+          if (pages.get(key) === record && !record.parsed) record.parsed = parse(page.html);
+        });
+        return page;
+      },
+    );
+    record.page.catch(() => {
+      if (pages.get(key) === record) pages.delete(key);
+    });
+    pages.set(key, record);
+    while (pages.size > PAGE_LIMIT) pages.delete(pages.keys().next().value);
+    return record;
+  }
+
+  /** Fetch a page the reader is about to open. Guesses are counted and bounded; intent is not. */
+  function prefetch(href, guess = false) {
+    let url;
+    try {
+      url = new URL(href, location.href);
+    } catch {
+      return;
+    }
+    const key = address(url.href);
+    if (!routable(url) || key === current) return;
+    if (guess) {
+      if (frugal() || (speculated >= SPECULATION_LIMIT && !pages.has(key))) return;
+      if (!pages.has(key)) speculated += 1;
+    }
+    load(url.href).page.catch(() => {});
+  }
+
+  /** Leave the page on screen: keep its place and its cursor, and end what it set up. */
+  function leave() {
+    if (pageScope.signal.aborted) return;
+    scrolls.set(entry, window.scrollY);
+    if (KIND !== "item") {
+      places.delete(current);
+      places.set(current, window.scrollY);
+      while (places.size > PLACE_LIMIT) places.delete(places.keys().next().value);
+    }
+    selection.save(current);
+    pageScope.abort();
+  }
+
+  /** Bring the persistent parts of the page (header, tab bar) in line with the page arriving. */
+  function syncRegion(selector, next) {
+    const region = $(selector);
+    const fresh = next.querySelector(selector);
+    if (!region || !fresh) return;
+    const old = $$("a, img", region);
+    const renewed = Array.from(fresh.querySelectorAll("a, img"));
+    if (old.length !== renewed.length) {
+      region.replaceWith(document.adoptNode(fresh));
+      return;
+    }
+    old.forEach((node, index) => {
+      for (const name of ["href", "src", "aria-current"]) {
+        const value = renewed[index].getAttribute(name);
+        if (value === null) node.removeAttribute(name);
+        else if (node.getAttribute(name) !== value) node.setAttribute(name, value);
+      }
+    });
+  }
+
+  /** Swap the page's own metadata; scripts, styles and settings shared by every page stay. */
+  function syncHead(next) {
+    const shared = (node) =>
+      node.matches(
+        'title, script:not([type="application/ld+json"]), style, link[rel~="stylesheet"], meta[charset], meta[name="viewport"], #theme-color',
+      );
+    const old = Array.from(document.head.children).filter((node) => !shared(node));
+    const renewed = Array.from(next.head.children).filter((node) => !shared(node));
+    const kept = new Set(renewed.map((node) => node.outerHTML));
+    const present = new Set(old.map((node) => node.outerHTML));
+    for (const node of old) if (!kept.has(node.outerHTML)) node.remove();
+    for (const node of renewed)
+      if (!present.has(node.outerHTML)) document.head.appendChild(document.adoptNode(node));
+    const data = $("#aggr-page");
+    const incoming = next.getElementById("aggr-page");
+    if (data && incoming) data.textContent = incoming.textContent;
+  }
+
+  function swap(next, main, context) {
+    document.title = next.title;
+    syncHead(next);
+    for (const key of Object.keys(AGGR)) if (!(key in context)) delete AGGR[key];
+    Object.assign(AGGR, context);
+    KIND = AGGR.kind || next.body.dataset.kind || "";
+    const body = document.body;
+    for (const name of body.getAttributeNames())
+      if (!next.body.hasAttribute(name)) body.removeAttribute(name);
+    for (const name of next.body.getAttributeNames())
+      body.setAttribute(name, next.body.getAttribute(name) || "");
+    syncRegion(".top", next);
+    syncRegion(".mobile-tabs", next);
+    $("#content")?.replaceWith(document.adoptNode(main));
+  }
+
+  /** When the page last moved, to tell a page still gliding from one at rest. */
+  let scrolled = -Infinity;
+
+  /** Put the reader where the page they arrived at expects them, and the keyboard with it. */
+  function arrive(saved, hash) {
+    const id = hash ? decodeURIComponent(hash.slice(1)) : "";
+    const target = id ? document.getElementById(id) : null;
+    const place = () => {
+      if (saved !== undefined) window.scrollTo({ top: saved, behavior: "instant" });
+      else if (target) target.scrollIntoView({ block: "start", behavior: "instant" });
+      else window.scrollTo({ top: 0, behavior: "instant" });
+    };
+    // A fling or a trackpad's momentum outlives the page it moved and would drag the next one
+    // along. Taking the scrollbar away through one painted frame is what makes the compositor let
+    // go of it, and until then any step it still takes is undone before it is painted. A page at
+    // rest is left alone, since a scrollbar's width could shift that frame.
+    const gliding = performance.now() - scrolled < 150;
+    const root = document.documentElement;
+    place();
+    if (gliding) {
+      root.style.overflow = "hidden";
+      window.addEventListener("scroll", place, { passive: true });
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          root.style.removeProperty("overflow");
+          window.removeEventListener("scroll", place);
+          place();
+        }),
+      );
+    }
+    const main = $("#content");
+    if (main) {
+      main.setAttribute("data-navigation-focus", "");
+      main.focus({ preventScroll: true });
+    }
+  }
+
+  /** The stylesheets and scripts a document runs on, resolved against its own address. */
+  const shell = (doc, base) =>
+    Array.from(doc.querySelectorAll('link[rel~="stylesheet"][href], script[src]'))
+      .map((node) => new URL(node.getAttribute("href") || node.getAttribute("src") || "", base).href)
+      .sort()
+      .join(" ");
+
+  /** The shell this document loaded with, read while its address still matches its links. */
+  let runningShell = "";
+
+  /** Whatever this cannot swap is still a link: let the browser follow it. */
+  function fallback(href, traverse) {
+    if (traverse) location.reload();
+    else location.assign(href);
+  }
+
+  /** The page on screen, asked for again: its top, with nothing left mid-edit. */
+  function top() {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && editing(active)) active.blur();
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }
+
+  /**
+   * Show the page at `href`. `replace` stands in for the current history entry; `traverse` means
+   * Back or Forward already moved the address bar, and the page has to catch up with it.
+   */
+  async function go(href, { replace = false, traverse = false } = {}) {
+    const url = new URL(href, location.href);
+    if (!installed || !routable(url)) {
+      if (replace) location.replace(url.href);
+      else location.assign(url.href);
+      return;
+    }
+    if (!traverse && address(url.href) === current) {
+      if (url.hash) location.hash = url.hash;
+      else top();
+      return;
+    }
+    const mine = ++token;
+    pending = true;
+    const slow = setTimeout(() => document.documentElement.setAttribute("data-navigating", ""), 150);
+    const record = load(url.href);
+    const page = await record.page.catch(() => null);
+    if (mine !== token) return;
+    pending = false;
+    clearTimeout(slow);
+    document.documentElement.removeAttribute("data-navigating");
+    if (!page) return fallback(url.href, traverse);
+    const next = record.parsed || parse(page.html);
+    // The parsed page is taken apart by the swap; the next visit parses its own copy.
+    record.parsed = null;
+    const main = next.getElementById("content");
+    let context;
+    try {
+      context = JSON.parse(next.getElementById("aggr-page")?.textContent || "null");
+    } catch {
+      context = null;
+    }
+    if (!main || !context) return fallback(url.href, traverse);
+    // A page from a newer release needs that release's styles and scripts: load it whole.
+    if (shell(next, page.url) !== runningShell) return fallback(url.href, traverse);
+
+    if (!traverse) {
+      leave();
+      const destination = new URL(page.url);
+      destination.hash = url.hash;
+      entry = newKey();
+      if (replace) history.replaceState({ aggr: { key: entry } }, "", destination.href);
+      else history.pushState({ aggr: { key: entry } }, "", destination.href);
+    }
+    current = address(location.href);
+    swap(next, main, context);
+    pageScope = new AbortController();
+    const saved = traverse
+      ? (scrolls.get(entry) ?? history.state?.aggr?.scroll)
+      : KIND !== "item" && !url.hash
+        ? places.get(current)
+        : undefined;
+    arrive(saved, url.hash);
+    mountPage();
+  }
+
+  /** Record a new entry for a place in this page, as following a fragment link would. */
+  function pushFragment(hash) {
+    scrolls.set(entry, window.scrollY);
+    entry = newKey();
+    history.pushState({ aggr: { key: entry } }, "", hash);
+  }
+
+  /**
+   * A tab answers the touch that lands on it, including one that lands while the page is still
+   * gliding from a fling: the platform spends that touch on stopping the scroll and never sends
+   * the click, so the release is the activation. Only a touch that stayed on its tab counts.
+   */
+  function installTabActivation() {
+    const tabs = $(".mobile-tabs");
+    if (!tabs) return;
+    let pressed = null;
+    tabs.addEventListener(
+      "touchstart",
+      (event) => {
+        const touch = event.touches.length === 1 ? event.touches[0] : null;
+        const target = event.target;
+        const link = touch && target instanceof Element ? target.closest("a[href]") : null;
+        pressed = link && touch ? { link, x: touch.clientX, y: touch.clientY } : null;
+        if (link instanceof HTMLAnchorElement) prefetch(link.href);
+      },
+      { passive: true },
+    );
+    tabs.addEventListener(
+      "touchmove",
+      (event) => {
+        const touch = event.touches[0];
+        if (pressed && touch && Math.hypot(touch.clientX - pressed.x, touch.clientY - pressed.y) > 12)
+          pressed = null;
+      },
+      { passive: true },
+    );
+    tabs.addEventListener("touchcancel", () => (pressed = null), { passive: true });
+    tabs.addEventListener(
+      "touchend",
+      (event) => {
+        const hit = pressed;
+        pressed = null;
+        if (!hit || event.touches.length) return;
+        const touch = event.changedTouches[0];
+        const under = touch ? document.elementFromPoint(touch.clientX, touch.clientY) : null;
+        if (!under || under.closest("a[href]") !== hit.link) return;
+        // Cancelling the release cancels the click the platform would have sent after it, so
+        // one tap stays one navigation.
+        event.preventDefault();
+        hit.link.click();
+      },
+      { passive: false },
+    );
+  }
+
+  /** Fetch what this page makes likely next, once the page itself has settled. */
+  function speculate() {
+    speculated = 0;
+    const signal = pageScope.signal;
+    idle(() => {
+      if (signal.aborted || frugal()) return;
+      for (const link of $$("[data-site-navigation] a[data-route]"))
+        prefetch(/** @type {HTMLAnchorElement} */ (link).href, true);
+      const article = $("article.item");
+      for (const neighbour of [article?.dataset.nextUrl, article?.dataset.previousUrl])
+        if (neighbour) prefetch(new URL(neighbour, BASE).href, true);
+      if (!("IntersectionObserver" in window)) return;
+      // A row the reader lingers over, rather than every row that scrolls past.
+      const timers = new Map();
+      const observer = new IntersectionObserver((entries) => {
+        for (const seen of entries) {
+          const link = /** @type {HTMLAnchorElement} */ (seen.target);
+          clearTimeout(timers.get(link));
+          timers.delete(link);
+          if (!seen.isIntersecting) continue;
+          timers.set(
+            link,
+            setTimeout(() => {
+              observer.unobserve(link);
+              prefetch(link.href, true);
+            }, 500),
+          );
+        }
+      });
+      for (const link of $$(".rows .row [data-row-open], .article-more-link")) observer.observe(link);
+      signal.addEventListener("abort", () => {
+        observer.disconnect();
+        timers.forEach((timer) => clearTimeout(timer));
+      });
+    });
+  }
+
+  function install() {
+    if (!("pushState" in history) || typeof DOMParser !== "function") return;
+    installed = true;
+    runningShell = shell(document, location.href);
+    history.scrollRestoration = "manual";
+    window.addEventListener("scroll", () => (scrolled = performance.now()), { passive: true });
+    entry = history.state?.aggr?.key || newKey();
+    const saved = history.state?.aggr?.scroll;
+    history.replaceState(stateWith({}), "");
+    // A reload or a return to a document the browser let go of: its own place, as it was left.
+    const arrival = /** @type {PerformanceNavigationTiming | undefined} */ (
+      performance.getEntriesByType?.("navigation")?.[0]
+    );
+    if (typeof saved === "number" && (arrival?.type === "reload" || arrival?.type === "back_forward"))
+      requestAnimationFrame(() => window.scrollTo({ top: saved, behavior: "instant" }));
+
+    document.addEventListener("click", (event) => {
+      if (event.defaultPrevented || event.button !== 0) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const hit = linkIn(event);
+      if (!hit) return;
+      if (address(hit.url.href) === current) {
+        // A fragment of this page is the browser's own jump; the entry it leaves keeps its place.
+        if (hit.url.hash) {
+          scrolls.set(entry, window.scrollY);
+          return;
+        }
+        event.preventDefault();
+        top();
+        return;
+      }
+      event.preventDefault();
+      void go(hit.url.href);
+    });
+    // Intent: a press is a promise of a click, and a pointer resting on a link is a likely one.
+    document.addEventListener(
+      "pointerdown",
+      (event) => {
+        const hit = linkIn(event);
+        if (hit) prefetch(hit.url.href);
+      },
+      { capture: true, passive: true },
+    );
+    let hover;
+    document.addEventListener(
+      "pointerover",
+      (event) => {
+        clearTimeout(hover);
+        if (event.pointerType !== "mouse") return;
+        const hit = linkIn(event);
+        if (hit) hover = setTimeout(() => prefetch(hit.url.href), 60);
+      },
+      { passive: true },
+    );
+    document.addEventListener("pointerout", () => clearTimeout(hover), { passive: true });
+
+    window.addEventListener("popstate", (event) => {
+      const key = event.state?.aggr?.key;
+      if (address(location.href) === current && !pending) {
+        // Another place in this same page. Nothing was fetched, so nothing needs to arrive.
+        scrolls.set(entry, window.scrollY);
+        entry = key || newKey();
+        const saved = scrolls.get(entry);
+        if (saved !== undefined) window.scrollTo({ top: saved, behavior: "instant" });
+        return;
+      }
+      leave();
+      entry = key || newKey();
+      if (!key) history.replaceState(stateWith({}), "");
+      void go(location.href, { traverse: true });
+    });
+    // A fragment the browser followed by itself made an entry with no key: give it one.
+    window.addEventListener("hashchange", () => {
+      if (history.state?.aggr?.key) return;
+      entry = newKey();
+      history.replaceState(stateWith({}), "");
+    });
+    // The place this entry was left at, for a reload or a Back that has to rebuild the document.
+    window.addEventListener("pagehide", () => {
+      try {
+        history.replaceState(stateWith({ scroll: window.scrollY }), "");
+      } catch {
+        /* a browser rationing history writes may refuse this one */
+      }
+    });
+    installTabActivation();
+  }
+
+  return { install, go, prefetch, pushFragment, speculate };
+})();
+
 /* ------------------------------------------------------------------ tap feedback */
 
 /**
@@ -671,6 +1182,8 @@ function installTapFeedback() {
   for (const name of ["pointerup", "pointercancel", "pointerleave"])
     tabs.addEventListener(name, clear, { passive: true });
   window.addEventListener("pagehide", clear);
+  // WebKit only shows `:active` on touch when a page listens for touches at all.
+  document.addEventListener("touchstart", () => {}, { passive: true });
 }
 
 /* ------------------------------------------------------------------ pictures */
@@ -680,28 +1193,32 @@ function installTapFeedback() {
  * alt text when it never arrives. Two capturing listeners cover the whole document, including the
  * rows search adds later, so no page has to load a module to show a picture honestly.
  */
+const pictureFrame = (image) =>
+  image.closest(".article-picture, .article-lead, .preview-media, .audio-cover, .media-frame");
+// A picture that arrives after a failure, or fails after arriving, must not keep both marks:
+// the same source is retried whenever a reader comes back to a page that had no network.
+const markPicture = (box, loaded) => {
+  box.classList.toggle("is-loaded", loaded);
+  box.classList.toggle("is-error", !loaded);
+};
+
 function installPictureStates() {
-  const frame = (image) =>
-    image.closest(".article-picture, .article-lead, .preview-media, .audio-cover, .media-frame");
-  // A picture that arrives after a failure, or fails after arriving, must not keep both marks:
-  // the same source is retried whenever a reader comes back to a page that had no network.
-  const mark = (box, loaded) => {
-    box.classList.toggle("is-loaded", loaded);
-    box.classList.toggle("is-error", !loaded);
-  };
   const settle = (event, loaded) => {
     const target = event.target;
     if (!(target instanceof HTMLImageElement)) return;
-    const box = frame(target);
-    if (box) mark(box, loaded);
+    const box = pictureFrame(target);
+    if (box) markPicture(box, loaded);
   };
   document.addEventListener("load", (event) => settle(event, true), true);
   document.addEventListener("error", (event) => settle(event, false), true);
-  // A picture the browser had already finished with never fires either event here.
+}
+
+/** A picture the browser had already finished with never fires either event. */
+function settlePictures() {
   for (const image of $$("img")) {
     if (!(image instanceof HTMLImageElement) || !image.complete) continue;
-    const box = frame(image);
-    if (box) mark(box, image.naturalWidth > 0);
+    const box = pictureFrame(image);
+    if (box) markPicture(box, image.naturalWidth > 0);
   }
 }
 
@@ -732,9 +1249,57 @@ function installKeyboardInset() {
 function loadMedia() {
   if (!AGGR.assets?.media) return;
   if (!$(".video-player, [data-audio-component], .native-video, [data-media-timing]")) return;
+  const signal = pageScope.signal;
   import(new URL(AGGR.assets.media, document.baseURI).href)
-    .then((module) => module.mount())
+    .then((module) => signal.aborted || module.mount({ signal }))
     .catch((error) => console.error("aggr: media", error));
+}
+
+/* ------------------------------------------------------------------ reading header */
+
+/**
+ * Reading progress and the folding header are scroll-driven animations in the stylesheet. Where
+ * the browser has no scroll timelines, the bar follows the scroll from here, on its own transform.
+ * Where it has them but no `calc-size()` (Safari), the header's natural heights are measured once
+ * per resize, so the scaled title gives back the height it no longer uses.
+ */
+function installReadingHeader() {
+  const header = $("body[data-kind='item'] .itemhead");
+  if (!header) return;
+  const signal = pageScope.signal;
+  if (!CSS.supports("animation-timeline: scroll()")) {
+    const bar = $(".itemhead-progress", header);
+    if (!bar) return;
+    let frame = 0;
+    const paint = () => {
+      frame = 0;
+      const range = document.documentElement.scrollHeight - window.innerHeight;
+      const progress = range > 0 ? Math.min(1, Math.max(0, window.scrollY / range)) : 0;
+      bar.style.transform = "scaleX(" + progress + ")";
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(paint);
+    };
+    window.addEventListener("scroll", schedule, { passive: true, signal });
+    window.addEventListener("resize", schedule, { passive: true, signal });
+    paint();
+    return;
+  }
+  if (CSS.supports("height: calc-size(auto, size)") || !("ResizeObserver" in window)) return;
+  const measured = [
+    [$(".itemhead-title", header), "--title-height"],
+    [$(".item-tags-inner", header), "--tags-height"],
+  ];
+  // The untransformed border box: the title is scaled, and whole pixels would jolt the fold.
+  const observer = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const property = measured.find(([node]) => node === entry.target)?.[1];
+      const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+      if (property) header.style.setProperty(property, height + "px");
+    }
+  });
+  for (const [node] of measured) if (node) observer.observe(node);
+  signal.addEventListener("abort", () => observer.disconnect());
 }
 
 /* ------------------------------------------------------------------ preferences */
@@ -767,7 +1332,7 @@ function installFootnoteTargets() {
     if (reference) reference.setAttribute("data-footnote-active", "");
   };
   paired();
-  window.addEventListener("hashchange", paired);
+  window.addEventListener("hashchange", paired, { signal: pageScope.signal });
 }
 
 /**
@@ -792,9 +1357,7 @@ function installHeadingAnchors() {
   const jump = (id, record) => {
     const target = document.getElementById(id);
     if (!target) return;
-    if (record && location.hash.slice(1) !== id) {
-      history.pushState(history.state, "", "#" + encodeURIComponent(id));
-    }
+    if (record && location.hash.slice(1) !== id) navigation.pushFragment("#" + encodeURIComponent(id));
     const top = window.scrollY + target.getBoundingClientRect().top - clearance();
     window.scrollTo({ top: Math.max(0, top), behavior: "instant" });
   };
@@ -822,7 +1385,7 @@ function installHeadingAnchors() {
     const id = decodeURIComponent(location.hash.slice(1));
     if (id && document.getElementById(id)?.closest(".body")) jump(id, false);
   };
-  window.addEventListener("hashchange", settle);
+  window.addEventListener("hashchange", settle, { signal: pageScope.signal });
   requestAnimationFrame(settle);
 }
 
@@ -935,7 +1498,7 @@ function installPreferences() {
       if (KIND !== "preferences") {
         const destination = new URL("preferences/", BASE);
         destination.hash = "aggr-state=" + encoded;
-        location.replace(destination.href);
+        navigation.go(destination.href, { replace: true });
         return;
       }
       review(values);
@@ -1057,15 +1620,20 @@ function installPreferences() {
       apply(PREFS.read(), false);
   });
 
-  const share = $("#share-state");
-  if (share) share.hidden = typeof navigator.share !== "function";
-  // The controls ship disabled so they cannot take a value nothing would save.
-  const controls = /** @type {HTMLFieldSetElement | null} */ ($("#preferences-controls"));
-  if (controls) controls.disabled = false;
-  syncControls();
-  refreshThemeColor();
-  importFragment();
+  preparePreferences = () => {
+    const share = $("#share-state");
+    if (share) share.hidden = typeof navigator.share !== "function";
+    // The controls ship disabled so they cannot take a value nothing would save.
+    const controls = /** @type {HTMLFieldSetElement | null} */ ($("#preferences-controls"));
+    if (controls) controls.disabled = false;
+    syncControls();
+    refreshThemeColor();
+    importFragment();
+  };
 }
+
+/** The part of the preferences that belongs to the page on screen, set once they are installed. */
+let preparePreferences = () => {};
 
 /* ------------------------------------------------------------------ new since last visit */
 
@@ -1084,6 +1652,7 @@ const UPDATE_INTERVAL = 300000;
  */
 function installFeedUpdates() {
   if (!AGGR.content || !$(".rows:not(.search-results)")) return;
+  const signal = pageScope.signal;
   let content = AGGR.content;
   let wanted = null;
   let entries = null;
@@ -1100,9 +1669,11 @@ function installFeedUpdates() {
     // ones that were current when this pass started.
     const target = wanted;
     try {
-      const response = await fetch(location.href, { cache: "no-store" });
+      const response = await fetch(location.href, { cache: "no-store", signal });
       if (!response.ok) return;
       const page = new DOMParser().parseFromString(await response.text(), "text/html");
+      // The reader may have moved on to another page while this was in flight.
+      if (signal.aborted) return;
       const rows = $(".rows:not(.search-results)");
       const fresh = page.querySelector(".rows:not(.search-results)");
       if (!rows || !fresh) return;
@@ -1153,15 +1724,20 @@ function installFeedUpdates() {
   };
 
   void check();
-  setInterval(() => {
+  const timer = setInterval(() => {
     if (!document.hidden) void check();
   }, UPDATE_INTERVAL);
+  signal.addEventListener("abort", () => clearInterval(timer));
   // Opening the app again is the moment a reader expects to be caught up.
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) void check(true);
-  });
-  window.addEventListener("focus", () => void check(true));
-  window.addEventListener("scroll", () => settle(), { passive: true });
+  document.addEventListener(
+    "visibilitychange",
+    () => {
+      if (!document.hidden) void check(true);
+    },
+    { signal },
+  );
+  window.addEventListener("focus", () => void check(true), { signal });
+  window.addEventListener("scroll", () => settle(), { passive: true, signal });
 }
 
 function markNewEntries() {
@@ -1199,27 +1775,40 @@ function registerWorker() {
 
 /* ------------------------------------------------------------------ boot */
 
-function boot() {
-  safely("shift-hover", installShiftHover);
+/**
+ * Everything that belongs to the page on screen, run when it arrives: on load, and again each time
+ * another page is swapped in. What it sets up ends with `pageScope`.
+ */
+function mountPage() {
   safely("dates", () => dates.render());
   safely("selection", () => selection.restore());
   safely("feed-paging", applyFeedPaging);
   safely("new-entries", markNewEntries);
   safely("feed-updates", installFeedUpdates);
-  safely("keyboard", installKeyboard);
-  safely("shortcut-help", installShortcutHelp);
   safely("footnotes", installFootnoteTargets);
   safely("heading-anchors", installHeadingAnchors);
+  safely("reading-header", installReadingHeader);
   // Every module this page can use is fetched now rather than on the first gesture: waiting for
   // intent puts the download in front of the person who just asked for the thing.
   safely("search", loadSearch);
-  safely("preferences", installPreferences);
+  safely("preferences-page", () => preparePreferences());
   safely("search-intent", installSearchIntent);
+  safely("pictures", settlePictures);
+  safely("media", loadMedia);
+  safely("speculation", navigation.speculate);
+}
+
+function boot() {
+  safely("shift-hover", installShiftHover);
+  safely("keyboard", installKeyboard);
+  safely("shortcut-help", installShortcutHelp);
+  safely("preferences", installPreferences);
   safely("keyboard-inset", installKeyboardInset);
   safely("pictures", installPictureStates);
   safely("tap-feedback", installTapFeedback);
-  safely("media", loadMedia);
+  safely("navigation", navigation.install);
   safely("service-worker", registerWorker);
+  mountPage();
 
   // Keep relative times honest while the tab stays open.
   setInterval(() => {

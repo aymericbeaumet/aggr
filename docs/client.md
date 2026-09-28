@@ -11,13 +11,24 @@ there is no search service.
 | File | Loaded | What it owns |
 |---|---|---|
 | `themes/default/static/bootstrap.js` | render-blocking, every page | Applies saved preferences and rewrites dates before the first paint, so nothing flashes and no date column starts empty. The only blocking script, and deliberately small. |
-| `themes/default/static/app.js` | deferred module, every page | Keyboard shortcuts and the selection cursor, feed page slicing, the preferences form, relative-date upkeep, the shortcut dialog, and the two lazy imports below. |
+| `themes/default/static/app.js` | deferred module, every page | In-place page navigation, keyboard shortcuts and the selection cursor, feed page slicing, the preferences form, relative-date upkeep, the shortcut dialog, and the two lazy imports below. |
 | `themes/default/static/search.js` | on first search intent | The query language, the completion menu, and the result list on top of Pagefind's low-level API. |
 | `themes/default/static/media.js` | on article pages with media | The podcast player, provider video facades, and playback-time readouts. |
 
-Everything else is the platform. Navigation is ordinary multi-page navigation, with
-`<script type="speculationrules">` for prefetching and `@view-transition` for the transition.
-The reading progress bar and the folding article header are scroll-driven animations. Rows open
+Moving between pages is instant because `app.js` swaps them in place. A link inside the archive
+is fetched as soon as it is pressed or hovered, and once a page settles the tabs, the neighbouring
+articles and the rows that stay on screen are fetched too. Following the link replaces
+`<main id="content">`, the page's own `<head>` metadata, the body's `data-kind` and `window.AGGR`
+(read from the page's `#aggr-page` JSON). The header and the tab bar stay, with their links and
+`aria-current` updated from the new page. Whatever a page sets up runs again under an
+`AbortController` that the next swap aborts. Scroll positions are kept per history entry, so
+Back returns to the same place and list cursor. Tabs activate on touch release, so a tap lands
+even while the page is still gliding from a fling. Another site, a file, or a failed or non-HTML
+response falls back to ordinary navigation, and without JavaScript every link is an ordinary link.
+
+Everything else is the platform. The reading progress bar and the folding article header are
+scroll-driven animations, with a small script standing in where scroll timelines or `calc-size()`
+are missing. Rows open
 through a stretched link, so modifier and middle clicks behave natively. Keyboard help is a
 `<dialog>` opened by an invoker command. Anything without universal support sits behind
 `@supports` or a feature check and degrades to plain HTML.

@@ -284,17 +284,12 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
         "document.querySelector('.preview-image')?.naturalWidth === 240",
     )
     .await?;
-    // Tapping a row is an ordinary navigation the browser has already been told to prepare.
-    assert_eq!(
-        client
-            .execute(
-                "return document.querySelector('.rows .row [data-row-open]').matches(JSON.parse(document.querySelector('script[type=speculationrules]').textContent).prerender[0].where.selector_matches)",
-                vec![]
-            )
-            .await?,
-        true,
-        "the row a tap opens is one the speculation rules name"
-    );
+    // The row a tap opens has already been fetched while the reader looked at it.
+    wait_for(
+        client,
+        "performance.getEntriesByType('resource').some(entry => entry.initiatorType === 'fetch' && entry.name === document.querySelector('.rows .row [data-row-open]').href)",
+    )
+    .await?;
     screenshot(client, "mobile-feed").await?;
     client
         .execute("document.querySelector('.brand').focus()", vec![])
@@ -490,7 +485,9 @@ async fn mobile_tabs_and_tab_navigation() -> Result<()> {
               const bar=document.querySelector('.mobile-tabs'),r=bar.getBoundingClientRect();
               return {bottom:r.bottom,viewport:innerHeight,height:r.height,padding:parseFloat(getComputedStyle(document.querySelector('.main')).paddingBottom),safe:parseFloat(getComputedStyle(bar).paddingBottom)};
             "#,vec![]).await?;
-            anyhow::ensure!(inset["safe"]==44 && (inset["height"].as_f64().unwrap()-layout["height"].as_f64().unwrap()-32.0).abs()<1.0 && (inset["bottom"].as_f64().unwrap()-inset["viewport"].as_f64().unwrap()).abs()<1.0,"scrolling keeps the bar docked and safe area is counted once: {inset}");
+            // The pill sinks into the home-indicator zone, keeping 16px of it: 32px of inset
+            // lowers the bar's surface to 16px above the edge instead of stacking 32px under it.
+            anyhow::ensure!(inset["safe"]==20 && (inset["height"].as_f64().unwrap()-layout["height"].as_f64().unwrap()-8.0).abs()<1.0 && (inset["bottom"].as_f64().unwrap()-inset["viewport"].as_f64().unwrap()).abs()<1.0,"scrolling keeps the bar docked and safe area is counted once: {inset}");
             anyhow::ensure!((inset["padding"].as_f64().unwrap()-inset["height"].as_f64().unwrap()-12.0).abs()<1.0,"home-indicator padding is not duplicated in content: {inset}");
             let keyboard=client.execute_async(r#"
               const done=arguments[arguments.length-1],bar=document.querySelector('.mobile-tabs'),input=document.querySelector('#q'),viewport=window.visualViewport;
@@ -697,6 +694,10 @@ async fn mobile_physical_taps_navigate_once_without_delay() -> Result<()> {
         phone_session(&client).await?;
         client.goto(&fixture.base).await?;
         wait_booted_with(&client,"!!document.querySelector('.mobile-tabs a[data-route=\"browse/\"]')").await?;
+        // Touch reading tells links apart by colour: nothing in a row is underlined, and a row
+        // that was tapped does not keep a hover underline afterwards.
+        let underlined=client.execute("return [...document.querySelectorAll('.row a')].filter(link=>getComputedStyle(link).textDecorationLine!=='none').map(link=>link.className||link.href)",vec![]).await?;
+        anyhow::ensure!(underlined==json!([]),"touch reading underlines no feed link: {underlined}");
         let history_before = client.execute("return history.length",vec![]).await?.as_u64().unwrap_or(0);
         for (index,route) in ["browse/","preferences/"].iter().enumerate() {
             let selector=format!(".mobile-tabs a[data-route='{route}']");

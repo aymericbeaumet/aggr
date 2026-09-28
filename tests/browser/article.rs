@@ -704,6 +704,45 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         );
         assert_eq!(reading_progress[sample]["transition"], "0s");
     }
+    // The bar reports where the reader is rather than moving by itself, so it keeps following the
+    // scroll under reduced motion. It is thick enough to see, and a fade under it keeps the text
+    // scrolling beneath the header from running into it.
+    emulate(
+        client,
+        "Emulation.setEmulatedMedia",
+        json!({"features":[{"name":"prefers-reduced-motion","value":"reduce"}]}),
+    )
+    .await?;
+    let reduced = client
+        .execute_async(
+            r#"
+      const done = arguments[arguments.length - 1], head = document.querySelector('.itemhead');
+      const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+      (async () => {
+        window.scrollTo(0, (document.documentElement.scrollHeight - innerHeight) / 2);
+        await frame(); await frame(); await frame();
+        const bar = head.querySelector('.itemhead-progress'), fade = head.querySelector('.itemhead-fade');
+        done({progress: new DOMMatrixReadOnly(getComputedStyle(bar).transform).a,
+          height: bar.getBoundingClientRect().height, fade: Number(getComputedStyle(fade).opacity),
+          gap: fade.getBoundingClientRect().top - bar.getBoundingClientRect().bottom});
+      })();
+    "#,
+            vec![],
+        )
+        .await?;
+    emulate(
+        client,
+        "Emulation.setEmulatedMedia",
+        json!({"features":[{"name":"prefers-reduced-motion","value":"no-preference"}]}),
+    )
+    .await?;
+    assert!(
+        (reduced["progress"].as_f64().unwrap_or_default() - 0.5).abs() < 0.05
+            && reduced["height"].as_f64().unwrap_or_default() >= 2.0
+            && reduced["fade"].as_f64() == Some(1.0)
+            && reduced["gap"].as_f64().unwrap_or(f64::MAX).abs() < 1.0,
+        "reading progress stays visible and follows the scroll under reduced motion: {reduced}"
+    );
     client.execute("window.scrollTo(0,520)", vec![]).await?;
     let header_reads = client
         .execute_async(

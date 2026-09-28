@@ -123,6 +123,9 @@ function createPlayback(audio, update, known = {}) {
     }
   }
 
+  // The archived length is known before anything loads: show it rather than a placeholder.
+  queueMicrotask(emit);
+
   return {
     toggle() {
       if (disposed) return;
@@ -204,7 +207,7 @@ const AUDIO_STATUS = {
   ended: "Finished",
 };
 
-function enhanceAudio(card) {
+function enhanceAudio(card, signal) {
   const audio = $("audio", card);
   const controls = $("[data-audio-controls]", card);
   const tools = $("[data-audio-tools]", card);
@@ -233,9 +236,9 @@ function enhanceAudio(card) {
         toggle.setAttribute("aria-label", label);
         toggle.title = label;
       }
-      if (status) status.textContent = AUDIO_STATUS[state.phase] || "Ready when you are";
+      if (status) status.textContent = AUDIO_STATUS[state.phase] || "";
       if (elapsed) elapsed.textContent = clock(state.position);
-      if (total) total.textContent = clock(state.duration ?? NaN);
+      if (total) total.textContent = state.duration ? clock(state.duration) : "--:--";
       if (seekBar instanceof HTMLInputElement) {
         seekBar.disabled = !state.seekable;
         if (!scrubbing) seekBar.value = String(Math.round(state.progress * 1000));
@@ -246,13 +249,8 @@ function enhanceAudio(card) {
       }
       for (const button of $$("[data-audio-skip]", card))
         /** @type {HTMLButtonElement} */ (button).disabled = !state.seekable;
-      if (estimate)
-        estimate.textContent =
-          state.endsAt !== undefined
-            ? "Ends at " + wallClock(state.endsAt)
-            : state.remaining !== undefined
-              ? clock(state.remaining) + " remaining"
-              : "";
+      // The finish time only means something while the recording plays; the total is beside it.
+      if (estimate) estimate.textContent = state.endsAt !== undefined ? "Ends at " + wallClock(state.endsAt) : "";
       if (mute) {
         const label = state.muted ? "Unmute" : "Mute";
         mute.setAttribute("aria-label", label);
@@ -297,7 +295,8 @@ function enhanceAudio(card) {
   controls.hidden = false;
   tools.hidden = false;
   card.classList.add("is-enhanced");
-  window.addEventListener("pagehide", () => player.dispose());
+  window.addEventListener("pagehide", () => player.dispose(), { signal });
+  signal?.addEventListener("abort", () => player.dispose());
 }
 
 /* ------------------------------------------------------------------ timing readout */
@@ -377,7 +376,7 @@ const youtubePhase = (value) =>
  * Follow a provider player's state over postMessage, so the reader gets a finish time without
  * downloading the provider's own SDK. Messages must match both the expected origin and window.
  */
-function followProvider(frame, provider, origin, report, known) {
+function followProvider(frame, provider, origin, report, known, signal) {
   let state = { phase: "idle", position: NaN, duration: duration(known), speed: NaN };
   let live = false;
   let recorded = Boolean(state.duration);
@@ -491,13 +490,13 @@ function followProvider(frame, provider, origin, report, known) {
       } else return;
     }
     emit();
-  });
+  }, { signal });
 
   return subscribe;
 }
 
 /** Nothing reaches the provider until the reader activates the poster. */
-function enhanceVideoFacade(preview) {
+function enhanceVideoFacade(preview, signal) {
   const player = preview.closest(".video-player");
   if (!player || player.dataset.videoBound === "true") return;
   const provider = player.dataset.videoProvider;
@@ -537,7 +536,7 @@ function enhanceVideoFacade(preview) {
     const report = timingHost(player);
     const subscribe =
       provider === "youtube" || provider === "vimeo"
-        ? followProvider(frame, provider, url.origin, report, Number(player.dataset.durationSeconds))
+        ? followProvider(frame, provider, url.origin, report, Number(player.dataset.durationSeconds), signal)
         : null;
 
     player.classList.add("is-loading");
@@ -599,8 +598,10 @@ function enhanceVideoFacade(preview) {
   preview.addEventListener("keydown", activate);
 }
 
-export function mount() {
-  for (const card of $$("[data-audio-component]")) enhanceAudio(card);
+/** Enhance the page's players. `signal` ends them when the page is swapped for another. */
+export function mount(options = {}) {
+  const signal = options.signal;
+  for (const card of $$("[data-audio-component]")) enhanceAudio(card, signal);
   for (const video of $$(".native-video video")) enhanceNativeVideo(video);
-  for (const preview of $$("[data-video-embed]")) enhanceVideoFacade(preview);
+  for (const preview of $$("[data-video-embed]")) enhanceVideoFacade(preview, signal);
 }

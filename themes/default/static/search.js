@@ -1124,6 +1124,8 @@ export function mount(options) {
 
   /** Keep `?q=` and `?search-page=` shareable without adding a history entry per keystroke. */
   function syncLocation() {
+    // The address belongs to whichever page is on screen now.
+    if (options.signal?.aborted) return;
     try {
       const url = active() ? queryURL(location.href, input.value, page) : stripSearch();
       history.replaceState(history.state, "", url);
@@ -1299,6 +1301,13 @@ export function mount(options) {
     debounce = setTimeout(() => void run(), delay);
   }
 
+  // Swapped out for another page: a query still in flight has nothing left to update.
+  options.signal?.addEventListener("abort", () => {
+    generation++;
+    contextGeneration++;
+    clearTimeout(debounce);
+  });
+
   let edited = false;
 
   input.addEventListener("input", () => {
@@ -1384,7 +1393,7 @@ export function mount(options) {
     // A collection page is itself a scope. Clearing the field there asks for everything, which is
     // the whole feed rather than this page with its own list still under an empty search.
     if (scope) {
-      location.assign(base);
+      (options.navigate || ((href) => location.assign(href)))(base);
       return;
     }
     input.value = "";
@@ -1412,14 +1421,19 @@ export function mount(options) {
     results.scrollIntoView({ block: "start", behavior: "instant" });
   });
 
-  // A shared URL or a Back navigation must restore the same results.
-  window.addEventListener("popstate", () => {
-    const url = new URL(location.href);
-    input.value = url.searchParams.get("q") || input.value;
-    page = Number(url.searchParams.get("search-page")) || 1;
-    restore();
-    void run();
-  });
+  // A shared URL or a Back navigation must restore the same results. These controls belong to
+  // the page they were mounted on, and stop listening when it is swapped out.
+  window.addEventListener(
+    "popstate",
+    () => {
+      const url = new URL(location.href);
+      input.value = url.searchParams.get("q") || input.value;
+      page = Number(url.searchParams.get("search-page")) || 1;
+      restore();
+      void run();
+    },
+    { signal: options.signal },
+  );
 
   void loadFacets().then(() => suggest());
   const url = new URL(location.href);

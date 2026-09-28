@@ -2678,7 +2678,7 @@ category = "Science"
         let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(
             feed.contains(&format!(
-                "content: {}",
+                "\"content\": {}",
                 serde_json::to_string(&original["content_version"]).unwrap()
             )),
             "{feed}"
@@ -3740,15 +3740,15 @@ category = "Science"
         let offline = std::fs::read_to_string(out.join("offline.html")).unwrap();
         assert!(!offline.contains("id=\"offline-articles\""));
         assert!(offline.contains("<link rel=\"manifest\" href=\"/repo/manifest.webmanifest\">"));
-        assert!(offline.contains("pwa: true"));
+        assert!(offline.contains("\"pwa\": true"));
         assert!(offline.contains("href=\"/repo/browse/\""), "{offline}");
-        assert!(offline.contains("base: \"/repo/\""), "{offline}");
+        assert!(offline.contains("\"base\": \"/repo/\""), "{offline}");
         assert!(!offline.contains("<base "), "{offline}");
         assert!(!offline.contains("rel=\"canonical\""));
         assert!(!offline.contains("application/ld+json"));
         let not_found = std::fs::read_to_string(out.join("404.html")).unwrap();
         assert!(not_found.contains("href=\"/repo/browse/\""), "{not_found}");
-        assert!(not_found.contains("base: \"/repo/\""), "{not_found}");
+        assert!(not_found.contains("\"base\": \"/repo/\""), "{not_found}");
         assert!(!not_found.contains("<base "), "{not_found}");
         assert!(!not_found.contains("rel=\"canonical\""));
         assert!(!not_found.contains("property=\"og:url\""));
@@ -4324,7 +4324,7 @@ same_as = ["https://social.example/@ada"]
         assert!(!river.contains("rel=\"manifest\""));
         assert!(!river.contains("mobile-web-app-capable"));
         assert!(!river.contains("apple-mobile-web-app-capable"));
-        assert!(river.contains("pwa: false"));
+        assert!(river.contains("\"pwa\": false"));
     }
 
     #[test]

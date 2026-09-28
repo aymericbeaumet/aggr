@@ -81,17 +81,17 @@ async fn responsive_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     )
     .await?;
     client.goto(&fixture.base).await?;
-    // Navigation is the browser's own here too: no framework takes the page over, and the
-    // speculation rules are what prepare the next one.
+    // No framework takes the page over: the reader's own script swaps pages in place, and no
+    // speculation rules prepare documents it will never load.
     assert_eq!(
         client
             .execute(
-                "return {framework:typeof window.swup, rules:JSON.parse(document.querySelector('script[type=speculationrules]').textContent).prerender[0].eagerness}",
+                "return {framework:typeof window.swup, rules:!!document.querySelector('script[type=speculationrules]')}",
                 vec![]
             )
             .await?,
-        json!({"framework":"undefined","rules":"moderate"}),
-        "desktop navigation stays the browser's, prepared by speculation rules"
+        json!({"framework":"undefined","rules":false}),
+        "desktop navigation is the reader's own, without a framework or speculation rules"
     );
     let desktop_density = client
         .execute(

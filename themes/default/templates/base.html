@@ -69,22 +69,8 @@
 {% if site.pwa %}
 <link rel="manifest" href="{{ 'manifest.webmanifest' | url_for }}">
 {% endif %}
-<script>window.AGGR = {base: {{ page.root | json }}, kind: {{ page.kind | json }}, pwa: {{ site.pwa | json }}, discussions: {{ site.discussions | json }}, entries: {{ site.entry_shortcuts | json }}, assets: {search: {{ ('assets/search.js' | url_for) | json }}, media: {{ ('assets/media.js' | url_for) | json }}}, content: {{ build.content_version | json }}};</script>
-<script type="speculationrules">
-{
-  "prefetch": [{
-    "where": {"and": [
-      {"href_matches": "/*"},
-      {"not": {"selector_matches": "[target], [download], [rel~=external], .u-bookmark-of, .discussion, .config-link, .footer a"}}
-    ]},
-    "eagerness": "moderate"
-  }],
-  "prerender": [{
-    "where": {"selector_matches": ".rows .row [data-row-open], .article-more-link, [data-site-navigation] a[data-route]"},
-    "eagerness": "moderate"
-  }]
-}
-</script>
+<script id="aggr-page" type="application/json">{"base": {{ page.root | json }}, "kind": {{ page.kind | json }}, "pwa": {{ site.pwa | json }}, "discussions": {{ site.discussions | json }}, "entries": {{ site.entry_shortcuts | json }}, "assets": {"search": {{ ('assets/search.js' | url_for) | json }}, "media": {{ ('assets/media.js' | url_for) | json }}}, "content": {{ build.content_version | json }}}</script>
+<script>window.AGGR = JSON.parse(document.getElementById("aggr-page").textContent);</script>
 {% if schema %}<script type="application/ld+json">{{ schema | json }}</script>{% endif %}
 {% block head %}{% endblock %}
 </head>

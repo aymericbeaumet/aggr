@@ -347,10 +347,14 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   share with the templates. Never add a bundler, a framework, an npm dependency, or a vendored
   browser library, and never import across files by anything but a `url_for`-resolved URL from
   `window.AGGR.assets`: hashed asset names are not rewritten inside file contents.
-- Reach for the platform before JavaScript: speculation rules and ordinary navigation, view
-  transitions, scroll-driven animations, `<dialog>` with invoker commands, stretched links, CSS
-  counters. Wrap anything not universally supported in `@supports` or a feature check that degrades
-  to plain HTML. Generated HTML must stay usable with JavaScript disabled.
+- Reach for the platform before JavaScript: scroll-driven animations, `<dialog>` with invoker
+  commands, stretched links, CSS counters. Wrap anything not universally supported in `@supports`
+  or a feature check that degrades to plain HTML. Generated HTML must stay usable with JavaScript
+  disabled.
+- Page changes are the one place script owns: `app.js` swaps `<main id="content">` in place so
+  moving between pages is instant everywhere. Keep links real links, fall back to ordinary
+  navigation for anything that cannot be swapped, and run per-page setup from `mountPage()` with
+  listeners bound to `pageScope` so the next swap ends them.
 - A prerendered page runs before anyone sees it: gate session storage, history writes and worker
   registration behind `document.prerendering`.
 - Preferences live in one typed table in `src/config/preferences.rs`, which produces both the

@@ -200,8 +200,11 @@ Search completion uses `search-catalog.json` (version, base, document count, and
 runtime and its filter files wait until an actual query needs them, so a reader who never searches
 downloads none of it. See [client development](client.md) for the search contract.
 
-Prefetching is the browser's: a `speculationrules` document rule with moderate eagerness, which
-lets the browser spend its own budget and cancel work the reader moved away from.
+Prefetching is bounded. A press, or a mouse resting on a link for 60 ms, fetches that page.
+Once a page settles, the reader also fetches the tabs, the neighbouring articles and the rows
+that stay on screen for half a second. That is at most ten guesses per page, and none at all
+under Save-Data or on a 2G connection. Fetched pages stay in memory for five minutes, 24 at most,
+and are parsed while the browser is idle, so following a link only has to swap the content.
 
 ## Measuring changes
 
