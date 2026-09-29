@@ -1217,6 +1217,31 @@ async fn recommendation_cards_and_navigation_layout() -> Result<()> {
             anyhow::ensure!(second["top"].as_f64()>first["bottom"].as_f64(), "recommendations stack vertically at every viewport width: {layout}");
             anyhow::ensure!(layout["unusedHeight"].as_f64().unwrap().abs()<1.0, "text-only recommendations fit their content without reserving absent previews: {layout}");
             anyhow::ensure!(layout["headingMargin"].as_f64().unwrap()>=if width>600 {36.0} else {28.0}, "article header needs a little breathing room: {layout}");
+            // Scrolled under the sticky article header, a card stays under it: none of its raised
+            // metadata paints over the header or catches a tap meant for it.
+            let covered=client.execute_async(r#"
+              const done=arguments[arguments.length-1], head=document.querySelector('.itemhead');
+              const meta=document.querySelector('.article-more-card .meta');
+              const frame=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+              // Room below the short fixture article, so the cards can scroll under the header.
+              const main=document.querySelector('.main');
+              main.style.paddingBottom='150vh';
+              (async()=>{
+                // The header folds as the page scrolls, so aim twice: the metadata's top a few
+                // pixels above the header's bottom edge, under the header.
+                for (let i=0;i<3;i++) {
+                  scrollTo(0, scrollY + meta.getBoundingClientRect().top - head.getBoundingClientRect().bottom + 6);
+                  await frame();
+                }
+                const box=head.getBoundingClientRect(), under=meta.getBoundingClientRect();
+                const over=document.elementFromPoint(under.left+Math.min(under.width/2,40), box.bottom-3);
+                done({header:!!over?.closest('.itemhead'), overlapping:under.top<box.bottom-3 && under.bottom>box.bottom-3, over:over?.className||over?.tagName});
+                main.style.removeProperty('padding-bottom');
+                scrollTo(0,0);
+              })();
+            "#, vec![]).await?;
+            anyhow::ensure!(covered["overlapping"]==true && covered["header"]==true,"the sticky header stays above the cards scrolling under it: {covered}");
+            wait_for(&client,"scrollY===0").await?;
             // A card's stretched link must stop at the card. Reaching past it makes the article
             // body read and click as whichever recommendation happens to be painted last.
             let body=client.execute(r#"

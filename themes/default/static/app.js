@@ -1135,10 +1135,15 @@ const navigation = (() => {
     const timer = setInterval(refresh, PAGE_LIFETIME / 2);
     document.addEventListener("visibilitychange", refresh, { signal });
     signal.addEventListener("abort", () => clearInterval(timer));
+    // The tabs and neighbours are fetched as soon as this page has painted: they are what a reader
+    // reaches for first, and a tap must find them ready.
+    requestAnimationFrame(() =>
+      setTimeout(() => {
+        if (!signal.aborted && !frugal()) for (const href of nearest()) prefetch(href, true);
+      }, 0),
+    );
     idle(() => {
-      if (signal.aborted || frugal()) return;
-      for (const href of nearest()) prefetch(href, true);
-      if (!("IntersectionObserver" in window)) return;
+      if (signal.aborted || frugal() || !("IntersectionObserver" in window)) return;
       // A row the reader lingers over, rather than every row that scrolls past.
       const timers = new Map();
       const observer = new IntersectionObserver((entries) => {
@@ -1181,6 +1186,14 @@ const navigation = (() => {
       requestAnimationFrame(() => window.scrollTo({ top: saved, behavior: "instant" }));
 
     document.addEventListener("click", (event) => {
+      // The press already chose this entry; its click changes nothing more.
+      const target = event.target;
+      if (pressed && target instanceof Element && target.closest("a[href]") === pressed) {
+        pressed = null;
+        event.preventDefault();
+        return;
+      }
+      pressed = null;
       if (event.defaultPrevented || event.button !== 0) return;
       if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       const hit = linkIn(event);
@@ -1200,11 +1213,26 @@ const navigation = (() => {
       void go(hit.url.href, { from: hit.link });
     });
     // Intent: a press is a promise of a click, and a pointer resting on a link is a likely one.
+    // A mouse press on the site's own navigation is the choice itself, as in a native app's
+    // sidebar: the page changes on the press, and the click that follows it is spent.
+    let pressed = null;
     document.addEventListener(
       "pointerdown",
       (event) => {
         const hit = linkIn(event);
-        if (hit) prefetch(hit.url.href);
+        if (!hit) return;
+        prefetch(hit.url.href);
+        const menu = hit.link.closest("[data-site-navigation]") && hit.link.hasAttribute("data-route");
+        if (
+          menu &&
+          event.pointerType === "mouse" &&
+          event.button === 0 &&
+          !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey &&
+          address(hit.url.href) !== current
+        ) {
+          pressed = hit.link;
+          void go(hit.url.href, { from: hit.link });
+        }
       },
       { capture: true, passive: true },
     );

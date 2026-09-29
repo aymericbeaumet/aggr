@@ -181,8 +181,9 @@ impl SearchDocument {
             // aggr's UI can mount the generated directory beneath any path.
             url: item.url.trim_start_matches('/').to_string(),
             // Embedded link targets and raw HTML stay out of the digest. The one intentional URL
-            // is upstream identity, allowing a pasted article URL to find its local snapshot.
-            content: format!("{lookup}\n\n{prose}"),
+            // is upstream identity, allowing a pasted article URL to find its local snapshot. It
+            // follows the prose, so an excerpt that matched nothing starts with the article.
+            content: format!("{prose}\n\n{lookup}"),
             meta,
             filters,
             sort,

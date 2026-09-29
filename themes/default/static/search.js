@@ -574,11 +574,15 @@ function renderMetadata(display, base, original, dates) {
   return element("div", { class: "meta" }, fields);
 }
 
-/** Pagefind's excerpt comes as HTML; rebuild it as text nodes so nothing can inject markup. */
+/**
+ * Pagefind's excerpt comes as HTML; rebuild it as text nodes so nothing can inject markup. An
+ * excerpt that highlights nothing (a query of filters alone, or one that matched the metadata)
+ * says less than the article's own summary, which the feed row shows too.
+ */
 function renderExcerpt(result) {
   const container = element("div", { class: "search-excerpt" });
   const html = result.excerpt;
-  if (!html) {
+  if (!html || (!html.includes("<mark") && displayData(result).excerpt)) {
     container.textContent = displayData(result).excerpt || "";
     return container;
   }

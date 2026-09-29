@@ -429,12 +429,12 @@ body[data-kind="item"] .main {
   padding-left: max(1.25rem, env(safe-area-inset-left));
   padding-right: max(1.25rem, env(safe-area-inset-right));
 }
-.itemhead { position: sticky; top: var(--top-nav-offset); z-index: 1; isolation: isolate; width: 100%; max-width: none; margin: 0 0 1.75rem; padding: calc(var(--header-padding-top, 1.5rem) * (1 - var(--header-progress, 0)) + 0.6rem * var(--header-progress, 0)) 0 calc(var(--header-padding-bottom, 0.7rem) * (1 - var(--header-progress, 0)) + 0.5rem * var(--header-progress, 0)); background: var(--bg); }
+.itemhead { position: sticky; top: var(--top-nav-offset); z-index: 3; isolation: isolate; width: 100%; max-width: none; margin: 0 0 1.75rem; padding: calc(var(--header-padding-top, 1.5rem) * (1 - var(--header-progress, 0)) + 0.6rem * var(--header-progress, 0)) 0 calc(var(--header-padding-bottom, 0.7rem) * (1 - var(--header-progress, 0)) + 0.5rem * var(--header-progress, 0)); background: var(--bg); }
 .itemhead::before { content: ""; position: absolute; z-index: -1; inset: 0; background: var(--bg); box-shadow: 0 1px 0 var(--faint); }
-/* Reading progress covers the header's hairline; the fade below it keeps the text scrolling
-   underneath from butting against the bar. */
+/* Reading progress covers the header's hairline. Below it, the text scrolling underneath fades
+   and blurs out gradually rather than meeting the bar at a hard edge. */
 .itemhead-progress { position: absolute; left: 0; bottom: -2px; width: 100%; height: 2px; background: var(--warm); transform: scaleX(0); will-change: transform; transform-origin: left; pointer-events: none; }
-.itemhead-fade { position: absolute; top: calc(100% + 2px); left: 0; width: 100%; height: 1.75rem; background: linear-gradient(to bottom, var(--bg), color-mix(in srgb, var(--bg) 60%, transparent) 45%, transparent); opacity: min(1, calc(var(--header-progress, 0) * 8)); pointer-events: none; }
+.itemhead-fade { position: absolute; top: calc(100% + 2px); left: 0; width: 100%; height: 2.75rem; background: linear-gradient(to bottom, var(--bg), color-mix(in srgb, var(--bg) 55%, transparent) 40%, transparent); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); -webkit-mask-image: linear-gradient(to bottom, #000 20%, transparent); mask-image: linear-gradient(to bottom, #000 20%, transparent); opacity: min(1, calc(var(--header-progress, 0) * 8)); pointer-events: none; }
 .itemhead { --itemhead-title-size: clamp(1.65rem, 4vw, 2.25rem); }
 .itemhead h1 { max-width: none; font-size: var(--itemhead-title-size); line-height: 1.2; margin: 0 0 calc(var(--header-title-gap, 0.65rem) * (1 - var(--header-progress, 0)) + 0.2rem * var(--header-progress, 0)); letter-spacing: -0.025em; overflow-wrap: anywhere; text-wrap: pretty; }
 .itemhead-title { display: block; transform: scale(var(--title-scale)); transform-origin: top left; }
@@ -615,7 +615,9 @@ body[data-kind="item"] .main {
 .article-more-section { min-width: 0; }
 .article-more-heading { margin: 0 0 .65rem; color: var(--fg); font-size: 1rem; font-weight: 650; line-height: 1.3; }
 .article-more { display: grid; gap: .65rem; }
-.article-more-card { min-width: 0; padding: .8rem; border: 1px solid var(--faint); border-radius: .4rem; background: var(--panel); }
+/* Each card stacks its raised metadata within itself, so nothing in it can paint over the sticky
+   article header it scrolls under. */
+.article-more-card { isolation: isolate; min-width: 0; padding: .8rem; border: 1px solid var(--faint); border-radius: .4rem; background: var(--panel); }
 .article-more-card .row-content { --preview-size: 3.5rem; }
 .article-more-card .row-content:not(:has(.preview-media)) { min-height: 0; }
 .interactive-reader { margin: 0 0 1.5rem; }
@@ -749,8 +751,8 @@ body[data-kind="item"] .main {
   }
   /* Tags read as a line of words: a tall row and a box as wide as it is high would space them
      unevenly, so each keeps its own width and a comfortable height. */
-  .tag { display: inline-flex; align-items: center; min-height: 2rem; }
-  .item-tags-inner { gap: 0 0.9rem; }
+  .tag { display: inline-flex; align-items: center; min-height: 1.75rem; }
+  .item-tags-inner { gap: 0 0.7rem; }
   /* A row is one target: its metadata and thumbnail let a tap through to the row's own link,
      and only their own links keep it. */
   .row :is(.meta, .preview-media), .article-more-card .meta { pointer-events: none; }
