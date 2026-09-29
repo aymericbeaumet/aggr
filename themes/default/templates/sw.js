@@ -120,6 +120,12 @@ self.addEventListener("install", function (event) {
   );
 });
 
+// A page that loaded while this worker was activating asks to be claimed: activation only
+// claims the pages that existed at that moment.
+self.addEventListener("message", function (event) {
+  if (event.data && event.data.type === "claim") event.waitUntil(self.clients.claim());
+});
+
 self.addEventListener("activate", function (event) {
   event.waitUntil(
     (async function () {

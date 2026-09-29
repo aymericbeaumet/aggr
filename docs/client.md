@@ -53,7 +53,7 @@ export. Values live in `localStorage` under `aggr:<setting>`.
 
 ## Offline
 
-A 55-line service worker keeps the shell installable, caches pages as the reader opens them, and
+A small service worker keeps the shell installable, caches pages as the reader opens them, and
 serves `offline.html` for anything unvisited. Content-addressed assets are served from the cache;
 everything else is revalidated. Nothing is downloaded ahead of the reader, and there is no offline
 search index.

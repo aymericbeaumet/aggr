@@ -899,22 +899,31 @@ const navigation = (() => {
       else window.scrollTo({ top: 0, behavior: "instant" });
     };
     // A fling or a trackpad's momentum outlives the page it moved and would drag the next one
-    // along. Taking the scrollbar away through one painted frame is what makes the compositor let
-    // go of it, and until then any step it still takes is undone before it is painted. A page at
-    // rest is left alone, since a scrollbar's width could shift that frame.
+    // along. Taking the scrollbar away is what makes the compositor let go of it, and until it has
+    // any step it still takes is undone before it is painted. A page at rest is left alone, since
+    // a scrollbar's width could shift the layout while it is gone.
     const gliding = performance.now() - scrolled < 150;
     const root = document.documentElement;
     place();
     if (gliding) {
+      // Held until the page has been still for a moment (at most 1.5s): a slow frame must not
+      // hand the page back to a fling that is still carrying it.
       root.style.overflow = "hidden";
-      window.addEventListener("scroll", place, { passive: true });
-      requestAnimationFrame(() =>
-        requestAnimationFrame(() => {
-          root.style.removeProperty("overflow");
-          window.removeEventListener("scroll", place);
-          place();
-        }),
-      );
+      const until = performance.now() + 1500;
+      let quiet = 0;
+      const release = () => {
+        clearTimeout(quiet);
+        window.removeEventListener("scroll", hold);
+        root.style.removeProperty("overflow");
+        place();
+      };
+      const hold = () => {
+        place();
+        clearTimeout(quiet);
+        quiet = setTimeout(release, performance.now() < until ? 120 : 0);
+      };
+      window.addEventListener("scroll", hold, { passive: true });
+      quiet = setTimeout(release, 120);
     }
     const main = $("#content");
     if (main) {
@@ -1901,6 +1910,13 @@ function registerWorker() {
   if (AGGR.pwa === false || !("serviceWorker" in navigator)) return;
   navigator.serviceWorker
     .register(new URL("sw.js", BASE).href, { scope: new URL(BASE).pathname, updateViaCache: "none" })
+    .then(() => navigator.serviceWorker.ready)
+    .then((registration) => {
+      // A page whose load began while its worker was still activating is not one the worker
+      // claimed then. Pages now change in place, so it would stay uncontrolled, and uncached
+      // offline, for the whole visit: ask to be claimed.
+      if (!navigator.serviceWorker.controller) registration.active?.postMessage({ type: "claim" });
+    })
     .catch((error) => console.error("aggr: service worker", error));
 }
 
