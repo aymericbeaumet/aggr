@@ -219,11 +219,32 @@ async fn interpret(
         return Ok(Fetch::Unchanged { validators });
     }
 
-    if let Ok(feed) = parse(&body.bytes, &body.final_url) {
-        return Ok(changed(feed, &body.final_url, validators, &body.bytes));
-    }
+    let unreadable = match parse(&body.bytes, &body.final_url) {
+        Ok(feed) => return Ok(changed(feed, &body.final_url, validators, &body.bytes)),
+        Err(err) => is_feed_document(&body.bytes).then_some(err),
+    };
     let budget = discovery_budget(ctx.client.timeout());
-    discover(body, source, ctx, validators, first_discovery, budget).await
+    let discovered = discover(body, source, ctx, validators, first_discovery, budget).await;
+    match unreadable {
+        // A feed that could not be read is the error, not that the "page" lists no articles.
+        Some(err) if discovered.is_err() => Err(err),
+        _ => discovered,
+    }
+}
+
+/// Whether a body is a feed document, readable or not: its root is `rss`, `feed` or `rdf:RDF`.
+fn is_feed_document(bytes: &[u8]) -> bool {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_reader(bytes);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                return matches!(element.local_name().as_ref(), "rss" | "feed" | "RDF");
+            }
+            Ok(Event::Eof) | Err(_) => return false,
+            Ok(_) => {}
+        }
+    }
 }
 
 /// The response is not a feed: advertised endpoints, conventional endpoints, then article cards,
@@ -621,7 +642,7 @@ fn dedupe(mut urls: Vec<Url>) -> Vec<Url> {
 
 /// RSS, Atom or JSON Feed bytes; relative links resolve against the URL the body came from.
 pub fn parse(bytes: &[u8], base: &Url) -> Result<Feed> {
-    let normalized = normalize_podcast_durations(bytes);
+    let normalized = prepare_for_feed_rs(bytes);
     let mut feed = feed_rs::parser::Builder::new()
         .base_uri(Some(base.as_str()))
         .build()
@@ -811,9 +832,10 @@ fn entry_media(bytes: &[u8], base: &Url) -> Vec<EntryMedia> {
                             .flatten()
                             .is_some_and(|kind| kind.value.as_ref() == "html");
                         // Reading the text consumes the element's end: leave it as its end would.
-                        let Some((_, text)) = podcast_duration_text(&mut reader) else {
+                        let Some((_, text, nested)) = element_text(&mut reader) else {
                             return Vec::new();
                         };
+                        let text = if nested { String::new() } else { text };
                         depth -= 1;
                         bases.retain(|(declared, _)| *declared <= depth);
                         if name == "duration" {
@@ -915,37 +937,59 @@ fn thumbnail(
     }
 }
 
-fn normalize_podcast_durations(bytes: &[u8]) -> Cow<'_, [u8]> {
+/// The bytes feed-rs is given, with what it would misread or refuse put right first: everything
+/// else about the feed is still feed-rs's reading of it.
+fn prepare_for_feed_rs(bytes: &[u8]) -> Cow<'_, [u8]> {
     use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
 
-    if !bytes
-        .windows(b"duration".len())
-        .any(|part| part == b"duration")
-    {
+    let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|part| part == needle);
+    if !contains(b"duration") && !contains(MEDIA_RSS_NAMESPACE.as_bytes()) {
         return Cow::Borrowed(bytes);
     }
     let mut reader = NsReader::from_reader(bytes);
     let mut replacements = Vec::new();
     loop {
+        let before = reader.buffer_position() as usize;
         let Ok((namespace, event)) = reader.read_resolved_event() else {
             return Cow::Borrowed(bytes);
         };
+        let bound = |uri: &str| matches!(namespace, ResolveResult::Bound(namespace) if namespace.as_ref() == uri);
+        let media_text = |name: &str| matches!(name, "title" | "description");
         match event {
             Event::Start(element)
-                if element.local_name().as_ref() == "duration"
-                    && matches!(namespace, ResolveResult::Bound(namespace) if namespace.as_ref() == "http://www.itunes.com/dtds/podcast-1.0.dtd") =>
+                if element.local_name().as_ref() == "duration" && bound(ITUNES_NAMESPACE) =>
             {
                 let start = reader.buffer_position() as usize;
-                let Some((end, text)) = podcast_duration_text(&mut reader) else {
+                let Some((end, text, nested)) = element_text(&mut reader) else {
                     return Cow::Borrowed(bytes);
                 };
                 // feed-rs treats MM:SS as seconds and accepts numeric substrings in invalid values.
-                let value = crate::media_duration::parse(&text)
+                let value = (!nested)
+                    .then(|| crate::media_duration::parse(&text))
+                    .flatten()
                     .map(|seconds| seconds.to_string())
                     .unwrap_or_default();
                 if &bytes[start..end] != value.as_bytes() {
                     replacements.push((start..end, value));
                 }
+            }
+            // feed-rs rejects the whole feed over a `media:title` or `media:description` without
+            // text, which YouTube writes for every video published without a description. Saying
+            // nothing is the same as not being there.
+            Event::Start(element)
+                if media_text(element.local_name().as_ref()) && bound(MEDIA_RSS_NAMESPACE) =>
+            {
+                let Some((_, text, nested)) = element_text(&mut reader) else {
+                    return Cow::Borrowed(bytes);
+                };
+                if !nested && text.trim().is_empty() {
+                    replacements.push((before..reader.buffer_position() as usize, String::new()));
+                }
+            }
+            Event::Empty(element)
+                if media_text(element.local_name().as_ref()) && bound(MEDIA_RSS_NAMESPACE) =>
+            {
+                replacements.push((before..reader.buffer_position() as usize, String::new()));
             }
             Event::Eof => break,
             _ => {}
@@ -965,9 +1009,9 @@ fn normalize_podcast_durations(bytes: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(normalized)
 }
 
-fn podcast_duration_text(
-    reader: &mut quick_xml::reader::NsReader<&[u8]>,
-) -> Option<(usize, String)> {
+/// An element's own text, read up to its end: where that end tag starts, the text, and whether
+/// the element held other elements too.
+fn element_text(reader: &mut quick_xml::reader::NsReader<&[u8]>) -> Option<(usize, String, bool)> {
     use quick_xml::events::Event;
     let mut text = String::new();
     let mut depth = 1;
@@ -989,7 +1033,7 @@ fn podcast_duration_text(
             Event::End(_) => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some((position, if nested { String::new() } else { text }));
+                    return Some((position, text, nested));
                 }
             }
             Event::Eof => return None,
@@ -1385,6 +1429,51 @@ Second paragraph.</media:description></media:group>
     }
 
     #[test]
+    fn a_video_published_without_a_description_does_not_fail_its_channel() {
+        // YouTube's shape: an empty `media:description`, next to a thumbnail and a rating.
+        let xml = r#"<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/">
+          <title>Videos</title>
+          <entry>
+            <id>yt:video:quiet</id><title>No description</title>
+            <link href="https://www.youtube.com/watch?v=quiet"/>
+            <media:group>
+              <media:title>No description</media:title>
+              <media:thumbnail url="https://i1.ytimg.com/vi/quiet/hqdefault.jpg" width="480" height="360"/>
+              <media:description></media:description>
+              <media:community><media:starRating count="0" average="0.00" min="1" max="5"/></media:community>
+            </media:group>
+          </entry>
+          <entry>
+            <id>yt:video:blank</id><title>Blank title</title>
+            <link href="https://www.youtube.com/watch?v=blank"/>
+            <media:group><media:title> </media:title><media:description/></media:group>
+          </entry>
+          <entry>
+            <id>yt:video:said</id><title>Described</title>
+            <link href="https://www.youtube.com/watch?v=said"/>
+            <media:group><media:description>What it is about</media:description></media:group>
+          </entry>
+        </feed>"#;
+        let (_, items) = parse(
+            xml,
+            "https://www.youtube.com/feeds/videos.xml?channel_id=UC1",
+        );
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].title, "No description");
+        assert_eq!(
+            items[0].extra["thumbnail"].as_str(),
+            Some("https://i1.ytimg.com/vi/quiet/hqdefault.jpg"),
+            "{:?}",
+            items[0].extra
+        );
+        assert_eq!(items[2].summary.as_deref(), Some("What it is about"));
+
+        // Only the empty elements go: an element with text, or with markup, is left to feed-rs.
+        let kept = br#"<rss xmlns:media="http://search.yahoo.com/mrss/" xmlns:other="https://example.com/x"><media:description>Said</media:description><other:description></other:description><description></description></rss>"#;
+        assert!(matches!(prepare_for_feed_rs(kept), Cow::Borrowed(_)));
+    }
+
+    #[test]
     fn source_language_comes_from_the_feed_and_is_canonicalised() {
         let rss = |language: &str| {
             format!(
@@ -1514,15 +1603,9 @@ Second paragraph.</media:description></media:group>
         let expected = String::from_utf8(xml.to_vec())
             .unwrap()
             .replace("27&#58;51", "1671");
-        assert_eq!(
-            normalize_podcast_durations(xml).as_ref(),
-            expected.as_bytes()
-        );
+        assert_eq!(prepare_for_feed_rs(xml).as_ref(), expected.as_bytes());
         assert!(
-            matches!(
-                normalize_podcast_durations(expected.as_bytes()),
-                Cow::Borrowed(_)
-            ),
+            matches!(prepare_for_feed_rs(expected.as_bytes()), Cow::Borrowed(_)),
             "canonical feed durations do not copy the response again"
         );
         let base = Url::parse("https://example.com/feed").unwrap();
@@ -2161,6 +2244,47 @@ Second paragraph.</media:description></media:group>
         assert_eq!(section.calls_async().await, 1);
         assert_eq!(others.calls_async().await, 6);
         assert_eq!(site.calls_async().await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_feed_that_cannot_be_read_says_so() {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/feed.xml");
+                // An Atom `content` that points at nothing: feed-rs refuses the whole feed.
+                then.status(200)
+                    .header("content-type", "application/atom+xml")
+                    .body(r#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Blog</title><entry><id>a</id><title>A</title><link href="https://example.com/a"/><content type="image/png"></content></entry></feed>"#);
+            })
+            .await;
+        let url = Url::parse(&server.url("/feed.xml")).unwrap();
+        let source = source(url.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let state = crate::store::SourceState::default();
+        let ctx = Context {
+            client: &client,
+            state: &state,
+            cache_dir: cache.path(),
+        };
+        let Err(err) = fetch(&url, &source, &ctx).await else {
+            panic!("an unreadable feed is not a listing");
+        };
+        let message = format!("{err:#}");
+        assert!(message.contains("parsing feed"), "{message}");
+        assert!(!message.contains("no advertised feed"), "{message}");
+
+        assert!(is_feed_document(
+            b"\xef\xbb\xbf<?xml version=\"1.0\"?>\n<!-- c --><rss/>"
+        ));
+        assert!(is_feed_document(b"<rdf:RDF xmlns:rdf=\"x\"></rdf:RDF>"));
+        assert!(!is_feed_document(
+            b"<!doctype html><html><body>Blog</body></html>"
+        ));
+        assert!(!is_feed_document(
+            b"{\"version\": \"https://jsonfeed.org/version/1.1\"}"
+        ));
     }
 
     async fn page(url: &Url, source: &Source, ctx: &Context<'_>) -> Body {

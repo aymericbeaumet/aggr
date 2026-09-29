@@ -83,7 +83,7 @@ src/config.rs, config/                    aggr.toml types, imports and collectio
 src/git.rs                                worktree/orphan bootstrap, commit with trailers, push+rebase, refs
 src/http.rs, http/transport.rs            reqwest client (UA, timeouts, size cap, conditional GET, retries) + wreq challenge fallback
 src/sources/mod.rs                        engine dispatch by URL predicate: instagram, qwen, podcast, then feed
-src/sources/feed.rs, html.rs              RSS/Atom/JSON via feed-rs (media it drops restored from the XML); the discovery ladder from HTML
+src/sources/feed.rs, html.rs              RSS/Atom/JSON via feed-rs (empty media texts it refuses removed first, media it drops restored from the XML); the discovery ladder from HTML
 src/sources/aggr.rs                       another aggr repository as a source
 src/sources/instagram.rs                  profile pages that expose post cards
 src/sources/podcast.rs                    show pages resolved to publisher feeds
