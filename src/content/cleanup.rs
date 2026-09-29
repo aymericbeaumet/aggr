@@ -1226,6 +1226,11 @@ fn is_inline_paragraph(markdown: &str) -> bool {
 /// nothing else, and the date names the item's own day or month; a sign-off the item's date does
 /// not confirm, or that says anything more, is the author's to keep. A lone date there goes on the
 /// same evidence, as it does at the top of the article.
+/// The longest closing line read as a sign-off: a four-word name and a written-out date, with room
+/// for the name's link in the Markdown.
+const MAX_SIGNATURE_CHARS: usize = 160;
+const MAX_SIGNATURE_BYTES: usize = 1024;
+
 fn strip_trailing_signature(markdown: &str, published: Option<DateTime<Utc>>) -> String {
     let Some(published) = published.map(|published| published.date_naive()) else {
         return markdown.to_string();
@@ -1234,10 +1239,15 @@ fn strip_trailing_signature(markdown: &str, published: Option<DateTime<Utc>>) ->
     let Some((before, last)) = body.rsplit_once("\n\n") else {
         return markdown.to_string();
     };
-    if before.trim().is_empty() || !is_inline_paragraph(last) {
+    // A name and a date are a short line, even with the name linked: anything longer is prose,
+    // and trying its every word boundary as the split would cost a long paragraph quadratic time.
+    if before.trim().is_empty() || last.len() > MAX_SIGNATURE_BYTES || !is_inline_paragraph(last) {
         return markdown.to_string();
     }
     let rendered = html_to_text(&render_markdown(last));
+    if rendered.chars().count() > MAX_SIGNATURE_CHARS {
+        return markdown.to_string();
+    }
     let names_published =
         |date: &str| super::dates::parse(date.trim()).is_some_and(|date| date.names(published));
     let name_and_date = |first: &str, second: &str| {
@@ -2207,6 +2217,22 @@ mod tests {
         ] {
             assert_eq!(strip_leading_kind_label(opening), opening, "{opening}");
         }
+    }
+
+    #[test]
+    fn a_long_closing_paragraph_is_prose_and_is_decided_quickly() {
+        use chrono::TimeZone as _;
+
+        let published = Utc.with_ymd_and_hms(2026, 9, 28, 2, 5, 13).unwrap();
+        let paragraph = "Jane Doe wrote about September 2026 and more ".repeat(4000);
+        let markdown = format!("The first paragraph.\n\n{}\n", paragraph.trim_end());
+        let started = std::time::Instant::now();
+        assert_eq!(
+            strip_article_metadata(&markdown, "Title", Some(published), "example-com"),
+            markdown
+        );
+        // Trying every word boundary took minutes on paragraphs this long.
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]
