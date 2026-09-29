@@ -1,8 +1,8 @@
 /**
  * The contracts the reader's scripts share with the MiniJinja templates.
  *
- * Nothing imports this at runtime: it exists so editors type-check
- * `themes/default/static/*.js` through `jsconfig.json`, with no toolchain installed.
+ * Nothing imports this at runtime: editors and the developer-only compiler check
+ * `themes/default/static/*.js` through `jsconfig.json`.
  */
 
 /** A discussion network, from `[[networks]]` in aggr.toml. */
@@ -18,6 +18,7 @@ export interface DiscussionNetwork {
 export interface AssetMap {
   search: string;
   media: string;
+  reader: string;
 }
 
 /** `window.AGGR`, emitted by `base.html`. */
@@ -34,18 +35,34 @@ export interface AppContext {
   assets: AssetMap;
   /** The content fingerprint this page was built from, for `updates.json` polling. */
   content?: string;
+  /** The application fingerprint, separate from content updates. */
+  app?: string;
   /** Where the search index lives, when one was built. */
   search?: { base: string; docs: number };
 }
 
 export type PreferenceValue = string | number | boolean;
 
-/** One setting's validation rule, generated from `src/config/preferences.rs`. */
-export interface PreferenceRule {
+/**
+ * One setting's validation rule, generated from `src/config/preferences.rs`: a select or a
+ * checkbox lists its values, a number carries its bounds instead.
+ */
+export type PreferenceRule = ChoiceRule | RangeRule;
+
+export interface ChoiceRule {
   initial: PreferenceValue;
-  values?: PreferenceValue[];
-  min?: number;
-  max?: number;
+  values: PreferenceValue[];
+  min?: undefined;
+  max?: undefined;
+  /** `documentElement.dataset` key this setting drives. */
+  attribute?: string;
+}
+
+export interface RangeRule {
+  initial: number;
+  values?: undefined;
+  min: number;
+  max: number;
   /** `documentElement.dataset` key this setting drives. */
   attribute?: string;
 }
@@ -56,7 +73,7 @@ export interface Preferences {
   values: Record<string, PreferenceValue>;
   read(): Record<string, PreferenceValue>;
   validate(payload: unknown): Record<string, PreferenceValue>;
-  valid(key: string, value: unknown): boolean;
+  valid(key: string, value: unknown): value is PreferenceValue;
   /** Mirror the values onto `documentElement.dataset`. */
   apply(values: Record<string, PreferenceValue>): void;
 }
@@ -66,10 +83,39 @@ export interface SharedDates {
   text(timestamp: number, format: string): string | null;
 }
 
+export interface OfflineStatus {
+  requested: number;
+  total: number;
+  saved: Array<{ url: string; title: string }>;
+  failed: number;
+  downloading: boolean;
+  search?: {
+    phase: string;
+    activeVersion: string | null;
+    targetVersion: string | null;
+    base: string | null;
+    downloadedFiles: number;
+    totalFiles: number;
+    downloadedBytes: number;
+    totalBytes: number;
+    error: string | null;
+  };
+}
+
 declare global {
+  interface Navigator {
+    connection?: { saveData?: boolean; effectiveType?: string };
+    userAgentData?: { platform: string };
+  }
+
+  interface Document {
+    prerendering?: boolean;
+  }
+
   interface Window {
     AGGR?: AppContext;
     AGGRPreferences?: Preferences;
     AGGRDates?: SharedDates;
+    AGGROffline?: OfflineStatus;
   }
 }

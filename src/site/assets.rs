@@ -143,6 +143,31 @@ impl ItemMedia {
         compact: bool,
         compact_cache: Option<&Path>,
     ) -> Result<Self> {
+        let mut preview = Self::stored_preview(store, item, memo)?;
+        let mut assets = store.read_image_assets(item)?;
+        if preview.is_none() && derive_preview {
+            preview = derived_preview(&assets, memo)?;
+        }
+        if compact {
+            assets = assets
+                .into_iter()
+                .map(|asset| super::compressed_media::compact_cached(asset, compact_cache))
+                .collect::<Result<_>>()?;
+        }
+        Ok(Self {
+            preview,
+            assets,
+            document: store
+                .read_document(item)?
+                .filter(|asset| crate::document::matches_item(asset, item)),
+        })
+    }
+
+    fn stored_preview(
+        store: &Store,
+        item: &Item,
+        memo: &MediaMemo,
+    ) -> Result<Option<PreparedPreview>> {
         let mut preview = None;
         if let Some(stored) = &item.front.preview
             && let Some(bytes) = store.read_preview(item)?
@@ -167,22 +192,23 @@ impl ItemMedia {
                 bytes,
             });
         }
-        let mut assets = store.read_image_assets(item)?;
-        if preview.is_none() && derive_preview {
-            preview = derived_preview(&assets, memo)?;
-        }
-        if compact {
-            assets = assets
-                .into_iter()
-                .map(|asset| super::compressed_media::compact_cached(asset, compact_cache))
-                .collect::<Result<_>>()?;
+        Ok(preview)
+    }
+
+    /// List pages need only a tiny preview, never every full-sized image in each visible article.
+    pub(super) fn gather_preview(
+        store: &Store,
+        item: &Item,
+        derive: bool,
+        memo: &MediaMemo,
+    ) -> Result<Self> {
+        let mut preview = Self::stored_preview(store, item, memo)?;
+        if preview.is_none() && derive {
+            preview = derived_preview(&store.read_image_assets(item)?, memo)?;
         }
         Ok(Self {
             preview,
-            assets,
-            document: store
-                .read_document(item)?
-                .filter(|asset| crate::document::matches_item(asset, item)),
+            ..Self::default()
         })
     }
 

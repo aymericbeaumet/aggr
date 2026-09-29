@@ -1189,3 +1189,13 @@ body[data-searching] [data-static-feed] { display: none; }
    them is running; the grouping itself should be invisible. */
 .preferences-controls { min-width: 0; margin: 0; padding: 0; border: 0; }
 .preferences-controls:disabled { opacity: 0.6; }
+
+/* Persistent status and passage sharing stay outside the replaced article. */
+.selection-share { position: absolute; z-index: 20; padding: .25rem; border: 1px solid var(--faint); border-radius: .4rem; background: var(--bg); box-shadow: 0 2px 8px #0002; }
+.selection-share button { color: var(--fg); background: var(--bg); border: 0; padding: .35rem .7rem; cursor: pointer; }
+.connection-status { position: fixed; right: 1rem; bottom: calc(var(--bottom-nav-offset, 0px) + 1rem); z-index: 25; max-width: min(30rem, calc(100vw - 2rem)); padding: .55rem .8rem; border: 1px solid var(--faint); border-radius: .5rem; background: var(--bg); color: var(--fg); box-shadow: 0 2px 8px #0002; }
+.connection-status button { color: inherit; font: inherit; background: transparent; border: 0; cursor: pointer; }
+.pull-refresh { position: fixed; top: 0; left: 50%; transform: translate(-50%, var(--pull-distance, 0px)); z-index: 30; padding: .5rem .8rem; border-radius: .4rem; background: var(--bg); color: var(--fg); box-shadow: 0 2px 8px #0002; }
+html[data-pull-state="pulling"], html[data-pull-state="armed"] { overscroll-behavior-y: contain; }
+
+.search-saved-status { color: var(--muted); font-size: .75rem; }

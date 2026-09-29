@@ -109,6 +109,7 @@ impl Layers {
     }
 }
 
+#[derive(Clone)]
 pub struct Renderer {
     env: Environment<'static>,
     layers: Layers,
@@ -207,6 +208,15 @@ impl Renderer {
     }
 
     /// Copy every static file into `<out>/assets/`.
+    /// Freeze every effective template before exposing a lazy dev generation. A later edit may
+    /// create a new generation, but cannot change an in-flight page from this one.
+    pub(crate) fn freeze_templates(&self) -> Result<()> {
+        for name in self.layers.template_names()? {
+            self.env.get_template(&name)?;
+        }
+        Ok(())
+    }
+
     pub fn write_static(&self, out: &Path) -> Result<Vec<String>> {
         for asset in self.assets.values() {
             let Some(bytes) = self
@@ -772,9 +782,9 @@ mod tests {
         let worker = std::str::from_utf8(worker_file.data.as_ref()).unwrap();
         // The index lives under an immutable version, so it never needs revalidating.
         assert!(worker.contains("pagefind\\/[0-9a-f]{64}\\/"));
-        // Nothing is downloaded ahead of the reader: no archive, no index prefetch.
-        assert!(!worker.contains("OFFLINE_CATALOG"));
-        assert!(!worker.contains("search-manifest.json"));
+        // The selected archive and complete index use protected caches.
+        assert!(worker.contains("OFFLINE_CATALOG"));
+        assert!(worker.contains("search-manifest.json"));
     }
 
     #[test]

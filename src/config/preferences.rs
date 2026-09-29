@@ -29,9 +29,7 @@ pub struct ReaderPreferences {
     pub single_key_shortcuts: bool,
     /// Maximum lines moved by d/u, bounded by half the available viewport.
     pub scroll_amount: usize,
-    /// Retired with the offline article archive. Still accepted so existing `aggr.toml` files keep
-    /// parsing under `deny_unknown_fields`, but it no longer reaches the browser.
-    #[serde(skip_serializing)]
+    /// Recent complete articles to retain offline; zero disables automatic downloads.
     pub offline_items: usize,
 }
 
@@ -268,10 +266,8 @@ impl ReaderPreferences {
         if !(1..=100).contains(&self.scroll_amount) {
             bail!("[site.preferences] scroll_amount must be between 1 and 100 lines");
         }
-        if self.offline_items != Self::default().offline_items {
-            log::warn!(
-                "[site.preferences] offline_items is no longer used: the reader caches pages it visits instead of downloading an archive"
-            );
+        if self.offline_items > 1000 {
+            bail!("[site.preferences] offline_items must be between 0 and 1000");
         }
         Ok(())
     }
@@ -427,6 +423,18 @@ impl ReaderPreferences {
                     ),
                 ],
             ),
+            (
+                "offline",
+                "Offline reading",
+                vec![number(
+                    "offline-items",
+                    "Recent articles to keep",
+                    0,
+                    1000,
+                    self.offline_items,
+                    "Keep articles and their archived images on this device. Set to 0 to disable downloads. Embedded players need a connection.",
+                )],
+            ),
         ]
     }
 
@@ -493,22 +501,18 @@ mod tests {
         assert_eq!(values["paragraph-indent"], false);
         assert_eq!(values["scroll-amount"], 7);
         assert_eq!(values["feed-page-size"], "50");
-        assert_eq!(values.as_object().unwrap().len(), 17);
+        assert_eq!(values.as_object().unwrap().len(), 18);
     }
 
     #[test]
-    fn retired_offline_items_parses_without_reaching_the_browser() {
+    fn offline_items_reaches_the_browser_with_validated_bounds() {
         let config = Config::parse("[site.preferences]\noffline_items=7\n").unwrap();
         let values = config.site.preferences.browser_defaults().unwrap();
-        assert!(values.get("offline-items").is_none());
-        assert!(
-            !config
-                .site
-                .preferences
-                .schema()
-                .bootstrap
-                .contains_key("offline-items")
-        );
+        assert_eq!(values["offline-items"], 7);
+        let rule = &config.site.preferences.schema().bootstrap["offline-items"];
+        assert_eq!(rule.min, Some(0));
+        assert_eq!(rule.max, Some(1000));
+        assert!(Config::parse("[site.preferences]\noffline_items=1001\n").is_err());
     }
 
     #[test]

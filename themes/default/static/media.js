@@ -6,27 +6,35 @@
  * failure here leaves the reader with working native controls rather than nothing.
  */
 
+/** @template {Element} [T=HTMLElement] @param {string} selector @param {ParentNode} [root] @returns {T|null} */
 const $ = (selector, root = document) => root.querySelector(selector);
+/** @template {Element} [T=HTMLElement] @param {string} selector @param {ParentNode} [root] @returns {T[]} */
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
+/** @typedef {{phase:string, position:number, duration?:number, speed:number}} TimingState */
+/** @typedef {TimingState & {progress:number, seekable:boolean, volume:number, muted:boolean, volumeAdjustable:boolean, remaining?:number, endsAt?:number}} PlaybackState */
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
 
 /** A usable, finite length in seconds, or nothing. */
+/** @param {unknown} value @returns {number|undefined} */
 const duration = (value) =>
   typeof value === "number" && Number.isFinite(value) && value > 0 && value <= Number.MAX_SAFE_INTEGER
     ? value
     : undefined;
 
+/** @param {number} seconds */
 function clock(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return "—";
   const whole = Math.floor(seconds);
   const hours = Math.floor(whole / 3600);
   const minutes = Math.floor(whole / 60) % 60;
+  /** @param {number} value */
   const pad = (value) => String(value).padStart(2, "0");
   return hours ? hours + ":" + pad(minutes) + ":" + pad(whole % 60) : minutes + ":" + pad(whole % 60);
 }
 
 /** When the recording finishes, given where it is and how fast it is playing. */
+/** @param {TimingState} state @param {number} [now] */
 function endsAt(state, now = Date.now()) {
   const length = duration(state.duration);
   const speed = duration(state.speed);
@@ -42,6 +50,7 @@ function endsAt(state, now = Date.now()) {
   };
 }
 
+/** @param {number} timestamp */
 const wallClock = (timestamp) => {
   const date = new Date(timestamp);
   if (!Number.isFinite(date.getTime())) return "";
@@ -52,6 +61,7 @@ const wallClock = (timestamp) => {
  * Correct the article header's "N min listen/watch" once the real recording length is known.
  * Show notes and transcripts must never stand in for a duration.
  */
+/** @param {ParentNode} root @param {string} action @param {number} seconds */
 function updateConsumption(root, action, seconds) {
   if (!duration(seconds)) return;
   const target = $(".itemhead .reading-stats[data-consumption='" + action + "']", root);
@@ -68,6 +78,7 @@ function updateConsumption(root, action, seconds) {
 /* ------------------------------------------------------------------ audio */
 
 /** Drive a native `<audio>` element and report its state back to the rendered controls. */
+/** @param {HTMLAudioElement} audio @param {(state: PlaybackState)=>void} update @param {{duration?:number}} [known] */
 function createPlayback(audio, update, known = {}) {
   const listeners = new AbortController();
   const signal = listeners.signal;
@@ -98,6 +109,7 @@ function createPlayback(audio, update, known = {}) {
       ...endsAt(state),
     });
   }
+  /** @param {string} next */
   const setPhase = (next) => {
     phase = next;
     emit();
@@ -112,6 +124,7 @@ function createPlayback(audio, update, known = {}) {
   audio.addEventListener("ended", () => setPhase("ended"), { signal });
   audio.addEventListener("error", () => setPhase("error"), { signal });
 
+  /** @param {number} fraction */
   function seek(fraction) {
     const total = seekable();
     if (disposed || !total || !Number.isFinite(fraction)) return;
@@ -146,10 +159,12 @@ function createPlayback(audio, update, known = {}) {
       }
     },
     seek,
+    /** @param {number} seconds */
     skip(seconds) {
       const total = seekable();
       if (total && Number.isFinite(seconds)) seek((audio.currentTime + seconds) / total);
     },
+    /** @param {number} value */
     speed(value) {
       if (disposed || !SPEEDS.includes(value)) return;
       try {
@@ -159,6 +174,7 @@ function createPlayback(audio, update, known = {}) {
         /* the browser may restrict playback rates */
       }
     },
+    /** @param {number} value */
     volume(value) {
       if (disposed || !Number.isFinite(value)) return;
       const next = Math.max(0, Math.min(1, value));
@@ -199,6 +215,7 @@ function createPlayback(audio, update, known = {}) {
   };
 }
 
+/** @type {Record<string,string>} */
 const AUDIO_STATUS = {
   error: "Audio unavailable. Try playing again.",
   loading: "Loading audio…",
@@ -207,8 +224,9 @@ const AUDIO_STATUS = {
   ended: "Finished",
 };
 
+/** @param {HTMLElement} card @param {AbortSignal} signal */
 function enhanceAudio(card, signal) {
-  const audio = $("audio", card);
+  const audio = card.querySelector("audio");
   const controls = $("[data-audio-controls]", card);
   const tools = $("[data-audio-tools]", card);
   if (!audio || !controls || !tools) return;
@@ -224,6 +242,7 @@ function enhanceAudio(card, signal) {
   const mute = $("[data-audio-mute]", card);
   const volume = $("[data-audio-volume]", card);
   let scrubbing = false;
+  /** @type {number|undefined} */
   let announced;
 
   const player = createPlayback(
@@ -250,7 +269,7 @@ function enhanceAudio(card, signal) {
       for (const button of $$("[data-audio-skip]", card))
         /** @type {HTMLButtonElement} */ (button).disabled = !state.seekable;
       // The finish time only means something while the recording plays; the total is beside it.
-      if (estimate) estimate.textContent = state.endsAt !== undefined ? "Ends at " + wallClock(state.endsAt) : "";
+      if (estimate) estimate.textContent = state.endsAt !== undefined ? "Ends at " + wallClock(state.endsAt) : state.remaining !== undefined ? clock(state.remaining) + " remaining" : "";
       if (mute) {
         const label = state.muted ? "Unmute" : "Mute";
         mute.setAttribute("aria-label", label);
@@ -260,6 +279,9 @@ function enhanceAudio(card, signal) {
       if (volume instanceof HTMLInputElement && !volume.matches(":active")) {
         volume.hidden = !state.volumeAdjustable;
         volume.value = String(state.volume);
+        volume.setAttribute("aria-valuetext", Math.round(state.volume * 100) + "%");
+        const device = $("[data-device-volume]", card);
+        if (device) device.hidden = state.volumeAdjustable;
       }
       if (speed instanceof HTMLSelectElement) speed.value = String(state.speed);
       // Native controls come back if playback fails.
@@ -296,16 +318,22 @@ function enhanceAudio(card, signal) {
   tools.hidden = false;
   card.classList.add("is-enhanced");
   window.addEventListener("pagehide", () => player.dispose(), { signal });
-  signal?.addEventListener("abort", () => player.dispose());
+  signal.addEventListener("abort", () => {
+    player.dispose();
+    audio.removeAttribute("src");
+    audio.load();
+  }, {once:true});
 }
 
 /* ------------------------------------------------------------------ timing readout */
 
 /** The "Ends at HH:MM" line that sits beside a player. */
+/** @param {Element} player */
 function timingHost(player) {
   const sibling = player.nextElementSibling;
   const host = sibling?.matches("[data-media-timing]") ? sibling : null;
   const article = player.closest("article.item") || document;
+  /** @param {TimingState} state */
   return (state) => {
     if (state.duration) updateConsumption(article, "watch", state.duration);
     const { endsAt: end } = endsAt(state);
@@ -314,7 +342,8 @@ function timingHost(player) {
   };
 }
 
-function enhanceNativeVideo(video) {
+/** @param {HTMLVideoElement} video @param {AbortSignal} signal */
+function enhanceNativeVideo(video, signal) {
   const frame = video.closest(".native-video");
   if (!frame) return;
   const report = timingHost(frame);
@@ -327,18 +356,20 @@ function enhanceNativeVideo(video) {
       position: video.currentTime,
       speed: video.playbackRate,
     });
+  /** @param {string} next */
   const setPhase = (next) => {
     phase = next;
     emit();
   };
   for (const name of ["loadedmetadata", "durationchange", "timeupdate", "ratechange"])
-    video.addEventListener(name, emit);
-  video.addEventListener("play", () => setPhase("loading"));
-  video.addEventListener("playing", () => setPhase("playing"));
-  video.addEventListener("waiting", () => setPhase(video.paused ? "paused" : "loading"));
-  video.addEventListener("pause", () => setPhase(video.ended ? "ended" : "paused"));
-  video.addEventListener("ended", () => setPhase("ended"));
-  video.addEventListener("error", () => setPhase("error"));
+    video.addEventListener(name, emit, {signal});
+  video.addEventListener("play", () => setPhase("loading"), {signal});
+  video.addEventListener("playing", () => setPhase("playing"), {signal});
+  video.addEventListener("waiting", () => setPhase(video.paused ? "paused" : "loading"), {signal});
+  video.addEventListener("pause", () => setPhase(video.ended ? "ended" : "paused"), {signal});
+  video.addEventListener("ended", () => setPhase("ended"), {signal});
+  video.addEventListener("error", () => setPhase("error"), {signal});
+  signal.addEventListener("abort", () => { video.pause(); video.removeAttribute("src"); video.load(); }, {once:true});
   emit();
 }
 
@@ -349,9 +380,11 @@ const VIMEO_EVENTS = [
   "bufferstart", "bufferend", "seeking", "seeked", "durationchange", "error",
 ];
 
+/** @param {unknown} value @returns {Record<string,unknown>|undefined} */
 const asRecord = (value) =>
-  value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+  value && typeof value === "object" && !Array.isArray(value) ? /** @type {Record<string,unknown>} */ (value) : undefined;
 
+/** @param {unknown} value */
 function messageData(value) {
   if (typeof value === "string") {
     if (value.length > 128000) return undefined;
@@ -364,6 +397,7 @@ function messageData(value) {
   return asRecord(value);
 }
 
+/** @param {unknown} value */
 const youtubePhase = (value) =>
   value === 1 ? "playing"
   : value === 2 ? "paused"
@@ -376,6 +410,7 @@ const youtubePhase = (value) =>
  * Follow a provider player's state over postMessage, so the reader gets a finish time without
  * downloading the provider's own SDK. Messages must match both the expected origin and window.
  */
+/** @param {HTMLIFrameElement} frame @param {string} provider @param {string} origin @param {(state:TimingState)=>void} report @param {number} known @param {AbortSignal} signal */
 function followProvider(frame, provider, origin, report, known, signal) {
   let state = { phase: "idle", position: NaN, duration: duration(known), speed: NaN };
   let live = false;
@@ -383,8 +418,11 @@ function followProvider(frame, provider, origin, report, known, signal) {
   let subscribed = false;
   let stale = false;
   let vimeoPlayback = "idle";
+  /** @type {ReturnType<typeof setTimeout>|undefined} */
   let watchdog;
+  signal.addEventListener("abort", () => clearTimeout(watchdog), {once:true});
 
+  /** @param {unknown} message */
   const post = (message) => frame.contentWindow?.postMessage(message, origin);
   function emit() {
     clearTimeout(watchdog);
@@ -496,9 +534,11 @@ function followProvider(frame, provider, origin, report, known, signal) {
 }
 
 /** Nothing reaches the provider until the reader activates the poster. */
+/** @param {HTMLAnchorElement} preview @param {AbortSignal} signal */
 function enhanceVideoFacade(preview, signal) {
-  const player = preview.closest(".video-player");
-  if (!player || player.dataset.videoBound === "true") return;
+  const candidate = preview.closest(".video-player");
+  if (!(candidate instanceof HTMLElement) || candidate.dataset.videoBound === "true") return;
+  const player = candidate;
   const provider = player.dataset.videoProvider;
   // Twitch refuses to embed outside a secure context.
   if (
@@ -508,10 +548,12 @@ function enhanceVideoFacade(preview, signal) {
   )
     return;
   player.dataset.videoBound = "true";
-  const title = preview.getAttribute("aria-label") || "Video";
+  const title = preview.dataset.aggrExternalLabel || preview.getAttribute("aria-label")?.replace(/, (?:opens in a new tab|external site)$/, "") || "Video";
 
+  /** @param {MouseEvent|KeyboardEvent} event */
   function activate(event) {
-    if (event.type === "keydown" && event.key !== " " && event.key !== "Enter") return;
+    if (event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) return;
+    if (event instanceof KeyboardEvent && event.key !== " " && event.key !== "Enter") return;
     event.preventDefault();
     if (player.dataset.videoMounted === "true") return;
     player.dataset.videoMounted = "true";
@@ -536,7 +578,7 @@ function enhanceVideoFacade(preview, signal) {
     const report = timingHost(player);
     const subscribe =
       provider === "youtube" || provider === "vimeo"
-        ? followProvider(frame, provider, url.origin, report, Number(player.dataset.durationSeconds), signal)
+        ? followProvider(frame, provider || "", url.origin, report, Number(player.dataset.durationSeconds), signal)
         : null;
 
     player.classList.add("is-loading");
@@ -569,13 +611,16 @@ function enhanceVideoFacade(preview, signal) {
           );
         } else if (provider === "vimeo") target.postMessage({ method: "play" }, url.origin);
       },
-      { once: true },
+      { once: true, signal },
     );
     player.appendChild(frame);
+    frame.focus({preventScroll:true});
+    signal.addEventListener("abort", () => { frame.removeAttribute("src"); frame.remove(); }, {once:true});
 
     // Twitch refuses to render below 400×300. A narrow column gets a player laid out at that
     // size and scaled down to fit, rather than a player that widens the article or a refusal.
     if (provider === "twitch") {
+      /** @param {number} width @param {number} height */
       const fit = (width, height) => {
         const scale = width && width < 400 ? width / 400 : 1;
         frame.style.width = scale < 1 ? "400px" : "100%";
@@ -587,21 +632,29 @@ function enhanceVideoFacade(preview, signal) {
       const box = player.getBoundingClientRect();
       fit(box.width, box.height);
       if ("ResizeObserver" in window) {
-        new ResizeObserver((entries) => {
+        const observer = new ResizeObserver((entries) => {
           for (const entry of entries) fit(entry.contentRect.width, entry.contentRect.height);
-        }).observe(player);
+        });
+        observer.observe(player);
+        signal.addEventListener("abort", () => observer.disconnect(), {once:true});
       }
     }
   }
 
-  preview.addEventListener("click", activate);
-  preview.addEventListener("keydown", activate);
+  preview.setAttribute("role", "button");
+  preview.addEventListener("click", activate, {signal});
+  preview.addEventListener("keydown", activate, {signal});
 }
 
 /** Enhance the page's players. `signal` ends them when the page is swapped for another. */
-export function mount(options = {}) {
+/** @param {{signal:AbortSignal}} options */
+export function mount(options) {
   const signal = options.signal;
   for (const card of $$("[data-audio-component]")) enhanceAudio(card, signal);
-  for (const video of $$(".native-video video")) enhanceNativeVideo(video);
-  for (const preview of $$("[data-video-embed]")) enhanceVideoFacade(preview, signal);
+  for (const video of document.querySelectorAll(".native-video video"))
+    if (video instanceof HTMLVideoElement) enhanceNativeVideo(video, signal);
+  for (const preview of document.querySelectorAll("[data-video-embed]"))
+    if (preview instanceof HTMLAnchorElement) enhanceVideoFacade(preview, signal);
 }
+
+export { createPlayback, endsAt, followProvider };

@@ -333,6 +333,46 @@ async fn search_control_mount_and_delayed_facets() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "requires ChromeDriver"]
+async fn search_intent_keeps_incomplete_queries_light_and_hides_obsolete_results() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fixture = Fixture::with_pwa(false)?;
+    let client = browser_client().await?;
+    let result = async {
+        // A shared incomplete qualifier arrives atomically. Typing it character by character
+        // first creates valid full-text queries, which are allowed to initialize the index.
+        client.goto(&format!("{}?q=source%3A", fixture.base)).await?;
+        wait_booted_with(&client, "!!document.querySelector('#q')").await?;
+        client.find(Locator::Css("#q")).await?.click().await?;
+        wait_for(&client, "document.querySelector('#q').value === 'source:' && document.querySelectorAll('.search-completion').length > 0 && document.querySelector('#search-status').hidden").await?;
+        let incomplete = client.execute(r#"
+          const error=document.querySelector('.search-error');
+          return {runtimeRequested:performance.getEntriesByType('resource').some(entry=>/\/pagefind\.(js|wasm)/.test(entry.name)),
+            error:error.hidden ? null : error.textContent,
+            feedHidden:document.querySelector('[data-static-feed]').hidden};
+        "#, vec![]).await?;
+        anyhow::ensure!(incomplete == json!({"runtimeRequested":false,"error":null,"feedHidden":true}), "an incomplete facet needs only the catalogue and has no validation error: {incomplete}");
+        client.execute("const input=document.querySelector('#q');input.value='Article';input.dispatchEvent(new Event('input',{bubbles:true}))", vec![]).await?;
+        wait_for(&client, "document.querySelectorAll('.search-results .row').length > 0").await?;
+        anyhow::ensure!(client.execute(r#"
+          const input=document.querySelector('#q');
+          input.value='Article source:'; input.dispatchEvent(new Event('input',{bubbles:true}));
+          return !document.querySelector('.search-results .row') && document.querySelector('[data-static-feed]').hidden;
+        "#, vec![]).await? == true, "changing the query hides obsolete selectable rows before its typing delay");
+        wait_for(&client, "document.querySelectorAll('.search-completion').length > 0").await?;
+        anyhow::ensure!(client.execute("return document.querySelector('.search-error').hidden", vec![]).await? == true, "completing a clause remains an incomplete query, not an error");
+        client.execute(r#"
+          history.replaceState(history.state,'',location.pathname);
+          dispatchEvent(new PopStateEvent('popstate'));
+        "#, vec![]).await?;
+        wait_for(&client, "document.querySelector('#q').value === '' && !document.querySelector('[data-static-feed]').hidden").await?;
+        Ok(())
+    }.await;
+    report_failure(&client, "search-intent", &result).await;
+    finish(client, result).await
+}
+
+#[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
 async fn search_focus_keeps_the_reading_position() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -396,6 +436,11 @@ async fn rich_search_across_the_query_language() -> Result<()> {
             "items/example/2026/09/2026-09-01-story-{index:02}.md"
         ));
         let body = std::fs::read_to_string(&path)?;
+        let body = if index == 1 {
+            body.replacen("\n---\n", "\nextra:\n  points: 0\n  num_comments: 0\n  comments_url: https://publisher.invalid/comments\n---\n", 1)
+        } else {
+            body
+        };
         std::fs::write(path, format!("{body}\n\n{text}\n"))?;
     }
     git(&archive, &["add", "items"])?;
@@ -538,6 +583,7 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
     wait_for(client,"getComputedStyle(document.querySelector('#search-query-help')).display==='none' && document.querySelector('#q').getAttribute('aria-expanded')==='false'").await?;
 
     search_query(client, "\"cobalt marmalade\"", 1).await?;
+    anyhow::ensure!(client.execute("const metadata=document.querySelector('.search-results .meta');return metadata.textContent.includes('0 points') && metadata.textContent.includes('0 comments') && [...metadata.querySelectorAll('a')].some(link=>link.href==='https://publisher.invalid/comments')", vec![]).await? == true, "search metadata preserves explicit zero counts and the archived comments link");
     anyhow::ensure!(
         client
             .execute(

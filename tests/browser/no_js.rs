@@ -31,7 +31,13 @@ async fn no_javascript_contracts(client: &Client, fixture: &Fixture) -> Result<(
     .await?;
     client.goto(&fixture.base).await?;
     anyhow::ensure!(
-        client.execute("return typeof window.Swup", vec![]).await? == "undefined",
+        client
+            .execute(
+                "return document.documentElement.dataset.aggrReady || null",
+                vec![]
+            )
+            .await?
+            == serde_json::Value::Null,
         "Page scripts must remain blocked"
     );
     assert_eq!(

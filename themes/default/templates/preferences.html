@@ -30,6 +30,7 @@
       </div>
       {% endif %}
       {% endfor %}
+      {% if group.id == 'offline' %}<p id="offline-download-status" class="muted" role="status" aria-live="polite">Checking offline availability…</p>{% endif %}
       {% if group.id == 'keyboard' %}
       <p class="setting"><button class="text-button" type="button" id="show-shortcuts" command="show-modal" commandfor="shortcut-help" aria-haspopup="dialog">Show keyboard shortcuts</button></p>
       {% endif %}

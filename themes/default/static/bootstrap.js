@@ -9,7 +9,10 @@
 (function () {
   "use strict";
 
-  /** @type {Record<string, {initial: any, values?: any[], min?: number, max?: number, attribute?: string}>} */
+  /** @typedef {import("../../../types/aggr").PreferenceRule} PreferenceRule */
+  /** @typedef {import("../../../types/aggr").PreferenceValue} PreferenceValue */
+
+  /** @type {Record<string, PreferenceRule>} */
   var schema = {};
   try {
     var declared = document.getElementById("aggr-preferences");
@@ -18,14 +21,18 @@
     schema = {};
   }
 
+  /** @param {string} key @param {unknown} value @returns {value is PreferenceValue} */
   function valid(key, value) {
     if (!Object.prototype.hasOwnProperty.call(schema, key)) return false;
     var rule = schema[key];
-    if (rule.values) return rule.values.indexOf(value) !== -1;
-    return Number.isInteger(value) && value >= rule.min && value <= rule.max;
+    if (rule.values) return /** @type {unknown[]} */ (rule.values).indexOf(value) !== -1;
+    return typeof value === "number" && Number.isInteger(value) && value >= rule.min && value <= rule.max;
   }
 
-  /** Storage holds strings; restore the type the rule declares before validating. */
+  /**
+   * Storage holds strings; restore the type the rule declares before validating.
+   * @param {string} key @param {string | null} value
+   */
   function storedValue(key, value) {
     if (typeof schema[key].initial === "boolean")
       return value === "true" ? true : value === "false" ? false : null;
@@ -35,6 +42,7 @@
   }
 
   function read() {
+    /** @type {Record<string, PreferenceValue>} */
     var state = {};
     Object.keys(schema).forEach(function (key) {
       var value = null;
@@ -49,28 +57,35 @@
     return state;
   }
 
-  /** Imports must be a `{version: 1, preferences: {…}}` envelope of known, valid settings. */
+  /**
+   * Imports must be a `{version: 1, preferences: {…}}` envelope of known, valid settings.
+   * @param {unknown} payload
+   */
   function validate(payload) {
     if (!payload || typeof payload !== "object" || Array.isArray(payload))
       throw new Error("Invalid preferences");
+    var envelope = /** @type {Record<string, unknown>} */ (payload);
     if (
-      payload.version !== 1 ||
-      Object.keys(payload).some(function (key) {
+      envelope.version !== 1 ||
+      Object.keys(envelope).some(function (key) {
         return key !== "version" && key !== "preferences";
       })
     )
       throw new Error("Unsupported preferences version");
-    var source = payload.preferences;
+    var source = envelope.preferences;
     if (!source || typeof source !== "object" || Array.isArray(source) || !Object.keys(source).length)
       throw new Error("Empty preferences");
+    var preferences = /** @type {Record<string, unknown>} */ (source);
+    /** @type {Record<string, PreferenceValue>} */
     var state = {};
-    Object.keys(source).forEach(function (key) {
-      if (!valid(key, source[key])) throw new Error("Invalid preference: " + key);
-      state[key] = source[key];
+    Object.keys(preferences).forEach(function (key) {
+      if (!valid(key, preferences[key])) throw new Error("Invalid preference: " + key);
+      state[key] = preferences[key];
     });
     return state;
   }
 
+  /** @param {Record<string, PreferenceValue>} values */
   function apply(values) {
     Object.keys(schema).forEach(function (key) {
       var attribute = schema[key].attribute;
@@ -91,12 +106,15 @@
 
   /* ---------------------------------------------------------------- dates */
 
+  /** @type {Map<string, Intl.DateTimeFormat>} */
   var formatters = new Map();
+  /** @param {string} name @param {Intl.DateTimeFormatOptions} options */
   function formatter(name, options) {
     if (!formatters.has(name)) formatters.set(name, new Intl.DateTimeFormat(undefined, options));
-    return formatters.get(name);
+    return /** @type {Intl.DateTimeFormat} */ (formatters.get(name));
   }
 
+  /** @param {number} timestamp @param {PreferenceValue} format */
   function text(timestamp, format) {
     if (!Number.isFinite(timestamp) || Number.isNaN(new Date(timestamp).getTime())) return null;
     if (format === "iso") return new Date(timestamp).toISOString().slice(0, 10);
@@ -118,14 +136,16 @@
 
   window.AGGRDates = { text: text };
 
+  /** @param {Element} time */
   function format(time) {
     if (!time.textContent) return;
     var value = text(Date.parse(time.getAttribute("datetime") || ""), values["date-format"]);
     if (value && time.textContent !== value) time.textContent = value;
   }
 
+  /** @param {Node} node @param {Set<Element>} times @param {boolean} descendants */
   function collect(node, times, descendants) {
-    var element = node.nodeType === 1 ? node : node.parentElement;
+    var element = node.nodeType === 1 ? /** @type {Element} */ (node) : node.parentElement;
     if (!element) return;
     var time = element.closest("time[datetime]");
     if (time) times.add(time);
@@ -135,7 +155,9 @@
       });
   }
 
+  /** @param {MutationRecord[]} records */
   function changed(records) {
+    /** @type {Set<Element>} */
     var times = new Set();
     records.forEach(function (record) {
       collect(record.target, times, false);

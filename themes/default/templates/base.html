@@ -69,13 +69,20 @@
 {% if site.pwa %}
 <link rel="manifest" href="{{ 'manifest.webmanifest' | url_for }}">
 {% endif %}
-<script id="aggr-page" type="application/json">{"base": {{ page.root | json }}, "kind": {{ page.kind | json }}, "pwa": {{ site.pwa | json }}, "discussions": {{ site.discussions | json }}, "entries": {{ site.entry_shortcuts | json }}, "assets": {"search": {{ ('assets/search.js' | url_for) | json }}, "media": {{ ('assets/media.js' | url_for) | json }}}, "content": {{ build.content_version | json }}}</script>
+<script id="aggr-page" type="application/json">{"base": {{ page.root | json }}, "kind": {{ page.kind | json }}, "pwa": {{ site.pwa | json }}, "discussions": {{ site.discussions | json }}, "entries": {{ site.entry_shortcuts | json }}, "assets": {"search": {{ ('assets/search.js' | url_for) | json }}, "media": {{ ('assets/media.js' | url_for) | json }}, "reader": {{ ('assets/reader.js' | url_for) | json }}}, "content": {{ build.content_version | json }}, "app": {{ build.app_version | json }}}</script>
 <script>window.AGGR = JSON.parse(document.getElementById("aggr-page").textContent);</script>
 {% if schema %}<script type="application/ld+json">{{ schema | json }}</script>{% endif %}
 {% block head %}{% endblock %}
 </head>
 <body data-kind="{{ page.kind }}">
 <a class="skip-link" href="#content">skip to content</a>
+<div id="reader-announcement" class="sr-only" role="status" aria-live="polite"></div>
+<div id="pull-refresh" class="pull-refresh" role="status" hidden></div>
+<div id="connection-status" class="connection-status" role="status" aria-live="polite" hidden>
+  <span id="connection-status-message"></span>
+  <button id="connection-retry" type="button" hidden>Retry</button>
+  <button id="pwa-refresh" type="button" title="Refresh and keep your place" hidden>↻ Refresh to update</button>
+</div>
 <header class="top" data-nosnippet>
   <nav class="nav" data-site-navigation aria-label="Site navigation">
     <a class="brand" data-route="" rel="home" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/favicon-32.png' | url_for }}" alt="" width="20" height="20"><span class="brand-title">{{ site.title | lower }}</span></a>

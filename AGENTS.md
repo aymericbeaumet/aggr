@@ -26,8 +26,9 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   during the fetch and stored. A build that would need the network drops the feature instead.
 - The CLI and static generator are Rust; the reader is hand-written HTML, CSS and JavaScript with
   no build step and no dependencies. Site generation stays entirely Rust: never execute
-  JavaScript/SSR or invoke a frontend compiler from the CLI or Cargo build. Never reintroduce a
-  frontend toolchain, a framework, or a vendored browser library. Async Rust
+  JavaScript/SSR or invoke a frontend compiler from the CLI or Cargo build. The pinned
+  development-only TypeScript checker emits nothing; never add a bundler, a runtime
+  framework, or a vendored browser library. Async Rust
   work uses tokio (`JoinSet` + `Semaphore`); git is shelled out. Every CPU-bound stage is sized from
   the machine's parallelism, never a fixed slot count, and stages that run at the same time share it
   rather than each claiming the whole machine. Normal HTTP uses rustls with
@@ -62,7 +63,7 @@ src/main.rs, cli.rs                       entry + clap types; AGGR_CONFIG and AG
 src/commands/mod.rs                       Project = config + sources + repo; the .aggr/ lock and worktree
 src/commands/sync.rs                      fetch, commit with trailers, push, move refs/aggr/last-good
 src/commands/build.rs                     sync then render, or render a pinned --data-ref
-src/commands/dev.rs                       isolated cache, in-memory snapshot, watch and live reload
+src/commands/dev.rs                       isolated cache, lazy snapshots, watch and live reload
 src/commands/fetch.rs                     shared fetch stage: per-source workers, heavy content, persistence
 src/commands/fetch/index.rs               one archive pass: stored URLs, paths, reconciliation indexes
 src/commands/fetch/links.rs               cross-source URL reservations for overlapping feeds
@@ -108,8 +109,8 @@ src/site/pagefind.rs                      the search index and its cache key
 src/site/parallel.rs                      ordered map over at most 8 scoped workers; AGGR_BUILD_WORKERS
 src/site/{related,display,document,interactive,item_type,native_media,video}.rs  navigation and presentation contexts
 themes/default/                           embedded theme: templates/ plus static/ with the hand-written client
-themes/default/static/{app,search,media,bootstrap}.js  the whole client: core, lazy search, lazy media, pre-paint
-types/aggr.d.ts, jsconfig.json            editor-only type checking for the client; nothing to install
+themes/default/static/{app,reader,search,media,bootstrap}.js  navigation, reader, search, media, pre-paint
+types/aggr.d.ts, jsconfig.json            strict client types; pinned mise compiler via make typecheck
 tests/cli.rs                              end-to-end: bare origin + clone + httpmock + the real binary
 tests/clean.rs, local_sources.rs          cleanup and local-file source scenarios
 tests/support/                            shared integration helpers: git and environment isolation
@@ -122,7 +123,8 @@ docs/*.md                                 the user-facing reference the readme l
 ## Commands
 
 ```sh
-make check                                   # fmt, clippy and the full test suite
+make check                                   # fmt, TypeScript, client tests, clippy and Rust tests
+make typecheck-watch                         # continuously check browser code during dev
 cargo test --test cli                        # end-to-end only
 make run ARGS="dev --port 3000"              # dogfood examples/aggr.toml
 cargo run -- sync --dry-run -vv              # fetch without writing, with debug logs
@@ -158,7 +160,9 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   Preserve aggr's identity and configured headers when changing HTTP transports; see
   [interoperability](docs/interoperability.md) for native build requirements.
 - `sync` persists to git; `build` runs that same sync first; `dev` runs it against a namespaced
-  OS cache and serves an atomic in-memory snapshot without committing or pushing.
+  OS cache and serves atomic snapshots without committing or pushing. Ordinary dev renders requested
+  pages, media and search on demand; `dev --release` exercises the full publication build. Retain
+  snapshot ownership across blocking requests, and keep the last good generation on preparation failure.
 - Every `src/sources/*` adapter documents its accepted URL contract in
   [interoperability](docs/interoperability.md#source-adapters); `sources/mod.rs` dispatches on
   those predicates in order.
@@ -341,12 +345,15 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   selection, vertical scroll, pinch zoom, controls, horizontal scrollers, and browser edge gestures.
   Never apply `touch-action: pan-y` to an ancestor containing horizontal scrollers.
   Share keyboard/swipe article destinations; a missing neighbor returns to the main feed.
-- The client is four hand-written files edited in place: `bootstrap.js` (pre-paint preferences and
-  dates, the only render-blocking script), `app.js` (every page), and `search.js` and `media.js`,
-  imported on demand. Each opens with `// @ts-check`; `types/aggr.d.ts` declares the contracts they
-  share with the templates. Never add a bundler, a framework, an npm dependency, or a vendored
+- The client uses hand-written modules edited in place: `bootstrap.js` (pre-paint preferences and
+  dates, the only render-blocking script), `app.js` (navigation), `reader.js` (sharing, updates and
+  offline controls), and `search.js` and `media.js`, imported on demand. Each opens with
+  `// @ts-check`; `types/aggr.d.ts` declares the contracts they share with the templates.
+  Never add a bundler, a framework, a browser runtime dependency, or a vendored
   browser library, and never import across files by anything but a `url_for`-resolved URL from
   `window.AGGR.assets`: hashed asset names are not rewritten inside file contents.
+- `make typecheck` checks browser modules and the rendered worker. In `sw.js` JSDoc, separate
+  nested braces (`{ { ... } }`); adjacent `{{` is a MiniJinja expression even inside a comment.
 - Reach for the platform before JavaScript: scroll-driven animations, `<dialog>` with invoker
   commands, stretched links, CSS counters. Wrap anything not universally supported in `@supports`
   or a feature check that degrades to plain HTML. Generated HTML must stay usable with JavaScript
@@ -380,7 +387,7 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   and portable caption links; see
   [PDF preservation](docs/interoperability.md#pdf-preservation).
 - A shared selection addresses words, not DOM offsets, so the link survives a rebuild. Keep the
-  range in the fragment, update it live while the selection changes, and clear it when it empties.
+  range in the shared link fragment; selecting text never rewrites the address the reader arrived with.
   The toolbar answers the reader's own gesture, never a restored selection, and scrolling with a
   selection repositions it without re-deriving it: index the article once per page scope.
 - Mobile is a platform surface: a compact tab bar above the home indicator, colour rather than

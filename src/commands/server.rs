@@ -22,20 +22,25 @@ const DEV_KEY_FILE: &str = ".aggr-dev-key";
 
 type SiteFiles = BTreeMap<String, Arc<Vec<u8>>>;
 
+enum Snapshot {
+    Files(SiteFiles),
+    Lazy(Arc<crate::site::dev::Site>),
+}
+
 #[derive(Clone)]
 struct MemorySite {
-    files: Arc<RwLock<SiteFiles>>,
+    snapshot: Arc<RwLock<Snapshot>>,
 }
 
 impl MemorySite {
     fn loading() -> Self {
-        let page = b"<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>aggr dev</title><style>body{font:16px system-ui;margin:3rem;max-width:40rem}body:before{content:'';display:inline-block;width:.75rem;height:.75rem;margin-right:.6rem;border:2px solid #8ea1ff;border-top-color:transparent;border-radius:50%;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style><p>Syncing sources and building the in-memory site&hellip;</p>".to_vec();
+        let page = b"<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>aggr dev</title><style>body{font:16px system-ui;margin:3rem;max-width:40rem}body:before{content:'';display:inline-block;width:.75rem;height:.75rem;margin-right:.6rem;border:2px solid #8ea1ff;border-top-color:transparent;border-radius:50%;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style><p>Preparing the archive; pages render on request&hellip;</p>".to_vec();
         let page = Arc::new(page);
         Self {
-            files: Arc::new(RwLock::new(BTreeMap::from([
+            snapshot: Arc::new(RwLock::new(Snapshot::Files(BTreeMap::from([
                 ("index.html".to_string(), page.clone()),
                 ("404.html".to_string(), page),
-            ]))),
+            ])))),
         }
     }
 
@@ -48,7 +53,7 @@ impl MemorySite {
         }
         match read_site(root, None) {
             Ok(files) => Some(Self {
-                files: Arc::new(RwLock::new(files)),
+                snapshot: Arc::new(RwLock::new(Snapshot::Files(files))),
             }),
             Err(err) => {
                 log::warn!("ignoring unusable dev snapshot {}: {err:#}", root.display());
@@ -65,12 +70,15 @@ impl MemorySite {
         let files = read_site(staging, None)?;
         remove_build(staging)?;
         Ok(Self {
-            files: Arc::new(RwLock::new(files)),
+            snapshot: Arc::new(RwLock::new(Snapshot::Files(files))),
         })
     }
 
     async fn replace_from(&self, staging: &Path, cached: &Path) -> Result<()> {
-        let retained = self.files.read().await.clone();
+        let retained = match &*self.snapshot.read().await {
+            Snapshot::Files(files) => files.clone(),
+            Snapshot::Lazy(_) => BTreeMap::new(),
+        };
         let staging = staging.to_owned();
         let cached = cached.to_owned();
         let files = tokio::task::spawn_blocking(move || -> Result<_> {
@@ -107,28 +115,56 @@ impl MemorySite {
         })
         .await
         .context("loading and promoting the dev snapshot")??;
-        *self.files.write().await = files;
+        *self.snapshot.write().await = Snapshot::Files(files);
         Ok(())
     }
 
-    async fn response(&self, base: &str, path: &str) -> Option<(String, Arc<Vec<u8>>)> {
-        let key = resolve_key(base, path)?;
-        self.files
-            .read()
+    async fn lazy_root(&self) -> Option<PathBuf> {
+        match &*self.snapshot.read().await {
+            Snapshot::Lazy(site) => Some(site.root().to_owned()),
+            Snapshot::Files(_) => None,
+        }
+    }
+
+    async fn replace_lazy(&self, site: crate::site::dev::Site) {
+        *self.snapshot.write().await = Snapshot::Lazy(Arc::new(site));
+    }
+
+    async fn body(&self, key: &str) -> Result<Option<Arc<Vec<u8>>>> {
+        let site = match &*self.snapshot.read().await {
+            Snapshot::Files(files) => return Ok(files.get(key).cloned()),
+            Snapshot::Lazy(site) => Arc::clone(site),
+        };
+        let key = key.to_owned();
+        // The snapshot owns its scratch directory until the last in-flight request ends.
+        tokio::task::spawn_blocking(move || site.response(&key).map(|body| body.map(Arc::new)))
             .await
-            .get(&key)
-            .cloned()
-            .map(|body| (key, body))
+            .context("rendering dev response")?
+    }
+
+    async fn resolve_response(
+        &self,
+        base: &str,
+        path: &str,
+    ) -> Result<Option<(String, Arc<Vec<u8>>)>> {
+        let Some(key) = resolve_key(base, path) else {
+            return Ok(None);
+        };
+        Ok(self.body(&key).await?.map(|body| (key, body)))
+    }
+
+    #[cfg(test)]
+    async fn response(&self, base: &str, path: &str) -> Option<(String, Arc<Vec<u8>>)> {
+        self.resolve_response(base, path).await.unwrap()
     }
 
     async fn not_found(&self) -> (String, Arc<Vec<u8>>) {
         let key = "404.html".to_string();
         let body = self
-            .files
-            .read()
+            .body(&key)
             .await
-            .get(&key)
-            .cloned()
+            .ok()
+            .flatten()
             .unwrap_or_else(|| Arc::new(b"not found".to_vec()));
         (key, body)
     }
@@ -142,6 +178,7 @@ struct DevState {
     staging: PathBuf,
     site: MemorySite,
     reload: broadcast::Sender<()>,
+    preparation: Arc<crate::site::dev::PreparationCache>,
 }
 
 struct DevWatcher {
@@ -285,7 +322,7 @@ pub async fn run_with_reload(
         "syncing {} source(s) in the background…",
         project.sources.len()
     );
-    let site = match MemorySite::cached(&cached) {
+    let site = match args.release.then(|| MemorySite::cached(&cached)).flatten() {
         Some(site) => {
             println!("restored the previous dev build from cache");
             site
@@ -301,6 +338,7 @@ pub async fn run_with_reload(
         staging,
         site,
         reload,
+        preparation: Arc::default(),
     };
     // Register filesystem watches before the first network sync/build. Editors can otherwise save
     // a config or theme while startup is busy and leave the served snapshot stale until the next
@@ -430,8 +468,13 @@ async fn render_snapshot(
     let build_args = build_args.clone();
     let data = state.data.clone();
     let cache = state.cache.clone();
-    let cached = state.cached.clone();
+    let cached = if build_args.release {
+        state.cached.clone()
+    } else {
+        state.site.lazy_root().await.unwrap_or_default()
+    };
     let staging = state.staging.clone();
+    let preparation = Arc::clone(&state.preparation);
     let (rendered, finished) = oneshot::channel();
     // A dedicated thread keeps template rendering from blocking the signal future. Unlike
     // `spawn_blocking`, it also cannot make Tokio wait for a long render while shutting down;
@@ -450,21 +493,32 @@ async fn render_snapshot(
                 discussions,
                 now,
                 visible_change,
+                &preparation,
             );
             let _ = rendered.send(result);
         })
         .context("starting dev render worker")?;
-    let rebuilt = finished
+    let rendered = finished
         .await
         .context("dev render worker stopped before finishing")??;
-    if rebuilt {
-        state
-            .site
-            .replace_from(&state.staging, &state.cached)
-            .await?;
-        let _ = state.reload.send(());
+    match rendered {
+        RenderedSnapshot::Current => return Ok(false),
+        RenderedSnapshot::Release => {
+            state
+                .site
+                .replace_from(&state.staging, &state.cached)
+                .await?;
+        }
+        RenderedSnapshot::Lazy(site) => state.site.replace_lazy(*site).await,
     }
-    Ok(rebuilt)
+    let _ = state.reload.send(());
+    Ok(true)
+}
+
+enum RenderedSnapshot {
+    Current,
+    Release,
+    Lazy(Box<crate::site::dev::Site>),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -479,7 +533,8 @@ fn render_refresh(
     discussions: crate::discussions::ResolutionSet,
     now: chrono::DateTime<Utc>,
     visible_change: bool,
-) -> Result<bool> {
+    preparation: &crate::site::dev::PreparationCache,
+) -> Result<RenderedSnapshot> {
     let store = crate::store::Store::open(data);
     let generation = crate::site::render_generation(&store.items()?, &project.config.site, now);
     let discussions_fingerprint = discussions.fingerprint();
@@ -497,7 +552,45 @@ fn render_refresh(
     })?;
     if !rebuild_required(visible_change, cached, &fingerprint) {
         println!("dev build already current");
-        return Ok(false);
+        return Ok(RenderedSnapshot::Current);
+    }
+    if !build_args.release {
+        let scratch = staging
+            .parent()
+            .context("dev staging directory has no parent")?;
+        std::fs::create_dir_all(scratch).context("creating dev snapshot staging directory")?;
+        let directory = tempfile::Builder::new()
+            .prefix("snapshot-")
+            .tempdir_in(scratch)
+            .context("creating isolated dev snapshot")?;
+        let out = directory.path().join("site");
+        let info = crate::site::BuildInfo {
+            out: out.clone(),
+            base_url,
+            config_sha,
+            config_path: project.config_repo_path(),
+            data_sha: None,
+            generation,
+            now,
+            release: false,
+            discussions,
+            development: true,
+            render_cache_key: None,
+            pagefind_cache: Some(cache.to_owned()),
+        };
+        let site = crate::site::dev::Site::prepare(
+            &project.config,
+            &project.sources,
+            store.with_image_cache(cache),
+            &project.root,
+            info,
+            preparation,
+        )?
+        .own_directory(directory);
+        crate::cache::write(&out.join(DEV_KEY_FILE), fingerprint.as_bytes())
+            .context("writing the dev snapshot fingerprint")?;
+        println!("prepared dev snapshot; pages and media render on request");
+        return Ok(RenderedSnapshot::Lazy(Box::new(site)));
     }
     // The staging directory is disposable. A template error may leave a partial tree without the
     // safety marker used for user-selected output directories, so always reset it before retrying.
@@ -505,11 +598,11 @@ fn render_refresh(
     build::run_ephemeral(project, build_args, data, staging, cache, discussions)?;
     crate::cache::write(&staging.join(DEV_KEY_FILE), fingerprint.as_bytes())
         .context("writing the dev build fingerprint")?;
-    Ok(true)
+    Ok(RenderedSnapshot::Release)
 }
 
 fn rebuild_required(visible_change: bool, site: &Path, fingerprint: &str) -> bool {
-    visible_change || !dev_key_matches(site, fingerprint)
+    visible_change || site.as_os_str().is_empty() || !dev_key_matches(site, fingerprint)
 }
 
 fn dev_key_matches(site: &Path, fingerprint: &str) -> bool {
@@ -690,6 +783,9 @@ impl WatchPaths {
             state.cached.with_extension("previous"),
             state.staging.clone(),
         ];
+        if let Some(scratch) = state.staging.parent() {
+            excluded.push(scratch.to_owned());
+        }
         excluded.sort();
         excluded.dedup();
 
@@ -835,11 +931,19 @@ async fn handle(
         }
         return Ok(());
     }
-    let (status, file, mut body) = match site.response(base, path).await {
-        Some((file, body)) => ("200 OK", file, body),
-        None => {
+    let (status, file, mut body) = match site.resolve_response(base, path).await {
+        Ok(Some((file, body))) => ("200 OK", file, body),
+        Ok(None) => {
             let (file, body) = site.not_found().await;
             ("404 Not Found", file, body)
+        }
+        Err(error) => {
+            log::error!("could not render dev route {path}: {error:#}");
+            (
+                "500 Internal Server Error",
+                "error.txt".to_string(),
+                Arc::new(b"Could not render this page. See the development server log.".to_vec()),
+            )
         }
     };
     let file = Path::new(&file);
@@ -1253,6 +1357,7 @@ mod tests {
             staging: tmp.path().join("staging"),
             site: MemorySite::loading(),
             reload,
+            preparation: Arc::default(),
         };
         let store = Store::open(&state.data);
         store.bootstrap().unwrap();
@@ -1282,11 +1387,33 @@ mod tests {
                 .await
                 .unwrap()
         );
+        let root = state.site.lazy_root().await.unwrap();
+        let retained_snapshot = match &*state.site.snapshot.read().await {
+            Snapshot::Lazy(site) => Arc::clone(site),
+            Snapshot::Files(_) => panic!("ordinary dev must be lazy"),
+        };
+        assert!(
+            !root.join("index.html").exists(),
+            "preparation does not render the feed"
+        );
+        assert!(
+            !root.join("items").exists(),
+            "unrequested articles stay unrendered"
+        );
+        assert!(
+            !root.join("pagefind").exists(),
+            "search is initialized on demand"
+        );
         let page = state.site.response("/", "/").await.unwrap().1;
         assert!(
             std::str::from_utf8(&page)
                 .unwrap()
                 .contains("Retained article")
+        );
+        assert!(root.join("index.html").is_file());
+        assert!(
+            !root.join("items").exists(),
+            "the feed does not render article pages"
         );
         assert!(
             !crate::cache::Namespace::Discussions
@@ -1298,6 +1425,10 @@ mod tests {
             !refresh(project, &fetch, &build, &state, false)
                 .await
                 .unwrap()
+        );
+        assert_eq!(
+            state.site.lazy_root().await.as_deref(),
+            Some(root.as_path())
         );
         feed.assert_calls_async(0).await;
 
@@ -1347,6 +1478,21 @@ mod tests {
             reloads.try_recv().is_err(),
             "unchanged discussions must not rebuild or reload again"
         );
+        assert_ne!(
+            state.site.lazy_root().await.as_deref(),
+            Some(root.as_path())
+        );
+        assert!(root.exists(), "an in-flight snapshot keeps its directory");
+        assert!(
+            std::str::from_utf8(&retained_snapshot.response("index.html").unwrap().unwrap())
+                .unwrap()
+                .contains("Retained article")
+        );
+        drop(retained_snapshot);
+        assert!(
+            !root.exists(),
+            "superseded snapshots release their scratch directory"
+        );
         let enriched: crate::discussions::ResolutionSet =
             serde_json::from_value(serde_json::json!({
                 "hackernews:https://example.test/fresh": {
@@ -1380,9 +1526,14 @@ mod tests {
                 .contains("https://news.ycombinator.com/item?id=42")
         );
         assert!(
-            !render_with_discussion_refresh(project, &build, &state, enriched, false, async {
-                anyhow::bail!("provider unavailable")
-            })
+            !render_with_discussion_refresh(
+                project.clone(),
+                &build,
+                &state,
+                enriched,
+                false,
+                async { anyhow::bail!("provider unavailable") }
+            )
             .await
             .unwrap()
         );
@@ -1390,6 +1541,61 @@ mod tests {
             reloads.try_recv().is_err(),
             "provider failure keeps the current readable snapshot"
         );
+        let removed = store
+            .items()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.front.link == "https://example.test/fresh")
+            .unwrap();
+        store.remove_item(&removed.path).unwrap();
+        assert!(
+            refresh(project, &fetch, &build, &state, false)
+                .await
+                .unwrap()
+        );
+        assert!(
+            state
+                .site
+                .response("/", &format!("/items/blog/{stem}/"))
+                .await
+                .is_none(),
+            "a route absent from the next snapshot must not serve its old generated file"
+        );
+
+        let last_good = state.site.lazy_root().await.unwrap();
+        let theme = tmp.path().join("themes/custom/templates");
+        std::fs::create_dir_all(&theme).unwrap();
+        std::fs::write(theme.join("index.html"), "{% invalid syntax %}").unwrap();
+        let config = std::fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("pwa = false", "pwa = false\ntheme = \"themes/custom\"");
+        std::fs::write(&config_path, config).unwrap();
+        let project = Arc::new(Project::load_offline(&config_path).await.unwrap());
+        assert!(
+            refresh(project.clone(), &fetch, &build, &state, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            state.site.lazy_root().await.as_deref(),
+            Some(last_good.as_path())
+        );
+        assert!(
+            std::str::from_utf8(&state.site.response("/", "/").await.unwrap().1)
+                .unwrap()
+                .contains("Retained article")
+        );
+        std::fs::remove_file(theme.join("index.html")).unwrap();
+        assert!(
+            refresh(project, &fetch, &build, &state, false)
+                .await
+                .unwrap()
+        );
+        assert_ne!(
+            state.site.lazy_root().await.as_deref(),
+            Some(last_good.as_path())
+        );
+        feed.assert_calls_async(0).await;
     }
 
     #[test]

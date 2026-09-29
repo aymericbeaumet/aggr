@@ -1,0 +1,3 @@
+[tools]
+node = "26.0.0"
+"npm:typescript" = "7.0.2"

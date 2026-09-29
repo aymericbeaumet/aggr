@@ -1,13 +1,24 @@
 // @ts-check
 /**
- * Full-text search, loaded the first time someone reaches for the search field.
+ * Full-text search with a compact catalogue and a lazily initialized index.
  *
  * Pagefind builds and serves the index; everything here is the query language, the completion
  * menu and the result list on top of it. The chrome is already in the HTML: this file fills it.
  */
 
+/** @typedef {import('../../../types/search').Query} Query */
+/** @typedef {import('../../../types/search').Clause} Clause */
+/** @typedef {import('../../../types/search').Facet} Facet */
+/** @typedef {import('../../../types/search').Facets} Facets */
+/** @typedef {import('../../../types/search').Catalog} Catalog */
+/** @typedef {import('../../../types/search').Completion} Completion */
+/** @typedef {import('../../../types/search').Result} Result */
+/** @typedef {import('../../../types/search').ResultRef} ResultRef */
+/** @typedef {import('../../../types/search').Pagefind} Pagefind */
+/** @typedef {import('../../../types/search').Outcome} Outcome */
+/** @typedef {import('../../../types/search').Display} Display */
+/** @param {string} selector @param {ParentNode} [root] */
 const $ = (selector, root = document) => root.querySelector(selector);
-const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
 const FACET_FIELDS = ["source", "category", "tag", "type"];
 const DATE_FIELDS = ["date", "before", "after", "since", "until"];
@@ -22,6 +33,7 @@ const MAX_CLAUSES = 16;
 const DEBOUNCE = 60;
 
 class QueryError extends Error {
+  /** @param {string} message */
   constructor(message, start = 0, end = start) {
     super(message);
     this.start = start;
@@ -32,6 +44,7 @@ class QueryError extends Error {
 /* ------------------------------------------------------------------ query language */
 
 /** Split a query into clauses, honouring quoted phrases and backslash escapes. */
+/** @param {string} raw */
 function tokenize(raw, incomplete = false) {
   const tokens = [];
   let i = 0;
@@ -59,26 +72,31 @@ function tokenize(raw, incomplete = false) {
   return tokens;
 }
 
+/** @param {string} value */
 const quoteValue = (value) =>
   /[\s"\\]/u.test(value) ? '"' + value.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"' : value;
 
 const DAY = 86400000;
+/** @param {number} timestamp */
 const day = (timestamp) => new Date(timestamp).toISOString().slice(0, 10);
 
+/** @param {string} value */
 function checkedDay(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value)) || day(Date.parse(value)) !== value)
     throw new QueryError("Use a valid UTC date, such as 2026-09-08.");
   return value;
 }
+/** @param {string} value @param {number} days */
 const shifted = (value, days) => day(Date.parse(value) + days * DAY);
 
 /** Resolve a date qualifier to an inclusive range of UTC publication days. */
+/** @param {string} value @param {string} operator @param {number} now @returns {{from?: string, through?: string}} */
 function dateRange(value, operator, now) {
   const today = day(now);
   if (operator === "date") {
     if (value === "today") return { from: today, through: today };
     if (value === "yesterday") return { from: shifted(today, -1), through: shifted(today, -1) };
-    const shortcut = { week: 7, last7d: 7, month: 30, last30d: 30, year: 365 }[value];
+    const shortcut = /** @type {Record<string, number>} */ ({ week: 7, last7d: 7, month: 30, last30d: 30, year: 365 })[value];
     if (shortcut) return { from: shifted(today, 1 - shortcut), through: today };
     const range = value.split("..");
     if (range.length === 2) {
@@ -92,7 +110,7 @@ function dateRange(value, operator, now) {
     if (comparison)
       return dateRange(
         comparison[2],
-        { ">=": "since", "<=": "until", ">": "after", "<": "before", "=": "date" }[comparison[1]],
+        /** @type {Record<string, string>} */ ({ ">=": "since", "<=": "until", ">": "after", "<": "before", "=": "date" })[comparison[1]],
         now,
       );
   }
@@ -104,6 +122,7 @@ function dateRange(value, operator, now) {
   return { from: exact, through: exact };
 }
 
+/** @param {string} raw @returns {Query} */
 function parseQuery(raw, now = Date.now()) {
   if (raw.length > MAX_CHARS)
     throw new QueryError("Search is limited to 4,096 characters.", MAX_CHARS, raw.length);
@@ -111,11 +130,12 @@ function parseQuery(raw, now = Date.now()) {
   if (tokens.length > MAX_CLAUSES)
     throw new QueryError("Use at most 16 search clauses.", tokens[MAX_CLAUSES].start, raw.length);
   let sort = "relevance";
-  const clauses = tokens.map((token) => {
+  const clauses = tokens.map(/** @returns {Clause} */ (token) => {
     const exclude = token.value.startsWith("-") && !token.raw.startsWith('"');
     const value = exclude ? token.value.slice(1) : token.value;
     if (!value.trim())
       throw new QueryError("Add a word or phrase to search for.", token.start, token.end);
+    /** @type {Clause} */
     const clause = { ...token, value, exclude, kind: "text" };
     // A pasted URL is full text, not a qualifier, however many colons it holds.
     const operator =
@@ -143,12 +163,14 @@ function parseQuery(raw, now = Date.now()) {
   return { raw, clauses, sort };
 }
 
+/** @param {{from?: string, through?: string, exclude?: boolean}} clause @param {string} date */
 function dateMatches(clause, date) {
   const matches = (!clause.from || date >= clause.from) && (!clause.through || date <= clause.through);
   return clause.exclude ? !matches : matches;
 }
 
 /** Replace relative date shortcuts with absolute dates, so a shared link stays stable. */
+/** @param {string} query */
 function canonicalQuery(query, now = Date.now()) {
   let canonical = query;
   for (const clause of parseQuery(query, now).clauses.reverse()) {
@@ -166,37 +188,47 @@ function canonicalQuery(query, now = Date.now()) {
   return canonical;
 }
 
+/** @param {string} base @param {string} query */
 function queryURL(base, query, page = 1, now = Date.now()) {
   const url = new URL(base);
   if (query.trim()) url.searchParams.set("q", canonicalQuery(query, now));
+  else url.searchParams.delete("q");
   if (page > 1) url.searchParams.set("search-page", String(page));
+  else url.searchParams.delete("search-page");
   return url.href;
 }
 
+/** @param {string} base @param {string} field @param {string} value */
 const facetURL = (base, field, value) =>
   queryURL(base, field + ':"' + value.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"');
 
 /** The collection page a facet already has, matching `facet_page` in the templates. */
+/** @param {string} base @param {string} field @param {string} value */
 const facetPage = (base, field, value) =>
   new URL((field === "source" ? "sources/" : field === "category" ? "categories/" : "tags/") + value + "/", base)
     .href;
 
 /* ------------------------------------------------------------------ facets */
 
+/** @param {string} value */
 const normalized = (value) => value.normalize("NFKC").toLocaleLowerCase();
 
 /**
  * Facet values by identifier and by readable label. A label shared by two values resolves to
  * nothing rather than silently picking one.
  */
+/** @param {Facet[]} values @param {string} kind */
 function facetIndex(values, kind) {
+  /** @type {Map<string, Facet>} */
   const identifiers = new Map();
+  /** @type {Map<string, Facet | null>} */
   const labels = new Map();
   for (const facet of values) {
     if (!identifiers.has(facet.value)) identifiers.set(facet.value, facet);
     const label = normalized(facet.label);
     labels.set(label, labels.has(label) ? null : facet);
   }
+  /** @param {Facet} facet */
   const alias = (facet) => {
     // A source is named by its hostname everywhere it is published, including in a query: that
     // name is already the readable one, and a display name would not survive being shared.
@@ -217,17 +249,20 @@ function facetIndex(values, kind) {
   return {
     entries,
     alias,
-    lookup: (value) => identifiers.get(value) ?? labels.get(normalized(value)),
+    lookup: (/** @type {string} */ value) => identifiers.get(value) ?? labels.get(normalized(value)),
   };
 }
 
+/** @type {WeakMap<Facet[], ReturnType<typeof facetIndex>>} */
 const indexCache = new WeakMap();
+/** @param {Facet[]} values @param {string} kind */
 function cachedIndex(values, kind) {
   let index = indexCache.get(values);
   if (!index) indexCache.set(values, (index = facetIndex(values, kind)));
   return index;
 }
 
+/** @param {string} value @param {Facet[]} values @param {string} kind */
 function resolveFacet(value, values, kind) {
   const facet = cachedIndex(values, kind).lookup(value);
   if (facet === undefined)
@@ -238,6 +273,7 @@ function resolveFacet(value, values, kind) {
 }
 
 /** Swap internal identifiers in a shared query for their readable labels. */
+/** @param {string} raw @param {Facets} facets */
 function readableQuery(raw, facets) {
   let result = raw;
   try {
@@ -264,6 +300,7 @@ function readableQuery(raw, facets) {
 /* ------------------------------------------------------------------ completion */
 
 /** The token under the cursor, which is the only part completion may replace. */
+/** @param {string} query @param {number} cursor */
 function completionToken(query, cursor) {
   const token = tokenize(query, true).find((entry) => entry.start <= cursor && cursor <= entry.end);
   const start = token?.start ?? cursor;
@@ -273,6 +310,7 @@ function completionToken(query, cursor) {
   return { token, start, end, excluded, value: excluded ? decoded.slice(1) : decoded };
 }
 
+/** @param {string} raw @param {number} now */
 const validToken = (raw, now) => {
   try {
     parseQuery(raw, now);
@@ -282,6 +320,7 @@ const validToken = (raw, now) => {
   }
 };
 
+/** @param {string} kind @param {Facet} facet @param {string | undefined} alias @param {string} excluded */
 const facetInsertion = (kind, facet, alias, excluded) =>
   excluded +
   kind +
@@ -294,7 +333,8 @@ const facetInsertion = (kind, facet, alias, excluded) =>
  * Suggestions for the token under the cursor: qualifier names, facet values with their counts, and
  * date shortcuts. Articles are never suggested; they belong in the result list.
  */
-function complete(query, cursor, facets, now = Date.now(), catalogue = facets) {
+/** @param {string} query @param {number} cursor @param {Facets | undefined} facets @param {number} [now] @param {Facets | undefined} [catalogue] @param {boolean} [scoped] @returns {Completion[]} */
+function complete(query, cursor, facets, now = Date.now(), catalogue = facets, scoped = false) {
   const { token, start, end, excluded, value } = completionToken(query, cursor);
   const finished = token && cursor === token.end && validToken(token.raw, now);
 
@@ -331,14 +371,13 @@ function complete(query, cursor, facets, now = Date.now(), catalogue = facets) {
     if (finished && !argument.endsWith("..")) return [];
     const relative =
       kind === "date"
-        ? DATE_SHORTCUTS.filter((value) => value.startsWith(argument)).map((value) => ({
-            id: "date:" + value,
-            label: value,
-            detail: "UTC publication date",
-            insert: canonicalQuery(excluded + "date:" + value, now),
-            start,
-            end,
-          }))
+        ? DATE_SHORTCUTS.filter(value => value.startsWith(argument)).map(value => {
+            const range = { ...dateRange(value, "date", now), exclude: Boolean(excluded) };
+            const count = (facets?.["published-day"] || []).filter(day => dateMatches(range, day.value)).reduce((total, day) => total + day.count, 0);
+            return { id: "date:" + value, label: value, detail: "UTC publication date",
+              insert: canonicalQuery(excluded + "date:" + value, now), start, end,
+              ...(scoped ? { count } : {}) };
+          }).filter(option => !scoped || option.count)
         : [];
     const range = argument.lastIndexOf("..");
     const boundary =
@@ -351,12 +390,17 @@ function complete(query, cursor, facets, now = Date.now(), catalogue = facets) {
         id: kind + ":" + boundary + entry.value,
         label: boundary + entry.value,
         detail: "UTC publication date",
-        count: entry.count,
+        count: scoped
+          ? (facets?.["published-day"] || []).filter(day => {
+              try { return dateMatches({ ...dateRange(boundary + entry.value, kind, now), exclude: Boolean(excluded) }, day.value); }
+              catch { return false; }
+            }).reduce((total, day) => total + day.count, 0)
+          : entry.count,
         insert: excluded + kind + ":" + boundary + entry.value,
         start,
         end,
       }))
-      .filter((entry) => validToken(entry.insert, now));
+      .filter((entry) => validToken(entry.insert, now) && (!scoped || entry.count > 0));
     return [...relative, ...days];
   }
 
@@ -387,6 +431,7 @@ function complete(query, cursor, facets, now = Date.now(), catalogue = facets) {
 }
 
 /** Replace only the token under the cursor, leaving the rest of the query alone. */
+/** @param {string} query @param {Completion} completion */
 function acceptCompletion(query, completion) {
   const tail = query.slice(completion.end);
   const space = completion.insert.endsWith(":") || /^\s/.test(tail) ? "" : " ";
@@ -402,6 +447,7 @@ function acceptCompletion(query, completion) {
  * Display metadata travels hex-encoded in a zero-weight Pagefind field, so provider names and
  * JSON keys can never become search terms.
  */
+/** @param {Result} result @returns {Display} */
 function decodeDisplay(result) {
   try {
     const hex = result.meta?.aggr_display || "";
@@ -414,13 +460,16 @@ function decodeDisplay(result) {
   }
 }
 
+/** @type {WeakMap<Result, Display>} */
 const displays = new WeakMap();
+/** @param {Result} result @returns {Display} */
 function displayData(result) {
   let display = displays.get(result);
   if (!display) displays.set(result, (display = decodeDisplay(result)));
   return display;
 }
 
+/** @param {string | undefined} value @param {string} base */
 function safeURL(value, base) {
   try {
     const url = new URL(value || "", base);
@@ -431,6 +480,7 @@ function safeURL(value, base) {
 }
 
 /** Only a validated inline PNG may become a placeholder background. */
+/** @param {string | undefined} value */
 const placeholderBackground = (value) =>
   value && value.length <= 8192 && /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(value)
     ? 'url("' + value + '")'
@@ -438,6 +488,7 @@ const placeholderBackground = (value) =>
 
 /* ------------------------------------------------------------------ result markup */
 
+/** @template {keyof HTMLElementTagNameMap} T @param {T} tag @param {Record<string, unknown>} [attributes] @param {(Node | null | undefined)[]} [children] @returns {HTMLElementTagNameMap[T]} */
 const element = (tag, attributes = {}, children = []) => {
   const node = document.createElement(tag);
   for (const [name, value] of Object.entries(attributes)) {
@@ -449,9 +500,11 @@ const element = (tag, attributes = {}, children = []) => {
   return node;
 };
 
+/** @param {Node[]} children */
 const field = (children) => element("span", { class: "meta-field" }, children);
 
 /** The same fields, in the same order, as `_metadata.html`. */
+/** @param {Display} display @param {string} base @param {string} original @param {import("../../../types/search").Dates} dates */
 function renderMetadata(display, base, original, dates) {
   const fields = [];
   if (display.source_display) {
@@ -571,6 +624,14 @@ function renderMetadata(display, base, original, dates) {
         }),
       ]),
     );
+  if (display.points !== undefined)
+    fields.push(field([element("span", { text: display.points + " points" })]));
+  if (display.comments)
+    fields.push(field([element("a", {
+      href: safeURL(display.comments.url, base), title: display.comments.url,
+      target: "_blank", rel: "noopener noreferrer",
+      text: (display.comments.count !== undefined ? display.comments.count + " " : "") + "comments",
+    })]));
   return element("div", { class: "meta" }, fields);
 }
 
@@ -579,6 +640,7 @@ function renderMetadata(display, base, original, dates) {
  * excerpt that highlights nothing (a query of filters alone, or one that matched the metadata)
  * says less than the article's own summary, which the feed row shows too.
  */
+/** @param {Result} result */
 function renderExcerpt(result) {
   const container = element("div", { class: "search-excerpt" });
   const html = result.excerpt;
@@ -599,6 +661,7 @@ function renderExcerpt(result) {
 }
 
 /** One result row, matching the structure of `_item.html`. */
+/** @param {Result} result @param {{base: string, dates: import("../../../types/search").Dates, cachedPreviews?: Set<string>}} context */
 function renderRow(result, context) {
   const display = displayData(result);
   const page = safeURL(result.url, context.base);
@@ -622,14 +685,16 @@ function renderRow(result, context) {
 
   const content = element("div", { class: "row-content" }, [copy]);
   const preview = display.preview;
-  if (preview) {
+  if (window.AGGROffline?.saved.some(saved => safeURL(saved.url, context.base) === page))
+    copy.appendChild(element("div", { class: "search-saved-status", "data-saved-offline": "true", text: "Saved offline" }));
+  if (preview && (navigator.onLine || context.cachedPreviews?.has(safeURL(preview.url, context.base)))) {
     const media = element("span", {
       class: "preview-media",
       "data-preview-bound": "true",
     });
     const background = placeholderBackground(preview.placeholder?.data_url);
     if (background) media.style.setProperty("--image-preview", background);
-    if (/^#[0-9a-f]{6}$/i.test(preview.color || "")) media.style.setProperty("--preview-color", preview.color);
+    if (preview.color && /^#[0-9a-f]{6}$/i.test(preview.color)) media.style.setProperty("--preview-color", preview.color);
     media.appendChild(
       element("img", {
         class: "preview-image",
@@ -653,11 +718,13 @@ function renderRow(result, context) {
 /* ------------------------------------------------------------------ engine */
 
 /** Turn the parsed query's facet and date clauses into Pagefind's filter shape. */
+/** @param {Query} query @param {Catalog} catalogue @returns {Record<string, {any?: string[], none?: string[]}>} */
 function buildFilters(query, catalogue) {
+  /** @type {Record<string, {any?: string[], none?: string[]}>} */
   const filters = {};
   for (const field of FACET_FIELDS) {
     const clauses = query.clauses.filter((clause) => clause.kind === "facet" && clause.field === field);
-    const resolve = (value) => resolveFacet(value, catalogue.facets[field] || [], field).value;
+    const resolve = (/** @type {string} */ value) => resolveFacet(value, catalogue.facets[field] || [], field).value;
     const any = [...new Set(clauses.filter((clause) => !clause.exclude).map((clause) => resolve(clause.value)))];
     const none = [...new Set(clauses.filter((clause) => clause.exclude).map((clause) => resolve(clause.value)))];
     if (any.length || none.length)
@@ -681,93 +748,79 @@ function buildFilters(query, catalogue) {
 const INDEX_REQUESTS = 6;
 
 /** Run tasks with at most `size` in flight, in the order they were asked for. */
+/** @param {number} size */
 function limiter(size) {
   let active = 0;
-  /** @type {{task: () => Promise<any>, resolve: (value: any) => void, reject: (error: any) => void}[]} */
+  /** @type {(() => void)[]} */
   const waiting = [];
   const next = () => {
     while (active < size && waiting.length) {
-      const { task, resolve, reject } = /** @type {(typeof waiting)[number]} */ (waiting.shift());
-      active++;
-      Promise.resolve()
-        .then(task)
-        .then(resolve, reject)
-        .finally(() => {
-          active--;
-          next();
-        });
+      const task = waiting.shift();
+      if (task) { active++; task(); }
     }
   };
   /** @template T @param {() => Promise<T>} task @returns {Promise<T>} */
-  return (task) =>
-    new Promise((resolve, reject) => {
-      waiting.push({ task, resolve, reject });
-      next();
+  return task => new Promise((resolve, reject) => {
+    waiting.push(() => {
+      Promise.resolve().then(task).then(resolve, reject).finally(() => { active--; next(); });
     });
+    next();
+  });
 }
 
-function createEngine(base) {
-  /** @type {Promise<any> | undefined} */
-  let catalogue;
-  /** @type {Promise<any> | undefined} */
+/** One immutable catalogue and its lazily initialized runtime. Retired runtimes finish their leases. */
+/** @param {string} base @param {Catalog} manifest @param {(url: string) => Promise<import("../../../types/search").PagefindModule>} importAPI @param {AbortSignal} lifetime */
+function createIndex(base, manifest, importAPI, lifetime) {
+  /** @type {Promise<Pagefind> | undefined} */
   let api;
+  /** @type {Map<string, Promise<import('../../../types/search').Matches>>} */
   const searches = new Map();
+  /** @type {Map<ResultRef, Promise<Result>>} */
   const hydrated = new Map();
+  /** @type {Map<string, Promise<void>>} */
   const loading = new Map();
-  /** Which documents carry each facet value; the same for every query, so kept apart from them. */
+  /** @type {Map<string, Promise<Set<string>>>} */
   const memberships = new Map();
-  // Every search and fragment load passes through here, so separate callers cannot add up to more.
   const limit = limiter(INDEX_REQUESTS);
+  let leases = 0;
+  let retired = false;
+  let destroyed = false;
 
-  /** The catalogue is fetched fresh so a cached page never points at a retired index. */
-  function loadCatalogue() {
-    catalogue ??= fetch(new URL("search-catalog.json", base).href, { cache: "no-store" })
-      .then((response) => {
-        if (!response.ok) throw new Error("search catalogue unavailable");
-        return response.json();
-      })
-      .catch((error) => {
-        catalogue = undefined;
-        throw error;
-      });
-    return catalogue;
+  function release() {
+    if (!retired || leases || destroyed) return;
+    destroyed = true;
+    void api?.then(client => client.destroy()).catch(() => {});
+    searches.clear(); hydrated.clear(); memberships.clear();
   }
 
   async function instance() {
-    const manifest = await loadCatalogue();
     api ??= (async () => {
       const bundle = new URL(manifest.base, base);
-      if (bundle.origin !== new URL(base).origin) throw new Error("search index is off-origin");
-      const module = await import(new URL("pagefind.js", bundle).href);
-      const instance = module.createInstance({
-        basePath: bundle.pathname,
-        baseUrl: new URL(base).pathname,
-        excerptLength: 28,
-        ranking: {
-          termFrequency: 0.65,
-          termSimilarity: 1,
-          pageLength: 0.35,
-          termSaturation: 0.8,
-          // Display data carries weight zero so it cannot influence ranking.
-          metaWeights: { title: 12, source: 2, date: 0, aggr_display: 0 },
-        },
+      const module = await importAPI(new URL("pagefind.js", bundle).href);
+      lifetime.throwIfAborted();
+      const client = module.createInstance({
+        basePath: bundle.pathname, baseUrl: new URL(base).pathname, excerptLength: 28,
+        ranking: { termFrequency: 0.65, termSimilarity: 1, pageLength: 0.35,
+          termSaturation: 0.8, metaWeights: { title: 12, source: 2, date: 0, aggr_display: 0 } },
       });
-      // An instance cannot answer anything until it has loaded its entry table.
-      try {
-        await instance.init();
-      } catch (error) {
-        await instance.destroy?.().catch(() => {});
-        throw error;
-      }
-      return instance;
-    })().catch((error) => {
-      api = undefined;
-      throw error;
-    });
-    return { manifest, api: await api };
+      try { await client.init(); }
+      catch (error) { await client.destroy().catch(() => {}); throw error; }
+      return client;
+    })().catch(error => { api = undefined; throw error; });
+    return api;
+  }
+
+  /** @template T @param {(client: Pagefind) => Promise<T>} task @param {AbortSignal} [signal] */
+  async function use(task, signal) {
+    signal?.throwIfAborted();
+    if (retired) throw new Error("Search index is retired.");
+    leases++;
+    try { const client = await instance(); signal?.throwIfAborted(); lifetime.throwIfAborted(); return await task(client); }
+    finally { leases--; release(); }
   }
 
   /** Repeat searches within a session are common; keep a bounded cache of their ID sets. */
+  /** @param {Pagefind} client @param {string | null} term @param {Record<string, unknown>} options */
   function search(client, term, options) {
     const key = JSON.stringify([term, options]);
     let pending = searches.get(key);
@@ -777,7 +830,7 @@ function createEngine(base) {
         throw error;
       });
       searches.set(key, pending);
-      if (searches.size > 32) searches.delete(searches.keys().next().value);
+      if (searches.size > 32) searches.delete(searches.keys().next().value || "");
     }
     return pending;
   }
@@ -786,6 +839,7 @@ function createEngine(base) {
    * Pagefind reuses one mutable fragment per document, so copy an immutable snapshot before
    * another query can hydrate the same document. Unrelated documents still load in parallel.
    */
+  /** @param {Pagefind} client @param {ResultRef} result */
   function hydrate(client, result) {
     let data = hydrated.get(result);
     if (data) return data;
@@ -810,7 +864,7 @@ function createEngine(base) {
       if (loading.get(result.id) === settled) loading.delete(result.id);
     });
     hydrated.set(result, data);
-    if (hydrated.size > 256) hydrated.delete(hydrated.keys().next().value);
+    if (hydrated.size > 256) hydrated.delete(/** @type {ResultRef} */ (hydrated.keys().next().value));
     return data;
   }
 
@@ -818,6 +872,7 @@ function createEngine(base) {
    * Every phrase intersection and exclusion is applied to complete result-ID sets, so counts and
    * paging can never depend on a first-page sample.
    */
+  /** @param {Pagefind} client @param {Query} query @param {Catalog} manifest */
   async function matching(client, query, manifest) {
     const terms = query.clauses.filter((clause) => clause.kind === "text" && !clause.exclude);
     const plain = terms.filter((clause) => !clause.quoted).map((clause) => clause.value).join(" ");
@@ -830,9 +885,11 @@ function createEngine(base) {
 
     // A filter-only query has no relevance to sort by, so it falls back to newest.
     const sort = query.sort === "relevance" && !terms.length ? "newest" : query.sort;
+    /** @type {Record<string, unknown>} */
     const options = { filters: buildFilters(query, manifest) };
     if (sort !== "relevance") options.sort = { date: sort === "oldest" ? "asc" : "desc" };
 
+    /** @type {(string | null)[]} */
     const positive = [...(plain ? [plain] : []), ...phrases];
     if (!positive.length) positive.push(null);
     const matches = await Promise.all(
@@ -857,6 +914,7 @@ function createEngine(base) {
   }
 
   /** The IDs of every document carrying one facet value, fetched once per page. */
+  /** @param {Pagefind} client @param {string} field @param {string} value */
   function membership(client, field, value) {
     const key = field + "\u0000" + value;
     let members = memberships.get(key);
@@ -872,596 +930,508 @@ function createEngine(base) {
       memberships.set(key, members);
       // Bounded like the other caches. Evicting one costs a single search the next time it is
       // needed, and a count already under way holds its own copy.
-      if (memberships.size > 256) memberships.delete(memberships.keys().next().value);
+      if (memberships.size > 256) memberships.delete(memberships.keys().next().value || "");
     }
     return members;
   }
 
   return {
-    catalogue: loadCatalogue,
-    /** Load the catalogue, the engine and its entry table now; a query should only have to ask. */
-    warm() {
-      void instance().catch(() => {});
+    manifest,
+    retire() { retired = true; release(); },
+    /** @param {Query} query @param {AbortSignal} [signal] */
+    prepare(query, signal) {
+      buildFilters(query, manifest);
+      return use(async client => {
+        if (!query.clauses.some(clause => clause.kind === "text"))
+          await client.preload(null, { filters: buildFilters(query, manifest) });
+      }, signal);
     },
-    async run(query, requestedPage, size) {
-      const { manifest, api: client } = await instance();
-      const { results } = await matching(client, query, manifest);
-      const pages = Math.max(1, Math.ceil(results.length / size));
-      const page = Math.max(1, Math.min(pages, requestedPage));
-      return {
-        results: await Promise.all(
-          results.slice((page - 1) * size, page * size).map((result) => hydrate(client, result)),
-        ),
-        total: results.length,
-        page,
-        pages,
-        size,
-      };
+    /** @param {Query} query @param {number} requestedPage @param {number} size @param {AbortSignal} [signal] */
+    run(query, requestedPage, size, signal) {
+      return use(async client => {
+        const { results } = await matching(client, query, manifest);
+        signal?.throwIfAborted();
+        const pages = Math.max(1, Math.ceil(results.length / size));
+        const page = Math.max(1, Math.min(pages, requestedPage));
+        return {
+          results: await Promise.all(results.slice((page - 1) * size, page * size).map(result => hydrate(client, result))),
+          total: results.length, page, pages, size,
+        };
+      }, signal);
     },
-    /** Counts for one facet, scoped to every other clause still in the query. */
-    async counts(query, field) {
-      const { manifest, api: client } = await instance();
-      const matches = await matching(client, query, manifest);
-      const facets = manifest.facets[field] || [];
-      if (matches.filters?.[field])
-        return facets
-          .map((facet) => ({ ...facet, count: matches.filters[field][facet.value] || 0 }))
-          .filter((facet) => facet.count > 0);
-      const ids = new Set(matches.results.map((result) => result.id));
-      if (!ids.size) return [];
-      // A compound text query has no single count map, so each value's documents are intersected
-      // with the matches. Only values every positive term's own search counted can be among them;
-      // that prunes an archive's hundreds of sources to the handful the query touches before any
-      // membership is asked for, and the shared limit bounds what remains.
-      const bounds = matches.bounds.map((filters) => filters?.[field]).filter(Boolean);
-      const candidates = facets.filter((facet) =>
-        bounds.every((counts) => (counts[facet.value] || 0) > 0),
-      );
-      const counted = await Promise.all(
-        candidates.map(async (facet) => {
+    /** Counts for one facet after every other clause, without loading article bodies.
+     * @param {Query} query @param {string} field @param {AbortSignal} [signal] */
+    counts(query, field, signal) {
+      return use(async client => {
+        const matches = await matching(client, query, manifest);
+        signal?.throwIfAborted();
+        const facets = manifest.facets[field] || [];
+        const counts = matches.filters?.[field];
+        if (counts) return facets.map(facet => ({ ...facet, count: counts[facet.value] || 0 })).filter(facet => facet.count > 0);
+        const ids = new Set(matches.results.map(result => result.id));
+        if (!ids.size) return [];
+        const bounds = matches.bounds.flatMap(filters => filters?.[field] ? [filters[field]] : []);
+        const candidates = facets.filter(facet => bounds.every(counts => (counts[facet.value] || 0) > 0));
+        const counted = await Promise.all(candidates.map(async facet => {
+          signal?.throwIfAborted();
           const members = await membership(client, field, facet.value);
           const [small, large] = members.size < ids.size ? [members, ids] : [ids, members];
           let count = 0;
           for (const id of small) if (large.has(id)) count++;
           return { ...facet, count };
-        }),
-      );
-      return counted.filter((facet) => facet.count > 0);
+        }));
+        return counted.filter(facet => facet.count > 0);
+      }, signal);
     },
   };
 }
 
+/** A shared session keeps catalogue and runtime versions coherent across page navigation. */
+/** @param {string} base @param {(url: string) => Promise<import("../../../types/search").PagefindModule>} [importAPI] */
+function createSession(base, importAPI = url => import(url)) {
+  /** @type {Map<string, ReturnType<typeof createIndex>>} */
+  const versions = new Map();
+  /** @type {ReturnType<typeof createIndex> | undefined} */
+  let current;
+  /** @type {Promise<ReturnType<typeof createIndex>> | undefined} */
+  let pending;
+  let generation = 0;
+  let online = navigator.onLine;
+  let stale = false;
+  const lifetime = new AbortController();
+
+  /** @param {boolean} [refresh] @returns {Promise<ReturnType<typeof createIndex>>} */
+  function load(refresh = false) {
+    lifetime.signal.throwIfAborted();
+    if (pending) return pending;
+    if (current && !refresh && !stale) return Promise.resolve(current);
+    const token = generation;
+    pending = Promise.resolve().then(async () => {
+      try {
+        const offline = window.AGGROffline?.search;
+        if (!online && (!offline?.activeVersion || !offline.base))
+          throw new Error("A complete offline search index is not saved.");
+        const catalogueBase = online ? base : new URL(offline?.base || "", base).href;
+        const response = await fetch(new URL("search-catalog.json", catalogueBase).href, { cache: "no-store", signal: lifetime.signal });
+        if (!response.ok) throw new Error("Search catalogue unavailable.");
+        const manifest = /** @type {Catalog} */ (await response.json());
+        lifetime.signal.throwIfAborted();
+        if (token !== generation) return load();
+        const bundle = new URL(manifest.base, base), site = new URL(base);
+        if (bundle.origin !== site.origin || !bundle.pathname.startsWith(site.pathname) ||
+            typeof manifest.version !== "string" || !manifest.facets || (!online && manifest.version !== offline?.activeVersion))
+          throw new Error("Invalid search catalogue.");
+        const key = JSON.stringify([manifest.version, bundle.href]);
+        current = versions.get(key) || createIndex(base, manifest, importAPI, lifetime.signal);
+        versions.delete(key); versions.set(key, current); stale = false;
+        if (versions.size > 2) {
+          const oldest = versions.keys().next().value;
+          if (oldest !== undefined) { versions.get(oldest)?.retire(); versions.delete(oldest); }
+        }
+        return current;
+      } catch (error) {
+        if (token === generation && current && !lifetime.signal.aborted) return current;
+        throw error;
+      } finally { if (token === generation) pending = undefined; }
+    });
+    return pending;
+  }
+  return {
+    load,
+    stale() { generation++; pending = undefined; stale = true; },
+    network() {
+      if (online === navigator.onLine) return false;
+      online = navigator.onLine; generation++; pending = undefined; current = undefined; stale = true;
+      return true;
+    },
+    dispose() {
+      lifetime.abort(); generation++; pending = undefined; current = undefined;
+      for (const index of versions.values()) index.retire();
+      versions.clear();
+    },
+  };
+}
+
+/** @type {Map<string, ReturnType<typeof createSession>>} */
+const sessions = new Map();
+/** @param {string} base */
+function sessionFor(base) {
+  let session = sessions.get(base);
+  if (!session) { session = createSession(base); sessions.set(base, session); }
+  else session.stale();
+  session.network();
+  return session;
+}
+window.addEventListener("pagehide", event => {
+  if (event.persisted) return;
+  for (const session of sessions.values()) session.dispose();
+  sessions.clear();
+});
+
 /* ------------------------------------------------------------------ controller */
 
+/** @param {import("../../../types/search").MountOptions} options @returns {import("../../../types/search").SearchHandle | undefined} */
 export function mount(options) {
-  const base = options.base;
-  const dates = options.dates;
-  const preferences = options.preferences;
+  const { base, dates, preferences } = options;
   const root = $("[data-search-root]");
-  const input = /** @type {HTMLInputElement | null} */ ($("#q"));
+  const inputNode = $("#q");
   const form = $("#search-form");
-  const results = $("[data-search-results]");
-  if (!root || !input || !form || !results) return;
-
-  const staticFeed = $("[data-static-feed]");
-  const listbox = $("#search-completions");
-  const clear = $(".search-clear");
-  const status = $("#search-status");
-  const list = $("#list");
-  const empty = $("#empty");
-  const pager = $(".search-pager");
-  const error = $(".search-error", root);
-
-  const engine = createEngine(base);
-  // The index is what a search waits for, so start it with the page rather than with the query.
-  engine.warm();
-  const scope = root.dataset.scopeKind
-    ? root.dataset.scopeKind + ":" + root.dataset.scopeValue
-    : "";
-
-  let generation = 0;
+  const resultsNode = $("[data-search-results]");
+  if (!(root instanceof HTMLElement) || !(inputNode instanceof HTMLInputElement) || !form || !resultsNode) return;
+  const input = inputNode;
+  const results = resultsNode;
+  const staticFeed = /** @type {HTMLElement | null} */ ($("[data-static-feed]"));
+  const listbox = /** @type {HTMLElement | null} */ ($("#search-completions"));
+  const clear = /** @type {HTMLElement | null} */ ($(".search-clear"));
+  const status = /** @type {HTMLElement | null} */ ($("#search-status"));
+  const list = /** @type {HTMLElement | null} */ ($("#list"));
+  const empty = /** @type {HTMLElement | null} */ ($("#empty"));
+  const pager = /** @type {HTMLElement | null} */ ($(".search-pager"));
+  const error = /** @type {HTMLElement | null} */ ($(".search-error", root));
+  const scopeKind = root.dataset.scopeKind;
+  const scopeValue = root.dataset.scopeValue;
+  const scope = scopeKind && scopeValue ? scopeKind + ":" + quoteValue(scopeValue) : "";
+  const engine = sessionFor(base);
+  const bindings = new AbortController();
+  const signal = bindings.signal;
+  /** @type {Catalog | undefined} */
+  let catalogue;
+  /** @type {Completion[]} */
   let suggestions = [];
   let highlighted = 0;
-  let menuOpen = false;
+  let moved = false;
+  /** @type {'idle' | 'open' | 'dismissed'} */
+  let menu = "idle";
   let composing = false;
-  let debounce;
+  let edited = false;
+  let ready = false;
+  /** @type {Outcome | undefined} */
+  let lastOutcome;
+  /** @type {Set<string>} */
+  const cachedPreviews = new Set();
+  let offlineVersion = window.AGGROffline?.search?.activeVersion;
+  let generation = 0;
+  let catalogueGeneration = 0;
   let page = 1;
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let debounce;
+  /** @type {AbortController | undefined} */
+  let queryWork;
+  /** @type {AbortController | undefined} */
+  let contextWork;
+  /** @type {{key: string, field: string, values: Facet[]} | undefined} */
+  let context;
 
   const pageSize = () => Number(preferences?.values["feed-page-size"]) || 50;
   const active = () => input.value.trim() !== "" && input.value.trim() !== scope;
-
-  function showError(message) {
-    if (!error) return;
-    error.textContent = message || "";
-    error.hidden = !message;
-  }
-
-  /** Take the menu off screen without giving up on it: it may have something to say later. */
+  /** @param {string} message */
+  function showError(message) { if (error) { error.textContent = message; error.hidden = !message; } }
   function hideMenu() {
-    if (listbox) {
-      listbox.hidden = true;
-      // Drop the options too: a hidden list still answers queries and reads to assistive
-      // technology, so a stale suggestion would outlive the keystroke that produced it.
-      listbox.replaceChildren();
-    }
-    input.setAttribute("aria-expanded", "false");
-    input.removeAttribute("aria-activedescendant");
+    if (listbox) { listbox.hidden = true; listbox.replaceChildren(); }
+    input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant");
   }
-
-  /** Dismiss the menu: Escape, leaving the field, or accepting a complete clause. */
-  function closeMenu() {
-    menuOpen = false;
-    hideMenu();
-  }
-
+  function closeMenu() { menu = "dismissed"; contextWork?.abort(); hideMenu(); }
   function renderMenu() {
-    if (!listbox) return;
-    // Nothing to show yet is not the same as nothing to show: the vocabulary a qualifier needs
-    // arrives after it is typed, and the menu has to be there when it does.
-    if (!menuOpen || !suggestions.length) return hideMenu();
-    listbox.replaceChildren(
-      ...suggestions.map((suggestion, index) => {
-        const detail =
-          suggestion.detail + (suggestion.count !== undefined ? " · " + suggestion.count : "");
-        const item = element(
-          "li",
-          {
-            class: "search-completion",
-            role: "option",
-            id: "search-completion-" + index,
-            "data-completion-id": suggestion.id,
-            "aria-selected": String(index === highlighted),
-            ...(index === highlighted ? { "data-selected": "" } : {}),
-          },
-          [
-            element("span", { class: "completion-label", text: suggestion.label }),
-            detail.trim() ? element("small", { text: detail.trim() }) : null,
-          ],
-        );
-        item.addEventListener("pointerdown", (event) => {
-          event.preventDefault();
-          choose(suggestion);
-        });
-        item.addEventListener("pointermove", () => {
-          if (highlighted === index) return;
-          highlighted = index;
-          renderMenu();
-        });
-        return item;
-      }),
-    );
+    if (!listbox || signal.aborted) return;
+    if (menu !== "open" || !suggestions.length) return hideMenu();
+    listbox.replaceChildren(...suggestions.map((suggestion, index) => {
+      const detail = suggestion.detail + (suggestion.count !== undefined ? " · " + suggestion.count : "");
+      const item = element("li", {
+        class: "search-completion", role: "option", id: "search-completion-" + index,
+        "data-completion-id": suggestion.id, "aria-selected": String(index === highlighted),
+        ...(index === highlighted ? { "data-selected": "" } : {}),
+      }, [element("span", { class: "completion-label", text: suggestion.label }),
+        detail.trim() ? element("small", { text: detail.trim() }) : null]);
+      item.addEventListener("pointerdown", event => { event.preventDefault(); choose(suggestion); });
+      item.addEventListener("pointermove", () => {
+        if (highlighted === index) return;
+        highlighted = index; moved = true; renderMenu();
+      });
+      return item;
+    }));
     listbox.hidden = false;
     input.setAttribute("aria-expanded", "true");
     input.setAttribute("aria-activedescendant", "search-completion-" + highlighted);
+    listbox.children[highlighted]?.scrollIntoView({ block: "nearest" });
   }
-
-  /** Counts for the facet being completed, scoped to the query's other clauses. */
-  let context = null;
-  let contextGeneration = 0;
-
-  /** The facet qualifier under the cursor, and the query with that token taken out. */
   function editedFacet() {
     const cursor = input.selectionStart ?? input.value.length;
     const { start, end, value } = completionToken(input.value, cursor);
-    const field = value.match(/^(source|category|tag|type):/i)?.[1]?.toLowerCase();
-    if (!field) return null;
+    const operator = value.match(/^(source|category|tag|type|date|before|after|since|until):/i)?.[1]?.toLowerCase();
+    if (!operator) return;
+    const field = DATE_FIELDS.includes(operator) ? "published-day" : operator;
     return { field, rest: (input.value.slice(0, start) + input.value.slice(end)).trim() };
   }
-
-  /**
-   * Offer only the values that would actually narrow the current search, with the number of
-   * articles each would leave. An older context must never replace a newer one.
-   */
-  async function refineContext() {
-    const edited = editedFacet();
-    // With nothing else in the query the catalogue's own counts are already the contextual ones.
-    if (!edited || !edited.rest) {
-      contextGeneration++;
-      if (context) {
-        context = null;
-        renderSuggestions();
-      }
-      return;
-    }
-    if (context && context.field === edited.field && context.rest === edited.rest) return;
-    const generation = ++contextGeneration;
-    try {
-      const values = await engine.counts(parseQuery(edited.rest || ""), edited.field);
-      if (generation !== contextGeneration) return;
-      context = { ...edited, values };
-      renderSuggestions();
-    } catch {
-      /* the whole-archive vocabulary is still a useful answer */
-    }
-  }
-
-  const menuShape = (entries) => entries.map((entry) => entry.id).join("\u0000");
-
-  function renderSuggestions() {
-    if (!listbox) return;
-    const facets =
-      context && catalogueFacets
-        ? { ...catalogueFacets, [context.field]: context.values }
-        : catalogueFacets;
-    const before = menuShape(suggestions);
-    try {
-      suggestions = complete(
-        input.value,
-        input.selectionStart ?? input.value.length,
-        facets,
-        Date.now(),
-        catalogueFacets,
-      );
-    } catch {
-      // A fragment the completer cannot read is not the same as nothing to suggest: leaving the
-      // menu as it was keeps the reader's place in it.
-      return renderMenu();
-    }
-    // Counts and context arrive after the menu is already on screen. Re-rendering the same
-    // choices must not move the one the reader has arrowed to.
-    highlighted =
-      before === menuShape(suggestions) ? Math.min(highlighted, Math.max(0, suggestions.length - 1)) : 0;
-    renderMenu();
-  }
-
   function suggest() {
-    if (!listbox) return;
-    // A facet cannot be completed without the vocabulary. Fetch it once and come back rather
-    // than leaving the reader with an empty menu for a qualifier that does have values.
-    if (!catalogueFacets) void loadFacets().then((manifest) => manifest && suggest());
-    renderSuggestions();
-    void refineContext();
-  }
-
-  function choose(suggestion) {
-    const accepted = acceptCompletion(input.value, suggestion);
-    input.value = accepted.query;
-    input.setSelectionRange(accepted.cursor, accepted.cursor);
-    // A qualifier is half an answer: taking `source:` should offer the sources it accepts rather
-    // than closing on an unfinished clause. A clause that is already complete is an answer, and
-    // the menu gets out of the way of reading it.
-    menuOpen = suggestion.insert.endsWith(":");
-    schedule(0);
-    if (menuOpen) suggest();
-    else closeMenu();
-  }
-
-  /** Keep `?q=` and `?search-page=` shareable without adding a history entry per keystroke. */
-  function syncLocation() {
-    // The address belongs to whichever page is on screen now.
-    if (options.signal?.aborted) return;
+    if (signal.aborted || composing) return;
+    let facets = catalogue?.facets;
+    let scoped = false;
     try {
-      const url = active() ? queryURL(location.href, input.value, page) : stripSearch();
-      history.replaceState(history.state, "", url);
-    } catch {
-      /* an unparseable query is not worth an address-bar update */
-    }
+      const edited = editedFacet();
+      if (catalogue && edited && edited.rest && menu === "open") {
+        const query = parseQuery(edited.rest);
+        if (query.clauses.some(clause => clause.kind !== "sort")) {
+          scoped = true;
+          const key = JSON.stringify([catalogue.version, edited.field, edited.rest]);
+          if (context?.key !== key) {
+            contextWork?.abort(); contextWork = new AbortController();
+            const request = contextWork;
+            context = { key, field: edited.field, values: [] };
+            void engine.load().then(index => index.counts(query, edited.field, request.signal)).then(values => {
+              if (signal.aborted || request.signal.aborted || context?.key !== key) return;
+              context.values = values; suggest();
+            }).catch(failure => {
+              if (!signal.aborted && !request.signal.aborted) showError(failure instanceof Error ? failure.message : "Search suggestions are unavailable.");
+            });
+          }
+          facets = { ...catalogue.facets, [edited.field]: context.values };
+        }
+      }
+      if (!scoped) { contextWork?.abort(); context = undefined; }
+      const selected = moved ? suggestions[highlighted]?.id : undefined;
+      suggestions = complete(input.value, input.selectionStart ?? input.value.length, facets, Date.now(), catalogue?.facets, scoped);
+      highlighted = selected ? Math.max(0, suggestions.findIndex(option => option.id === selected)) : 0;
+      renderMenu();
+    } catch { suggestions = []; contextWork?.abort(); context = undefined; hideMenu(); }
   }
-
+  function completing() {
+    if (!catalogue) return false;
+    const { token, value } = completionToken(input.value, input.selectionStart ?? input.value.length);
+    const match = value.match(/^(source|category|tag|type):(.*)$/i);
+    if (!token || !match) return false;
+    // Other invalid clauses must still report their own error.
+    parseQuery(input.value.slice(0, token.start) + input.value.slice(token.end));
+    const values = catalogue.facets[match[1].toLowerCase()] || [];
+    if (validToken(token.raw, Date.now()) && cachedIndex(values, match[1]).lookup(match[2])) return false;
+    const candidate = complete(input.value, input.selectionStart ?? input.value.length, catalogue.facets)[0];
+    if (!candidate) return false;
+    try { parseQuery(acceptCompletion(input.value, candidate).query); return true; }
+    catch { return false; }
+  }
+  /** @param {Completion} suggestion */
+  function choose(suggestion) {
+    if (signal.aborted || menu !== "open" || !suggestions.some(option => option.id === suggestion.id && option.insert === suggestion.insert && option.start === suggestion.start && option.end === suggestion.end)) return;
+    const accepted = acceptCompletion(input.value, suggestion);
+    input.value = accepted.query; input.setSelectionRange(accepted.cursor, accepted.cursor);
+    changed(0);
+    if (!suggestion.insert.endsWith(":")) closeMenu();
+  }
+  function syncLocation() {
+    if (signal.aborted) return;
+    try { history.replaceState(history.state, "", active() ? queryURL(location.href, input.value, page) : stripSearch()); }
+    catch { /* Incomplete queries are not shareable yet. */ }
+  }
   function stripSearch() {
-    const url = new URL(location.href);
-    url.searchParams.delete("q");
-    url.searchParams.delete("search-page");
+    const url = new URL(location.href); url.searchParams.delete("q"); url.searchParams.delete("search-page");
     return url.href;
   }
-
-  function reset() {
-    generation++;
-    page = 1;
-    document.body.removeAttribute("data-searching");
-    if (staticFeed) staticFeed.hidden = false;
-    if (list) {
-      list.hidden = true;
-      list.replaceChildren();
-    }
-    if (status) status.hidden = true;
+  function hideResults() {
+    ready = false;
+    if (list) { list.hidden = true; list.replaceChildren(); }
     if (empty) empty.hidden = true;
     if (pager) pager.hidden = true;
-    showError("");
-    syncLocation();
-    // The feed coming back needs its cursor as much as the results leaving did.
-    options.selection?.restore();
   }
-
-  let catalogueFacets;
-  function loadFacets() {
-    return engine
-      .catalogue()
-      .then((manifest) => {
-        catalogueFacets = manifest.facets;
-        // A query shared with raw identifiers reads better once the vocabulary is known, but
-        // never overwrite something the reader has since typed.
-        if (!edited && active()) {
-          const readable = readableQuery(input.value, catalogueFacets);
-          if (readable !== input.value) input.value = readable;
-        }
-        return manifest;
-      })
-      .catch(() => undefined);
-  }
-
-  async function run() {
-    const token = ++generation;
-    if (!active()) return reset();
-
-    showResultsShell();
-    // Results already on screen answer the question better than a placeholder that replaces them,
-    // so only an empty list says it is working.
-    if (status && (!list || list.hidden)) {
-      status.hidden = false;
-      status.textContent = "Searching…";
-    }
-
-    /** Keep an explanation on screen without leaving results from an earlier query below it. */
-    const explain = (message) => {
-      showError(message);
-      if (list) {
-        list.hidden = true;
-        list.replaceChildren();
-      }
-      if (status) status.hidden = true;
-      if (empty) empty.hidden = true;
-      if (pager) pager.hidden = true;
-    };
-
-    let query;
-    try {
-      query = parseQuery(input.value);
-    } catch (failure) {
-      explain(failure instanceof Error ? failure.message : "This search could not be read.");
-      return;
-    }
-    showError("");
-
-    try {
-      const outcome = await engine.run(query, page, pageSize());
-      if (token !== generation) return;
-      page = outcome.page;
-      renderResults(outcome);
-      remember(outcome);
-      syncLocation();
-    } catch (failure) {
-      if (token !== generation) return;
-      // A query the reader can fix reads as advice; anything else is a fault worth reporting.
-      if (!(failure instanceof QueryError)) console.error("aggr: search", failure);
-      explain(
-        failure instanceof QueryError
-          ? failure.message
-          : "Search is unavailable right now. Try again in a moment.",
-      );
-    }
-  }
-
-  /** Hand the page over to the results: the feed behind them is not what the reader asked for. */
   function showResultsShell() {
     document.body.setAttribute("data-searching", "");
     if (staticFeed) staticFeed.hidden = true;
   }
-
-  const SNAPSHOT_KEY = "aggr:search-snapshot:" + encodeURIComponent(new URL(base).pathname);
-  const MAX_SNAPSHOT = 512 * 1024;
-
-  /**
-   * Opening a result and coming back reloads the document, and rebuilding the index to answer a
-   * question already answered leaves the reader on an empty page meanwhile. The page they left is
-   * kept verbatim and drawn straight away; the live query still runs and replaces it.
-   */
-  function remember(outcome) {
-    const saved = JSON.stringify({ query: input.value, page: outcome.page, outcome });
-    if (saved.length > MAX_SNAPSHOT) return;
+  function cancelQuery() { clearTimeout(debounce); generation++; queryWork?.abort(); }
+  function reset() {
+    cancelQuery(); contextWork?.abort(); context = undefined; page = 1; closeMenu(); hideResults();
+    document.body.removeAttribute("data-searching");
+    if (staticFeed) staticFeed.hidden = false;
+    if (status) status.hidden = true;
+    showError(""); syncLocation(); options.selection?.restore();
+  }
+  /** @param {boolean} [refresh] */
+  async function loadFacets(refresh = false) {
+    const token = ++catalogueGeneration;
+    const index = await engine.load(refresh);
+    if (signal.aborted || token !== catalogueGeneration) return;
+    catalogue = index.manifest;
+    if (!edited && active()) input.value = readableQuery(input.value, catalogue.facets);
+    suggest();
+    return index;
+  }
+  /** @param {boolean} [keepRows] @param {boolean} [refresh] */
+  async function run(keepRows = false, refresh = false) {
+    if (signal.aborted || composing) return;
+    cancelQuery(); const token = generation; queryWork = new AbortController(); const work = queryWork;
+    if (!active()) return reset();
+    showResultsShell(); if (!keepRows) hideResults(); showError("");
+    if (status && !ready) { status.hidden = false; status.textContent = "Searching…"; }
+    const focused = results.contains(document.activeElement) && document.activeElement instanceof HTMLAnchorElement ? document.activeElement.href : "";
     try {
-      sessionStorage.setItem(SNAPSHOT_KEY, saved);
-    } catch {
-      /* private mode, or no room: the query simply runs as before */
+      const index = await loadFacets(refresh);
+      if (!index || signal.aborted || token !== generation) return;
+      if (completing()) { if (status) status.hidden = true; return; }
+      const query = parseQuery(input.value);
+      if (scopeKind && scopeValue && !query.clauses.some(clause => clause.kind === "facet" && clause.field === scopeKind && !clause.exclude && resolveFacet(clause.value, index.manifest.facets[scopeKind] || [], scopeKind).value === scopeValue)) {
+        (options.navigate || (href => location.assign(href)))(queryURL(base, input.value, page)); return;
+      }
+      const outcome = await index.run(query, page, pageSize(), work.signal);
+      if (signal.aborted || token !== generation) return;
+      page = outcome.page; syncLocation(); await verifyPreviews(outcome);
+      if (signal.aborted || token !== generation) return;
+      renderResults(outcome); remember(outcome);
+      if (focused) list?.querySelectorAll('a').forEach(link => { if (link.href === focused) link.focus({ preventScroll: true }); });
+    } catch (failure) {
+      if (signal.aborted || token !== generation) return;
+      hideResults(); if (status) status.hidden = true;
+      showError(failure instanceof QueryError ? failure.message : navigator.onLine ? "Search is unavailable right now. Try again in a moment." : "Offline search is unavailable until the complete index is saved.");
     }
   }
-
+  const SNAPSHOT_KEY = "aggr:search-snapshot:" + encodeURIComponent(new URL(base).pathname);
+  /** @param {Outcome} outcome */
+  function remember(outcome) {
+    const saved = JSON.stringify({ query: input.value, page: outcome.page, outcome });
+    if (saved.length <= 512 * 1024) try { sessionStorage.setItem(SNAPSHOT_KEY, saved); } catch { /* Storage is optional. */ }
+  }
   function restore() {
     try {
       const saved = JSON.parse(sessionStorage.getItem(SNAPSHOT_KEY) || "null");
-      if (!saved || saved.query !== input.value || saved.page !== page) return false;
-      showResultsShell();
-      renderResults(saved.outcome);
-      return true;
-    } catch {
-      return false;
-    }
+      if (!saved || saved.query !== input.value || saved.page !== page || !Array.isArray(saved.outcome?.results)) return false;
+      showResultsShell(); renderResults(saved.outcome); return true;
+    } catch { return false; }
   }
-
+  /** @param {Outcome} outcome */
+  async function verifyPreviews(outcome) {
+    if (navigator.onLine || !("caches" in window)) return;
+    await Promise.all(outcome.results.map(async result => {
+      const preview = displayData(result).preview;
+      if (!preview) return;
+      const url = safeURL(preview.url, base);
+      try {
+        const response = await caches.match(url);
+        if (response?.ok && response.headers.get("content-type")?.startsWith("image/")) cachedPreviews.add(url);
+      } catch { /* Keep unavailable previews absent while offline. */ }
+    }));
+  }
+  /** @param {Outcome} outcome */
   function renderResults(outcome) {
-    if (!list) return;
-    const context = { base, dates };
-    list.replaceChildren(...outcome.results.map((result) => renderRow(result, context)));
-    // The copy moves right by the widest rank's extra digits (see `.row-content::before`), and
-    // never by less than the feed's, so titles hold still as a search replaces the feed.
+    if (!list || signal.aborted) return;
+    lastOutcome = outcome;
+    list.replaceChildren(...outcome.results.map(result => renderRow(result, { base, dates, cachedPreviews })));
     const widest = (outcome.page - 1) * outcome.size + outcome.results.length;
-    const feed = parseInt(staticFeed ? $(".rows", staticFeed)?.style.getPropertyValue("--rank-indent") || "" : "", 10) || 0;
+    const feedRows = staticFeed?.querySelector('.rows');
+    const feed = parseInt(feedRows instanceof HTMLElement ? feedRows.style.getPropertyValue("--rank-indent") : "", 10) || 0;
     list.style.setProperty("--rank-indent", Math.max(feed, String(widest).length - 1) + "ch");
-    // Rank numbers continue across pages.
     list.style.setProperty("counter-reset", "rank " + (outcome.page - 1) * outcome.size);
-    list.hidden = false;
-    if (status) {
-      status.hidden = false;
-      status.textContent = outcome.total + (outcome.total === 1 ? " article" : " articles");
-    }
+    list.hidden = false; ready = true;
+    if (status) { status.hidden = false; status.textContent = outcome.total + (outcome.total === 1 ? " article" : " articles"); }
     if (empty) empty.hidden = outcome.total !== 0;
     if (pager) {
       pager.hidden = outcome.pages <= 1;
-      const previous = /** @type {HTMLAnchorElement | null} */ ($("[data-search-page-previous]", pager));
-      const next = /** @type {HTMLAnchorElement | null} */ ($("[data-search-page-next]", pager));
+      const previous = $("[data-search-page-previous]", pager), next = $("[data-search-page-next]", pager);
       const label = $("[data-search-page-status]", pager);
-      if (previous) {
-        previous.hidden = outcome.page <= 1;
-        previous.href = queryURL(location.href, input.value, outcome.page - 1);
-      }
-      if (next) {
-        next.hidden = outcome.page >= outcome.pages;
-        next.href = queryURL(location.href, input.value, outcome.page + 1);
-      }
+      if (previous instanceof HTMLAnchorElement) { previous.hidden = outcome.page <= 1; previous.href = queryURL(location.href, input.value, outcome.page - 1); }
+      if (next instanceof HTMLAnchorElement) { next.hidden = outcome.page >= outcome.pages; next.href = queryURL(location.href, input.value, outcome.page + 1); }
       if (label) label.textContent = "page " + outcome.page + " / " + outcome.pages;
     }
-    options.selection?.restore();
-    dates.render(list);
+    options.selection?.restore(); dates.render(list);
+    document.dispatchEvent(new CustomEvent("aggr:search-results", { detail: { root: list } }));
   }
-
-  function schedule(delay = DEBOUNCE) {
-    clearTimeout(debounce);
+  function changed(delay = DEBOUNCE) {
+    cancelQuery(); edited = true; page = 1; menu = "open"; moved = false;
+    if (clear) clear.hidden = !input.value;
+    if (!input.value.trim() && !composing) return reset();
+    showResultsShell(); hideResults(); showError(""); suggest();
+    if (composing) return;
+    const token = generation; queryWork = new AbortController(); const work = queryWork;
+    void loadFacets().then(index => {
+      if (!index || token !== generation || work.signal.aborted || signal.aborted || completing()) return;
+      return index.prepare(parseQuery(input.value), work.signal);
+    }).catch(() => {});
     debounce = setTimeout(() => void run(), delay);
   }
-
-  // Swapped out for another page: a query still in flight has nothing left to update.
-  options.signal?.addEventListener("abort", () => {
-    generation++;
-    contextGeneration++;
-    clearTimeout(debounce);
-  });
-
-  let edited = false;
-
-  input.addEventListener("input", () => {
-    if (composing) return;
-    edited = true;
-    page = 1;
-    if (clear) clear.hidden = !input.value;
-    menuOpen = true;
-    suggest();
-    schedule();
-  });
-  input.addEventListener("compositionstart", () => (composing = true));
-  input.addEventListener("compositionend", () => {
-    composing = false;
-    input.dispatchEvent(new Event("input"));
-  });
+  input.addEventListener("input", () => changed(), { signal });
+  input.addEventListener("compositionstart", () => { composing = true; cancelQuery(); hideResults(); }, { signal });
+  input.addEventListener("compositionend", () => { composing = false; changed(); }, { signal });
   input.addEventListener("focus", () => {
     if (clear) clear.hidden = !input.value;
-    menuOpen = true;
+    if (menu === "idle") menu = "open";
     suggest();
-  });
-  // Leaving the field closes its menu; leaving the window does not. Coming back to a tab should
-  // find the search exactly as it was left, suggestions included.
-  input.addEventListener("blur", () =>
-    setTimeout(() => {
-      if (document.activeElement !== input) closeMenu();
-    }, 120),
-  );
-  input.addEventListener("keyup", (event) => {
-    if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) suggest();
-  });
-  input.addEventListener("click", () => suggest());
-
-  input.addEventListener("keydown", (event) => {
-    if (composing || event.isComposing) {
-      event.stopPropagation();
-      return;
-    }
-    const suggesting = menuOpen && suggestions.length > 0;
+  }, { signal });
+  input.addEventListener("blur", () => setTimeout(() => {
+    if (!signal.aborted && document.activeElement !== input) { menu = "idle"; hideMenu(); }
+  }, 120), { signal });
+  input.addEventListener("keyup", event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) suggest(); }, { signal });
+  input.addEventListener("click", suggest, { signal });
+  input.addEventListener("keydown", event => {
+    if (composing || event.isComposing) { event.stopPropagation(); return; }
+    const suggesting = menu === "open" && suggestions.length > 0;
     if (event.key === "Escape") {
-      // The first Escape closes the suggestions; the next leaves the field. Neither clears it.
-      event.preventDefault();
-      event.stopPropagation();
-      if (suggesting) closeMenu();
-      else input.blur();
-      return;
+      event.preventDefault(); event.stopPropagation(); if (suggesting) closeMenu(); else input.blur(); return;
     }
-    if ((event.key === "Enter" || (event.key === "Tab" && !event.shiftKey)) && suggesting) {
-      event.preventDefault();
-      event.stopPropagation();
-      choose(suggestions[highlighted] || suggestions[0]);
-      return;
+    if ((event.key === "Enter" || event.key === "Tab" && !event.shiftKey) && suggesting) {
+      event.preventDefault(); event.stopPropagation(); choose(suggestions[highlighted] || suggestions[0]); return;
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      // Open suggestions are what the arrows are for; the results keep them the rest of the time,
-      // and either way the keyboard stays in the field.
       if (suggesting) {
-        event.preventDefault();
-        event.stopPropagation();
-        highlighted =
-          (highlighted + (event.key === "ArrowDown" ? 1 : -1) + suggestions.length) % suggestions.length;
+        event.preventDefault(); event.stopPropagation(); moved = true;
+        highlighted = (highlighted + (event.key === "ArrowDown" ? 1 : -1) + suggestions.length) % suggestions.length;
         renderMenu();
-        return;
-      }
-      if (options.selection?.move(event.key === "ArrowDown" ? 1 : -1, false)) {
-        event.preventDefault();
-        event.stopPropagation();
+      } else if (ready && options.selection?.move(event.key === "ArrowDown" ? 1 : -1, false)) {
+        event.preventDefault(); event.stopPropagation();
       }
       return;
     }
     if (event.key === "Enter") {
-      event.preventDefault();
-      event.stopPropagation();
-      closeMenu();
-      // With no suggestion to accept, Enter opens the result the cursor is on.
-      const link = options.selection?.link(options.selection.selected());
-      if (link) link.click();
-      else schedule(0);
+      event.preventDefault(); event.stopPropagation(); closeMenu();
+      const link = ready ? options.selection?.link(options.selection.selected()) : null;
+      if (link) link.click(); else void run();
     }
-  });
-
+  }, { signal });
   clear?.addEventListener("click", () => {
-    // A collection page is itself a scope. Clearing the field there asks for everything, which is
-    // the whole feed rather than this page with its own list still under an empty search.
-    if (scope) {
-      (options.navigate || ((href) => location.assign(href)))(base);
-      return;
-    }
-    input.value = "";
-    edited = true;
-    clear.hidden = true;
-    closeMenu();
-    reset();
-    input.focus({ preventScroll: true });
-  });
-
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    closeMenu();
-    schedule(0);
-  });
-
-  pager?.addEventListener("click", (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    const link = target.closest("[data-search-page-previous], [data-search-page-next]");
+    if (scope) { (options.navigate || (href => location.assign(href)))(base); return; }
+    input.value = ""; edited = true; clear.hidden = true; reset(); input.focus({ preventScroll: true });
+  }, { signal });
+  form.addEventListener("submit", event => { event.preventDefault(); closeMenu(); void run(); }, { signal });
+  pager?.addEventListener("click", event => {
+    if (!(event.target instanceof Element)) return;
+    const link = event.target.closest("[data-search-page-previous], [data-search-page-next]");
     if (!link) return;
-    event.preventDefault();
-    page += link.hasAttribute("data-search-page-next") ? 1 : -1;
-    void run();
-    results.scrollIntoView({ block: "start", behavior: "instant" });
-  });
-
-  // A shared URL or a Back navigation must restore the same results. These controls belong to
-  // the page they were mounted on, and stop listening when it is swapped out.
-  window.addEventListener(
-    "popstate",
-    () => {
-      const url = new URL(location.href);
-      input.value = url.searchParams.get("q") || input.value;
-      page = Number(url.searchParams.get("search-page")) || 1;
-      restore();
-      void run();
-    },
-    { signal: options.signal },
-  );
-
-  void loadFacets().then(() => suggest());
+    event.preventDefault(); page += link.hasAttribute("data-search-page-next") ? 1 : -1;
+    void run(); results.scrollIntoView({ block: "start", behavior: "instant" });
+  }, { signal });
+  window.addEventListener("popstate", () => {
+    const url = new URL(location.href); input.value = url.searchParams.get("q") || scope;
+    page = Number(url.searchParams.get("search-page")) || 1; closeMenu();
+    if (active()) { const restored = restore(); void run(restored); } else reset();
+  }, { signal });
+  function refresh() {
+    if (signal.aborted) return;
+    contextWork?.abort(); context = undefined; catalogueGeneration++; engine.stale();
+    if (active() && !composing) void run(ready, true);
+    else void loadFacets(true).catch(() => {});
+  }
+  function updateOfflineStatus() { if (engine.network()) refresh(); }
+  window.addEventListener("online", updateOfflineStatus, { signal });
+  window.addEventListener("offline", updateOfflineStatus, { signal });
+  document.addEventListener("aggr:offline-status", () => {
+    const version = window.AGGROffline?.search?.activeVersion;
+    if (offlineVersion !== version) { offlineVersion = version; if (!navigator.onLine) refresh(); }
+    if (lastOutcome && ready) {
+      for (const row of list?.querySelectorAll(".row") || []) {
+        row.querySelector(".search-saved-status")?.remove();
+        if (row instanceof HTMLElement && window.AGGROffline?.saved.some(saved => safeURL(saved.url, base) === row.dataset.url))
+          row.querySelector(".row-copy")?.appendChild(element("div", { class: "search-saved-status", "data-saved-offline": "true", text: "Saved offline" }));
+      }
+    }
+  }, { signal });
+  function destroy() {
+    if (signal.aborted) return;
+    cancelQuery(); contextWork?.abort(); catalogueGeneration++; bindings.abort();
+  }
+  options.signal?.addEventListener("abort", destroy, { once: true });
+  if (options.signal?.aborted) { destroy(); return; }
   const url = new URL(location.href);
-  if (url.searchParams.has("q")) {
-    input.value = url.searchParams.get("q") || "";
-    page = Number(url.searchParams.get("search-page")) || 1;
-  }
-  // After the query is restored, not before: a shared `?q=` link arrives with an empty input and
-  // would otherwise be offered no way to clear the search it just ran.
+  if (url.searchParams.has("q")) { input.value = url.searchParams.get("q") || ""; page = Number(url.searchParams.get("search-page")) || 1; }
   if (clear) clear.hidden = !input.value;
-  // This module is fetched on the first sign of interest, so the reader may already have typed
-  // by the time it arrives. A shared `?q=` link lands here too.
-  if (active()) {
-    restore();
-    void run();
-  }
-  // If they are still in the field, show them the suggestions for what they have typed rather
-  // than waiting for another keystroke.
-  if (document.activeElement === input) {
-    menuOpen = true;
-    suggest();
-  }
+  if (document.activeElement === input) menu = "open";
+  if (active()) { const restored = restore(); void run(restored); }
+  else void loadFacets().catch(() => {});
+  return { refresh, updateOfflineStatus, destroy };
 }
+
+export { parseQuery, queryURL, complete, acceptCompletion, createSession };

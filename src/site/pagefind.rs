@@ -222,7 +222,8 @@ pub fn build_cached(
     publish(out, documents)
 }
 
-fn publish(out: &Path, documents: &[SearchDocument]) -> Result<SearchCatalogue> {
+/// Facet vocabulary needs only document metadata, not a compiled full-text index.
+pub(super) fn catalogue(version: String, documents: &[SearchDocument]) -> SearchCatalogue {
     let mut facets: BTreeMap<String, BTreeMap<String, SearchFacet>> = BTreeMap::new();
     for document in documents {
         for (kind, values) in &document.filters {
@@ -249,6 +250,16 @@ fn publish(out: &Path, documents: &[SearchDocument]) -> Result<SearchCatalogue> 
         .into_iter()
         .map(|(kind, values)| (kind, values.into_values().collect()))
         .collect();
+    SearchCatalogue {
+        base: format!("pagefind/{version}/"),
+        version,
+        docs: documents.len(),
+        facets,
+    }
+}
+
+fn publish(out: &Path, documents: &[SearchDocument]) -> Result<SearchCatalogue> {
+    let facets = catalogue(String::new(), documents).facets;
     let root = out.join("pagefind");
     let mut files = Vec::new();
     for entry in walkdir::WalkDir::new(&root).sort_by_file_name() {
@@ -614,9 +625,8 @@ mod tests {
         for (key, value) in metadata.as_object().unwrap() {
             assert_eq!(&display[key], value, "shared field {key}");
         }
-        // Aggregator scores are stored provenance, not something the reader is shown.
-        assert!(display.get("points").is_none());
-        assert!(display.get("comments").is_none());
+        assert_eq!(display["points"], 0);
+        assert_eq!(display["comments"]["count"], 12);
         assert!(!document.meta["aggr_display"].contains("publisher"));
         assert!(!document.content.contains("comments?a="));
 
@@ -629,8 +639,9 @@ mod tests {
         assert!(rendered.contains("Publisher &quot;quoted&quot;"));
         assert!(rendered.contains("</a> <em>via <a class=\"source-feed\""));
         assert!(rendered.contains("title=\"The feed\">feed.example/news</a></em>"));
-        assert!(!rendered.contains("points"), "{rendered}");
-        assert!(!rendered.contains("comments"), "{rendered}");
+        assert!(rendered.contains("0 points"), "{rendered}");
+        assert!(rendered.contains("12 comments"), "{rendered}");
+        assert!(rendered.contains("comments?a=1&amp;b=2"), "{rendered}");
         assert!(rendered.contains("matching discussion found, score 12"));
         assert!(!rendered.contains(" · "));
         assert!(!rendered.contains("rust</a>"));
@@ -655,7 +666,11 @@ mod tests {
         item.updated = Some(item.date);
         let metadata = serde_json::to_value(super::super::display::Metadata::from(&item)).unwrap();
         assert!(metadata["comments"].get("count").is_none());
+        assert_eq!(metadata["comments"]["url"], "https://example.com/comments");
         assert!(metadata.get("updated").is_none());
+        item.extra.insert("num_comments".into(), 0.into());
+        let metadata = serde_json::to_value(super::super::display::Metadata::from(&item)).unwrap();
+        assert_eq!(metadata["comments"]["count"], 0);
     }
 
     #[test]

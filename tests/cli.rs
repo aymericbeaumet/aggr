@@ -145,6 +145,48 @@ fn wait_for_dev(port: u16, timeout: Duration) {
 }
 
 #[cfg(unix)]
+fn wait_for_dev_page(port: u16, path: &str, contains: &str, timeout: Duration) -> String {
+    use std::io::{Read as _, Write as _};
+    let start = Instant::now();
+    let mut last = String::new();
+    while start.elapsed() < timeout {
+        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            if write!(
+                stream,
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .is_ok()
+            {
+                last.clear();
+                if stream.read_to_string(&mut last).is_ok()
+                    && last.starts_with("HTTP/1.1 200")
+                    && last.contains(contains)
+                {
+                    return last;
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("aggr dev did not serve {path} containing {contains:?}: {last}");
+}
+
+fn worker_json(worker: &str, name: &str) -> serde_json::Value {
+    let prefix = format!("var {name} = ");
+    serde_json::from_str(
+        worker
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .unwrap()
+            .trim_end_matches(';'),
+    )
+    .unwrap()
+}
+
+#[cfg(unix)]
 fn stop_dev(mut child: std::process::Child) -> std::process::Output {
     let status = Command::new("kill")
         .args(["-INT", &child.id().to_string()])
@@ -497,11 +539,22 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
         master
     );
     assert!(page.contains(&master_asset), "{page}");
-    // Media is content-addressed and cached when the reader opens the article, not at install.
+    // Complete offline downloads include the master without adding it to installation work.
+    let worker = std::fs::read_to_string(repo.clone.join("_site/sw.js")).unwrap();
     assert!(
-        !std::fs::read_to_string(repo.clone.join("_site/sw.js"))
+        worker_json(&worker, "PRECACHE")
+            .as_array()
             .unwrap()
-            .contains(&master_asset)
+            .iter()
+            .all(|entry| entry["url"] != master_asset)
+    );
+    assert!(
+        worker_json(&worker, "OFFLINE_CATALOG")
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| entry["resources"].as_array().unwrap())
+            .any(|entry| entry["url"] == master_asset)
     );
 
     let tip = repo.origin_rev("aggr").unwrap();
@@ -760,7 +813,7 @@ fn init_writes_config_and_workflow() {
 #[test]
 fn dev_uses_an_external_persistent_cache_and_stops_on_ctrl_c() {
     let server = MockServer::start();
-    server.mock(|when, then| {
+    let mut feed = server.mock(|when, then| {
         when.method(GET).path("/feed.xml");
         then.status(200).body(FEED);
     });
@@ -784,7 +837,7 @@ fn dev_uses_an_external_persistent_cache_and_stops_on_ctrl_c() {
     drop(available);
     let first = run(port);
     wait_for_dev(port, Duration::from_secs(10));
-    wait_for_cached_site(&cache_path, Duration::from_secs(20));
+    wait_for_dev_page(port, "/", "Second", Duration::from_secs(20));
     let first = stop_dev(first);
     assert!(
         first.status.success(),
@@ -792,8 +845,14 @@ fn dev_uses_an_external_persistent_cache_and_stops_on_ctrl_c() {
         String::from_utf8_lossy(&first.stderr)
     );
 
+    feed.delete();
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(503);
+    });
     let second = run(port);
     wait_for_dev(port, Duration::from_secs(10));
+    wait_for_dev_page(port, "/", "Second", Duration::from_secs(20));
     let second = stop_dev(second);
     assert!(
         second.status.success(),
@@ -802,7 +861,7 @@ fn dev_uses_an_external_persistent_cache_and_stops_on_ctrl_c() {
     );
     assert!(
         String::from_utf8_lossy(&second.stdout)
-            .contains("restored the previous dev build from cache")
+            .contains("prepared dev snapshot; pages and media render on request")
     );
 
     assert!(!repo.clone.join(".aggr").exists());
@@ -1731,10 +1790,21 @@ fn build_renders_the_site_and_release_needs_a_url() {
     let sw = std::fs::read_to_string(site.join("sw.js")).unwrap();
     assert!(sw.contains("\"assets/style-"), "{sw}");
     assert!(sw.contains("\"assets/app-"), "{sw}");
-    // Articles are cached as the reader opens them, so none is listed at install time.
+    // Installation caches the shell; the separate download catalogue retains article families.
+    let article = "items/demo/2026-09-01-hello-there/";
     assert!(
-        !sw.contains("\"items/demo/2026-09-01-hello-there/\""),
-        "{sw}"
+        worker_json(&sw, "PRECACHE")
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["url"] != article)
+    );
+    assert!(
+        worker_json(&sw, "OFFLINE_CATALOG")
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["url"] == article)
     );
     assert!(site.join("manifest.webmanifest").exists());
     assert!(site.join("offline.html").exists());

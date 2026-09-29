@@ -1,4 +1,4 @@
-//! The service worker: registration, the precached shell, and reading offline what has been read.
+//! The service worker: registration, complete selected downloads, and visited-page fallbacks.
 
 use std::sync::atomic::Ordering;
 
@@ -185,8 +185,10 @@ async fn offline_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         .click()
         .await?;
     wait_for(client, "!!document.querySelector('.body pre')").await?;
-    // What has been read is what is kept: the worker caches the pages someone opened, and their
-    // content-addressed pictures, and never downloads an archive ahead of them.
+    // Selected downloads retain complete articles independently of evictable visited pages.
+    client.execute("window.AGGRPreferences.values['offline-items']=2;document.dispatchEvent(new Event('aggr:preferences'))", vec![]).await?;
+    wait_for(client, "window.AGGROffline?.requested === 2 && !window.AGGROffline.downloading && window.AGGROffline.saved.length === 2 && window.AGGROffline.search?.phase === 'ready'").await?;
+    let downloaded = client.execute("return new URL(window.AGGROffline.saved[1].url, new URL(window.AGGR.base, document.baseURI)).href", vec![]).await?;
     client.execute("window.scrollTo(0,300)", vec![]).await?;
     let read_article = client.current_url().await?;
     wait_for(
@@ -217,7 +219,9 @@ async fn offline_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         "the article opened before must read the same way with no network"
     );
     screenshot(client, "mobile-dark").await?;
-    // An article nobody opened was never downloaded, and says so instead of failing blankly.
+    client.goto(downloaded.as_str().unwrap()).await?;
+    wait_for(client, "!!document.querySelector('article.item')").await?;
+    // An article outside the selected download count still has the honest fallback.
     client
         .goto(&format!(
             "{}items/example/2026-09-01-story-30/",

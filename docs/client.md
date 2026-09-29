@@ -1,6 +1,6 @@
 # Client development and search
 
-Rust and MiniJinja render the complete static reader. The browser client is four hand-written
+Rust and MiniJinja render the complete static reader. The browser client is five hand-written
 files with no build step and no dependencies: editing one and reloading is the whole loop.
 Site generation never executes JavaScript or invokes a frontend compiler, so `cargo build`,
 `aggr sync`, `aggr build` and `aggr dev` need no Node. Search is a build-time Pagefind index;
@@ -11,8 +11,9 @@ there is no search service.
 | File | Loaded | What it owns |
 |---|---|---|
 | `themes/default/static/bootstrap.js` | render-blocking, every page | Applies saved preferences and rewrites dates before the first paint, so nothing flashes and no date column starts empty. The only blocking script, and deliberately small. |
-| `themes/default/static/app.js` | deferred module, every page | In-place page navigation, keyboard shortcuts and the selection cursor, feed page slicing, the preferences form, relative-date upkeep, the shortcut dialog, and the two lazy imports below. |
-| `themes/default/static/search.js` | on first search intent | The query language, the completion menu, and the result list on top of Pagefind's low-level API. |
+| `themes/default/static/app.js` | deferred module, every page | In-place page navigation, keyboard shortcuts and the selection cursor, feed page slicing, the preferences form, relative-date upkeep, the shortcut dialog, and the page modules below. |
+| `themes/default/static/search.js` | on searchable pages; index on valid query intent | The query language, the completion menu, and the result list on top of Pagefind's low-level API. |
+| `themes/default/static/reader.js` | every page | Offline downloads and status, application updates, selection sharing, and reading feedback. |
 | `themes/default/static/media.js` | on article pages with media | The podcast player, provider video facades, and playback-time readouts. |
 
 Moving between pages is instant because `app.js` swaps them in place. A link inside the archive
@@ -36,9 +37,26 @@ through a stretched link, so modifier and middle clicks behave natively. Keyboar
 `@supports` or a feature check and degrades to plain HTML.
 
 Each file opens with `// @ts-check`. `types/aggr.d.ts` declares the contracts they share with the
-templates, and `jsconfig.json` makes editors type-check them with no toolchain installed. Hashed
+templates, and `jsconfig.json` enables strict checking in editors and with the compiler. Hashed
 asset names are never rewritten inside file contents, so the lazy modules are imported through
 URLs the template resolves into `window.AGGR.assets`.
+
+Node and TypeScript are pinned in `mise.toml` for development checks:
+
+```sh
+mise install
+make typecheck
+make typecheck-watch # keep compiler diagnostics current while editing
+```
+
+The compiler checks the hand-written JavaScript without emitting files. `make check` and CI run
+the same check; none of the Rust build, generation, or development-server commands invoke it.
+Run the watch command beside `aggr dev` when editing the client.
+
+The same commands check the service-worker template with WebWorker types. The check renders its
+declared JSON placeholders into a temporary file and reports diagnostics against the original
+template lines. Object types in that template use `{ { ... } }` in JSDoc: adjacent opening braces
+would start a MiniJinja expression, even inside a JavaScript comment.
 
 A prerendered page runs before anyone has seen it, so `app.js` waits for `prerenderingchange`
 before writing session state, history or a worker registration.
@@ -55,10 +73,13 @@ export. Values live in `localStorage` under `aggr:<setting>`.
 
 ## Offline
 
-A small service worker keeps the shell installable, caches pages as the reader opens them, and
-serves `offline.html` for anything unvisited. Content-addressed assets are served from the cache;
-everything else is revalidated. Nothing is downloaded ahead of the reader, and there is no offline
-search index.
+The service worker separates automatically cached pages from selected offline downloads. The
+offline preference saves complete article pages and their retained image renditions; readiness
+requires every retained file. Partial and quota failures remain visible. Any positive download
+limit also saves the complete archive search manifest, including its versioned catalogue, runtime
+and fragments. Only a fully committed index becomes active, and a previous complete index remains
+available during an update. Online/offline transitions select the matching catalogue and runtime;
+search results mark saved articles and omit previews that are unavailable offline.
 
 ## Browser regression tests
 
@@ -94,8 +115,9 @@ date:2026-08-01..2026-08-31 -"sponsored post"
 | `date:today`, `yesterday`, `week`/`last7d`, `month`/`last30d`, `year` | Shortcuts, rewritten to absolute dates in the shared URL. |
 | `sort:relevance`, `sort:newest`, `sort:oldest` | Result order; the one clause that cannot be negated. |
 
-A known qualifier without a value is an error; an unknown qualifier and any `http(s)://` URL stay
-full text. The parser is `web/src/search/query.ts`.
+A known qualifier without a value offers completion while it is being edited; other invalid
+recognized clauses show an error. An unknown qualifier and any `http(s)://` URL stay full text.
+The parser and controller live in `themes/default/static/search.js`.
 
 Unqualified words search the indexed title and full text. Quoted phrases match together; a leading
 minus excludes a word, phrase, or facet. `category:`, `source:`, `tag:`, and `type:` accept stable
@@ -147,9 +169,9 @@ and share its one cursor: the first is selected as soon as they render, leaving 
 them to the ordinary `j`/`k`/`o` shortcuts, and clearing the query hands the cursor back to the
 feed. The static feed waits hidden behind the results, so a cursor may only ever rest on a row
 whose container is on screen.
-Opening a result and coming back reloads the document, so the last rendered page is kept in
-`sessionStorage` under the site path and drawn before the index has reloaded; the live query still
-runs and replaces it, and a placeholder only appears when there is nothing to keep.
+Opening a result and coming back restores the last rendered page from `sessionStorage`, scoped
+to the site path and exact query/page. The live query still runs; background refreshes preserve
+existing rows, while changing the query immediately hides obsolete results and cancels its work.
 Suggestions and counts honor every remaining clause after removing the edited token. While that
 context loads, unrelated archive-wide values remain hidden. Obsolete requests cannot replace a newer
 context, survive clearing/navigation, or apply to another index version.
@@ -158,6 +180,8 @@ while the manifest loads must not discard the vocabulary needed to complete that
 The vocabulary comes from `search-catalog.json`, which contains only the index version, base,
 document count, and facets. Focusing the
 field or completing an unresolved qualifier does not initialize Pagefind or fetch its index chunks.
+`make client-test` exercises the query and session contracts with Node’s built-in test runner;
+no runtime dependency or browser bundle is introduced.
 Once a valid query is entered, runtime initialization overlaps the existing typing delay. Fully
 resolved filter queries also use Pagefind's supported preload API; partial text does not speculate
 on potentially broad prefix matches. Clearing, replacing, or abandoning the query cancels pending
@@ -168,14 +192,15 @@ source, type, and published-day facets are generated in Rust. Every phrase inter
 applied to complete Pagefind result-ID sets before counting or pagination; only visible result
 fragments are loaded. Completion uses Pagefind's filtered counts for a single search and bounded
 filter-membership intersections for mixed phrases/exclusions, without loading article bodies.
-Display metadata remains opaque to Pagefind's text tokenizer.
+Display metadata remains opaque to Pagefind's text tokenizer. Archived points and comment counts
+are shared by static and search metadata, including explicit zero values; missing counts stay absent.
 
 Completion caches normalized aliases and ranking by immutable catalogue identity; detecting a
 finished facet token does not build or sort a suggestion list. A persistent search session coalesces
 catalogue requests and keeps two recently used independent Pagefind instances across navigation.
 Evicted instances remain alive only while their queries, hydration, preload, or facet requests finish;
 the last operation releases their worker resources and cached results. Application disposal cancels
-shared catalogue requests and awaits instance retirement. JavaScript module code remains subject to
+shared catalogue requests and retires instances after their active operations finish. JavaScript module code remains subject to
 the browser's import cache. Content updates and online/offline changes revalidate the catalogue;
 failed content revalidation retains the usable index, while network transitions reselect the current
 online index or the worker's committed offline index. Page disposal cancels only its own work. Result hydration is cached by

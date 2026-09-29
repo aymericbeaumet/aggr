@@ -141,6 +141,16 @@ jobs:
           save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - run: cargo build --locked
 
+  # The reader's JavaScript against its JSDoc types, in strict mode; the compiler emits nothing.
+  types:
+    name: types (tsc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - run: make typecheck
+      - run: make client-test
+
   # Licenses, RustSec advisories, duplicate versions and registry sources of the dependency tree,
   # as configured in deny.toml. The action ships cargo-deny; no toolchain or cache is needed.
   deps:

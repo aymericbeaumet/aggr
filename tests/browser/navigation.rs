@@ -356,7 +356,7 @@ async fn reader_modules_survive_every_base_path() -> Result<()> {
                     )
                     .await?;
                 anyhow::ensure!(
-                    controls["count"] == 17,
+                    controls["count"] == 18,
                     "every setting renders a control ({base_path}): {controls}"
                 );
                 anyhow::ensure!(
@@ -384,7 +384,7 @@ async fn reader_modules_survive_every_base_path() -> Result<()> {
                         && player["skips"] == json!(["30", "15", "15", "30"]),
                     "the player is titled by its episode and shows its length ({base_path}): {player}"
                 );
-                // Adjusting the volume before playing says nothing about time left.
+                // Idle recordings show remaining duration without claiming a finish time.
                 let volume = client.execute(r#"
                   const card = document.querySelector('.native-audio'), volume = card.querySelector('[data-audio-volume]');
                   volume.value = '0.5';
@@ -392,8 +392,8 @@ async fn reader_modules_survive_every_base_path() -> Result<()> {
                   return {estimate: card.querySelector('[data-audio-ends-at]').textContent, text: card.innerText};
                 "#, vec![]).await?;
                 anyhow::ensure!(
-                    volume["estimate"] == "" && !volume["text"].as_str().unwrap_or("").contains("remaining"),
-                    "an idle player shows no time remaining ({base_path}): {volume}"
+                    volume["estimate"] == "10:00 remaining" && !volume["text"].as_str().unwrap_or("").contains("Ends at"),
+                    "an idle player shows duration, not a finish time ({base_path}): {volume}"
                 );
                 // A player reached in place is enhanced like one that was loaded.
                 client.find(Locator::Css(".brand")).await?.click().await?;

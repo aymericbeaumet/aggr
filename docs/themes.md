@@ -268,30 +268,34 @@ ordinary navigation; see [client development](client.md). Search display data is
 even zero-weight metadata values; decoding it for display must not leak implementation keys into
 search matches.
 
-The service worker serves cached HTML immediately and refreshes it in the background. An explicit
-reload requests fresh HTML. `updates.json` separates the application fingerprint (aggr version and
+The service worker requests fresh HTML and falls back to its last complete copy if the network
+fails or exceeds the bounded deadline. `updates.json` separates the application fingerprint (aggr version and
 effective template/static files) from the content fingerprint. Browsers check it every 15 seconds while
 visible, when returning to the app, and when reconnecting, including sites with PWA mode disabled.
 New content refreshes the feed and search index without reloading the document or showing an app
 update prompt, including while a separate application release awaits refresh. Returning to a feed
 also checks its displayed content version so stale navigation entries are replaced automatically.
-List selection and reading position are retained; an open article stays in place. Dev build events
-check immediately and queue another check if an earlier request is still in flight.
+List selection and reading position are retained; an open article stays in place. Dev build events check immediately and queue another check if an earlier request is still in flight.
 
 An application release shows a clickable, keyboard-accessible “Refresh to update” pill in browsers
 and installed apps on desktop and mobile. It reloads the same page, preserving its query, fragment,
 and scroll position. A normal browser refresh also loads the new release; a hard refresh works too.
 Browser refresh remains native; the installed app also supports pull-to-refresh. Dev disables
-service workers so a previous deployment cannot mask a local snapshot. Loading, promoting, and
-removing dev snapshots runs on blocking workers, so large asset trees cannot stop HTTP responses
-while the previous in-memory snapshot remains available.
+service workers so a previous deployment cannot mask a local snapshot. Ordinary dev renders pages and media on demand on blocking workers, and retains the current
+generation while a replacement is prepared. See [local development](commands.md#local-development).
 
-The worker keeps the pages a reader has opened and the content-addressed assets they used, each
-in a bounded cache, and serves `offline.html` for anything it has never seen. It downloads nothing
-ahead of the reader. A host answering with a server error is treated like a host that cannot be
-reached, so an error body never replaces a page that was read before. Caching works in ordinary
-secure browser tabs as well as installed PWAs; `pwa = false` disables both. Browser storage
-eviction can still drop what was kept.
+The worker keeps visited pages and content-addressed assets in bounded runtime caches. The offline
+preference additionally downloads 0–1000 recent articles into protected caches: each article is
+available only after its page, every retained image rendition, and any local PDF companion are
+saved. Partial downloads and quota failures remain visible in preferences; `offline.html` lists
+complete saved articles. A positive count also downloads a complete versioned search manifest,
+checking every size and digest before switching the active index. Search readiness never implies
+article or image readiness, and an incomplete replacement retains the previous complete index.
+
+A host answering with a server error is treated like an unreachable host, so an error body never
+replaces a readable page. Caching works in ordinary secure browser tabs and installed PWAs;
+`pwa = false` unregisters this site's worker and removes only its caches. Browser storage eviction
+can still remove downloads; readiness checks exclude incomplete resource families.
 
 Validate custom themes at narrow widths, with enlarged text, both color schemes, reduced motion,
 and JavaScript disabled. Mobile uses the persistent bottom navigation bar; the desktop header

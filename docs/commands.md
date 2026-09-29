@@ -5,7 +5,7 @@
 | `aggr init [--github] [--defaults]` | Write the small starter config, optionally the GitHub workflow; `--defaults` copies the full reference config instead. |
 | `aggr sync [--fetch-only] [--dry-run] [--refresh] [--reprocess]` | Fetch new items. Normally commit and push them; `--fetch-only` writes locally without either, while `--dry-run` writes nothing. |
 | `aggr build [--release] [--out DIR] [--data-ref REF]` | Sync and render, or render a pinned data ref without fetches, commits, or pushes. |
-| `aggr dev [--release] [--port 7319]` | Sync and build in an isolated cache, serve from memory, watch, and live-reload. Never commits or pushes. |
+| `aggr dev [--release] [--port 7319]` | Sync into an isolated cache, render requested pages, watch, and live-reload. Never commits or pushes. |
 | `aggr clean [--dry-run] [--out DIR]` | Remove disposable dev state, build cache, and owned output. `--dry-run` lists exact targets. |
 | `aggr check` | Validate the config and probe every source. |
 | `aggr completions <SHELL>` | Generate shell completions. |
@@ -33,6 +33,23 @@ archive without refetching. This pass covers all retained articles, including re
 sources, and skips truncated HTML. It runs once before the normal configured-source sync; repeating
 it without content changes writes nothing. Hand-edited bodies are replaced. Use it after upgrading
 when you want those extraction changes applied.
+
+## Local development
+
+`aggr dev` prepares the archive's shared display metadata, then renders each page only when it is
+requested. Opening the feed reads its thumbnails; opening an article loads that article's media.
+Completion uses a small metadata catalogue; the full-text index is built only when a search needs
+its runtime, and reuses the persistent Pagefind cache.
+Template, CSS and JavaScript edits reuse normalized bodies and parsed Markdown, replace the current
+snapshot atomically, and trigger a browser reload. A template syntax error keeps the last working
+snapshot available. Requested output lives in disposable per-generation directories; the archive
+and fetch caches survive restart, and nothing is committed or pushed.
+
+Use `aggr dev --release` to exercise the complete publication build, including its media budget
+and PWA outputs. Ordinary lazy dev omits PWA outputs; the dev server unregisters its scoped worker
+to keep browser caches from hiding edits.
+For browser code, run `make typecheck-watch` alongside dev; `make check` checks the types, client
+behavior and Rust code. See [client development](client.md) for the pinned compiler setup.
 
 ## Cache and cleanup
 

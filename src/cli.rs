@@ -14,7 +14,7 @@ Typical loop:
 
     aggr init --github   # write aggr.toml and the GitHub workflow
     aggr build           # sync, then render the site into _site/
-    aggr dev             # local resync + build + live-reloading server
+    aggr dev             # local sync + lazy rendering + live reload
 
 Everything the site shows comes from the data branch, so a pinned data commit can be rendered
 without refetching its sources. The storage engine uses ordinary Git; GitHub is the turnkey host,
@@ -43,7 +43,7 @@ pub enum Command {
     Sync(SyncArgs),
     /// Sync and render, or render a pinned data ref without syncing.
     Build(BuildArgs),
-    /// Sync and build in a disposable workspace, then serve with live reload.
+    /// Sync in an isolated cache and render pages on demand with live reload.
     Dev(DevArgs),
     /// Remove disposable local caches and owned generated output; preserve archived articles.
     Clean(CleanArgs),

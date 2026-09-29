@@ -173,11 +173,15 @@ async fn responsive_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
         "the widest rank keeps the extra 8px inset used on mobile: {desktop_density}"
     );
     assert!(
-        (desktop_density["separatorLeft"].as_f64().unwrap_or_default()
+        (desktop_density["separatorLeft"]
+            .as_f64()
+            .unwrap_or_default()
             - desktop_density["search"][0].as_f64().unwrap_or(f64::MAX))
         .abs()
             < 0.5
-            && (desktop_density["separatorRight"].as_f64().unwrap_or_default()
+            && (desktop_density["separatorRight"]
+                .as_f64()
+                .unwrap_or_default()
                 - desktop_density["search"][1].as_f64().unwrap_or(f64::MAX))
             .abs()
                 < 0.5,

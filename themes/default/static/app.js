@@ -37,7 +37,9 @@ const $ = (selector, root = document) => /** @type {T | null} */ (root.querySele
  */
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
-/** Never let one broken enhancement take the rest of the page down with it. */
+/** Never let one broken enhancement take the rest of the page down with it.
+ * @template T @param {string} label @param {() => T} run
+ */
 function safely(label, run) {
   try {
     return run();
@@ -67,7 +69,9 @@ const storage = {
   },
 };
 
-/** The element id a fragment names; one that is not valid percent-encoding names itself. */
+/** The element id a fragment names; one that is not valid percent-encoding names itself.
+ * @param {string} hash
+ */
 function fragmentId(hash) {
   try {
     return decodeURIComponent(hash.slice(1));
@@ -76,13 +80,14 @@ function fragmentId(hash) {
   }
 }
 
-/** Per-site key, so several readers on one origin never share session state. */
+/** Per-site key, so several readers on one origin never share session state. @param {string} name */
 const scopeKey = (name) => "aggr:" + name + ":" + encodeURIComponent(new URL(BASE).pathname);
 
 /* ------------------------------------------------------------------ shift-hover */
 
 /** While Shift is held, links reveal where they lead. Styled entirely by the stylesheet. */
 function installShiftHover() {
+  /** @param {boolean} on */
   const held = (on) => document.documentElement.classList.toggle("is-shift-held", on);
   const options = { capture: true, passive: true };
   document.addEventListener("keydown", (event) => held(event.shiftKey), options);
@@ -100,10 +105,12 @@ function installShiftHover() {
  * them current while the tab stays open and upgrades the tooltip to a localized one on demand.
  */
 const dates = (() => {
+  /** @type {Map<string, Intl.DateTimeFormat>} */
   const formatters = new Map();
   /** @type {WeakMap<HTMLTimeElement, {exact: string, timestamp: number, updated: number, tooltip: string, text?: string, localized?: boolean}>} */
   const states = new WeakMap();
 
+  /** @param {string} name @param {Intl.DateTimeFormatOptions} settings */
   const formatter = (name, settings) => {
     let value = formatters.get(name);
     if (!value) formatters.set(name, (value = new Intl.DateTimeFormat(undefined, settings)));
@@ -112,6 +119,7 @@ const dates = (() => {
 
   const format = () => String(PREFS?.values["date-format"] || "relative");
 
+  /** @param {number} timestamp @param {string} style */
   function text(timestamp, style) {
     if (window.AGGRDates) return window.AGGRDates.text(timestamp, style);
     if (Number.isNaN(timestamp)) return null;
@@ -165,7 +173,9 @@ const dates = (() => {
     ageBands(root);
   }
 
-  /** The exact, localized timestamp costs a formatter; build it only when someone looks. */
+  /** The exact, localized timestamp costs a formatter; build it only when someone looks.
+   * @param {HTMLTimeElement} time
+   */
   function localize(time) {
     const state = states.get(time);
     if (!state || state.localized) return;
@@ -177,7 +187,7 @@ const dates = (() => {
     state.tooltip = (label ? "Published: " : "") + exact.format(state.timestamp);
     if (!Number.isNaN(state.updated)) state.tooltip += "\nUpdated: " + exact.format(state.updated);
     state.localized = true;
-    (label || time).title = state.tooltip;
+    (label || time).setAttribute("title", state.tooltip);
     if (state.text) time.setAttribute("aria-label", state.text + "; " + state.tooltip);
   }
 
@@ -198,7 +208,7 @@ const dates = (() => {
   return { render, format, text };
 })();
 
-/** Recolour rows as their articles age, in the bands the stylesheet paints. */
+/** Recolour rows as their articles age, in the bands the stylesheet paints. @param {ParentNode} [root] */
 function ageBands(root = document) {
   for (const row of $$(".rows:not(.search-results) .row", root)) {
     const time = $("time[datetime]", row);
@@ -222,7 +232,8 @@ const selection = (() => {
   // container is hidden is not on screen and must not hold the cursor.
   const rows = () =>
     $$(".rows:not([aria-busy='true']) .row:not([hidden])").filter((row) => !row.closest("[hidden]"));
-  const link = (row) => (row ? $("[data-row-open]", row) : null);
+  /** @param {HTMLElement | null | undefined} row */
+  const link = (row) => (row ? /** @type {HTMLAnchorElement | null} */ ($("[data-row-open]", row)) : null);
 
   function key(href = location.href) {
     const url = new URL(href);
@@ -234,6 +245,7 @@ const selection = (() => {
       encodeURIComponent(url.href)
     );
   }
+  /** @returns {{url?: string}} */
   const read = () => {
     try {
       return JSON.parse(storage.read(sessionStorage, key()) || "null") || {};
@@ -241,6 +253,7 @@ const selection = (() => {
       return {};
     }
   };
+  /** @param {{url: string}} state @param {string} [href] */
   const write = (state, href) => storage.write(sessionStorage, key(href), JSON.stringify(state));
 
   // One cursor for the whole page: the list on screen may change under it, and a row left marked
@@ -249,9 +262,10 @@ const selection = (() => {
     for (const entry of $$(".row.is-selected")) entry.classList.remove("is-selected");
   };
 
+  /** @param {HTMLElement | null} row @param {boolean} focus @param {boolean} scroll */
   function select(row, focus, scroll) {
     const target = link(row);
-    if (!target) return false;
+    if (!row || !target) return false;
     clear();
     row.classList.add("is-selected");
     // The row is the whole cursor. Reading the scroll offset here would flush the layout the
@@ -268,6 +282,7 @@ const selection = (() => {
     rows,
     link,
     select,
+    /** @param {"first" | "last"} which */
     edge(which) {
       const all = rows();
       return select((which === "first" ? all[0] : all.at(-1)) || null, true, true);
@@ -288,7 +303,9 @@ const selection = (() => {
       clear();
       row.classList.add("is-selected");
     },
-    /** `focus: false` walks the list while the keyboard stays where it is, e.g. in the search field. */
+    /** `focus: false` walks the list while the keyboard stays where it is, e.g. in the search field.
+     * @param {number} direction
+     */
     move(direction, focus = true) {
       const all = rows();
       if (!all.length) return false;
@@ -304,12 +321,15 @@ const selection = (() => {
 
 const FEED_PAGE = "feed-page";
 
+/** @param {unknown} value @param {number} fallback */
 const positiveInteger = (value, fallback) => {
   const parsed = Number.parseInt(String(value), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-/** The address of `slice` of the static page at `target`, keeping the current page's parameters. */
+/** The address of `slice` of the static page at `target`, keeping the current page's parameters.
+ * @param {string} target @param {number} slice
+ */
 function feedPageUrl(target, slice) {
   const current = new URL(location.href);
   const url = new URL(target, BASE);
@@ -382,6 +402,7 @@ function applyFeedPaging() {
 
 /* ------------------------------------------------------------------ keyboard */
 
+/** @param {EventTarget | null} target */
 const editing = (target) =>
   target instanceof Element &&
   (target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])") !== null ||
@@ -416,7 +437,9 @@ function currentArticle() {
   };
 }
 
-/** `O` opens the original; a network's upper-case key opens its discussion, or its search. */
+/** `O` opens the original; a network's upper-case key opens its discussion, or its search.
+ * @param {string} key
+ */
 function externalTarget(key) {
   const article = currentArticle();
   if (!article) return null;
@@ -431,10 +454,11 @@ function externalTarget(key) {
         .split("{title}").join(encodeURIComponent(article.title));
 }
 
-/** The `g` chord: `gg` to the top, letters to routes, digits to the numbered entries. */
+/** The `g` chord: `gg` to the top, letters to routes, digits to the numbered entries. @param {string} key */
 function gotoTarget(key) {
   if (key === "g") return { top: true };
-  const routes = { f: "", i: "", b: "browse/", p: "preferences/" };
+  /** @type {Record<string, string>} */
+  const routes = { f: "", i: "", b: "browse/", l: "browse/", p: "preferences/" };
   if (Object.prototype.hasOwnProperty.call(routes, key))
     return { url: new URL(routes[key], BASE).href };
   if (/^[1-9]$/.test(key)) {
@@ -452,6 +476,7 @@ function lineHeight() {
   return parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.6 || 24;
 }
 
+/** @param {string} key @param {boolean} byLine */
 function pageScroll(key, byLine) {
   const line = lineHeight();
   const header = ($(".itemhead") || $(".top"))?.getBoundingClientRect().height || 0;
@@ -462,6 +487,7 @@ function pageScroll(key, byLine) {
 }
 
 let gotoArmed = false;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
 let gotoTimer;
 
 function installKeyboard() {
@@ -503,7 +529,7 @@ function installKeyboard() {
         if (target.top) {
           if (KIND === "item") window.scrollTo({ top: 0, behavior: "instant" });
           else selection.edge("first");
-        } else navigation.go(target.url);
+        } else if (target.url) navigation.go(target.url);
       }
       return;
     }
@@ -603,6 +629,7 @@ function installShortcutHelp() {
 /**
  * Whether the search field sits entirely between the sticky header and the bottom bar. Moving the
  * page when the reader can already see the field would cost them their place for nothing.
+ * @param {HTMLInputElement} field
  */
 function searchFieldVisible(field) {
   const box = field.getBoundingClientRect();
@@ -612,7 +639,7 @@ function searchFieldVisible(field) {
   return box.top >= header && box.bottom <= floor;
 }
 
-/** Bring the search field into view, but only when it is not already there. */
+/** Bring the search field into view, but only when it is not already there. @param {HTMLInputElement} field */
 function revealSearchField(field) {
   if (!searchFieldVisible(field)) window.scrollTo({ top: 0, behavior: "instant" });
 }
@@ -631,8 +658,11 @@ function focusSearch() {
   field.select();
 }
 
+/** @type {Promise<typeof import("./search.js")> | undefined} */
 let searchModule;
-/** Each page's search controls, mounted once. */
+/** @type {import("../../../types/search").SearchHandle | undefined} */
+let searchHandle;
+/** Each page's search controls, mounted once. @type {WeakMap<HTMLElement, Promise<void>>} */
 const searchMounts = new WeakMap();
 /** The search engine is a separate file, fetched with the page that can use it. */
 function loadSearch() {
@@ -644,7 +674,8 @@ function loadSearch() {
   const mounted = searchModule
     .then((module) => {
       if (signal.aborted || !root.isConnected) return;
-      module.mount({ base: BASE, dates, selection, preferences: PREFS, signal, navigate: navigation.go });
+      searchHandle = module.mount({ base: BASE, dates, selection, preferences: PREFS, signal, navigate: navigation.go });
+      signal.addEventListener("abort", () => { searchHandle = undefined; }, {once:true});
     })
     .catch((error) => console.error("aggr: search", error));
   searchMounts.set(root, mounted);
@@ -689,18 +720,20 @@ function installSearchIntent() {
  */
 const navigation = (() => {
   const root = new URL(BASE);
-  /** Fetched pages by address, least recently used first. */
+  /** @typedef {{time: number, page: Promise<{url: string, html: string} | null>, parsed: Document | null, ready: boolean}} PageRecord */
+  /** Fetched pages by address, least recently used first. @type {Map<string, PageRecord>} */
   const pages = new Map();
   const PAGE_LIMIT = 24;
   /** A page fetched longer ago than this is fetched again rather than shown. */
   const PAGE_LIFETIME = 5 * 60000;
   /** Pages one screen may fetch before anyone asks for them. */
   const SPECULATION_LIMIT = 16;
-  /** Where each history entry was scrolled to, by the key its state carries. */
+  /** Where each history entry was scrolled to, by the key its state carries. @type {Map<string, number>} */
   const scrolls = new Map();
   /**
    * Where each list was last left, by address. Like a native tab, a list reached again through
    * its tab picks up where the reader was; asking for the list already on screen goes to its top.
+   * @type {Map<string, number>}
    */
   const places = new Map();
   const PLACE_LIMIT = 50;
@@ -712,7 +745,7 @@ const navigation = (() => {
   let speculated = 0;
   let installed = false;
 
-  /** A page's address without its fragment: two fragments of one page are one page. */
+  /** A page's address without its fragment: two fragments of one page are one page. @param {string} href */
   function address(href) {
     const url = new URL(href, location.href);
     url.hash = "";
@@ -720,14 +753,16 @@ const navigation = (() => {
   }
 
   const newKey = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  /** @param {{scroll?: number}} fields */
   const stateWith = (fields) => ({ ...(history.state || {}), aggr: { key: entry, ...fields } });
 
-  /** Pages of this archive, as opposed to its files (feeds, Markdown, TOML) and other sites. */
+  /** Pages of this archive, as opposed to its files (feeds, Markdown, TOML) and other sites. @param {URL} url */
   const routable = (url) =>
     url.origin === root.origin &&
     url.pathname.startsWith(root.pathname) &&
     (url.pathname.endsWith("/") || url.pathname.endsWith(".html"));
 
+  /** @param {Event} event */
   function linkIn(event) {
     const target = event.target;
     const link = target instanceof Element ? target.closest("a[href]") : null;
@@ -740,17 +775,20 @@ const navigation = (() => {
 
   /** A reader who asked the browser to save data, or who is on a slow link, gets no guesses. */
   const frugal = () => {
-    const connection = /** @type {any} */ (navigator).connection;
+    const connection = navigator.connection;
     return Boolean(connection?.saveData) || /2g$/.test(connection?.effectiveType || "");
   };
 
+  /** @param {() => void} run */
   const idle = (run) =>
     "requestIdleCallback" in window ? requestIdleCallback(run, { timeout: 1500 }) : setTimeout(run, 250);
 
+  /** @param {string} html */
   const parse = (html) => new DOMParser().parseFromString(html, "text/html");
 
-  /** A request for the page at `key`, remembered once it has arrived. */
+  /** A request for the page at `key`, remembered once it has arrived. @param {string} key */
   function request(key) {
+    /** @type {PageRecord} */
     const record = { time: Date.now(), page: Promise.resolve(null), parsed: null, ready: false };
     record.page = fetch(key, { headers: { accept: "text/html" }, credentials: "same-origin" }).then(
       async (response) => {
@@ -768,10 +806,14 @@ const navigation = (() => {
     return record;
   }
 
+  /** @param {string} key @param {PageRecord} record */
   function remember(key, record) {
     pages.delete(key);
     pages.set(key, record);
-    while (pages.size > PAGE_LIMIT) pages.delete(pages.keys().next().value);
+    while (pages.size > PAGE_LIMIT) {
+      const first = pages.keys().next();
+      if (!first.done) pages.delete(first.value);
+    }
   }
 
   /**
@@ -779,6 +821,7 @@ const navigation = (() => {
    * A page fetched longer ago than PAGE_LIFETIME may belong to an earlier build or release, so it
    * is fetched again, and its old copy stands in only when the network cannot answer. The pages a
    * screen links to most are kept fresh while it is open (see `speculate`), so this rarely waits.
+   * @param {string} href
    */
   function load(href) {
     const key = address(href);
@@ -802,7 +845,9 @@ const navigation = (() => {
     return record;
   }
 
-  /** Fetch a page the reader is about to open. Guesses are counted and bounded; intent is not. */
+  /** Fetch a page the reader is about to open. Guesses are counted and bounded; intent is not.
+   * @param {string} href
+   */
   function prefetch(href, guess = false) {
     let url;
     try {
@@ -826,13 +871,18 @@ const navigation = (() => {
     if (KIND !== "item") {
       places.delete(current);
       places.set(current, window.scrollY);
-      while (places.size > PLACE_LIMIT) places.delete(places.keys().next().value);
+      while (places.size > PLACE_LIMIT) {
+        const first = places.keys().next();
+        if (!first.done) places.delete(first.value);
+      }
     }
     selection.save(current);
     pageScope.abort();
   }
 
-  /** Bring the persistent parts of the page (header, tab bar) in line with the page arriving. */
+  /** Bring the persistent parts of the page (header, tab bar) in line with the page arriving.
+   * @param {string} selector @param {Document} next
+   */
   function syncRegion(selector, next) {
     const region = $(selector);
     const fresh = next.querySelector(selector);
@@ -852,8 +902,11 @@ const navigation = (() => {
     });
   }
 
-  /** Swap the page's own metadata; scripts, styles and settings shared by every page stay. */
+  /** Swap the page's own metadata; scripts, styles and settings shared by every page stay.
+   * @param {Document} next
+   */
   function syncHead(next) {
+    /** @param {Element} node */
     const shared = (node) =>
       node.matches(
         'title, script:not([type="application/ld+json"]), style, link[rel~="stylesheet"], meta[charset], meta[name="viewport"], #theme-color',
@@ -870,10 +923,11 @@ const navigation = (() => {
     if (data && incoming) data.textContent = incoming.textContent;
   }
 
+  /** @param {Document} next @param {HTMLElement} main @param {AppContext} context */
   function swap(next, main, context) {
     document.title = next.title;
     syncHead(next);
-    for (const key of Object.keys(AGGR)) if (!(key in context)) delete AGGR[key];
+    for (const key of Object.keys(AGGR)) if (!(key in context)) Reflect.deleteProperty(AGGR, key);
     Object.assign(AGGR, context);
     KIND = AGGR.kind || next.body.dataset.kind || "";
     const body = document.body;
@@ -895,7 +949,9 @@ const navigation = (() => {
    */
   let settle = () => {};
 
-  /** Put the reader where the page they arrived at expects them, and the keyboard with it. */
+  /** Put the reader where the page they arrived at expects them, and the keyboard with it.
+   * @param {number | undefined} saved @param {string} hash
+   */
   function arrive(saved, hash) {
     settle();
     const id = hash ? fragmentId(hash) : "";
@@ -944,7 +1000,9 @@ const navigation = (() => {
     }
   }
 
-  /** The stylesheets and scripts a document runs on, resolved against its own address. */
+  /** The stylesheets and scripts a document runs on, resolved against its own address.
+   * @param {Document} doc @param {string} base
+   */
   const shell = (doc, base) =>
     Array.from(doc.querySelectorAll('link[rel~="stylesheet"][href], script[src]'))
       .map((node) => new URL(node.getAttribute("href") || node.getAttribute("src") || "", base).href)
@@ -954,26 +1012,29 @@ const navigation = (() => {
   /** The shell this document loaded with, read while its address still matches its links. */
   let runningShell = "";
 
-  /** Whatever this cannot swap is still a link: let the browser follow it. */
+  /** Whatever this cannot swap is still a link: let the browser follow it.
+   * @param {string} href @param {boolean} traverse
+   */
   function fallback(href, traverse) {
     if (traverse) location.reload();
     else location.assign(href);
   }
 
   let slow = 0;
-  /** Say a page is on its way once it has taken longer than a glance, and stop saying so. */
+  /** Say a page is on its way once it has taken longer than a glance, and stop saying so. @param {boolean} on */
   function waiting(on) {
     clearTimeout(slow);
     if (on) slow = setTimeout(() => document.documentElement.setAttribute("data-navigating", ""), 150);
     else document.documentElement.removeAttribute("data-navigating");
   }
 
-  /** The row or card whose link is on its way, lit until its page replaces it. */
+  /** The row or card whose link is on its way, lit until its page replaces it. @type {Element | null} */
   let opening = null;
 
   /**
    * Answer the tap before the page arrives: the tab or menu entry chosen becomes current, and the
    * row or card followed stays lit.
+   * @param {HTMLAnchorElement | null} link
    */
   function acknowledge(link) {
     opening?.removeAttribute("data-opening");
@@ -1017,6 +1078,8 @@ const navigation = (() => {
   /**
    * Show the page at `href`. `replace` stands in for the current history entry; `traverse` means
    * Back or Forward already moved the address bar, and the page has to catch up with it.
+   * @param {string} href
+   * @param {{replace?: boolean, traverse?: boolean, from?: HTMLAnchorElement | null}} [options]
    */
   async function go(href, { replace = false, traverse = false, from = null } = {}) {
     const url = new URL(href, location.href);
@@ -1077,7 +1140,7 @@ const navigation = (() => {
     mountPage();
   }
 
-  /** Record a new entry for a place in this page, as following a fragment link would. */
+  /** Record a new entry for a place in this page, as following a fragment link would. @param {string} hash */
   function pushFragment(hash) {
     scrolls.set(entry, window.scrollY);
     entry = newKey();
@@ -1092,6 +1155,7 @@ const navigation = (() => {
   function installTabActivation() {
     const tabs = $(".mobile-tabs");
     if (!tabs) return;
+    /** @type {{y: number} | null} */
     let pressed = null;
     tabs.addEventListener(
       "touchstart",
@@ -1169,6 +1233,7 @@ const navigation = (() => {
     idle(() => {
       if (signal.aborted || frugal() || !("IntersectionObserver" in window)) return;
       // A row the reader lingers over, rather than every row that scrolls past.
+      /** @type {Map<HTMLAnchorElement, ReturnType<typeof setTimeout>>} */
       const timers = new Map();
       const observer = new IntersectionObserver((entries) => {
         for (const seen of entries) {
@@ -1240,6 +1305,7 @@ const navigation = (() => {
     // Intent: a press is a promise of a click, and a pointer resting on a link is a likely one.
     // A mouse press on the site's own navigation is the choice itself, as in a native app's
     // sidebar: the page changes on the press, and the click that follows it is spent.
+    /** @type {HTMLAnchorElement | null} */
     let pressed = null;
     document.addEventListener(
       "pointerdown",
@@ -1261,6 +1327,7 @@ const navigation = (() => {
       },
       { capture: true, passive: true },
     );
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
     let hover;
     document.addEventListener(
       "pointerover",
@@ -1307,7 +1374,7 @@ const navigation = (() => {
     installTabActivation();
   }
 
-  return { install, go, prefetch, pushFragment, speculate };
+  return { install, go, prefetch, pushFragment, speculate, clear: () => { pages.clear(); speculated = 0; } };
 })();
 
 /* ------------------------------------------------------------------ tap feedback */
@@ -1345,17 +1412,20 @@ function installTapFeedback() {
  * Every picture is painted over the placeholder the build inlined behind it, and falls back to its
  * alt text when it never arrives. Two capturing listeners cover the whole document, including the
  * rows search adds later, so no page has to load a module to show a picture honestly.
+ * @param {HTMLImageElement} image
  */
 const pictureFrame = (image) =>
   image.closest(".article-picture, .article-lead, .preview-media, .audio-cover, .media-frame");
 // A picture that arrives after a failure, or fails after arriving, must not keep both marks:
 // the same source is retried whenever a reader comes back to a page that had no network.
+/** @param {Element} box @param {boolean} loaded */
 const markPicture = (box, loaded) => {
   box.classList.toggle("is-loaded", loaded);
   box.classList.toggle("is-error", !loaded);
 };
 
 function installPictureStates() {
+  /** @param {Event} event @param {boolean} loaded */
   const settle = (event, loaded) => {
     const target = event.target;
     if (!(target instanceof HTMLImageElement)) return;
@@ -1403,7 +1473,9 @@ function loadMedia() {
   if (!AGGR.assets?.media) return;
   if (!$(".video-player, [data-audio-component], .native-video, [data-media-timing]")) return;
   const signal = pageScope.signal;
-  import(new URL(AGGR.assets.media, document.baseURI).href)
+  /** @type {Promise<typeof import("./media.js")>} */
+  const module = import(new URL(AGGR.assets.media, document.baseURI).href);
+  module
     .then((module) => signal.aborted || module.mount({ signal }))
     .catch((error) => console.error("aggr: media", error));
 }
@@ -1441,6 +1513,7 @@ function installReadingHeader() {
   if (!("ResizeObserver" in window)) return;
   // The compact title the header folds into, set across the full width: its height is the one the
   // box closes to. Without calc-size() the natural heights are measured as well.
+  /** @type {Array<[HTMLElement | null, string]>} */
   const measured = [[$(".itemhead-title-compact", header), "--compact-height"]];
   if (!CSS.supports("height: calc-size(auto, size)"))
     measured.push(
@@ -1489,6 +1562,16 @@ function installFootnoteTargets() {
     if (reference) reference.setAttribute("data-footnote-active", "");
   };
   paired();
+  for (const reference of $$(".footnote-ref a[data-footnote-ref]")) {
+    reference.addEventListener("click", event => {
+      const note = reference.parentElement?.nextElementSibling;
+      if (!(note instanceof HTMLElement) || !note.classList.contains("footnote-margin-note") || !note.getClientRects().length) return;
+      if (event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) return;
+      event.preventDefault();
+      note.tabIndex = -1;
+      note.focus({preventScroll:true});
+    }, {signal:pageScope.signal});
+  }
   window.addEventListener("hashchange", paired, { signal: pageScope.signal });
 }
 
@@ -1511,6 +1594,7 @@ function installHeadingAnchors() {
       16,
     );
 
+  /** @param {string} id @param {boolean} record */
   const jump = (id, record) => {
     const target = document.getElementById(id);
     if (!target) return;
@@ -1548,6 +1632,8 @@ function installHeadingAnchors() {
 
 function installPreferences() {
   if (!PREFS) return;
+  const preferences = PREFS;
+  /** @param {string} message */
   const status = (message) => {
     const node = $("#preferences-status");
     if (node) node.textContent = message;
@@ -1562,26 +1648,31 @@ function installPreferences() {
       );
   }
 
-  /** Validate, apply to the document, and persist. Invalid values are ignored, never stored. */
+  /** Validate, apply to the document, and persist. Invalid values are ignored, never stored.
+   * @param {Record<string, unknown>} values
+   */
   function apply(values, persist = true) {
+    const previousSize = preferences.values["feed-page-size"];
     let saved = true;
     for (const [key, value] of Object.entries(values)) {
-      if (!PREFS.valid(key, value)) continue;
-      PREFS.values[key] = value;
+      if (!preferences.valid(key, value)) continue;
+      preferences.values[key] = value;
       if (persist && !storage.write(localStorage, "aggr:" + key, String(value))) saved = false;
     }
-    PREFS.apply(PREFS.values);
+    preferences.apply(preferences.values);
     refreshThemeColor();
     syncControls();
     dates.render();
     applyFeedPaging();
+    if (preferences.values["feed-page-size"] !== previousSize) searchHandle?.refresh();
+    document.dispatchEvent(new Event("aggr:preferences"));
     return saved;
   }
 
   function syncControls() {
     for (const control of $$("[data-preference]")) {
       const key = control.dataset.preference || "";
-      const value = PREFS.values[key];
+      const value = preferences.values[key];
       if (control instanceof HTMLInputElement && control.type === "checkbox")
         control.checked = Boolean(value);
       else if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement)
@@ -1604,6 +1695,7 @@ function installPreferences() {
   /** @type {Record<string, unknown> | null} */
   let pending = null;
 
+  /** @param {Record<string, unknown>} values */
   function review(values) {
     pending = values;
     const section = $("#preferences-import");
@@ -1627,6 +1719,7 @@ function installPreferences() {
     status("Review the imported settings before applying them.");
   }
 
+  /** @param {string} message */
   function clearReview(message) {
     pending = null;
     const section = $("#preferences-import");
@@ -1634,6 +1727,7 @@ function installPreferences() {
     if (message) status(message);
   }
 
+  /** @param {string} raw */
   const parse = (raw) => {
     if (raw.length > 16384) throw new Error("Preferences file is too large");
     return PREFS.validate(JSON.parse(raw));
@@ -1664,6 +1758,7 @@ function installPreferences() {
     }
   }
 
+  /** @param {File} file */
   async function importFile(file) {
     try {
       if (file.size > 16384) throw new Error("File too large");
@@ -1675,6 +1770,7 @@ function installPreferences() {
     }
   }
 
+  /** @param {string} url */
   function offerLink(url) {
     const field = /** @type {HTMLInputElement | null} */ ($("#preferences-link"));
     if (!field) return;
@@ -1685,6 +1781,7 @@ function installPreferences() {
     status("Copy the selected link. Clipboard access is unavailable.");
   }
 
+  /** @type {Record<string, () => void | Promise<void>>} */
   const actions = {
     async copy() {
       const url = shareLink();
@@ -1739,7 +1836,7 @@ function installPreferences() {
   document.addEventListener("change", (event) => {
     const control = event.target;
     if (!(control instanceof HTMLInputElement || control instanceof HTMLSelectElement)) return;
-    if (control.id === "preferences-file") {
+    if (control instanceof HTMLInputElement && control.id === "preferences-file") {
       const file = control.files?.[0];
       control.value = "";
       if (file) void importFile(file);
@@ -1798,20 +1895,14 @@ let preparePreferences = () => {};
  * Mark the entries that appeared since this browsing session last saw the feed. Without a
  * remembered head nothing is new, so a first visit never lights up the whole page.
  */
-/** How often a page that shows a list asks whether the build has moved on. */
-const UPDATE_INTERVAL = 300000;
-
-/**
- * New items should arrive without anyone reaching for reload. `updates.json` is the build's own
- * statement of what it published, so a list page polls it, and swaps its rows for the current
- * ones when the content version has moved. The swap waits for a moment that does not move the
- * ground under the reader: the top of the list, or coming back to the window.
- */
+/** Apply complete content updates while keeping the visible row at the same position. */
 function installFeedUpdates() {
   if (!AGGR.content || !$(".rows:not(.search-results)")) return;
   const signal = pageScope.signal;
   let content = AGGR.content;
+  /** @type {string | null} */
   let wanted = null;
+  /** @type {string[] | null} */
   let entries = null;
   let pending = false;
   let swapping = false;
@@ -1834,6 +1925,9 @@ function installFeedUpdates() {
       const rows = $(".rows:not(.search-results)");
       const fresh = page.querySelector(".rows:not(.search-results)");
       if (!rows || !fresh) return;
+      const anchor = $$(".row", rows).find(row => !row.hidden && row.getBoundingClientRect().bottom > 0);
+      const anchorUrl = anchor?.dataset.url;
+      const anchorTop = anchor?.getBoundingClientRect().top;
       rows.replaceWith(document.importNode(fresh, true));
       const pager = page.querySelector("[data-feed-pager]");
       const current = $("[data-feed-pager]");
@@ -1842,12 +1936,18 @@ function installFeedUpdates() {
       if (Array.isArray(entries)) AGGR.entries = entries;
       dates.render();
       applyFeedPaging();
-      markNewEntries();
       selection.restore();
+      if (anchorUrl && anchorTop !== undefined) {
+        const restored = $$(".row").find(row => row.dataset.url === anchorUrl);
+        if (restored) window.scrollBy(0, restored.getBoundingClientRect().top - anchorTop);
+      }
+      document.dispatchEvent(new Event("aggr:feed-refreshed"));
+      searchHandle?.refresh();
       // Only now are the rows on screen this build's. Recording the version before the swap
       // landed meant one failed refresh made every later check believe it was already applied,
       // and the reader kept stale rows until some other build shipped.
       content = target;
+      AGGR.content = target;
       // Anything newer that arrived while this was in flight is still owed a pass.
       if (wanted === target) wanted = null;
       else pending = true;
@@ -1859,66 +1959,25 @@ function installFeedUpdates() {
     }
   }
 
-  const settle = (activated = false) => {
-    if (!pending || (!activated && window.scrollY > 200)) return;
-    pending = false;
+  document.addEventListener("aggr:content-update", event => {
+    if (!(event instanceof CustomEvent)) return;
+    const update = event.detail;
+    if (typeof update?.content_version !== "string" || update.content_version === content) return;
+    wanted = update.content_version;
+    entries = Array.isArray(update.entries) ? update.entries : null;
+    pending = true;
     void swap();
-  };
-
-  const check = async (activated = false) => {
-    try {
-      const response = await fetch(new URL("updates.json", BASE).href, { cache: "no-store" });
-      if (!response.ok) return;
-      const update = await response.json();
-      if (typeof update.content_version !== "string" || update.content_version === content) return;
-      wanted = update.content_version;
-      entries = Array.isArray(update.entries) ? update.entries : null;
-      pending = true;
-    } catch {
-      return;
-    }
-    settle(activated);
-  };
-
-  void check();
-  const timer = setInterval(() => {
-    if (!document.hidden) void check();
-  }, UPDATE_INTERVAL);
-  signal.addEventListener("abort", () => clearInterval(timer));
-  // Opening the app again is the moment a reader expects to be caught up.
-  document.addEventListener(
-    "visibilitychange",
-    () => {
-      if (!document.hidden) void check(true);
-    },
-    { signal },
-  );
-  window.addEventListener("focus", () => void check(true), { signal });
-  window.addEventListener("scroll", () => settle(), { passive: true, signal });
+  }, {signal});
 }
 
-function markNewEntries() {
-  if (KIND !== "river") return;
-  // The whole feed, not the slice on screen. Paging hides every row outside the current slice,
-  // so a boundary read from page two records that page's head as the last thing seen, and coming
-  // back to page one finds no boundary at all and marks all of it new.
-  const list = $(".rows:not(.search-results)");
-  const rows = list ? $$(".row", list) : [];
-  if (!rows.length) return;
-  const urls = rows.map((row) => row.dataset.url || "").filter(Boolean);
-  const key = scopeKey("last-seen-entry");
-  const head = storage.read(sessionStorage, key);
-  if (head) {
-    const boundary = urls.indexOf(head);
-    const fresh = new Set(urls.slice(0, boundary === -1 ? urls.length : boundary));
-    for (const row of rows) row.classList.toggle("is-new", fresh.has(row.dataset.url || ""));
-  }
-  // Marking reads the whole list, but only the slice holding the newest entry can say it has been
-  // seen. A reader who opened a later slice, or followed a link straight to one, has not looked
-  // at what sits above it, and acknowledging those rows would hide them on the way back.
-  const pager = $("[data-feed-pager]");
-  const newest = !rows[0].hidden && positiveInteger(pager?.dataset.staticPage, 1) === 1;
-  if (urls[0] && newest) storage.write(sessionStorage, key, urls[0]);
+/** @type {Promise<typeof import("./reader.js")>|undefined} */
+let readerModule;
+function loadReader() {
+  if (!AGGR.assets?.reader) return;
+  const signal = pageScope.signal;
+  readerModule ??= import(new URL(AGGR.assets.reader, document.baseURI).href);
+  void readerModule.then(module => { if (!signal.aborted) module.mount({base:BASE,signal}); })
+    .catch(error => console.error("aggr: reader",error));
 }
 
 /* ------------------------------------------------------------------ service worker */
@@ -1947,7 +2006,7 @@ function mountPage() {
   safely("dates", () => dates.render());
   safely("selection", () => selection.restore());
   safely("feed-paging", applyFeedPaging);
-  safely("new-entries", markNewEntries);
+  safely("reader", loadReader);
   safely("feed-updates", installFeedUpdates);
   safely("footnotes", installFootnoteTargets);
   safely("heading-anchors", installHeadingAnchors);
@@ -1972,6 +2031,8 @@ function boot() {
   safely("tap-feedback", installTapFeedback);
   safely("navigation", navigation.install);
   safely("service-worker", registerWorker);
+  document.addEventListener("aggr:offline-status", () => searchHandle?.updateOfflineStatus());
+  document.addEventListener("aggr:content-update", () => { navigation.clear(); searchHandle?.refresh(); });
   mountPage();
 
   // Keep relative times honest while the tab stays open.

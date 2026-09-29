@@ -16,7 +16,7 @@ use crate::content;
 /// Archive-wide template values prepared once per build. MiniJinja values retain their prepared
 /// representation across renders, so custom article templates still receive the entire archive
 /// without serializing it again for every page.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(super) struct SharedCtx {
     site: minijinja::Value,
     build: minijinja::Value,
@@ -112,12 +112,30 @@ impl<'a> Pages<'a> {
         archive: &'a [ItemCtx],
         per_page: usize,
     ) -> Self {
+        Self::prepared(
+            site,
+            renderer,
+            shared,
+            archive,
+            minijinja::Value::from_serialize(archive),
+            per_page,
+        )
+    }
+
+    pub(super) fn prepared(
+        site: &'a SiteCtx,
+        renderer: &'a Renderer,
+        shared: SharedCtx,
+        archive: &'a [ItemCtx],
+        archive_value: minijinja::Value,
+        per_page: usize,
+    ) -> Self {
         Self {
             site,
             renderer,
             shared,
             archive,
-            archive_value: minijinja::Value::from_serialize(archive),
+            archive_value,
             per_page,
         }
     }
@@ -130,54 +148,53 @@ impl<'a> Pages<'a> {
         page: ListPage<'_>,
         sitemap_urls: &mut Vec<outputs::SitemapUrl>,
     ) -> Result<usize> {
-        let ListPage {
-            kind,
-            title,
-            prefix,
-            list,
-            source,
-            category,
-        } = page;
-        let site = self.site;
-        let pagination = paginate(prefix, list.len(), self.per_page);
+        let pagination = paginate(page.prefix, page.list.len(), self.per_page);
         for pager in &pagination {
-            let page_number = pager.context.current_index;
-            let page = PageCtx {
-                kind: kind.to_string(),
-                title: title.to_string(),
-                document_title: document_title(&site.title, title, kind, page_number),
-                description: page_description(site, title, kind, page_number),
-                indexable: site.indexing,
-                path: pager.path.clone(),
-                root: relative_root(&pager.path),
-                canonical_url: site.absolute(&pager.path),
-                feed_path: Some(prefix.to_string()),
-                feed_title: Some(title.to_string()),
-                paginator: Some(pager.context.clone()),
-            };
-            let page_items = &list[pager.range.clone()];
-            if let Some(url) = &page.canonical_url {
+            let html = self.list(&page, pager)?;
+            if let Some(url) = self.site.absolute(&pager.path) {
                 sitemap_urls.push(outputs::SitemapUrl::new(
                     url,
-                    page_items.iter().map(archive_modified_at).max(),
+                    page.list[pager.range.clone()]
+                        .iter()
+                        .map(archive_modified_at)
+                        .max(),
                 ));
             }
-            let schema = structured_data(site, &page, page_items, None);
-            let html = self.renderer.render(
-                "index.html",
-                Ctx {
-                    shared: &self.shared,
-                    page,
-                    items: minijinja::Value::from_serialize(page_items),
-                    item: None,
-                    source,
-                    category,
-                    schema,
-                },
-            )?;
             write(&out.join(&pager.path).join("index.html"), html.as_bytes())?;
         }
         Ok(pagination.len())
+    }
+
+    pub(super) fn list(&self, list: &ListPage<'_>, pager: &super::Pager) -> Result<String> {
+        let site = self.site;
+        let page_number = pager.context.current_index;
+        let page = PageCtx {
+            kind: list.kind.to_string(),
+            title: list.title.to_string(),
+            document_title: document_title(&site.title, list.title, list.kind, page_number),
+            description: page_description(site, list.title, list.kind, page_number),
+            indexable: site.indexing,
+            path: pager.path.clone(),
+            root: relative_root(&pager.path),
+            canonical_url: site.absolute(&pager.path),
+            feed_path: Some(list.prefix.to_string()),
+            feed_title: Some(list.title.to_string()),
+            paginator: Some(pager.context.clone()),
+        };
+        let page_items = &list.list[pager.range.clone()];
+        let schema = structured_data(site, &page, page_items, None);
+        self.renderer.render(
+            "index.html",
+            Ctx {
+                shared: &self.shared,
+                page,
+                items: minijinja::Value::from_serialize(page_items),
+                item: None,
+                source: list.source,
+                category: list.category,
+                schema,
+            },
+        )
     }
 
     /// Render one standalone document.
