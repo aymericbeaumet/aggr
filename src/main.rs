@@ -31,6 +31,11 @@ fn main() -> ExitCode {
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level))
         .filter_module("html5ever::serialize", log::LevelFilter::Error)
+        // Rasterizing a publisher's SVG reports every CSS rule and attribute it has to skip
+        // (animations, `:root`, `width="auto"`): the publisher's markup, not something to act on.
+        .filter_module("simplecss", log::LevelFilter::Error)
+        .filter_module("usvg", log::LevelFilter::Error)
+        .filter_module("resvg", log::LevelFilter::Error)
         .format_timestamp(None)
         .init();
 
