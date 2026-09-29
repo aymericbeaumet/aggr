@@ -255,6 +255,32 @@ async fn archive_pages_swap_in_place_and_nothing_outside_the_archive_is_fetched(
             returned["kept"] == "kept" && returned["tab"] == "" && returned["selected"] == before["href"],
             "Back swaps the feed back in with its cursor: {returned}"
         );
+        // A page arriving while the last one still glides is held where it belongs until it is
+        // still; asking for its top in the meantime is the reader's call, and the hold lets go.
+        let held = client.execute_async(r#"
+          const done = arguments[arguments.length - 1], root = document.documentElement;
+          const frame = () => new Promise(resolve => requestAnimationFrame(() => resolve()));
+          (async () => {
+            root.style.paddingBottom = '200vh';
+            scrollTo(0, 300); await frame(); await frame();
+            document.querySelector('.row [data-row-open]').click();
+            while (document.body.dataset.kind !== 'item') await frame();
+            // A fling carrying the article as Back is pressed.
+            const fling = () => { if (document.body.dataset.kind === 'item') { scrollBy(0, 4); requestAnimationFrame(fling); } };
+            fling(); await frame(); await frame();
+            history.back();
+            while (document.body.dataset.kind !== 'river') await new Promise(resolve => setTimeout(resolve));
+            const arrived = {held: root.style.overflow === 'hidden', at: scrollY};
+            document.querySelector('.brand').click();
+            for (let i = 0; i < 20; i++) await frame();
+            done({...arrived, top: scrollY, overflow: root.style.overflow});
+            root.style.removeProperty('padding-bottom');
+          })();
+        "#, vec![]).await?;
+        anyhow::ensure!(
+            held["held"] == true && held["at"] == 300 && held["top"] == 0 && held["overflow"] == "",
+            "the title takes a held page to its top and ends the hold: {held}"
+        );
         Ok(())
     }.await;
     report_failure(&client, "in-place-navigation", &result).await;

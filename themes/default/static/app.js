@@ -889,8 +889,15 @@ const navigation = (() => {
   /** When the page last moved, to tell a page still gliding from one at rest. */
   let scrolled = -Infinity;
 
+  /**
+   * Let go of a page held still after arriving, without putting it back where it arrived: the
+   * next page, or the reader asking for a place, decides where it goes from here.
+   */
+  let settle = () => {};
+
   /** Put the reader where the page they arrived at expects them, and the keyboard with it. */
   function arrive(saved, hash) {
+    settle();
     const id = hash ? fragmentId(hash) : "";
     const target = id ? document.getElementById(id) : null;
     const place = () => {
@@ -911,10 +918,14 @@ const navigation = (() => {
       root.style.overflow = "hidden";
       const until = performance.now() + 1500;
       let quiet = 0;
-      const release = () => {
+      const stop = () => {
         clearTimeout(quiet);
         window.removeEventListener("scroll", hold);
         root.style.removeProperty("overflow");
+        settle = () => {};
+      };
+      const release = () => {
+        stop();
         place();
       };
       const hold = () => {
@@ -924,6 +935,7 @@ const navigation = (() => {
       };
       window.addEventListener("scroll", hold, { passive: true });
       quiet = setTimeout(release, 120);
+      settle = stop;
     }
     const main = $("#content");
     if (main) {
@@ -996,6 +1008,7 @@ const navigation = (() => {
   /** The page on screen, asked for again: its top, with nothing left mid-edit. */
   function top() {
     cancel();
+    settle();
     const active = document.activeElement;
     if (active instanceof HTMLElement && editing(active)) active.blur();
     window.scrollTo({ top: 0, behavior: "instant" });
@@ -1013,8 +1026,10 @@ const navigation = (() => {
       return;
     }
     if (!traverse && address(url.href) === current) {
-      if (url.hash) location.hash = url.hash;
-      else top();
+      if (url.hash) {
+        settle();
+        location.hash = url.hash;
+      } else top();
       return;
     }
     const mine = ++token;
@@ -1211,6 +1226,7 @@ const navigation = (() => {
         // A fragment of this page is the browser's own jump; the entry it leaves keeps its place.
         if (hit.url.hash) {
           cancel();
+          settle();
           scrolls.set(entry, window.scrollY);
           return;
         }
@@ -1262,6 +1278,7 @@ const navigation = (() => {
       const key = event.state?.aggr?.key;
       if (address(location.href) === current && !pending) {
         // Another place in this same page. Nothing was fetched, so nothing needs to arrive.
+        settle();
         scrolls.set(entry, window.scrollY);
         entry = key || newKey();
         const saved = scrolls.get(entry);
