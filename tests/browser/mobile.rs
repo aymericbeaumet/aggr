@@ -41,6 +41,8 @@ pub(crate) async fn mobile_feed_layout(client: &Client) -> Result<Value> {
         rankWidth:rank.getBoundingClientRect().width,
         titleLeft:title.getBoundingClientRect().left,metaLeft:meta.getBoundingClientRect().left,
         metadataInset:parseFloat(getComputedStyle(row.querySelector(".meta")).paddingLeft),
+        highlight:(()=>{const box=row.getBoundingClientRect(),cell=getComputedStyle(row.querySelector('.cell'),'::before'),search=document.querySelector('#q').getBoundingClientRect();
+          return Math.abs(box.left+parseFloat(cell.left)-search.left)<0.5 && Math.abs(box.right-parseFloat(cell.right)-search.right)<0.5;})(),
         header:{height:top.getBoundingClientRect().height,position:topStyle.position,
           background:topStyle.backgroundColor,navMinHeight:topNavStyle.minHeight,
           navPaddingLeft:topNavStyle.paddingLeft,navPaddingRight:topNavStyle.paddingRight,
@@ -207,6 +209,10 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
     assert_eq!(layout["selected"], 1, "the first feed row starts selected");
     assert_eq!(layout["rankDisplay"], "none", "mobile ranks are hidden");
     assert_eq!(layout["rankWidth"], 0, "hidden ranks reserve no width");
+    assert_eq!(
+        layout["highlight"], true,
+        "a row's highlight is exactly as wide as the search field: {layout}"
+    );
     assert_eq!(
         layout["metadataInset"], 0,
         "metadata reclaims the rank column"

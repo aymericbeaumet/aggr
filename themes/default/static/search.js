@@ -1272,7 +1272,11 @@ export function mount(options) {
     if (!list) return;
     const context = { base, dates };
     list.replaceChildren(...outcome.results.map((result) => renderRow(result, context)));
-    list.style.setProperty("--rank-indent", Math.max(2, String(outcome.total).length) + "ch");
+    // The copy moves right by the widest rank's extra digits (see `.row-content::before`), and
+    // never by less than the feed's, so titles hold still as a search replaces the feed.
+    const widest = (outcome.page - 1) * outcome.size + outcome.results.length;
+    const feed = parseInt(staticFeed ? $(".rows", staticFeed)?.style.getPropertyValue("--rank-indent") || "" : "", 10) || 0;
+    list.style.setProperty("--rank-indent", Math.max(feed, String(widest).length - 1) + "ch");
     // Rank numbers continue across pages.
     list.style.setProperty("counter-reset", "rank " + (outcome.page - 1) * outcome.size);
     list.hidden = false;

@@ -63,13 +63,14 @@ async fn search_keyboard_contracts(client: &Client, fixture: &Fixture) -> Result
     assert_eq!(client.execute(r#"
       const rows = [...document.querySelectorAll('#list .row')];
       const edge = rows[0].getBoundingClientRect().left + parseFloat(getComputedStyle(rows[0], '::after').left);
+      if (Math.abs(edge - document.querySelector('#q').getBoundingClientRect().left) >= 0.5) return false;
       return rows.every(row => {
         const separator = row.getBoundingClientRect().left + parseFloat(getComputedStyle(row, '::after').left);
         const marker = getComputedStyle(row, '::before');
         const markerRight = row.getBoundingClientRect().left + parseFloat(marker.left) + parseFloat(marker.width);
         return Math.abs(edge - separator) < 1 && Math.abs(markerRight - separator) < 1;
       });
-    "#, vec![]).await?, true, "all separators must share one left edge and meet the selection bar");
+    "#, vec![]).await?, true, "all separators start where the search field does and meet the selection bar");
     client
         .execute("document.querySelector('[data-row-open]').focus()", vec![])
         .await?;

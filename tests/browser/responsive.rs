@@ -101,18 +101,22 @@ async fn responsive_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
       const title = row.querySelector('.title').getBoundingClientRect();
       const metadata = row.querySelector('.meta').getBoundingClientRect();
       const meta = row.querySelector('.meta > *').getBoundingClientRect();
-      const rank = row.querySelector('.rank');
+      // The widest rank on the page is the one the copy makes room for.
+      const listed = document.querySelectorAll('[data-static-feed] .row');
+      const rank = listed[listed.length - 1].querySelector('.rank');
       const rankText = document.createRange();
       rankText.selectNodeContents(rank);
+      const search = document.querySelector('#q').getBoundingClientRect();
       const top = document.querySelector('.top');
       const topStyle = getComputedStyle(top);
       const topNavStyle = getComputedStyle(document.querySelector('.nav'));
       const brandLinkStyle = getComputedStyle(document.querySelector('.brand'));
       const configStyle = getComputedStyle(document.querySelector('.config-link'));
       const separatorLeft = row.getBoundingClientRect().left + parseFloat(getComputedStyle(row, '::after').left);
+      const separatorRight = row.getBoundingClientRect().right - parseFloat(getComputedStyle(row, '::after').right);
       return {height:row.getBoundingClientRect().height,
         metadataBelowTitle:metadata.top >= title.bottom - 1,
-        metaLeft:meta.left,titleLeft:title.left,separatorLeft,
+        metaLeft:meta.left,titleLeft:title.left,separatorLeft,separatorRight,search:[search.left,search.right],
         markerRight:row.getBoundingClientRect().left + parseFloat(getComputedStyle(row, '::before').left) + parseFloat(getComputedStyle(row, '::before').width),
         rankTextLeft:rankText.getBoundingClientRect().left,
         brandLeft:document.querySelector('.brand-icon').getBoundingClientRect().left,
@@ -166,7 +170,18 @@ async fn responsive_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
             - 8.0)
             .abs()
             <= 1.0,
-        "desktop rows should share the extra 8px inset used on mobile: {desktop_density}"
+        "the widest rank keeps the extra 8px inset used on mobile: {desktop_density}"
+    );
+    assert!(
+        (desktop_density["separatorLeft"].as_f64().unwrap_or_default()
+            - desktop_density["search"][0].as_f64().unwrap_or(f64::MAX))
+        .abs()
+            < 0.5
+            && (desktop_density["separatorRight"].as_f64().unwrap_or_default()
+                - desktop_density["search"][1].as_f64().unwrap_or(f64::MAX))
+            .abs()
+                < 0.5,
+        "a row's rule and highlight are exactly as wide as the search field: {desktop_density}"
     );
     assert!(
         (desktop_density["markerRight"].as_f64().unwrap_or_default()

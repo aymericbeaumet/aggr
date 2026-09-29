@@ -316,25 +316,23 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .row {
   --row-divider: var(--faint);
   --row-inset: 1.25rem;
-  /* Rows bleed past the column by this much; the rule and the new-entry highlight stop at the
-     column edge, flush with the search field, and the copy keeps the same clearance from the
-     rule's end as from its start. */
+  /* Rows bleed past the column by this much, so their whole width answers a click or a tap. The
+     rule and the new-entry highlight stop at the column's edges, exactly as wide as the search
+     field, and the copy keeps the same clearance inside them on both sides. */
   --row-bleed: 0.75rem;
   --rank-font: 0.875rem/1.4 var(--mono);
-  --row-rule-start: calc((var(--row-inset) - var(--rank-indent, 0ch) + 3px) / 2);
-  --row-rule-end: var(--row-bleed);
   position: relative;
   isolation: isolate;
   margin-inline: calc(-1 * var(--row-bleed));
-  padding: var(--row-padding) calc(var(--row-rule-end) + var(--row-inset) - var(--row-rule-start)) var(--row-padding) var(--row-inset);
+  padding: var(--row-padding) var(--row-inset);
   scroll-margin-block: 4rem 6rem;
 }
+/* The selection bar sits just outside the column, meeting the start of the rule. */
 .row::before {
   content: "";
   position: absolute;
   inset: 0 auto 0 0;
-  inset-inline-start: calc(var(--row-rule-start) - 3px);
-  font: var(--rank-font);
+  inset-inline-start: calc(var(--row-bleed) - 3px);
   width: 3px;
   background: var(--warm);
   opacity: 0;
@@ -345,8 +343,7 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
   content: "";
   position: absolute;
   inset-block: 0;
-  inset-inline: var(--row-rule-start) var(--row-rule-end);
-  font: var(--rank-font);
+  inset-inline: var(--row-bleed);
   pointer-events: none;
 }
 .row::after {
@@ -372,6 +369,11 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .row.is-selected .title:focus-visible { background: transparent; }
 .row:not(.is-selected) .title:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; background: transparent; }
 .row-content { display: flex; align-items: flex-start; gap: 0.75rem; }
+/* A rank hangs left by the digits it has beyond one, and a list says how many its widest rank has
+   in `--rank-indent`. The copy moves right by as much, so the widest rank keeps a single digit's
+   clearance inside the highlight. Set in the rank's own font, this spacer measures those digits
+   exactly; the negative margin takes back the gap the spacer adds. */
+.row-content::before { content: ""; flex: none; margin-inline-end: calc(var(--rank-indent, 0ch) - 0.75rem); font: var(--rank-font); }
 html:not([data-thumbnails="hide"]) .row-content { min-height: var(--preview-size); }
 .row-copy { flex: 1; min-width: 0; }
 .row-heading {
@@ -1037,6 +1039,7 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   :is(a, button, summary, [role="button"]) { -webkit-tap-highlight-color: transparent; }
   .feed-search input[type="search"] { font-size: 1rem; }
   .row .rank { display: none; }
+  .row-content::before { display: none; }
   .row-heading { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }
   html .row .row-copy > :is(.meta, .excerpt, .search-excerpt) { padding-left: 0; }
   .row { --mobile-preview-size: 3rem; min-height: var(--tap-target); padding-block: max(var(--row-padding), 0.625rem); }
