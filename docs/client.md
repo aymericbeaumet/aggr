@@ -28,7 +28,9 @@ response falls back to ordinary navigation, and without JavaScript every link is
 
 Everything else is the platform. The reading progress bar and the folding article header are
 scroll-driven animations, with a small script standing in where scroll timelines or `calc-size()`
-are missing. Rows open
+are missing. The article header spans the window like the navigation above it, so a wide table
+that borrows the page margins never shows beside it; the page clips what reaches past a classic
+scrollbar rather than scrolling sideways. Rows open
 through a stretched link, so modifier and middle clicks behave natively. Keyboard help is a
 `<dialog>` opened by an invoker command. Anything without universal support sits behind
 `@supports` or a feature check and degrades to plain HTML.

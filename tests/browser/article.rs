@@ -231,7 +231,8 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         const titleStyle = getComputedStyle(title);
         const initial = {headTop:head.getBoundingClientRect().top,titleTop:title.getBoundingClientRect().top,titleLeft:title.getBoundingClientRect().left,
           mainTop:main.getBoundingClientRect().top,mainPadding:getComputedStyle(main).paddingTop,
-          mainPaddingLeft:parseFloat(getComputedStyle(main).paddingLeft),
+          // The page is as wide as the window; the gutter is what the column keeps inside it.
+          mainPaddingLeft:parseFloat(getComputedStyle(main).paddingLeft)-Math.max(0,(main.clientWidth-parseFloat(getComputedStyle(main).getPropertyValue('--max'))*parseFloat(getComputedStyle(document.documentElement).fontSize))/2),
           headPaddingTop:parseFloat(headStyle.paddingTop),headPaddingBottom:parseFloat(headStyle.paddingBottom),
           titleMarginBottom:parseFloat(titleStyle.marginBottom),
           topHeight:top.getBoundingClientRect().height,topOffset:getComputedStyle(document.documentElement).getPropertyValue('--top-nav-offset')};
@@ -696,7 +697,7 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         await frame(); await frame(); await frame();
         const indicator = head.querySelector('.itemhead-progress'), line = getComputedStyle(indicator);
         return {progress:new DOMMatrixReadOnly(line.transform).a,
-          fill:indicator.getBoundingClientRect().width / head.getBoundingClientRect().width, transition:line.transitionDuration,
+          fill:indicator.getBoundingClientRect().width / innerWidth, transition:line.transitionDuration,
           expected:scrollY / (document.documentElement.scrollHeight - innerHeight)};
       }
       (async () => done({top:await sample(0),quarter:await sample(.25),half:await sample(.5),
@@ -743,9 +744,15 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         window.scrollTo(0, (document.documentElement.scrollHeight - innerHeight) / 2);
         await frame(); await frame(); await frame();
         const bar = head.querySelector('.itemhead-progress'), fade = head.querySelector('.itemhead-fade');
+        const box = head.getBoundingClientRect(), surface = getComputedStyle(head, '::before');
+        const barBox = bar.getBoundingClientRect(), fadeBox = fade.getBoundingClientRect();
         done({progress: new DOMMatrixReadOnly(getComputedStyle(bar).transform).a,
-          height: bar.getBoundingClientRect().height, fade: Number(getComputedStyle(fade).opacity),
-          gap: fade.getBoundingClientRect().top - bar.getBoundingClientRect().bottom});
+          height: barBox.height, fade: Number(getComputedStyle(fade).opacity),
+          gap: fadeBox.top - barBox.bottom,
+          page: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth,
+          edges: {surface: [box.left + parseFloat(surface.left), box.right - parseFloat(surface.right)],
+            bar: [barBox.left, barBox.left + barBox.width / new DOMMatrixReadOnly(getComputedStyle(bar).transform).a],
+            fade: [fadeBox.left, fadeBox.right]}});
       })();
     "#,
             vec![],
@@ -764,6 +771,18 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
             && reduced["gap"].as_f64().unwrap_or(f64::MAX).abs() < 1.0,
         "reading progress stays visible and follows the scroll under reduced motion: {reduced}"
     );
+    // The header spans the page rather than the reading column, and reaching past the column
+    // does not let the page scroll sideways.
+    let page = reduced["page"].as_f64().context("page width")?;
+    for layer in ["surface", "bar", "fade"] {
+        let edges = &reduced["edges"][layer];
+        assert!(
+            edges[0].as_f64().unwrap_or(f64::MAX) <= 0.5
+                && edges[1].as_f64().unwrap_or_default() >= page - 0.5,
+            "the header's {layer} must span the page: {reduced}"
+        );
+    }
+    assert_eq!(reduced["scrollWidth"].as_f64(), Some(page), "{reduced}");
     client.execute("window.scrollTo(0,520)", vec![]).await?;
     let header_reads = client
         .execute_async(

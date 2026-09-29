@@ -424,10 +424,15 @@ html:not([data-thumbnails="hide"]) .row-content { min-height: var(--preview-size
 .meta .published-date { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .meta .reading-stats { white-space: nowrap; }
 .item { overflow-anchor: none; font-size: var(--reading-size); max-width: var(--reading-measure); margin-inline: auto; }
+/* An article's page is as wide as the window, so its header can span it the way the navigation
+   above does; the margins that centred the column become padding and leave the same content box,
+   the one every width inside is measured from. */
 body[data-kind="item"] .main {
+  --page-gutter: 1.25rem;
+  max-width: none;
   padding-top: 0;
-  padding-left: max(1.25rem, env(safe-area-inset-left));
-  padding-right: max(1.25rem, env(safe-area-inset-right));
+  padding-left: max(var(--page-gutter), env(safe-area-inset-left), (100% - var(--max)) / 2 + var(--page-gutter));
+  padding-right: max(var(--page-gutter), env(safe-area-inset-right), (100% - var(--max)) / 2 + var(--page-gutter));
 }
 .itemhead { position: sticky; top: var(--top-nav-offset); z-index: 3; isolation: isolate; width: 100%; max-width: none; margin: 0 0 1.75rem; padding: calc(var(--header-padding-top, 1.5rem) * (1 - var(--header-progress, 0)) + 0.6rem * var(--header-progress, 0)) 0 calc(var(--header-padding-bottom, 0.7rem) * (1 - var(--header-progress, 0)) + 0.5rem * var(--header-progress, 0)); background: var(--bg); }
 .itemhead::before { content: ""; position: absolute; z-index: -1; inset: 0; background: var(--bg); box-shadow: 0 1px 0 var(--faint); }
@@ -435,6 +440,14 @@ body[data-kind="item"] .main {
    and blurs out gradually rather than meeting the bar at a hard edge. */
 .itemhead-progress { position: absolute; left: 0; bottom: -2px; width: 100%; height: 2px; background: var(--warm); transform: scaleX(0); will-change: transform; transform-origin: left; pointer-events: none; }
 .itemhead-fade { position: absolute; top: calc(100% + 2px); left: 0; width: 100%; height: 2.75rem; background: linear-gradient(to bottom, var(--bg), color-mix(in srgb, var(--bg) 55%, transparent) 40%, transparent); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); -webkit-mask-image: linear-gradient(to bottom, #000 20%, transparent); mask-image: linear-gradient(to bottom, #000 20%, transparent); opacity: min(1, calc(var(--header-progress, 0) * 8)); pointer-events: none; }
+/* The header's surface, edge and fade span the page, so a wide table borrowing the page margins
+   never shows beside it. They reach a little past a classic scrollbar's side; the page clips that
+   rather than letting it scroll. */
+@supports (overflow-x: clip) {
+  body[data-kind="item"] .main { overflow-x: clip; }
+  .itemhead::before { inset-inline: calc(50% - 50vw); }
+  .itemhead-progress, .itemhead-fade { left: calc(50% - 50vw); width: 100vw; }
+}
 .itemhead { --itemhead-title-size: clamp(1.65rem, 4vw, 2.25rem); }
 .itemhead h1 { max-width: none; font-size: var(--itemhead-title-size); line-height: 1.2; margin: 0 0 calc(var(--header-title-gap, 0.65rem) * (1 - var(--header-progress, 0)) + 0.2rem * var(--header-progress, 0)); letter-spacing: -0.025em; overflow-wrap: anywhere; text-wrap: pretty; }
 .itemhead-title { display: block; transform: scale(var(--title-scale)); transform-origin: top left; }
@@ -666,10 +679,7 @@ body[data-kind="item"] .main {
 @media (min-width: 40.0625rem) {
   body { font-size: 16px; line-height: 1.5; }
   .main { padding-top: 0.55rem; }
-  body[data-kind="item"] .main {
-    padding-left: max(2rem, env(safe-area-inset-left));
-    padding-right: max(2rem, env(safe-area-inset-right));
-  }
+  body[data-kind="item"] .main { --page-gutter: 2rem; }
   .page-header { margin-bottom: 0.6rem; }
   .views { margin-block: 0.4rem; padding-block: 0.2rem; }
   .itemhead { margin-bottom: 2.25rem; --header-padding-top: 2rem; --header-padding-bottom: 0.9rem; --header-title-gap: 0.75rem; }
