@@ -1137,11 +1137,7 @@ fn avif_asset(candidate: &Candidate, bytes: Vec<u8>, limits: &MediaLimits) -> Re
     // A flat stand-in keeps every promise the reader depends on: a valid inline preview that waits
     // for no request, and a colour holding the space until the picture itself arrives. Only the
     // likeness is missing, and the picture behind it is the publisher's own bytes.
-    let stand_in = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
-        4,
-        4,
-        image::Rgb([122, 122, 126]),
-    ));
+    let stand_in = avif_stand_in();
     Ok(Asset {
         source_url: candidate.url.to_string(),
         source_hash: crate::model::sha1_hex(candidate.url.as_str().as_bytes()),
@@ -1255,6 +1251,33 @@ mod avif_tests {
             asset.placeholder.data_url
         );
     }
+
+    #[test]
+    fn an_archived_avif_is_stored_and_restored_as_it_arrived() {
+        let bytes = avif(1200, 800);
+        let candidate = Candidate {
+            url: Url::parse("https://example.com/picture.avif").unwrap(),
+            alt: None,
+        };
+        let asset = avif_asset(&candidate, bytes.clone(), &MediaLimits::default()).unwrap();
+        let metadata = asset.metadata("2026-09-21-post");
+        assert!(metadata.original.file.ends_with(".avif"), "{metadata:?}");
+        assert!(metadata.is_valid_for("2026-09-21-post"), "{metadata:?}");
+        assert_eq!(
+            validate_stored(&bytes, &metadata.original, StoredKind::Master).unwrap(),
+            "avif"
+        );
+        let restored = Asset::from_stored(&metadata, bytes.clone(), Vec::new()).unwrap();
+        assert_eq!(restored.master_bytes, bytes);
+        assert_eq!(restored.metadata("2026-09-21-post"), metadata);
+
+        // Only a master: a rendition is always lossless WebP.
+        assert!(validate_stored(&bytes, &metadata.original, StoredKind::Rendition).is_err());
+        // The size the metadata promises is the size the container states.
+        let mut wrong = metadata.original.clone();
+        wrong.width = 1300;
+        assert!(validate_stored(&bytes, &wrong, StoredKind::Master).is_err());
+    }
 }
 
 fn prepare_rendition(
@@ -1337,6 +1360,8 @@ fn stored_identity_with_hash(
         ImageFormat::Jpeg if kind == StoredKind::Master => "jpg",
         ImageFormat::Png if kind == StoredKind::Master => "png",
         ImageFormat::Gif if kind == StoredKind::Master => "gif",
+        // Archived whole, as it arrived: see `avif_asset`.
+        ImageFormat::Avif if kind == StoredKind::Master => "avif",
         ImageFormat::WebP => "webp",
         _ => bail!("stored article image has an invalid format for its role"),
     };
@@ -1373,6 +1398,9 @@ fn decode_stored(
     limits: &MediaLimits,
 ) -> Result<DecodedStored> {
     let (format, extension, hash) = stored_identity(bytes, file, kind, limits)?;
+    if format == ImageFormat::Avif {
+        return decode_stored_avif(bytes, file, extension, hash, limits);
+    }
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     reader.limits(decoder_limits(limits));
     let decoder = reader
@@ -1411,8 +1439,44 @@ fn decode_stored_master(
                 .context("reading stored article image metadata")?;
             decode_stored_with_decoder(decoder, file, extension, hash, false, limits)
         }
+        ImageFormat::Avif => decode_stored_avif(bytes, file, extension, hash, limits),
         _ => bail!("stored article image has an invalid master format"),
     }
+}
+
+/// An archived AVIF is checked the way it was archived: by the size its container states, since
+/// there is no decoder to read its pixels. The flat stand-in `avif_asset` gave it holds its place,
+/// and an ICC mark keeps it from ever being given renditions it could not have produced.
+fn decode_stored_avif(
+    bytes: &[u8],
+    file: &ImageFile,
+    extension: &'static str,
+    hash: String,
+    limits: &MediaLimits,
+) -> Result<DecodedStored> {
+    let (width, height) = avif_dimensions(bytes).context("reading stored AVIF image size")?;
+    validate_stored_dimensions(width, height, limits)?;
+    ensure!(
+        (width, height) == (file.width, file.height),
+        "stored article image dimensions do not match metadata"
+    );
+    Ok(DecodedStored {
+        extension,
+        image: avif_stand_in(),
+        original_color: ExtendedColorType::Rgb8,
+        has_icc: true,
+        hash,
+        animated: false,
+    })
+}
+
+/// The flat picture an AVIF shows until its own bytes load: a placeholder and a colour, no likeness.
+fn avif_stand_in() -> DynamicImage {
+    DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+        4,
+        4,
+        image::Rgb([122, 122, 126]),
+    ))
 }
 
 fn decode_stored_with_decoder(

@@ -964,6 +964,7 @@ pub fn content_type(path: &Path) -> &'static str {
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
         Some("ico") => "image/x-icon",
         Some("woff2") => "font/woff2",
         Some("woff") => "font/woff",
@@ -1398,6 +1399,10 @@ mod tests {
             "text/html; charset=utf-8"
         );
         assert_eq!(content_type(Path::new("x.json")), "application/json");
+        assert_eq!(
+            content_type(Path::new("items/a/post.image-0123456789ab.avif")),
+            "image/avif"
+        );
         assert_eq!(
             content_type(Path::new("assets/documents/paper.pdf")),
             "application/pdf"
