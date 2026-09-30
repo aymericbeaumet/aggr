@@ -1,0 +1,26 @@
+<div id="readability-page-1" class="page"><div>
+				
+<p>The enterprise and organization <a href="https://github.blog/changelog/2026-07-17-repository-level-github-copilot-usage-metrics-generally-available/">repository-level Copilot usage metrics</a> reports now break down how long pull requests spend in each stage of review. A new <code>pull_request_review_times</code> array on each <code>repos-1-day</code> row reports a median and a 90th percentile for the time from ready for review to first review, first review to final review, and final review to merge.</p>
+<h3 id="whats-new"><a href="#whats-new">What’s new</a></h3>
+<p>Each entry in <code>pull_request_review_times</code> includes:</p>
+<ul>
+<li><strong><code>authored_by</code> and <code>reviewed_by</code></strong>: Who opened and who reviewed the pull requests in this entry. Both are <code>human</code> in this release.</li>
+<li><strong><code>total_merged</code></strong>: The number of qualifying pull requests merged in the repository that day.</li>
+<li><strong><code>median_minutes_ready_to_first_review</code> and <code>p90_minutes_ready_to_first_review</code></strong>: Time from the pull request becoming ready for review to its first review.</li>
+<li><strong><code>median_minutes_first_to_final_review</code> and <code>p90_minutes_first_to_final_review</code></strong>: Time between the first and final review.</li>
+<li><strong><code>median_minutes_final_review_to_merge</code> and <code>p90_minutes_final_review_to_merge</code></strong>: Time from the final review to merge.</li>
+</ul>
+<p>Durations are in minutes and attributed to the day the pull request merged. The existing <code>pull_requests</code> fields are unchanged.</p>
+<h3 id="why-this-matters"><a href="#why-this-matters">Why this matters</a></h3>
+<p>Teams can already see when pull requests take a long time to merge, but not where the time goes. Splitting the wait into three stages shows whether a pull request is waiting for someone to look at it, waiting on back-and-forth between reviewers, or sitting approved and unmerged. Each of those points to a different fix, and the 90th percentile beside the median shows when a handful of slow pull requests is driving the delay.</p>
+<h3 id="important-notes"><a href="#important-notes">Important notes</a></h3>
+<ul>
+<li><strong>Availability:</strong> Present in the enterprise and organization <code>repos-1-day</code> reports.</li>
+<li><strong>What is counted:</strong> Pull requests that a person opened and at least one other person reviewed. Only human reviews are timed. Reviews from Copilot code review, other bots, and the author are ignored, so a pull request reviewed by both a person and Copilot code review is still included. As a result, <code>pull_request_review_times[].total_merged</code> is usually lower than <code>pull_requests.total_merged</code>, which also counts pull requests merged without any reviews.</li>
+<li><strong>No backfill:</strong> Data builds forward from the release date, so early days will be thin. Pull requests that became ready for review before September 21, 2026 are left out of this section but still count toward <code>pull_requests.total_merged</code>.</li>
+<li><strong>A quiet day is an empty array, not a zero:</strong> The array is <code>[]</code> on days a repository merged no qualifying pull requests. The first-to-final review stage is <code>0</code> when pull requests receive a single review.</li>
+<li><strong>Access:</strong> Enterprise owners and billing managers, organization owners, and anyone with a custom organization or enterprise role that grants the <code>View Copilot Metrics</code> permission can access these reports. The Copilot usage metrics policy must be enabled.</li>
+</ul>
+<p>Visit the <a href="https://docs.github.com/rest/copilot/copilot-usage-metrics">Copilot usage metrics API documentation</a> to get started.</p>
+
+			</div></div>

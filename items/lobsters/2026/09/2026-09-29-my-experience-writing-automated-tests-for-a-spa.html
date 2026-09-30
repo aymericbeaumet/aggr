@@ -1,0 +1,65 @@
+<div id="readability-page-1" class="page"><div><p>I think I managed to build quite a nice and interesting test suite recently; I’ll do my best to describe it in this post.</p><p>It’s basically just a bunch of notes, and the code is not open-source, but I think these explanations can have more value than raw source code, especially if you want to adapt some of these ideas for one of your own projects.</p><h2>The application</h2><p>Let’s start with a quick description of <em>what</em> we want to actually test, because as you can imagine, this is crucial for everything else.</p><p><a href="https://reecoute.fr/">Réécoute</a> is a single-page web application (SPA), i.e., a website rendered with client-side JavaScript<sup><a href="#note1">1</a></sup>. It’s mainly an audio player, optimized for long recordings (typically 2 or 3 hours), with quite a few interactive features that couldn’t work with server-side rendering alone. It uses React, and the client-side JavaScript communicates with a single server by sending JSON over HTTP. Nothing special.</p><figure><a href="https://reecoute.fr/_static_assets/screenshot.png"><img src="https://reecoute.fr/_static_assets/screenshot.png"></a><figcaption>The main view of the app, the audio player.</figcaption></figure><p>Now, how can we test that? Unlike a classic server-side rendered website, the complexity is split into two roughly equal parts between the backend and the client-side JavaScript. Ideally, we should test both together in a realistic fashion to exercise all the chatter between the client and the server. I’ve made the extreme choice of testing the app as a whole, using a real web browser.</p><p>The project also has a few backend-only tests that I won’t discuss here because there is really nothing special about them.</p><h2>The main test suite</h2><p>The main test suite is written with <a href="https://playwright.dev/">Playwright</a>, running against a real web browser. It consists of about 20 files, each containing between 1 and 4 test cases.</p><p>Regarding my personal preferences: I tend to write rather lengthy test cases that describe full user journeys, rather than small tests for individual steps. For an e-commerce website, for example, I would likely write a test that adds an item to the cart, signs up, goes to the checkout page, and actually purchases the item: it’s the most critical user journey for the business, and you do not want it to break. Of course, I also write smaller, specialized tests for things like sign-up, but IMO these tend to be somewhat less critical than the end-to-end flows.</p><h2>Data isolation between tests</h2><p>Tests are not jailed in isolated environments, because:</p><ul><li>When using something like Playwright, this is very complicated to achieve with database transactions;</li><li>I <i>could</i> spawn an instance of the backend for each test, but it would be much slower, so I’m not going to do that;</li><li>Running each test on a tiny subset of the dataset does not help catch database queries that only slow down when there’s a lot of data;</li><li>It’s simply more complicated and less realistic than writing tests that run against the same database without disturbing other tests.</li></ul><p>Basically, I write tests just like anyone would use the app in production: each test creates its own objects without relying on any existing data, never touches data it did not create, and never cleans up anything. Data just accumulates. This strategy works really well for apps like Réécoute, where nothing is actually public.</p><p>I use a few helper functions to create data (<code>createUser</code>, <code>createBand</code>, <code>createSession</code>, etc.). Note that I do not use before/after hooks at all.</p><h2>Mocks</h2><p>The test suite uses two kinds of mocks:</p><ul><li>Each external service has its own global mock: things like S3, Stripe, Twilio, etc. I tend to write one large, realistic mock for each of them. It’s much faster and more reliable than using actual third-party services, and it allows running the tests without an internet connection. These mocks are enabled by default and used across all tests.</li><li>For some complicated cases (emails and passkeys, especially), I have a few (2 or 3?) custom code paths enabled by test-only parameters/HTTP headers in API queries. These parameters are ignored by the backend in production builds.</li></ul><p>(I really hate when a test suite forces you to write custom mocks for every single test…)</p><p>The most complex mock I wrote for this project is probably the one for passkeys: I couldn’t get actual passkeys to work in headless Chromium, so I hacked together a fake client around the <a href="https://docs.rs/passkey/latest/passkey/"><code>passkey</code> crate</a>. But it is very specific and I am not very proud of it, so I won’t go into details here!</p><h2>Speed</h2><p>As you can imagine, browser automation is much slower than simply parsing HTTP response bodies, so without parallelism it can quickly become unmanageable. This is why Playwright runs test files in parallel by default. With Réécoute, I went a step further by enabling <code>fullyParallel</code> in the Playwright config, so tests within the same file also run concurrently. However, the most important factor here is the app itself, since a test suite can’t be more efficient than the app being tested! To give you an idea, the Playwright suite currently completes in just over 20 seconds on my fanless M3 MacBook Air.</p><p>Also, Playwright supports all major web browsers and runs your tests across 3 or 4 of them by default. I changed the settings to only use Chromium: modern browsers behave very similarly, this makes the suite 3 to 4 times faster to run, and it is nearly as effective.</p><h2>Reliability</h2><p>Here’s the main downside to browser testing, especially for SPAs: because we are testing an entire app <i>and</i> an entire browser, it’s difficult to make tests perfectly reliable. Yet with a large test suite, you <strong>must</strong> have high reliability, because <a href="https://en.wikipedia.org/wiki/Probability#Independent_events">the more tests you have, the less reliable the overall suite becomes</a>, and re-running failed suites is expensive.</p><p>There is a trick here—it’s not pretty, but it works well: Playwright has a <a href="https://playwright.dev/docs/api/class-testconfig#test-config-retries"><code>retries</code></a> option, which I set to 2 in CI. When a test fails, it is retried individually up to 2 times. In practice, tests in Réécoute’s suite rarely fail and retry. I could probably eliminate flakes entirely if I spent a few hours on it, but I’m not sure it's worth the effort right now.</p><p>In fact, the main issue I faced with reliability was related to dual server-side/client-side rendering, in other words, <i>hydration</i>. When a user navigates to a page with a text input field, the browser first fetches the server-side rendered HTML, and then downloads and runs the JavaScript that replaces the page. But if the user starts typing into the input <i>before</i> React has initialized, the client-side code will ignore those edits. To prevent this issue, all inputs are disabled by default and are only enabled once their React component is actually ready. Here’s how I did it:</p><pre><code>export const useReady = (): boolean =&gt; {
+  const [ready, setReady] = useState(false);
+  useEffect(() =&gt; {
+    setTimeout(() =&gt; setReady(true), 1);
+  }, []);
+  return ready;
+};
+
+const MyPageWithAForm = () =&gt; {
+  const ready = useReady();
+  …
+
+  return (
+    &lt;form&gt;
+      &lt;input type="text" disabled={!ready} value={…} onChange={…} /&gt;
+    &lt;/form&gt;
+  );
+}</code></pre><p>I rely on the fact that Playwright waits until the input is enabled before filling it (just like a real user!). Another option would have been to make all forms submittable without JavaScript, but that would have been more work, and the app is kind of pointless without JavaScript anyway.</p><h2>Developer experience</h2><p>The interactive Playwright UI is great; I use it a lot:</p><figure><a href="https://reecoute.fr/_static_assets/playwright_ui_screenshot.png"><img src="https://reecoute.fr/_static_assets/playwright_ui_screenshot.png"></a><figcaption>playwright --ui. I tend to write tests against the French version of the app, I know 🙃</figcaption></figure><h2>Continuous integration</h2><p>This is where Playwright really shines: when a test fails, it creates a <code>playwright-report</code> directory containing HTML files that embed the <b>same</b> UI as the interactive Playwright runner, completely standalone! When tests fail in CI, you can simply upload this directory to your favorite S3-compatible cloud storage. It makes troubleshooting easy because the trace files include console logs, network request/response bodies, screenshots, and more.</p><p>Running a headless browser in a CI environment is not always straightforward. I use the following Dockerfile:</p><pre><code>FROM --platform=linux/amd64 node:22.15.0-bookworm
+
+RUN apt-get update &amp;&amp; \
+  apt-get install -y --no-install-recommends socat &amp;&amp; \
+  rm -rf /var/lib/apt/lists/*
+COPY package.json package-lock.json playwright.config.js ./
+RUN npm ci
+RUN npx playwright install-deps
+RUN npx playwright install chromium
+COPY . .
+
+ENTRYPOINT ["socat", "TCP4-LISTEN:4000,fork,reuseaddr", "TCP4:reecoute_test:4000"]</code></pre><p>This image only runs Playwright; the app being tested runs in a separate container. Honestly, I don’t remember why I decided to use <code>socat</code> here—there’s probably a way to make it work without it<sup><a href="#note2">2</a></sup>.</p><h2>Miscellaneous tricks I occasionally use</h2><h3>API tests using Playwright</h3><p>It’s not what Playwright was primarily designed for, but you can write API-only tests with it, using <code>request()</code>, and it works just fine.</p><h3>Testing emails</h3><p>I implemented a test-only API route that returns the latest emails for a recipient. It is used like this:</p><pre><code>/** Returns emails, newest first */
+export const listEmails = async ({ request, recipient_address }) =&gt; {
+  const res = await request.post(
+    "/_api/test_helpers/list_emails",
+    { data: { recipient_address } },
+  );
+  expect(res.ok()).toBeTruthy();
+  const { emails } = await res.json();
+  return emails;
+};
+
+const readOtpEmail = async ({ page, recipient_address }) =&gt; {
+  const emails = await listEmails({ request: page.request, recipient_address });
+  const email = emails[0];
+  expect(email.subject).toMatch(/^Your code is [0-9]{6} - Réécoute$/);
+  const code_match = /&lt;h2&gt;([0-9]{6})&lt;\/h2&gt;/.exec(email.html_part);
+  expect(code_match).toBeTruthy();
+  return code_match[1];
+};</code></pre><p>The API route is disabled in production builds.</p><h3>Simulating mouse movements and clicks</h3><p>I managed to write this one:</p><pre><code>…
+// wait until the player is loaded
+await expect(page.getByRole("button", { name: "Play" })).toBeEnabled();
+await page.mouse.move(800, 300);
+await page.mouse.down();
+await page.mouse.move(700, 300);
+await new Promise((r) =&gt; setTimeout(r, 100));
+await page.mouse.move(700, 300);
+await page.mouse.up();
+await page.getByRole("button", { name: "Select" }).click();
+// scroll
+await page.mouse.move(800, 300);
+await page.mouse.down();
+await page.mouse.move(600, 300);
+await new Promise((r) =&gt; setTimeout(r, 100));
+await page.mouse.move(600, 300);
+await page.mouse.up();
+await page.getByRole("button", { name: "Create a clip" }).click();
+…</code></pre><p>You may find it ugly, but it tests an important feature I really don't want to break. And believe it or not, despite the <code>setTimeout()</code>s, it is surprisingly reliable!</p><h2>Things that could be improved</h2><p>Test coverage isn't measured at the moment 🙃. However, the most critical user journeys and all the “happy paths” of the important features are tested. I don’t mind if obscure code paths aren't covered—I just don’t want any critical bugs.</p><p>I’d really like to set <code>retries</code> to zero in CI, and I don't think I'm far from that goal. I'm just too lazy to tackle it right now!</p><h3>Updates</h3><p>2026-09-29: added a note about hydration in the “Reliability” section.</p><hr><ol><li id="note1">In fact, Réécoute is <em>also</em> server-side rendered for speed, SEO, and the rare nerds who browse with JavaScript disabled. However, the primary features are unavailable without client-side rendering.</li><li id="note2">I can tell that it was my own decision to use socat—no LLM was involved here! It’s a great example of a situation where a comment would have helped…</li></ol></div></div>

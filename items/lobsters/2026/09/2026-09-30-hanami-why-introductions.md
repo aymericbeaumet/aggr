@@ -1,0 +1,186 @@
+---
+title: 'Hanami, Why?: Introductions'
+link: https://aaronmallen.me/writing/hanami-why-introductions
+source: lobsters
+published: 2026-09-30T15:55:21Z
+updated: 2026-09-30T15:55:21Z
+first_seen: 2026-09-30T17:56:37.314048Z
+authors:
+- aaronmallen.me via aaronmallen
+labels:
+- hanakai
+- hanami
+- ruby
+summary: Comments
+content: extracted
+html: 2026-09-30-hanami-why-introductions.html
+---
+
+I mentioned in my [Hello, world!](https://aaronmallen.me/writing/hello-world) post that I built this site using [Hanami](https://hanakai.org/hanami). This site may seem simple on the surface; it is, after all, just a blog. However, the backend is packed with features that help me day to day. I have built a tool that lets me cross-post to both Bluesky and Mastodon. I have a private journal where I can keep notes throughout the day. There is a custom analytics engine to provide me with insights on how well my blog posts are doing. There is a messaging backend that lets readers reach me through my contact form without cluttering my inbox. I have also built a task manager that syncs with both Linear and GitHub Issues and helps me track what I need to do. Most importantly, I have built an activity feed that captures my GitHub commits, journal entries, blog posts, and tasks. It helps me answer the question "What did I do between \_\_\_ and \_\_\_ dates?", which, believe it or not, is hard for me to answer on my own, even for last week. The application is open source, and you can find it on [GitHub](https://github.com/aaronmallen/aaronmallen.me).
+
+I chose Hanami for a few reasons. I had always felt trapped by Rails, which to me has a rigid way of doing things and makes you fight for anything you want to do differently. At one point I even started writing web applications in [Sinatra](https://sinatrarb.com/) for more freedom in how I built them. I had heard of Hanami, and had even experimented with some of the early 1.x versions, but it was not until RubyConf 2024 in Chicago that I was truly introduced to it. Today I am a maintainer on the [Hanakai team](https://hanakai.org/community) (the folks behind Hanami, dry-rb and ROM), and what better way to get to know the things you build than to use them? Hanami is **very** different from other web frameworks in the Ruby ecosystem. I thought it might be a good idea to go over some of these differences and why I think they are beneficial. So with that, I would like to introduce you to a new series I plan on doing over the coming weeks called "Hanami, Why?".
+
+## The Basics
+
+I think in order for us to have a fruitful conversation about Hanami, how it differs from other web frameworks, and what those differences mean, we need two things. First, we need to approach this with an open mind. As I mentioned, Hanami is **very** different, and I mean this in a good way. At best, you may come out of this series understanding that Hanami might actually scale better than alternatives in various circumstances. At worst, you will come out of this series with a new perspective on how things could be done differently within your own web applications. For either outcome, we must be open to difference. The other thing we will need is a basic understanding of how Hanami works. I will keep this segment high level, since the [Hanami documentation](https://hanakai.org/learn/hanami/v3.0/getting-started) covers the finer points well and we will dig deeper later in this series.
+
+Hanami does its best to push you toward tiny, single-purpose abstractions. There are several important abstractions in the Hanami ecosystem, but I think the four most important abstractions are [Actions](https://hanakai.org/learn/hanami/v3.0/actions), [Relations](https://hanakai.org/learn/hanami/v3.0/database/relations), Repos, and [Operations](https://hanakai.org/learn/hanami/v3.0/operations). Actions represent individual HTTP endpoints within your application. This can be daunting for some, as it means a simple set of CRUD operations is spread out amongst four separate classes. I will go into more detail in a future issue about how and why that is a good thing. Relations, repos and structs (plain data objects) are the "model" layer of a Hanami web application. Relations are the lowest level of the model layer and own the responsibility of querying your database. Repos are an optional, higher-level layer that sits on top of your relations. Repos can manage one or several relations and ensure you are not passing around a persistence layer by always returning structs. Lastly, you have operations. Operations are an implementation of the command pattern, powered by [dry-operation](https://hanakai.org/learn/dry/dry-operation/v1.1). Operations are the perfect place to perform complex mutations and receive a `Success` or `Failure` object in return.
+
+Beneath these sit lower-level system pieces that help with things like dependency injection. Thanks to [dry-system](https://hanakai.org/learn/dry/dry-system/v1.2) we can automagically inject instances of classes directly into our actions, relations, repos, and operations. This is typically done via the `Deps` module which gets included in your classes with a list of the dependencies you want to inject. This offers an additional layer of clarity on what dependencies a particular class relies on, as well as where those dependencies come from. We also have a robust typing system thanks to [dry-types](https://hanakai.org/learn/dry/dry-types/v1.8). We will go into more detail later in this series on how I use types to validate and normalize user inputs. Lastly, as I mentioned, our operations and our actions can both use `Success` and `Failure` results thanks to [dry-monads](https://hanakai.org/learn/dry/dry-monads/v1.8). In a moment I will show how these result objects, with pattern matching, simplify your mutations.
+
+A typical Hanami application might look a little something like this:
+
+```
+module MyApp
+  module Actions
+    module Users
+      class Create < Action
+        include Deps["operations.create_user"]
+        
+        before :validate_params
+        
+        params do
+          required(:user).filled(:hash) do
+            required(:email).filled(Types::EmailAddress)
+            required(:password).filled(:string, min_size?: 8)
+          end
+        end
+        
+        def handle(request, response)
+          case create_user.call(request.params.to_h)
+            in Success[user] then success_response(response, user)
+            in Failure[errors] then error_response(response, errors)
+          end
+        end
+        
+        private
+        
+        def error_response(response, errors)
+          response.status = :unprocessable_entity
+          response.format = :json
+          response.body = errors.to_json
+        end
+        
+        def success_response(response, user)
+          response.status = :created
+          response.format = :json
+          response.body = user.to_json
+        end
+        
+        def validate_params(request, response)
+          return if request.params.valid?
+          
+          halt 422, error_response(response, request.params.errors.to_h)
+        end
+      end
+    end
+  end
+end
+```
+
+Here we have an action which defines the shape of its parameters, validates them, then calls into the `CreateUser` operation to handle user creation. This ensures the action's sole responsibility is HTTP logic. If `CreateUser` returns success then we render the user object as JSON. If parameter validation fails or `CreateUser` returns failure then we render the errors as JSON and return an `unprocessable_entity` status.
+
+```
+module MyApp
+  module Operations
+    class CreateUser < Operation
+      include Deps[
+          "argon2.hasher",
+          "repos.user_repo"
+        ]
+      
+      def call(params)
+        step validate_user_email_unique(params.dig(:user, :email))
+        user_params = step build_user_params(params)
+        user_repo.create(user_params)
+      end
+      
+      private
+      
+      def build_user_params(params)
+        built_params = params[:user].slice(:email)
+        built_params[:password_digest] = hasher.call(params.dig(:user, :password))
+        Success(built_params)
+      end
+      
+      def validate_user_email_unique(email)
+        return Success() unless user_repo.email_exist?(email)
+        
+        Failure({ generic: "Something went wrong" })
+      end
+    end
+  end
+end
+```
+
+Here we have an operation that validates the user's email is unique, hashes the password, then creates the user. Note that we did not need to wrap the last call in `Success`, because [dry-operation](https://hanakai.org/learn/dry/dry-operation/v1.1) does this for us. We also inject an Argon2 hasher. It comes from a [provider](https://hanakai.org/learn/hanami/v3.0/app/providers), which we will cover in depth later in this series.
+
+```
+module MyApp
+  module Repos
+    class UserRepo < Repo
+      def create(params)
+        users.changeset(:create, **params).commit
+      end
+      
+      def email_exist?(email)
+        users.exist?(email:)
+      end
+    end
+  end
+end
+```
+
+Here we have a very simple repo class offering a method to create a user, and check if an email already exists.
+
+```
+module MyApp
+  module Relations
+    class Users < Relation
+      schema :users, infer: true do
+        attribute :email, Types::Normalized::EmailAddress
+      end
+    end
+  end
+end
+```
+
+Here we have our relation which currently does little besides infer its own schema from the `users` table and normalize our email address with a dry type. We will go into more detail on relations and types later in this series.
+
+```
+module MyApp
+  class Routes < Hanami::Routes
+    post "/users", to: "users.create"
+  end
+end
+```
+
+Finally, we have our router tying everything together and pointing the `/users` endpoint at our action. Now, this is a **very** simple example, and yes, it is riddled with security holes. We will cover more advanced use cases throughout this series. Still, I hope it is enough to give you the gist of how I structure a Hanami application. Keep in mind that a lot of these abstractions are optional. For example, I could have skipped the operation and just created my user directly in the action, or I could skip the repo and call my relations directly. Hanami gives you the freedom to choose how you write your application.
+
+## Rough Edges
+
+Throughout this series, I will do my best to give an honest assessment of some of the rough edges you may or may not encounter in your adventures with Hanami. We will start with some of the more general rough edges, or what I would consider barriers to entry. Most of these do not bother me, and I think most of them are easy to overcome, but I know they will bother some of you.
+
+One of the first rough edges you will hit with Hanami is that there will be a lot of "roll your own" solutions. If you are on a team with a deadline and you need an admin panel or authentication next week, this will sting. I personally view this as a net positive. The shorter your dependency tree, the lower your risk. Everything on this site, from GitHub sign-in to cross-posting, is something I built myself, and I understand every piece of it because of that. One of the main selling points of Hanami is its community, and there is ample opportunity for you to get involved in that community. If you find yourself rolling your own solution and you feel it would be useful to the community at large, extract it and publish it as a gem! I myself have taken some of the things I often build and published them as gems for the community, like [phlex-hanami](https://github.com/aaronmallen/phlex-hanami) and [hanami-settings-stores](https://github.com/aaronmallen/hanami-settings-stores).
+
+Another rough edge you may hit is finding resources for some of the more complex edge cases. Hanami does not have fifteen years of blog posts and Stack Overflow answers behind it, and your AI coding assistant has seen a lot less Hanami code than Rails code. If you are used to searching your way out of every problem, this will slow you down at first. I would encourage you to reach out via Discord, the discussion forum, a GitHub issue, whatever. Someone on the Hanami team or in the Hanami community will help you answer any question you may have. Pay it forward and submit a pull request to update documentation on whatever you got stuck on.
+
+If you want to dive in and start experimenting on your own, there are some good resources you should check out.
+
+- [Hanami documentation](https://hanakai.org/learn/hanami/v3.0/getting-started)
+- [Hanami Mastery](https://hanamimastery.com/)
+- [Hanami Forums](https://discourse.hanakai.org/)
+- [decafsucks](https://github.com/decafsucks/decafsucks)
+- [twist](https://github.com/radar/twist-v2)
+- [palaver](https://github.com/katafrakt/palaver)
+- [aaronmallen.me](https://github.com/aaronmallen/aaronmallen.me)
+
+## Acknowledgements
+
+I know, I know, typically you would save acknowledgements until the very end of a series. I would like to do things a bit backwards in this case. As I mentioned, one of the primary selling points of Hanami **is** the community being built around it. As a member of the Hanakai team, I have been blessed with the privilege of meeting some of the most compassionate and talented people I have ever worked with. A super nice, super quiet dude named [Sean Collins](https://github.com/cllns) was giving a workshop on how to Hanami at RubyConf. It was not until Sean's workshop that things started to click for me. I also briefly met [Tim Riley](https://timriley.info/). Both of them were super nice and, more importantly, helpful. I cannot think of a question they would not have answered.
+
+Now, I do not make it a habit to idolize people. I think idolizing people is actually a very dangerous practice to fall into. I do not idolize Tim, but I do **adore** Tim. Since RubyConf, Tim and I have grown close. Tim is a man I can be vulnerable with, and that is rarer than it should be. Tim is a man with community at the forefront of his mind in **all** things. Tim fosters relationships between the people on his team, as well as between his team and the community we serve. Tim genuinely wants to help folks and reaches out to open hearts and minds. I could not ask for a better lead on a project I am passionate about.
+
+The community itself has been overwhelmingly pleasant. We have a fairly active [Discord](https://discord.com/invite/KFCxDmk3JQ) community, and an even more active [discussion forum](https://discourse.hanakai.org/). Folks seem genuinely curious: they ask questions and share what they are working on. [Adam Lassek](https://github.com/alassek) is a Hanami veteran and is usually around when you need a question answered in a pinch. All in all, I think the people building and building with Hanami are a joy to work with. I have been having so much fun since I joined the Hanakai team.
+
+In closing, I hope you will stay with me on this journey. In the next issue, we will dig into the system pieces that hold a Hanami app together, like dependency injection. From there, I plan to cover actions, the model layer, operations and providers, though I expect that list to grow as we go. If there is something you would like me to cover, reach out and let me know. I look forward to seeing you in the next issue.

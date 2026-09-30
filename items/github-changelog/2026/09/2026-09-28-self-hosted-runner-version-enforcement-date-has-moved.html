@@ -1,0 +1,12 @@
+<div id="readability-page-1" class="page"><div>
+				
+<p>The enforcement date for <a href="https://github.blog/changelog/2026-06-12-github-actions-minimum-version-enforcement-timeline-for-self-hosted-runners/">GitHub Actions minimum version requirements for self-hosted runners</a> on GitHub Enterprise Cloud has changed. The change ships Monday, September 28, 2026, and full enforcement now begins Tuesday, September 29, 2026. This is instead of the date that was previously announced.</p>
+<p>The requirements themselves are unchanged:</p>
+<ul>
+<li>Self-hosted runners below version <code>2.329.0</code> won’t be able to register or reregister.</li>
+<li>Existing runners below the minimum version required to execute workflow jobs (which is a higher version than the registration minimum) will stop running jobs, even if they were previously registered.</li>
+</ul>
+<p>If you haven’t upgraded your self-hosted runners yet, do so before September 29, 2026 to avoid disruption to your workflows. See the <a href="https://docs.github.com/actions/hosting-your-own-runners">self-hosted runner documentation</a> for upgrade guidance. You can also use the new <a href="https://github.blog/changelog/2026-09-03-github-actions-early-september-2026-updates/#new-rest-api-for-runner-version-deprecations">REST API for runner version deprecations</a> to check the registration and runtime deprecation dates for any runner version and build automated alerts for fleets nearing their deadline.</p>
+<p>This shift only affects GitHub Enterprise Cloud. GitHub Enterprise Server isn’t impacted. Enforcement already began for GitHub Enterprise Cloud with Data Residency on July 31, 2026.</p>
+
+			</div></div>

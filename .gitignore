@@ -1,0 +1,2 @@
+# aggr data branch. Interrupted atomic writes leave temporary files; they never belong in history.
+.tmp*

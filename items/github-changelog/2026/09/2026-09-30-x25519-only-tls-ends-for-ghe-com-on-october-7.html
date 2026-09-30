@@ -1,0 +1,14 @@
+<div id="readability-page-1" class="page"><div>
+				
+<p>Beginning October 7, 2026, GitHub Enterprise Cloud with data residency will no longer accept TLS connections from clients that offer only X25519 for key agreement.</p>
+<p>Most customers don’t need to take action. The affected endpoints will continue to support the FIPS-approved P-256 (<code>secp256r1</code>) and P-384 (<code>secp384r1</code>) groups. Current browsers, operating systems, GitHub CLI releases, and commonly used TLS libraries already support P-256.</p>
+<p>You may be affected if an application, proxy, security appliance, or TLS library is explicitly configured to offer only X25519. Before October 7, 2026, you should:</p>
+<ul>
+<li>Update your operating system, runtime, GitHub CLI, proxy, and TLS libraries to supported versions.</li>
+<li>Remove any X25519-only configuration.</li>
+<li>Ensure P-256 (<code>secp256r1</code>) is enabled. You may also enable P-384 (<code>secp384r1</code>).</li>
+</ul>
+<p>After October 7, X25519-only clients will be unable to establish HTTPS connections. This change applies only to GitHub Enterprise Cloud with data residency. SSH connectivity is not affected.</p>
+<p>If you need help validating your TLS configuration, <a href="https://support.github.com/contact">contact GitHub Support</a>.</p>
+
+			</div></div>

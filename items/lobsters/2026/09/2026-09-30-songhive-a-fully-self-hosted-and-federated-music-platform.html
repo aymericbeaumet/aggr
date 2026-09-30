@@ -1,0 +1,270 @@
+<div id="readability-page-1" class="page"><div>
+
+
+      <div>
+<ul>
+<li><a href="#the-problem">The problem</a></li>
+<li><a href="#who-is-this-for">Who is this for</a></li>
+<li><a href="#what-you-get">What you get</a><ul>
+<li><a href="#the-streaming-stack">The streaming stack</a></li>
+<li><a href="#the-social-layer">The social layer</a></li>
+<li><a href="#sharing-and-privacy">Sharing and privacy</a></li>
+<li><a href="#the-platform-bits">The platform bits</a></li>
+</ul>
+</li>
+<li><a href="#how-it-compares">How it compares</a></li>
+<li><a href="#quickstart">Quickstart</a></li>
+<li><a href="#under-the-hood">Under the hood</a></li>
+<li><a href="#caveats-honestly">Caveats, honestly</a></li>
+<li><a href="#links">Links</a></li>
+</ul>
+</div>
+<h2 id="the-problem">The problem</h2>
+<p>If you've ever tried to self-host your music, you've probably noticed that every tool solves exactly one half of the problem.</p>
+<p><strong>Media servers</strong> (<a href="https://jellyfin.org">Jellyfin</a>, <a href="https://navidrome.org">Navidrome</a>, plain <a href="https://subsonic.org">Subsonic</a>) are great at the library half: point them at your FLAC collection, get streaming, transcoding, mobile apps. But they're single-player islands. Nobody else can discover your music, there's no social layer, and sharing a track means copy-pasting a file or a link that probably doesn't resolve outside your LAN, or creating accounts on your server for every person you want to share content with.</p>
+<p><strong>Social music platforms</strong> (<a href="https://www.funkwhale.audio">Funkwhale</a> being the closest thing) add the federation half, but the social experience is mostly library-oriented: you follow someone's <em>library</em> and sync their files. It's a distribution network, not a place where people talk about music. Moreover, most of those open platforms were never thought with revenue models in mind. Payments were never integrated. They're mostly places for artists to freely share their creations, not for them to monetize them.</p>
+<p><strong>Streaming services</strong> (<a href="https://spotify.com">Spotify</a>, <a href="https://apple.com/music">Apple Music</a>, <a href="https://tidal.com">TIDAL</a>) are widespread, but they usually don't come with true built-in social features besides following someone else's playlists, or the "Share to Facebook/Instagram/TikTok" button. And consumers don't own anything: the catalog can shrink overnight, and shared URLs can often be viewed only by people who already have an account on the platform. Music creators don't have much of a say either. They get fractions of a cent, they don't fully control distribution (and often they need an intermediary just to distribute their music, which takes a share of the revenue too), and they often have to release to multiple music platforms just because those platforms don't talk with one another. Most importantly, your listening history is the product.</p>
+<p><a href="https://bandcamp.com"><strong>Bandcamp</strong></a> tries to fix some of the issues, namely by putting content creators at the center and letting them own their own sales and monetization process (including sales of things like vinyls, CDs and merchandise). But it's still a centralized service whose <a href="https://www.nytimes.com/2022/03/02/arts/music/epic-games-bandcamp.html">ownership changed hands</a> <a href="https://www.bbc.com/news/technology-66953910">several times</a>. Users and artists are just one round of layoffs away from seeing the platform they invested in rot and/or enshittify, with no direct compatible alternatives. The social media aspect is also not something Bandcamp particularly invested in as well. The focus has increasingly shifted to sales, social interactions are basically limited to a "community" tab on artist pages, where artists can post updates and people can reply to. Any social interactions stay strictly confined to a tab on a centralized platform.</p>
+<p>Perhaps the <a href="https://en.wikipedia.org/wiki/Google_Play_Music">old incarnation of <strong>Google Music</strong></a> helped filled an important gap on user-generated content (it allowed users to upload up to 50,000 tracks to the cloud for free, making music collection sitting on old hard drives available on-the-go), but it didn't last long, and it didn't cover any social media and sharing needs.</p>
+<p>And <strong>MySpace</strong> — the thing everyone actually remembers fondly — was never really any of these. It was a place where a band had a page, you could play their song right there, leave a comment, and add them as a friend. Nobody has successfully rebuilt that.</p>
+<p>Songhive is an attempt to meet all these needs in one package: a self-hosted music streaming server where tracks, albums, playlists and posts are first-class <a href="https://activitypub.rocks/"><strong>ActivityPub</strong></a> objects. Think <em>Funkwhale meets Mastodon</em> — your music library lives on your hardware, or in any cloud storage you want to plug to it, but your music (and your posts about music) can travel across the fediverse, be followed from Mastodon, replied to, boosted, and quoted.</p>
+<p><img alt="Screenshot of an instance's home page on desktop" src="https://s3.fabiomanganiello.com/fabio/screenshots/songhive/home-full.png">
+<img alt="Screenshot of an instance's home page on mobile" src="https://s3.fabiomanganiello.com/fabio/screenshots/songhive/home-federated.png"></p>
+<h2 id="who-is-this-for">Who is this for</h2>
+<ul>
+<li><strong>Artists</strong>: publish tracks with a "Publish on the Fediverse" checkbox and they appear as playable <code>Audio</code> objects in Mastodon timelines. People can reply, boost and quote them from their existing fediverse account — no new signup required on your side. Your artist page, releases and playlists all expose RSS/Atom feeds, and blogs that support Webmentions will send you a notification when they link to your song. Native integration with <strong>Stripe</strong> also makes it easier for you to connect a payout account and put some of your tracks or albums for sale. You can choose how much of a paid song you want to share for streaming (only a sample, the full song or nothing), and how much users should pay for it. No shares of your revenue are taken besides the share taken by Stripe to process the transaction.</li>
+<li><strong>Bands</strong> who need an easy and flexible way to share their recordings, rehearsals, playlists of covers etc. Those who have played in a band know this issue quite well. Spotify playlists for covers to play are only good as long as everyone in the band has a premium Spotify account. YouTube playlists often result in precious rehearsal time wasted waiting for ads to end. Not to mention those <code>rehearsal.mp3</code> files shared between WhatsApp chats, emails and Dropbox or Google Drive folders, with no easy way of bringing them all together under the same roof - especially when you're looking for those recordings during a rehearsal. Songhive makes it easier to share whole tracks, albums or playlists with full control over the level of visibility. It makes it easier to integrate 3rd-party music streaming services so you can sync your playlist of covers and easily share it from a proxy platform without everyone having to have a Spotify or TIDAL premium account. It makes it easy to just plug that Google Drive folder where you carelessly dropped all the recordings of your band's rehearsal and sort them, tag them and share them as consistent collections with a single URL.</li>
+<li><strong>Self-hosters / library curators</strong>: point Songhive at your local folders, an S3 bucket, a WebDAV/SFTP share, Dropbox, Google Drive — or even import your collections from Jellyfin or TIDAL — and get a full streaming stack with transcoding, Subsonic mobile apps, Last.fm scrobbling, listening stats and automatic MusicBrainz/cover-art enrichment. Fine-grained visibility (<code>private</code> / <code>local</code> / <code>public</code>) means your 4,000-track hoard stays private while the three songs you actually wrote are public. Not only, but Songhive also taps into an issue that open projects like these often fail to address: how to provide incentives to sysadmins and self-hosters to run their servers. Especially when it comes to things like a music streaming server which, in terms of CPU, storage and bandwidth usage, is not free - and often not even cheap. Songhive provides the option for sysadmins to have a <strong>Paid</strong> registration mode. The admin can decide how much they want to charge users to use their instance and upload music to it, and how often they want to charge them. Subscriptions are handled transparently by Stripe and can be cancelled at any time. And admins can also set <strong>user quotas</strong> to keep things sane and prevent abuse.</li>
+<li><strong>People who want a MySpace-style music social network</strong>: run an instance for your scene, your label, your collective. Users get profiles, statuses with mentions and hashtags, threaded replies, quotes, notifications, and moderation tools (mute/block, reports, instance-level defederation). Your instance federates with Mastodon, so it's not a walled garden unless you want it to be.</li>
+<li><strong>Musicians with a multi-room house or a community radio streak</strong>: server-side outputs let playback keep running on the server after you close the tab — cast to Snapcast multi-room speakers, relay to an Icecast station, or host your own HTTP radio mountpoint with fan-out to unlimited listeners.</li>
+</ul>
+<h2 id="what-you-get">What you get</h2>
+<h3 id="the-streaming-stack">The streaming stack</h3>
+<p>The core is a serious music library and streaming server:</p>
+<ul>
+<li><strong>Library management</strong> with artists, albums, tracks, playlists and dynamic radio stations. Uploads get automatic tag extraction, duplicate detection, and metadata enrichment from MusicBrainz and the Cover Art Archive — including cover art and artist images fetched for you.</li>
+<li><strong>Streaming with on-the-fly transcoding</strong> (MP3, OGG, FLAC, AAC, Opus), HTTP range requests, and a transcode cache, with per-user/per-role bitrate caps (handy if your uplink or mobile data is precious).</li>
+<li><strong>Subsonic API compatibility</strong>, enabled by default. This is the sleeper feature: every Subsonic-compatible mobile/desktop client — Substreamer, Symfonium, Ultrasonic, Supersonic, Tempus and friends — works against your instance out of the box. You get a decade's worth of mature third-party players for free, and API tokens keep your real password out of them.</li>
+<li><strong>Mopidy integration</strong> via the <a href="https://github.com/blacklight/mopidy-songhive"><code>mopidy-songhive</code> extension</a> if that's your jam. - <strong>Listening history, favorites and scrobbling</strong> to Last.fm and Libre.fm out of the box, plus a personal listening-stats dashboard (top artists, calendar and hour-of-day heatmaps, release-year breakdowns) rendered with ECharts.</li>
+</ul>
+<p><img alt="A screenshot of the listening stats page, showing top listened artists and albums over a given time period" src="https://s3.fabiomanganiello.com/fabio/screenshots/songhive/listening-stats-1.png"></p>
+<p><img alt="A screenshot of the listening stats page, showing listened tracks grouped by release years and listening hours" src="https://s3.fabiomanganiello.com/fabio/screenshots/songhive/listening-stats-2.png"></p>
+<ul>
+<li><strong>Bulk downloads</strong>: select tracks/collections and get an async-built ZIP archive.</li>
+<li><strong>Server-side outputs</strong> — Spotify-Connect-style. The browser is just a remote control; audio is rendered by the server via a dedicated stream worker. Three providers: an Icecast relay (with live ICY metadata updates), a Snapcast provider for whole-home audio, and native HTTP mountpoints (<code>/streams/&lt;mount&gt;</code>) served directly by Songhive with per-listener cursors over Redis Streams — no external radio server required. Playback keeps playing after you close the tab, and multiple tabs/devices stay in sync.</li>
+<li><strong>Payments support out of the box</strong> — set up a Stripe account and connect it to the instance, and configure it as a marketplace account if you also want to allow musicians to wire their payout accounts and sell music through your platform.</li>
+</ul>
+<p><img alt="A screenshot of a track uploaded by a musician, showing the options to set up payments for it" src="https://s3.fabiomanganiello.com/fabio/screenshots/songhive/artist-payment-form.png">
+<img alt="A screenshot of the membership page on an instance with paid subscriptions" src="https://s3.fabiomanganiello.com/fabio/screenshots/songhive/membership-form.png"></p>
+
+<p>This is where Songhive diverges from every other self-hosted media server. Federation is full ActivityPub (via the <a href="https://github.com/blacklight/pubby">pubby</a> library), and music entities are social objects:</p>
+<ul>
+<li><strong>Every user is an ActivityPub actor</strong>, reachable at <code>@user@instance</code> via WebFinger, with Mastodon-style alias URLs. Mastodon users can follow, mention and interact with you from their own client.</li>
+<li><strong>Tracks are <code>Audio</code> objects.</strong> Publishing is explicit and opt-in per upload — your private library never leaks to the Fediverse by accident. Published tracks render as playable audio in Mastodon and Akkoma timelines, with descriptions, hashtags and link-backs to the track page.</li>
+<li><strong>Mastodon-style statuses</strong> with Markdown, mentions, hashtags, threaded replies, quotes and link preview cards. Reply to a track, boost an album drop, quote-post a playlist, or simply post some words to Mastodon and use it like a normal Mastodon account.</li>
+<li><strong>Funkwhale-compatible music federation</strong>: full bidirectional music federation with Funkwhale and other Songhive instances — remote libraries, albums, artists and tracks resolve as browsable resources you can follow and add to your collection.</li>
+<li><strong>Remote discovery</strong>: paste a Fediverse handle or URL into the search box and it's dereferenced, cached and browsable — SSRF-guarded and domain-moderated.</li>
+<li><strong>Real notifications</strong> over WebSocket (in-app, real-time), with per-type email and daily-digest preferences, plus optional OS-native push via VAPID WebPush.</li>
+<li><strong>Mastodon-grade moderation</strong>: users mute/block local and remote actors; admins limit/suspend actors, defederate or restrict instances, and review reports — optionally forwarding them to the reported actor's home instance via ActivityPub <code>Flag</code>.</li>
+<li><strong>RSS/Atom everywhere</strong>: every profile, artist, playlist, library, tag and genre has RSS 2.0 and Atom feeds with <code>&lt;link rel="alternate"&gt;</code> discovery, so even non-fediverse readers can subscribe.</li>
+</ul>
+<p><img alt="A Songhive post with a published song viewed from Mastodon" src="https://s3.fabiomanganiello.com/fabio/screenshots/songhive/mastodon-integration.png"></p>
+<h3 id="sharing-and-privacy">Sharing and privacy</h3>
+<ul>
+<li><strong>Three-level visibility</strong> on tracks, albums, playlists and libraries: <code>private</code>, <code>local</code> (instance-only), or <code>public</code>.</li>
+<li><strong>Share grants</strong> (give a specific user access) and <strong>revocable share links</strong> — a short URL that renders a preview page with an audio player for anyone, content-negotiated so API clients get JSON and crawlers get OpenGraph metadata.</li>
+<li><strong>Embeddables</strong>: public tracks and collections embed on any web page via <code>&lt;audio&gt;</code> tags, Markdown links, a <code>&lt;script&gt;</code> widget or a no-JS iframe. Media endpoints send <code>Access-Control-Allow-Origin</code>, so fediverse clients can embed your audio too.</li>
+<li><strong>Webmentions</strong>: bidirectional link-backs for public content. A blog that links to your song sends you a notification; content you share or comment on sends a Webmention back to the source. All outbound/inbound fetches on this path are SSRF-guarded.</li>
+</ul>
+<p><img alt="Screenshot of the &quot;Share Track&quot; modal" src="https://s3.fabiomanganiello.com/fabio/screenshots/songhive/track-share.png"></p>
+<h3 id="the-platform-bits">The platform bits</h3>
+<ul>
+<li><strong>Multi-user</strong> with open, invite-only, approval-required or closed registration; per-user profile visibility.</li>
+<li><strong>OAuth2 provider</strong> for third-party apps, plus API tokens for scripts and Subsonic clients.</li>
+<li><strong>Flexible storage</strong>: local filesystem, S3-compatible object storage.</li>
+<li><strong>External libraries</strong> — the feature that sells it to people with existing collections. Attach external music storage to a Songhive library: local folders (with a filesystem watchdog that picks up changes automatically), S3, SFTP, WebDAV, Dropbox, Google Drive, or plain HTTP. Entity-backed providers go further: <strong>Jellyfin</strong> and <strong>TIDAL</strong> import tracks, albums, artists and playlists as first-class library entries with lazily-fetched contents — audio bytes stay remote and are proxied at play time, so provider credentials never reach the client. Metadata can be written back to the provider, and Dropbox/TIDAL connect via OAuth straight from the settings form.</li>
+<li><strong>Metadata write-back</strong>: enriched tags are written into the audio files themselves, using audio-only content hashing — so re-tagging or swapping cover art never changes the stored path or invalidates the content hash. Since it support metadata write-back to the original file, you can also wire your existing music library on an old hard drive and use Songhive to fix broken audio metadata tags.</li>
+</ul>
+<h2 id="how-it-compares">How it compares</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Songhive</th>
+<th>Funkwhale</th>
+<th>Jellyfin/Navidrome</th>
+<th>Mastodon</th>
+<th>Spotify</th>
+<th>Bandcamp</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Self-hosted</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>Streaming + transcoding</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>❌</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Subsonic API (mobile apps)</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>Scrobbling + listening stats</td>
+<td>✅</td>
+<td>partial</td>
+<td>partial</td>
+<td>❌</td>
+<td>✅</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>ActivityPub social (posts, replies, boosts)</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>Federated music objects playable in Mastodon</td>
+<td>✅</td>
+<td>partial (library-oriented)</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>Fine-grained sharing (grants, links, embeds)</td>
+<td>✅</td>
+<td>partial</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>partial</td>
+</tr>
+<tr>
+<td>Server-side outputs (Icecast/Snapcast)</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>(Spotify Connect, proprietary)</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>External library import (S3, WebDAV, Jellyfin, TIDAL…)</td>
+<td>✅</td>
+<td>partial</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>Support for payments to artists</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Support for subscriptions to fund platform maintainers</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>You own the catalog</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>❌</td>
+<td>you can download the content you pay for</td>
+</tr>
+</tbody>
+</table>
+<h2 id="quickstart">Quickstart</h2>
+<p>The fastest path is the Docker bootstrap script, which drops a <code>docker-compose.yml</code>, an nginx config, and starter <code>config.toml</code>/<code>.env</code> files into the current directory:</p>
+<div><pre><code>curl -fsSL https://git.fabiomanganiello.com/songhive/raw/branch/main/docker/bootstrap.sh | sh
+</code></pre></div>
+
+<p>Set your user's UID/GID in <code>.env</code> (so the bind-mounted volumes stay yours), fill in the few required values in <code>config.toml</code>:</p>
+<div><pre><code>[auth]
+secret_key = "..."  # python -c "import secrets; print(secrets.token_urlsafe(64))"
+
+[storage]
+local_path = "./data/media"
+
+[federation]
+enabled = false
+# instance_domain = "music.example.com"  # uncomment to join the fediverse
+</code></pre></div>
+
+<p>then:</p>
+<div><pre><code>docker compose up
+# Or, if you want to enable local HTTP stream mount points too
+docker compose up --profile streams
+</code></pre></div>
+
+<p>Create the admin user:</p>
+<div><pre><code>docker compose exec songhive songhive admin create-user \
+    --username admin --email admin@example.com --password secret --admin
+</code></pre></div>
+
+<p>Open <code>http://localhost:8000/</code> and start uploading. The web UI, Swagger UI (<code>/swagger-ui/</code>) and OpenAPI spec (<code>/openapi.json</code>) are all served by the same process. There's also a <code>pip install songhive</code> path (the PyPI package ships the built web UI), systemd units under <code>config/systemd/</code>, and an <code>install.sh</code> that wires the whole thing up — see the README for those.</p>
+<p>Everything else — federation, Webmentions, RSS feeds, scrobbling keys, registration mode, bitrate caps — is a config knob, and most of it is enabled by default. All <code>config.toml</code> entries can also be overridden with <code>SONGHIVE_*</code> environment variables.</p>
+<h2 id="under-the-hood">Under the hood</h2>
+<ul>
+<li><strong>Backend</strong>: FastAPI (REST) mounted inside Tornado via <code>a2wsgi</code> — Tornado natively handles WebSockets, audio streaming with range requests, and HTTP stream mountpoints, while FastAPI handles everything else. (There's a non-obvious reason for the explicit thread pool in the WSGI bridge: without it, a federated fetch that resolves back to your own instance deadlocks the event loop. The architecture doc tells the whole war story.)</li>
+<li><strong>Data</strong>: PostgreSQL (SQLite works for small setups) + SQLAlchemy 2 async, Pydantic v2 everywhere, Alembic migrations.</li>
+<li><strong>Async work</strong>: Celery + Redis with three queues — <code>celery</code> for interactive work, <code>scrobbles</code> for latency-sensitive submissions, and <code>bulk</code> for the per-item fan-out jobs (a fresh external library sync can enqueue tens of thousands of enrichment tasks; without the split they'd starve scrobbles and federation delivery for hours).</li>
+<li><strong>Storage</strong>: content-addressable files (SHA-256) with audio-only hashing, so tag/cover-art rewrites don't move files or invalidate hashes.</li>
+<li><strong>Frontend</strong>: Vue 3 + TypeScript + Pinia, fully i18n'd with RTL support.</li>
+<li><strong>Security posture</strong>: JWT + opaque rotating refresh tokens, double-submit CSRF, Redis sliding-window rate limiting, SSRF-guarded federation and Webmention fetches with redirect revalidation, Fernet-encrypted provider secrets, RFC 7807 error handling.</li>
+<li><strong>License</strong>: AGPL-3.0.</li>
+</ul>
+<h2 id="caveats-honestly">Caveats, honestly</h2>
+<ul>
+<li>It's a real stack: Postgres, Redis, a Celery worker, ffmpeg. The Docker compose file makes this a non-issue, but it's not a single static binary. It can run on a RaspberryPi 4 or 5 with decent storage if you want to run it for yourself and your family, but if you want to have more tracks and more users you may need a beefier machine.</li>
+<li>Federation with the big platforms is only as good as ActivityPub support for audio — Mastodon renders playable audio attachments, but it treats <code>Audio</code> as a converted type, so Songhive also emits <code>Note</code> variants when you share a track as a post. The interop details with Akkoma, Funkwhale and friends are handled, but the fediverse music landscape is still young.</li>
+<li>TIDAL imports federate metadata-only (a browse link, not hosted audio) — for obvious reasons the audio bytes stay with the provider.</li>
+</ul>
+<h2 id="links">Links</h2>
+<ul>
+<li>🏠 My personal instance: <a href="https://manganiello.music">manganiello.music</a></li>
+<li>👤 My Fediverse handle: <a href="https://manganiello.music/@fabio">@fabio@manganiello.music</a></li>
+<li>&lt;/&gt; Code: <a href="https://github.com/blacklight/songhive">github.com/blacklight/songhive</a>
+  (canonical forge: <a href="https://git.fabiomanganiello.com/songhive">git.fabiomanganiello.com/songhive</a>)</li>
+<li>🏗️ Architecture deep-dive:
+  <a href="https://git.fabiomanganiello.com/blacklight/songhive/src/branch/main/docs/ARCHITECTURE.md"><code>docs/ARCHITECTURE.md</code></a></li>
+<li>🧩 Mopidy extension: <a href="https://github.com/blacklight/mopidy-songhive">mopidy-songhive</a></li>
+</ul>
+
+
+    </div></div>

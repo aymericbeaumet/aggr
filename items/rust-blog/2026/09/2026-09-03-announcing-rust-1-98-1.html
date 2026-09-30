@@ -1,0 +1,22 @@
+<div id="readability-page-1" class="page"><div>
+      <p>The Rust team has published a new point release of Rust, 1.98.1. Rust is a programming language that is empowering everyone to build reliable and efficient software.</p>
+<p>If you have a previous version of Rust installed via rustup, getting Rust 1.98.1 is as easy as:</p>
+<pre><code data-language="plain">rustup update stable</code></pre>
+<p>If you don't have it already, you can <a rel="external" href="https://www.rust-lang.org/install.html">get <code>rustup</code></a> from the appropriate page on our website.</p>
+<h2 id="what-s-in-1-98-1">
+What's in 1.98.1</h2>
+<p>Rust 1.98.1 fixes a <a rel="external" href="https://github.com/rust-lang/rust/issues/161441">miscompilation in vtable generation</a>.</p>
+<p>In Rust 1.98.0, in some circumstances, rustc would incorrectly generate a trait object vtable with a null pointer
+where a function pointer should be. This leads to undefined behavior in the
+emitted code. In some cases this may 'just' cause segfaults due to the null
+pointer being loaded, but it is possible for it to be justification for
+arbitrary effects (as is typical for UB).</p>
+<p>If you'd like to help us out by testing future releases, you might consider
+using the beta (<code>rustup default beta</code>) and nightly (<code>rustup default nightly</code>) channels locally and in your CI. Please
+<a rel="external" href="https://github.com/rust-lang/rust/issues/new/choose">report</a> any bugs you
+might come across!</p>
+<h3 id="contributors-to-1-98-1">
+Contributors to 1.98.1</h3>
+<p>Many people came together to create Rust 1.98.1. We couldn't have done it without all of you. <a rel="external" href="https://thanks.rust-lang.org/rust/1.98.1/">Thanks!</a></p>
+
+    </div></div>

@@ -1,0 +1,8 @@
+identity = "ebd932e77fb44d5176960412206d9dd0b03c2a3e"
+resolved_url = "https://blog.rust-lang.org/feed.xml"
+title = "Rust Blog"
+site_url = "https://blog.rust-lang.org/"
+language = "en"
+etag = 'W/"6aba2a08-20ba9"'
+last_modified = "Mon, 28 Sep 2026 08:49:12 GMT"
+body_hash = "6394f43c0f2ac92b185a5d1db3650e9fdc57beda"

@@ -1,0 +1,196 @@
+<div id="readability-page-1" class="page"><article><p>In the course of writing my <a href="https://git.sr.ht/~polywolf/driver">build driver</a>, I came across a bit of an unusual problem, for which I made a bit of an usual solution. I think the solution is interesting and would like to talk about it, but to understand anything we must first understand the problem at hand.</p><h2>Consider The Case Of The Humble Concurrent Cache</h2><p>Suppose we have some expensive function we'd like to put a cache in front of. Furthermore, suppose we'd like to access this cache from multiple threads. A simple example follows (<a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2024&amp;gist=cf4e4af4e40d6895d16d12779f395fa0">playground link</a>):</p><pre><code data-language="rust">enum JSON {
+    F64(f64),
+    String(String),
+    Vec(Vec&lt;JSON&gt;),
+    Object(HashMap&lt;String, JSON&gt;),
+}
+
+struct Proxy {
+    client: HTTPClient,
+    cache: RWLock&lt;HashMap&lt;String, JSON&gt;&gt;,
+}
+
+impl Proxy {
+    fn get(&amp;self, key: &amp;str) -&gt; JSON {
+        // 1.
+        {
+            let cache = self.cache.read().unwrap();
+            if let Some(value) = cache.get(key) {
+                return value.clone();
+            }
+        }
+
+        // 2.
+        let value = self.client.get(key);
+        {
+            let mut cache = self.cache.write().unwrap();
+            cache.insert(key.to_string(), value.clone());
+        }
+        value
+    }
+}</code></pre><p>This code has an "early exit" path (1) where it returns a value from the cache if it's present, and a "late exit" path (2) where it calls the expensive function, then inserts the resulting value into the cache.</p><p>Please ignore the many, many obvious problems with this implementation<sup><a data-footnote-ref="" href="#fn-problems" id="fnref-problems">1</a></sup>. Instead, let's focus on the one problem that bothers me the most: there's fair bit of <code>.clone()</code> action going on here!</p><p>Technically, it's just one <code>.clone()</code> per call: one on early exit to take value out of the cache, and one on late exit to put value into the cache. But if those values are big/tree-shaped/otherwise expensive to clone, this cost can dominate, minimizing the savings conferred by a cache. In my code, I found this to be the case, so we gotta do something about it.</p><h2>Let's Get Rid Of The Clones?</h2><p>Assume that, with the way we use this data, read-only access is more than enough. Shared references are read-only &amp; cheap to <code>Copy</code>, so using those instead of <code>.clone()</code>-ing the entire value seems good. If some later part of the code really needs to take ownership, we can just <code>.clone()</code> there, saving time in the average case. So, we'd like to change the signature for <code>get()</code> to be:</p><pre><code data-language="rust">impl Proxy {
+    fn get&lt;'a, 'b&gt;(&amp;'a self, url: &amp;'b str) -&gt; &amp;'a JSON { ... }
+}</code></pre><p>But we can't do this!! Because our cache is behind a mutex, the only way we can get references to its contents is thru temporary handles. Those handles, while live, hold a lock on the cache, plus they only live for the body of the function, a not for all of <code>'a</code>. Even if we <em>could</em> return one of those handles, that'd be equivalent to holding the lock outside the function, which is very bad. Locks should only be held for VERY SHORT amounts of time <del>unless ur into that sorta thing next month ;)</del></p><h2>Let's Make The Clones Cheaper</h2><p>So, no references. What other types can we use? What we want is something with all the following properties:</p><ol><li>It allows for read access to our data. That is, it allows us to get an <code>&amp;JSON</code> somehow.</li><li>It has no lifetime parameters (<code>'a</code>, the only lifetime we have access to, is too long).</li><li>It is cheap to <code>.clone()</code>, even if the underlying value is <em>not</em> cheap to <code>.clone()</code>.</li></ol><p>These requirements hint we should probably still be looking for some sort of pointer... Among standard library types, we have the following options<sup><a data-footnote-ref="" href="#fn-built-in" id="fnref-built-in">2</a></sup>:</p><ul><li><a href="https://doc.rust-lang.org/std/primitive.pointer.html">Raw pointers</a>: <code>*const JSON</code></li><li><a href="https://doc.rust-lang.org/std/rc/index.html">Reference-counted pointers</a>: <code>Rc&lt;JSON&gt;</code></li><li><a href="https://doc.rust-lang.org/std/sync/struct.Arc.html">Atomically-reference-counted pointers</a>: <code>Arc&lt;JSON&gt;</code></li></ul><p>Like any good Rustacean, we care a lot about safety &amp; concurrency, so <code>Arc</code> is the obvious pick here :3 Modifying the example to use it is straightforward (<a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2024&amp;gist=f3e3821009472761d2297690f6262e17">playground link</a>):</p><pre><code data-language="rust">struct Proxy {
+    client: HTTPClient,
+    cache: RWLock&lt;HashMap&lt;String, Arc&lt;JSON&gt;&gt;&gt;, // new!
+}
+
+impl Proxy {
+    fn get(&amp;self, url: &amp;str) -&gt; Arc&lt;JSON&gt; { // new!
+        {
+            let cache = self.cache.read().unwrap();
+            if let Some(value) = cache.get(url) {
+                return value.clone();
+            }
+        }
+
+        let value = Arc::new(self.client.get(url)); // new!
+        {
+            let mut cache = self.cache.write().unwrap();
+            cache.insert(url.to_string(), value.clone());
+        }
+        value
+    }
+}</code></pre><p>Other than the three lines with <code>Arc</code> added to them, this implementation looks the exact same as before. But now our clones are cheaper, so we're happy, yay!!</p><h2>So What's This About Downcasting?</h2><p>I hope the above section convinced you having an <code>Arc</code> "owned value that acts like a reference" is both normal to want &amp; possible to achieve. Switching gears a bit, I'd like to discuss an interesting shortcoming with them: they don't fit into Rust's type system very well.</p><p>Supposed we know for a fact that certain <code>JSON</code> values are strings, and we're only interested in the <code>JSON::String</code> variant of them. With an owned value or a shared reference, we can just pattern-match to "downcast" from a <code>JSON</code> to a <code>String</code>, or a <code>&amp;JSON</code> to a <code>&amp;String</code>.</p><pre><code data-language="rust">impl JSON {
+    fn to_str(self) -&gt; Option&lt;String&gt; {
+        match self {
+            Self::String(s) =&gt; Some(s),
+            _ =&gt; None,
+        }
+    }
+    
+    fn as_str(&amp;self) -&gt; Option&lt;&amp;String&gt; {
+        match self {
+            Self::String(s) =&gt; Some(s),
+            _ =&gt; None,
+        }
+    }
+}</code></pre><p>But if we have an <code>Arc&lt;JSON&gt;</code>, we can't get another <code>Arc&lt;String&gt;</code> the same way!</p><pre><code data-language="rust">impl JSON {
+    fn doesnt_exist(value: Arc&lt;JSON&gt;) -&gt; Option&lt;Arc&lt;String&gt;&gt; {
+        match value.deref() {
+            Self::String(s) =&gt; Some(s), // compile error!
+            _ =&gt; None,
+        }
+    }
+}</code></pre><p>This is because <code>value.deref()</code> creates a reference to <code>value</code>, whose lifetime will end as soon as the function is over, because we don't return it, only a pointer somewhere inside it. The machinery for <code>Arc</code> only works if it has access to the original pointer, not any derived pointers. So if we wanted to return an <code>Arc&lt;String&gt;</code>, we'd need to <code>.clone()</code> out of the <code>Arc&lt;JSON&gt;</code>, which is what we've been trying to avoid this whole time.</p><p>However! We don't necessarily <em>need</em> a full <code>Arc&lt;String&gt;</code>! We'd be perfectly happy returning some other type, perhaps implementing <code>Deref&lt;Target = String&gt;</code>, so long as it still gives us those "owned value that acts like a reference" properties. If only we could extend the lifetime of <code>value</code>, perhaps by returning it alongside a reference to its contents, packaged together to implement <code>Deref</code> like we want...</p><h2>Tying The Two Together With Evil Lesbian Shibari</h2><p>Our goal is some return type that looks like:</p><pre><code>               ,-----------------------+---------------------.
+val: owned --&gt; | contents: *const JSON | refcnt: AtomicUsize |
+               `-----------------------+---------------------'
+                                     |
+          /--------------------------/
+          V
+        ,------------------+--------------+------------+------------.
+        | JSON::String tag | buf: *mut u8 | len: usize | cap: usize |
+        `------------------+--------------+------------+------------'
+                             ^          |
+                             |          |
+ptr: ref --------------------/          |
+                                        V
+                                      ,---+---+---+---.
+                                      |'A'|'C'|'A'|'B'|
+                                      `---+---+---+---'
+</code></pre><p>That is, we want some <code>val</code> showing us how to get to the main value we care about, and then some pointer <code>ptr</code> into the memory <code>val</code> references. Then, as long as we keep those tied together, we know <code>ptr</code> will still be valid, because <code>val</code> is still alive, because we own <code>val</code>.</p><p>A first attempt at writing this reveals an immediate issue<sup><a data-footnote-ref="" href="#fn-why-not-arc" id="fnref-why-not-arc">3</a></sup></p><pre><code data-language="rust">struct Ref&lt;V, T&gt; {
+    val: V,
+    ptr: &amp;T, // What's the lifetime here?
+}</code></pre><p>We can't express <code>ptr</code> as a reference, because there's no obvious lifetime to attach it to. Without a way to spell "lifetime of the containing struct" in Rust, it looks like we're going to need a raw pointer instead. But what if.....</p><pre><code data-language="rust">struct Ref&lt;V, T: 'static&gt; {
+    val: V,
+    ptr: &amp;'static T,
+}
+
+impl&lt;T, V: Deref&lt;Target = T&gt;&gt; {
+    fn new(val: V) -&gt; Self {
+        let ptr: &amp;T = val.deref();
+        Self {
+            // This is the easiest way to do lifetime extension
+            // SAFETY: hm?
+            ptr: unsafe { std::mem::transmute(ptr) },
+            val,
+        }
+    }
+}</code></pre><p>Whoa!! That's scary!!! Are they even allowed to hold hands like that...?</p><p>It's true this is exceedingly unsafe if users could extract that <code>ptr: &amp;'static T</code> separately from the <code>val: V</code> it points into (<code>val</code>'s lifetime isn't <code>'static</code>!). But we could also just... not allow that, keeping them tied together always, providing access only via <code>Deref</code> implementation:</p><pre><code data-language="rust">impl&lt;V, T&gt; Deref for Ref&lt;V, T&gt; {
+    type Target = T;
+    fn deref(&amp;self) -&gt; &amp;T {
+        self.ptr
+    }
+}</code></pre><p>Because the <em>effective</em> lifetime for which <code>ptr</code> can be accessed is a subset of the <em>actual</em> lifetime for which <code>val</code> lives, I believe we've properly rules-lawyered Rust's reference aliasing rules into submission. Or have we...</p><p>Oh noes... (<a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2024&amp;gist=52455c2042bd9bc26f1bbbb8a239f9a4">playground link</a>)</p><pre><code data-language="rust">struct SimpleWrapper&lt;T&gt;(T);
+
+impl&lt;T&gt; Deref for SimpleWrapper&lt;T&gt; {
+    type Target = T;
+    fn deref(&amp;self) -&gt; &amp;Self::Target {
+        &amp;self.0
+    }
+}
+
+fn main() {
+    let r = Ref::new(SimpleWrapper(x));
+    // Check what's stored vs what should be returned
+    let ptr = r.ptr as *const i32 as usize;
+    let actual_ptr = r.val.deref() as *const i32 as usize;
+    println!("ptr: {ptr:x} actual_ptr {actual_ptr:x}");
+}</code></pre><p>Running this, I got <code>ptr: 7fff85189b5c actual_ptr 7fff85189b88</code>. These are in fact different pointers!!! Turns out I messed up my earlier rules-lawyering: The act of moving <code>val</code> into <code>Ref::new()</code>, taking the <code>.deref()</code> on that stack frame, and then moving it back out to the parent stack frame invalidates <code>ptr</code><sup><a data-footnote-ref="" href="#fn-why-not-arc" id="fnref-why-not-arc-2">3</a></sup>. Lifetimes exist precisely to prevent bugs like this, and our extension trick was foiled. Lesson learned! Guess we'll do this the hard way...</p><h2>Ensure Address Stability With This One Simple Trick!</h2><p>To fix our datastructure, we'll want a guarantee that each <code>.deref()</code> will give us the same pointer, even if move the container around. For this, we MUST NOT be able to move the <code>val: V</code> out of its location once we wrap it. Fortunately, Rust has a type exactly for this usecase!</p><p>ahem. anyways. Unfortunately, <code>Pin</code> is very hard to use, to the point I found a flaw in my initial implementation<sup><a data-footnote-ref="" href="#fn-other-idea" id="fnref-other-idea">4</a></sup> while writing this :( Still, the docs are <em>really</em> good, and we can pretty easily follow their example to make <a href="https://doc.rust-lang.org/std/pin/index.html#a-self-referential-struct">a self-referential struct</a>:</p><pre><code data-language="rust">struct MustPin&lt;V&gt; {
+    val: V,
+    _pin: PhantomPinned,
+}
+struct PinRef&lt;V, T&gt; {
+    val: Pin&lt;Arc&lt;MustPin&lt;V&gt;&gt;&gt;,
+    // MUST point into [`val`].
+    ptr: *const T,
+}
+
+impl&lt;V&gt; MustPin&lt;V&gt; {
+    fn new(val: V) -&gt; Pin&lt;Arc&lt;Self&gt;&gt; {
+        Arc::pin(Self {
+            val,
+            _pin: PhantomPinned,
+        })
+    }
+}
+
+impl&lt;V&gt; PinRef&lt;V, V&gt; {
+    fn new(val: Pin&lt;Arc&lt;MustPin&lt;V&gt;&gt;&gt;) -&gt; Self {
+        let ptr = &amp;raw const val.val;
+        Self { val, ptr }
+    }
+}</code></pre><p>Comparing this to the example in the docs:</p><ol><li>We use <code>*const T</code> instead of <code>NonNull&lt;T&gt;</code> because the latter is more like a <code>*mut T</code>, and we don't need all that power.</li><li>We don't need <code>MaybeUninit</code> because we solve the "knot-tying" trick in a different way: we create the pinned data first, and then store a pointer into it out-of-line. This is still fine because of pin guarantees.</li><li>We still need <code>PhantomPinned</code> because if we have <code>Pin&lt;Arc&lt;V&gt;&gt;</code> where <code>V: Unpin</code>, all bets are off, literally every pin guarantee goes out the window.</li></ol><p><code>Deref</code> is simple like before, just with a pointer instead of a reference:</p><pre><code data-language="rust">impl&lt;V, T&gt; Deref for PinRef&lt;V, T&gt; {
+    type Target = T;
+    fn deref(&amp;self) -&gt; &amp;Self::Target {
+        // SAFETY: by construction and pin guarantees, the pointer is still valid.
+        unsafe { &amp;*self.ptr }
+    }
+}</code></pre><p>Now, finally, we're all set up for the big reveal: how are we going to downcast these things?</p><h2>She Downcast On My <code>Pin</code> 'Til I <code>Arc</code></h2><p>Our rule for <code>ptr</code> is that it MUST point somewhere valid inside <code>val</code>. That's all we can assume, and that's what we have to uphold while doing our downcasts. Fortunately, we can use Rust's type-checking for "standard" downcasts to our advantage!</p><pre><code data-language="rust">impl&lt;V, T&gt; PinRef&lt;V, T&gt; {
+    fn project&lt;U&gt;(self, f: impl for&lt;'a&gt; FnOnce(&amp;'a T) -&gt; &amp;'a U) -&gt; PinRef&lt;V, U&gt; {
+        let Self { val, ptr } = self;
+        // SAFETY: by validity of `ptr` and `f`
+        let ptr = unsafe { f(&amp;*ptr) as *const U };
+        PinRef { val, ptr }
+    }
+}</code></pre><p>Stating this signature more in more math-y terms, for those unfamiliar with Rust's syntax:</p><p><span><span><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mtable columnalign="center" columnspacing="0em" rowspacing="0.25em"><mtr><mtd><mstyle displaystyle="true" scriptlevel="0"><mrow><mtext>PinRef</mtext><mo>:</mo><mo stretchy="false">(</mo><mtext>Type</mtext><mo separator="true">,</mo><mtext>Type</mtext><mo stretchy="false">)</mo><mo>→</mo><mtext>Type</mtext></mrow></mstyle></mtd></mtr><mtr><mtd><mstyle displaystyle="true" scriptlevel="0"><mrow><mi mathvariant="normal">∀</mi><mtext>&nbsp;</mtext><mi>V</mi><mo separator="true">,</mo><mi>T</mi><mo separator="true">,</mo><mi>U</mi><mo>:</mo><mtext>Type</mtext><mi mathvariant="normal">.</mi></mrow></mstyle></mtd></mtr><mtr><mtd><mstyle displaystyle="true" scriptlevel="0"><mrow><mtext>project</mtext><mo>:</mo><mtext>PinRef</mtext><mo stretchy="false">(</mo><mi>V</mi><mo separator="true">,</mo><mi>T</mi><mo stretchy="false">)</mo><mo>→</mo><mo stretchy="false">(</mo><mi mathvariant="normal">∀</mi><mo stretchy="false">(</mo><mi>a</mi><mo>:</mo><mtext>Lifetime</mtext><mo stretchy="false">)</mo><mi mathvariant="normal">.</mi><mtext>&nbsp;</mtext><msup><mi mathvariant="normal">&amp;</mi><mo lspace="0em" mathvariant="normal" rspace="0em">′</mo></msup><mi>a</mi><mi>T</mi><mo>→</mo><msup><mi mathvariant="normal">&amp;</mi><mo lspace="0em" mathvariant="normal" rspace="0em">′</mo></msup><mi>a</mi><mi>U</mi><mo stretchy="false">)</mo><mo>→</mo><mtext>PinRef</mtext><mo stretchy="false">(</mo><mi>V</mi><mo separator="true">,</mo><mi>U</mi><mo stretchy="false">)</mo></mrow></mstyle></mtd></mtr></mtable><annotation encoding="application/x-tex"> \begin{gathered} \text{PinRef} : (\text{Type}, \text{Type}) \rightarrow \text{Type}\\ \forall\ V,T,U : \text{Type}.\\ \text{project} : \text{PinRef}(V,T) \rightarrow (\forall(a: \text{Lifetime}).\ \&amp;'a T \rightarrow \&amp;'aU) \rightarrow \text{PinRef}(V,U) \end{gathered} </annotation></semantics></math></span></span></p><p>How we should interpret this is: If we can go from a <code>&amp;T</code> to a <code>&amp;U</code> for an <em>arbitrary</em> lifetime <code>'a</code>, that means <code>*U</code> is a fixed offset from <code>*T</code><sup><a data-footnote-ref="" href="#fn-arbitrary" id="fnref-arbitrary">5</a></sup>. So, because <code>ptr</code> has a fixed address (it was derived from the pinned <code>val</code>), so will the output of <code>f</code>. Other pin guarantees like "<code>val</code> will always remain valid at that address while it's pinned" help too.</p><p>If I were a real type theorist, I would have pulled out some sort of commutative diagram and drawn a bunch of arrows, or perhaps even written down some inference rules, but alas, I cannot even abstract over monads... Anyways this argument works for what we originally wanted too:</p><pre><code data-language="rust">impl&lt;V, T&gt; PinRef&lt;V, T&gt; {
+    fn filter_project&lt;U&gt;(
+        self,
+        f: impl for&lt;'a&gt; FnOnce(&amp;'a T) -&gt; Option&lt;&amp;'a U&gt;,
+    ) -&gt; Option&lt;PinRef&lt;V, U&gt;&gt; {
+        let Self { val, ptr } = self;
+        // SAFETY: by validity of `ptr`, `f`
+        let ptr = unsafe { f(&amp;*ptr)? as *const U };
+        Some(PinRef { val, ptr })
+    }
+    
+    fn try_project&lt;U, E&gt;(
+        self,
+        f: impl for&lt;'a&gt; FnOnce(&amp;'a T) -&gt; Result&lt;&amp;'a U, E&gt;,
+    ) -&gt; Result&lt;PinRef&lt;V, U&gt;, E&gt; {
+        let Self { val, ptr } = self;
+        // SAFETY: by validity of `ptr`, `f`
+        let ptr = unsafe { f(&amp;*ptr)? as *const U };
+        Ok(PinRef { val, ptr })
+    }
+}</code></pre><p>You see that??? We did the thing!! To celebrate, here's a full example using the original JSON projections (<a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2024&amp;gist=9ba8b6f27dc48afb065a2923023fb1da">playground link</a>):</p><pre><code data-language="rust">fn print(s: impl Deref&lt;Target = str&gt;) {
+    println!("{}", s.deref())
+}
+
+fn main() {
+    let v = std::sync::Arc::pin(JSON::String(String::from("hello, world!")));
+    let v = PinRef::new(v);
+    let s = v.filter_project(JSON::as_str).unwrap();
+    print(s.clone());
+    print(s);
+}</code></pre><p>All that remains in our original example is to replace all the plain <code>Arc&lt;JSON&gt;</code> with <code>Pin&lt;Arc&lt;MustPin&lt;JSON&gt;&gt;&gt;</code> (wow what a mouthful), make a <code>Clone</code> implementation, account for <code>?Sized</code> types, etc. etc. This post is long enough as it is so I've omitted that, but if you want, you can find the full details in my <a href="https://git.sr.ht/~polywolf/driver/tree/cb9ee31e272f24311981a41f979d82f31f39f61f/item/packages/pin-downcast/src/pin_ref.rs">repository</a>. I might release this as a standalone crate if I feel like it, but this might still be riddled with UB I missed so maybe not (:</p><p>Anyways!! Hope you learned something, until next time~</p><section data-footnotes=""><ol><li id="fn-problems"><p>In increasing order of badness: too much string typing, no error handling, concurrent requests can race and end up doing extra work. Probably others I'm missing too. The solution to that last one is simultaneously very interesting &amp; very boring, <a href="https://git.sr.ht/~polywolf/driver/tree/3e0e9250a6657f9e5ed977ecdd08f3550e06f68b/item/packages/driver-db/src/database.rs#L150-270">read the code yourself if you want</a>. <a aria-label="Back to reference 1" data-footnote-backref="" data-footnote-backref-idx="1" href="#fnref-problems">↩</a></p></li><li id="fn-built-in"><p>I'm only covering options from the Rust standard library for simplicity, but garbage-collected pointers from <a href="https://crates.io/crates/dumpster"><code>dumpster</code></a> or arena pointers from <a href="https://crates.io/crates/slotmap"><code>slotmap</code></a> can also be good ideas. <a aria-label="Back to reference 2" data-footnote-backref="" data-footnote-backref-idx="2" href="#fnref-built-in">↩</a></p></li><li id="fn-why-not-arc"><p>You might be thinking, "why not <code>struct Ref&lt;V, T&gt; { val: Arc&lt;V&gt;, ptr: &amp;'static T}</code>?" and unfortunately a refutation is much more complex, and this example is more illustrative of why we need <code>Pin</code> later. Suffice to say, even though <code>Arc</code> on its own gives address stability in practice, Rust's type system doesn't enforce that it will<sup><a data-footnote-ref="" href="#fn-other-idea" id="fnref-other-idea-2">4</a></sup>. <a aria-label="Back to reference 3" data-footnote-backref="" data-footnote-backref-idx="3" href="#fnref-why-not-arc">↩</a> <a aria-label="Back to reference 3-2" data-footnote-backref="" data-footnote-backref-idx="3-2" href="#fnref-why-not-arc-2">↩<sup>2</sup></a></p></li><li id="fn-other-idea"><p>I previously thought <code>struct PinRef&lt;V, T&gt; { val: Pin&lt;Arc&lt;V&gt;&gt;, ptr: &amp;'static T }</code> was enough, but turns out that's entirely insufficient due to the presence of <code>Unpin</code>. <a aria-label="Back to reference 4" data-footnote-backref="" data-footnote-backref-idx="4" href="#fnref-other-idea">↩</a> <a aria-label="Back to reference 4-2" data-footnote-backref="" data-footnote-backref-idx="4-2" href="#fnref-other-idea-2">↩<sup>2</sup></a></p></li><li id="fn-arbitrary"><p>"Arbitrary" is key here. Means we can't do <code>fn project&lt;'a, U&gt;(self, f: impl FnOnce(&amp;'a T) -&gt; &amp;'a U) -&gt; PinRef&lt;V, U&gt;</code>, because <code>'a</code> is bound too early, which would allow us to choose a smaller lifetime, letting us project things w/ interior mutability, which is bad. Wish I could formalize this better but I've thought about it really really hard and haven't been able to come up with a counterexample to my main function so I hope no one else will either. <a aria-label="Back to reference 5" data-footnote-backref="" data-footnote-backref-idx="5" href="#fnref-arbitrary">↩</a></p></li></ol></section></article></div>

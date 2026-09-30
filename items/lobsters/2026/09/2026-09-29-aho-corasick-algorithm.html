@@ -1,0 +1,136 @@
+<div id="readability-page-1" class="page"><div>
+        <br>
+<h3 id="introduction">Introduction</h3>
+<p>This post describes the construction of an Aho-Corasick automaton for
+the simultaneous matching of substrings within a sequence. I’m fond of
+this algorithm because it constructs an automaton from an existing
+tree data structure in a rather pleasant way.</p>
+<h3 id="tries">Tries</h3>
+<p>A trie (or “prefix tree”) is an $n$-ary tree that stores a set of
+strings. Each edge in the trie is labelled with a character and each
+node conceptually represents the concatenation of all the edge
+characters required to reach it (starting from the root).</p>
+<p>Tries are designed to reduce redundancy by ensuring entries with
+common prefixes share these prefixes within the tree data
+structure.</p>
+<p>See the trie below that stores the strings ${\lbrace
+\text{suit}, \text{suited}, \text{suitable} \rbrace}$:</p>
+<p><img src="https://compiler.club/img/aho-corasick/trie.svg" alt="example trie"></p><p>You can see that the common prefix of <code>suit</code> is shared by all entries. Also note that nodes representing complete entries in the trie are explicitly marked.</p>
+<h3 id="suffix-links">Suffix Links</h3>
+<p>Aho-Corasick automatons recover from transition failure by following
+so-called suffix links. These links preserve the longest suffix of the
+string represented by each node that happens to exist as a prefix of a
+pattern in the trie. This allows the machine to transition to a state
+that permits further matching of patterns that happen to have the
+failing node’s longest suffix as a prefix.</p>
+<p>Consider the suffix links applied (in red) to the trie constructed for
+the strings $\lbrace \text{item}, \text{suits} \rbrace$ below:</p>
+<p><img src="https://compiler.club/img/aho-corasick/first.svg" alt="example trie with suffix links"></p><p>The majority of nodes have the root node as their suffix link. However, if we look at node $8$, representing the state reached by following suit, we see that its suffix link (node $3$) points to the node one would reach if, starting from the root, we had followed its suffix, it. This permits the potential for matching the patterns prefixed with it; in this case, only $\lbrace \text{item} \rbrace$.</p>
+<p>For example, if we were scanning the input <code>suitems</code>, we would reach node $8$, see that there is no outgoing edge labelled <code>e</code>, we would transition via the suffix link and continue scanning from the failing character, eventually matching <code>su[item]s</code>.</p>
+<p>The construction of suffix links is rather pleasant, they’re computed
+in a breadth-first traversal of the trie. The cases for each node are
+computed as follows:</p>
+<ul>
+<li>
+<p>The root and its children have root as their suffix link.</p>
+</li>
+<li>
+<p>To compute the suffix link for each other node, you start by looking at the node’s parent’s suffix link. For a pattern of characters $( c_1, c_2, c_3, \ldots, c_n)$, to compute a suffix link for a node $c_k$ ($k \geq 3$), you examine the suffix link of $c_{k-1}$. That suffix link preserves the longest suffix of $(c_1, \ldots, c_{k-1})$ that represents a prefix of a pattern in the trie. If the node at that suffix link has an outgoing edge labelled $c_k$, then the target of that edge is $c_k$’s suffix link. Otherwise, you continue to chase up the trie by following successive suffix links. If you reach the root, you stop (to avoid iterating indefinitely by following its suffix link to itself).</p>
+</li>
+</ul>
+<p>Despite my best efforts to describe the suffix link construction process above formally, it’s best explained visually. Consider the trie constructed for the strings $\lbrace \text{cadence}, \text{facade} \rbrace$ with partially constructed suffix links below:</p>
+<p><img src="https://compiler.club/img/aho-corasick/two.svg" alt="incremental example of suffix links"></p><p>The nodes are numbered with their breadth-first traversal order.</p>
+<p>After processing the nodes with suffix links computed above, the BFS
+queue will contain $[(c, 5), (d, 6)]$. If we examine $(c, 5)$, we look
+at its parent’s suffix link. In this case, it’s the root of the
+trie. We see that root has an outgoing edge labelled with $c$, so the
+node reached by that edge is the suffix link for node $5$:</p>
+<p><img src="https://compiler.club/img/aho-corasick/three.svg" alt="updated incremental example of suffix links"></p><p>After the above, the queue will contain $[(d, 6), (a, 7)]$. The
+processing of $(d, 6)$ is straightforward. As before, its parent’s
+suffix link is the root. However, there is no outgoing edge labelled
+$d$, therefore node $6$’s suffix link is simply the root (capturing
+the idea that there’s no other pattern in the tree that has any of
+$\lbrace \text{c}, \text{ca}, \text{cad} \rbrace$ as a prefix). In
+operational terms, there’s no suffix to preserve as another pattern’s
+prefix if we get to node $6$ and the input character is not $e$. We
+dispose of the seen $\text{cad}$ and try the failing input character
+from the root. If a character fails to advance from the root, we stay
+at the root but advance the character stream (as it’s a non-starter
+for every pattern).</p>
+<p>The next interesting case is that of processing the $(a, 7)$
+edge. Node $7$’s parent’s suffix link is the previously computed,
+non-root, node $2$ - which does have an outgoing edge labelled $a$,
+therefore the suffix link of node $7$ is node $4$. This preserves the
+$\text{ca}$ suffix of $\text{faca}$ as being a valid prefix of the
+other pattern, $\text{cadence}$.</p>
+<p>When all nodes have been processed, the suffix links are as follows:</p>
+<p><img src="https://compiler.club/img/aho-corasick/four.svg" alt="final example of suffix links"></p><p>For clarity, I’ve omitted the suffix links that go to the root node. Interestingly, you can see that node $12$ goes to node $2$, attempting to preserve prefix context for matching $\text{cadence}$, from a node reached by assuming it was making progress in matching $\text{cadence}$!</p>
+<h3 id="output-links">Output Links</h3>
+<p>When a pattern is introduced into the trie, the last node traversed during insertion is annotated as being an “output” node (usually storing the inserted pattern). If a node has an output pattern associated with it, this identifies a match that should be output when entering the state represented by that node. However, it may be the case that a node with an output’s pattern has a suffix that also happens to be a pattern in the trie - and, so, must also be output at the same time.</p>
+<p>In order to capture this information, Aho-Corasick employs output links. As with suffix links, it will always be the case that output links point to nodes representing shorter strings (visited first in the breadth-first algorithm).</p>
+<p>Consider the trie below (with suffix links in red and output links in blue), constructed from the strings $\lbrace \text{spin}, \text{pin}, \text{in} \rbrace$.</p>
+<p><img src="https://compiler.club/img/aho-corasick/five.svg" alt="example of suffix links and output links"></p><p>The blue links go between node with an associated output. It’s clear that on reaching state $9$ (representing that <code>spin</code> has been matched), the outputs for $8$ and $6$ must also be output (representing pattern suffixes <code>pin</code> and <code>in</code>, respectively). You can think of output links as being a linked list of nodes that must be iteratively output if one was interpreting this matcher directly.</p>
+<p>The output link for a node (if it has one) can be computed directly after its suffix link has been computed. This makes sense because the suffix link attempts to capture the longest suffix of the current node’s pattern that happens to be a prefix of a pattern in the trie. So, the output link for a node is its suffix node if its suffix node has an associated output (is a pattern itself), otherwise a node’s output is its suffix node’s output link.</p>
+<h3 id="algorithm-pseudocode">Algorithm Pseudocode</h3>
+<p>The pseudocode for computing suffix and output links is as follows:</p>
+<p>let Q be a queue of (char, node)</p>
+<pre><code data-language="plain"># root and its immediate children have root as their suffix link
+root.suffix &lt;- root
+for each (char, child) in root.arrows {
+  child.suffix &lt;- root
+
+  # queue root's grandchildren for traversal
+  add (char, child) to Q
+}
+
+while Q is not empty {
+  let (char, node) = Q.poll()
+  
+  # start from parent's suffix link node
+  let suffix = node.parent.suffix
+
+  while suffix has no edge labelled char {
+    # follow its suffix link
+    suffix &lt;- suffix.suffix
+
+    # avoid looping endlessly if we reach root
+    if suffix == root then
+      break
+  }
+
+  # capture case where root has outgoing edge labelled char
+  if suffix has edge (char, actual) then
+    node.suffix &lt;- actual
+  else
+    node.suffix &lt;- suffix 
+	
+  # a node's output is its suffix if its suffix link is an output, 
+  # otherwise follow its suffix's output
+  if (node.suffix.pattern != null) then
+    node.output = node.suffix
+  else
+    node.output = node.suffix.output
+}</code></pre><br>
+<h3 id="the-automaton">The Automaton</h3>
+<p>The computation of suffix and output links is the core of Aho-Corasick, but only an intermediary step as far as computing the automaton is concerned. Of course, the trie - augmented with these internal links - can be interpreted directly. However, due to the potential to repetitively chase up suffix links to resolve the next state to transition to on a given symbol, the amount of work for each transition is not constant.</p>
+<p>Once the suffix and output links are in place, the transitions and outputs are all statically resolvable into a deterministic finite automaton. To compute this, a final breadth first traversal is performed.</p>
+<p>First, the root node (the base case) is processed. For every symbol, $a$, if the root node has an edge reaching some state, $s$, labelled $a$, then that’s where the root transitions on $a$. If no such edge for $a$ exists, then you stay in the same place (self-looping on the root - effectively skipping over the symbol as it’s a non-starter for every pattern in the trie). All states reachable from the root are added to the traversal queue during this processing.</p>
+<p>For every other node processed in breadth-first fashion: for every symbol, $a$, you transition to the state reachable on an edge labelled $a$. If no such edge exists, then you transition to the state reached if you transitioned from the node’s suffix node. This encodes the idea that if no progress can be made on a certain path through the trie, then the state is transitioned into one that hopefully preserves the longest suffix of the current state that is also a prefix of a pattern in the trie. Often times, many transitions simply go to the root (preserving $\epsilon$), so a sparse matrix storage representation is recommendable for many offline Aho-Corasick automatons.</p>
+<p>For example, the trie with suffix and output links constructed from the strings $\lbrace \text{he}, \text{she}, \text{her} \rbrace$ would be as follows:</p>
+<p><img src="https://compiler.club/img/aho-corasick/before.svg" alt="automaton before determinisation"></p><p>The DFA computed from the above trie (by resolving transitions and merging outputs into sets) would be:</p>
+<p><img src="https://compiler.club/img/aho-corasick/after.svg" alt="DFA computed from trie augmented with suffix and output links"></p><h3 id="demo">Demo</h3>
+<p>Below you can build an Aho-Corasick trie from a set of strings:</p>
+
+
+
+
+
+
+
+<br>
+<h3 id="further-reading">Further Reading</h3>
+<ul>
+<li><a rel="external" href="https://cr.yp.to/bib/1975/aho.pdf">Efficient String Matching: An Aid to Bibliographic Search</a> - original paper describing entire algorithm.</li>
+</ul>
+
+    </div></div>

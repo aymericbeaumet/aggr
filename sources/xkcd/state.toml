@@ -1,0 +1,7 @@
+identity = "128de3bb1d1aa72115740707a8d4debf5d8b6ea9"
+resolved_url = "https://xkcd.com/atom.xml"
+title = "xkcd.com"
+site_url = "https://xkcd.com/"
+language = "en"
+etag = '"6abb2e20-a7a"'
+body_hash = "586df5f1028ad8210f9aa69d69c0c94235416154"

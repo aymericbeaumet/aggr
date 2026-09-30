@@ -1,0 +1,33 @@
+<div id="readability-page-1" class="page"><div>
+      <h2 id="what-happened">
+What happened</h2>
+<p>On 2026-08-20 at 7:15 UTC we got a report that the <code>proc-macro1</code> crate was malicious.</p>
+<p>The Rust Security Response Team verified this to be the case: the crate had a build script that was downloading a malicious payload.</p>
+<p>This crate <code>proc-macro1</code> and others like it (<code>proc-macro-en</code>, <code>aovine</code>, <code>arone</code>, <code>aronenao</code>, <code>tinymember</code>) have been deleted.</p>
+<p>Furthermore, we discovered that the popular <a rel="external" href="https://crates.io/crates/arrayref"><code>arrayref</code></a> crate had recently been republished and made to depend on this crate, with the most recent versions yanked. We have removed the malicious version and unyanked the maliciously-yanked versions. Other crates by that author (<a rel="external" href="https://crates.io/crates/internment"><code>internment</code></a>, <a rel="external" href="https://crates.io/crates/append-only-vec"><code>append-only-vec</code></a>) were also affected so we have done the same for those, and locked the account as a precaution. We do not believe the author of <code>arrayref</code> to be acting maliciously, but their computer or credentials are likely compromised, and we are attempting to contact them.</p>
+<h2 id="what-you-need-to-do">
+What you need to do</h2>
+<p>We recommend you check your local dependencies to ensure these crates were not pulled in.
+Here are the malicious versions that we deleted from crates.io:</p>
+<ul>
+<li><code>append-only-vec@0.1.9</code>: published at <code>2026-08-20T07:37:49Z</code>, deleted at <code>2026-08-20T09:25:24Z</code>. Online for 107 minutes.</li>
+<li><code>arrayref@0.3.10</code>: published at <code>2026-08-20T07:15:00Z</code>, deleted at <code>2026-08-20T08:41:40Z</code>. Online for 86 minutes.</li>
+<li><code>internment@0.8.7</code>: published at <code>2026-08-20T07:34:07Z</code>, deleted at <code>2026-08-20T09:04:11Z</code>. Online for 90 minutes.</li>
+<li><code>proc-macro1</code>, <code>proc-macro-en</code>, <code>aovine</code>, <code>arone</code>, <code>aronenao</code>, <code>tinymember</code> (any versions).</li>
+</ul>
+<p>You can quickly check if these crates have been used locally by going through <code>~/.cargo/registry/cache</code> with this command:</p>
+<pre><code data-language="shellscript">find ~/.cargo/registry/cache -type f \( \
+  -name 'append-only-vec-0.1.9.crate' -o \
+  -name 'arrayref-0.3.10.crate' -o \
+  -name 'internment-0.8.7.crate' -o \
+  -name 'proc-macro1-*.crate' -o \
+  -name 'proc-macro-en-*.crate' -o \
+  -name 'aovine-*.crate' -o \
+  -name 'arone-*.crate' -o \
+  -name 'aronenao-*.crate' -o \
+  -name 'tinymember-*.crate' \
+\) -print</code></pre><h2 id="thanks">
+Thanks</h2>
+<p>We'd like to thank the Research Team at Nextron Systems GmbH for initially discovering this and reporting it to us. We'd also like to thank Emily Albini, Manish Goregaokar, Marco Ieni, Tobias Bieniek, Ubiratan Soares, and Walter Pearce for participating in the response here.</p>
+
+    </div></div>

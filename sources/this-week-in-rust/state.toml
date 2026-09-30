@@ -1,0 +1,7 @@
+identity = "f75c090627d6ceb5a38f6c8f9f9b29191345be9b"
+resolved_url = "https://this-week-in-rust.org/atom.xml"
+title = "This Week in Rust"
+site_url = "https://this-week-in-rust.org/"
+etag = 'W/"6ab48dac-2f057"'
+last_modified = "Thu, 24 Sep 2026 02:40:44 GMT"
+body_hash = "0095781613c75c55b538de0aa5e02b11ac1dec70"

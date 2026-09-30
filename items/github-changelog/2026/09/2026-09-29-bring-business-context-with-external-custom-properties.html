@@ -1,0 +1,18 @@
+<div id="readability-page-1" class="page"><div>
+				
+<p>You can now seamlessly bring business context about your repositories from an external system of record (e.g., a configuration management database (CMDB), an internal developer portal, or an in-house system) into GitHub with external custom properties. This feature is now in public preview.</p>
+<p>Keep business context aligned with its source, with updates managed by your external system. This includes information such as ownership, service tier, lifecycle stage, and compliance status.</p>
+<h2 id="when-to-choose-external-custom-properties"><a href="#when-to-choose-external-custom-properties">When to choose external custom properties</a></h2>
+<p>Use custom properties when you want to manage this context in GitHub, whether through the UI or APIs. Choose external custom properties when an external system should exclusively own and continuously update that context:</p>
+<ul>
+<li><strong>Read-only in the GitHub UI:</strong> Users can’t edit these values in GitHub, preventing conflicting updates across systems.</li>
+<li><strong>Ongoing synchronization:</strong> Your external integration uses the external custom properties APIs to keep values current as your source data changes.</li>
+<li><strong>Dedicated namespace:</strong> Your integration manages properties under its own prefix, keeping them separate from properties managed by other sources.</li>
+</ul>
+<p>You can use external custom properties everywhere you use custom properties today, including repository views, repository filtering, and ruleset targeting. Your existing governance can use the synced business context while your external system remains the source of truth.</p>
+<h2 id="connect-your-system-of-record"><a href="#connect-your-system-of-record">Connect your system of record</a></h2>
+<p>Port.io is the first partner to integrate with external custom properties. Read <a href="https://www.port.io/blog/github-external-custom-properties">Port.io’s announcement</a> for an overview, or follow the <a href="https://docs.port.io/guides/all/sync-port-properties-to-github-external-custom-properties/">Port.io integration guide</a> to sync your business context to GitHub.</p>
+<p>You aren’t limited to partner integrations. Any enterprise can build its own integration using the external custom properties APIs, with fine-grained permissions to control its access. To get started, see <a href="https://docs.github.com/organizations/managing-organization-settings/sync-external-custom-properties">Integrating custom properties with an external system</a>.</p>
+<p>Join the conversation in the <a href="https://github.com/orgs/community/discussions/categories/repositories">GitHub Community announcements category</a>.</p>
+
+			</div></div>

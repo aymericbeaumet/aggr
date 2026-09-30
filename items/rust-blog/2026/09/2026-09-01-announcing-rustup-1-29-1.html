@@ -1,0 +1,73 @@
+<div id="readability-page-1" class="page"><div>
+      <p>The rustup team is happy to announce the release of rustup version 1.29.1.</p>
+<p><a rel="external" href="https://rustup.rs">Rustup</a> is the recommended tool to install <a rel="external" href="https://www.rust-lang.org">Rust</a>, a
+programming language that empowers everyone to build reliable and efficient
+software.</p>
+<h2 id="what-s-new-in-rustup-1-29-1">
+What's new in rustup 1.29.1</h2>
+<p>The headlines of this release are:</p>
+<ul>
+<li>
+<p>Concurrency in certain <code>rustup</code> operations has been improved:</p>
+<ul>
+<li>When running <code>rustup update</code>, rustup will first check for possible updates in parallel. <a rel="external" href="https://github.com/rust-lang/rustup/pull/4752">pr#4752</a></li>
+<li>When running <code>rustup component add</code> with multiple components, they will be installed concurrently. <a rel="external" href="https://github.com/rust-lang/rustup/pull/4790">pr#4790</a></li>
+</ul>
+</li>
+<li>
+<p>Implicit installation of the active toolchain in <code>rustup-init</code> and <code>rustup</code> invocations has
+been deprecated where deemed unnecessary and will now produce a warning. <a rel="external" href="https://github.com/rust-lang/rustup/pull/4840">pr#4840</a></p>
+<ul>
+<li>Please see our
+<a rel="external" href="https://blog.rust-lang.org/inside-rust/2026/07/03/rustup-update-1.30/#refining-the-implicit-installation-behavior">blog post</a>
+for more details regarding this change.</li>
+</ul>
+</li>
+<li>
+<p><code>rustup doc</code> now supports the <code>--serve</code> flag which allows serving the docs over local HTTP.
+This should help users with containerized browser and/or rustup setups. <a rel="external" href="https://github.com/rust-lang/rustup/pull/4986">pr#4986</a></p>
+</li>
+<li>
+<p>Installing <code>i686-pc-windows-*</code> host toolchains on 64-bit Windows now requires <code>--force-non-host</code>.
+<a rel="external" href="https://github.com/rust-lang/rustup/pull/4935">pr#4935</a></p>
+</li>
+<li>
+<p><code>rustup-init</code> will no longer leave unexpected files on disk after cancelled installations. <a rel="external" href="https://github.com/rust-lang/rustup/pull/4996">pr#4996</a></p>
+</li>
+<li>
+<p>A bug has been fixed which might cause Windows installation to fail when using <code>rustup-init.sh</code>.
+<a rel="external" href="https://github.com/rust-lang/rustup/pull/4756">pr#4756</a></p>
+</li>
+<li>
+<p>"Target <strong>triple</strong>" has been renamed to "target <strong>tuple</strong>" across the project to reflect the
+<a rel="external" href="https://github.com/rust-lang/rust/pull/125579/changes/a26450cf81d67d68d3c6157579f8d968349129e7">new terminology</a>.
+<a rel="external" href="https://github.com/rust-lang/rustup/pull/4743">pr#4743</a> <a rel="external" href="https://github.com/rust-lang/rustup/pull/4827">pr#4827</a> <a rel="external" href="https://github.com/rust-lang/rustup/pull/4834">pr#4834</a></p>
+<ul>
+<li>Please note that this is not a breaking change in the CLI since the existing
+options such as <code>--target</code> are not using this terminology.</li>
+</ul>
+</li>
+</ul>
+<p>In addition, rustup now officially supports <code>aarch64-pc-windows-gnullvm</code> as a host platform. <a rel="external" href="https://github.com/rust-lang/rustup/pull/4523">pr#4523</a></p>
+<p>Further details are available in the <a rel="external" href="https://github.com/rust-lang/rustup/blob/stable/CHANGELOG.md">changelog</a>!</p>
+<h2 id="how-to-update">
+How to update</h2>
+<p>If you have a previous version of rustup installed, getting the new one is as easy as stopping
+any programs which may be using rustup (e.g. closing your IDE) and running:</p>
+<pre><code data-language="plain">$ rustup self update</code></pre>
+<p>Rustup will also automatically update itself at the end of a normal toolchain update:</p>
+<pre><code data-language="plain">$ rustup update</code></pre>
+<p>If you don't have it already, you can <a rel="external" href="https://rustup.rs">get rustup</a> from the appropriate page on our website.</p>
+<p>Rustup's documentation is also available in <a rel="external" href="https://rust-lang.github.io/rustup/">the rustup book</a>.</p>
+<h2 id="caveats">
+Caveats</h2>
+<p>Rustup releases can come with problems not caused by rustup itself but just due to having a new release.</p>
+<p>In particular, anti-malware scanners might block rustup or stop it from creating or copying
+files, especially when installing <code>rust-docs</code> which contains many small files.</p>
+<p>Issues like this should be automatically resolved in a few weeks when the anti-malware scanners are updated
+to be aware of the new rustup release.</p>
+<h2 id="thanks">
+Thanks</h2>
+<p>Thanks again to all the <a rel="external" href="https://github.com/rust-lang/rustup/blob/stable/CHANGELOG.md#detailed-changes">contributors</a> who made this rustup release possible!</p>
+
+    </div></div>
