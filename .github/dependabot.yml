@@ -15,3 +15,12 @@ updates:
       # The challenge-fallback transport tracks BoringSSL; its upgrades are validated by hand.
       - dependency-name: wreq
       - dependency-name: wreq-util
+
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: weekly
+    groups:
+      client:
+        patterns: ["*"]
+        update-types: [minor, patch]

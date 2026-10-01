@@ -1,0 +1,48 @@
+{
+  "component": "ArticleHeader",
+  "props": {
+    "article": {
+      "access": {
+        "kind": "normal"
+      },
+      "authors": [],
+      "has_margin_notes": false,
+      "header": {
+        "age_band": "h1",
+        "category": null,
+        "excerpt": "",
+        "labels": [],
+        "language": null,
+        "link": "https://blog.example/plain",
+        "metadata": {
+          "consumption": {
+            "action": "read",
+            "minutes": 1,
+            "words": 28
+          },
+          "date": "2026-09-30T10:00:00+00:00",
+          "discussions": [],
+          "feed_sources": [],
+          "is_aggregated": false,
+          "original": "https://blog.example/plain",
+          "reading_minutes": 1,
+          "source_display": "blog.example",
+          "source_query": "blog",
+          "source_slug": "blog",
+          "source_title": "Blog",
+          "word_count": 28
+        },
+        "path": "items/blog/2026/09/plain",
+        "preview": null,
+        "title": "A plain article",
+        "url": "items/blog/plain/"
+      },
+      "next": null,
+      "previous": null,
+      "recommended": [],
+      "resources": []
+    },
+    "base": "../../../",
+    "language": "en"
+  }
+}

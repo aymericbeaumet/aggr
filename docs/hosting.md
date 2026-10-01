@@ -161,7 +161,7 @@ This takes effect only in `aggr build --release`. Development and preview builds
 public URL is known. At an origin root, `robots.txt` permits crawling and advertises that sitemap;
 with indexing disabled it still permits crawling so engines can read the page's `noindex` directive.
 An instance under a subpath does not write `robots.txt`, since that file only governs an origin
-when served at its root. Custom themes must preserve `page.indexable` in their robots metadata.
+when served at its root. The templates keep `page.indexable` in their robots metadata.
 
 Every published article keeps its self-canonical URL and visibly labelled original URL. Original
 provenance also appears in structured data, feeds, portable representations, and `linkset.json`.

@@ -11,8 +11,6 @@ title = "aggr"
 # description = "My independent, searchable snapshot of the feeds I follow."
 # BCP 47 language tag used by HTML and feeds.
 language = "en"
-# "default", or a directory relative to the repository (e.g. "themes/mine").
-theme = "default"
 # Number of entries kept in each generated feed, source, category, and tag page. The reader can
 # split these static pages into smaller browser-side feed pages without hiding any entry from
 # no-JavaScript readers or crawlers.

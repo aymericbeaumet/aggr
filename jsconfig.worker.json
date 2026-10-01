@@ -1,7 +1,0 @@
-{
-  "extends": "./jsconfig.json",
-  "compilerOptions": {
-    "lib": ["ES2022", "WebWorker"]
-  },
-  "include": []
-}

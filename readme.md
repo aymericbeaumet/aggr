@@ -116,11 +116,11 @@ See [the measurements and hosting limits](docs/benchmarks.md) before choosing yo
 ## Documentation and contributing
 
 [Sources](docs/sources.md) · [Reader](docs/reading.md) · [Commands](docs/commands.md) ·
-[Hosting](docs/hosting.md) · [Themes](docs/themes.md) · [Git model](docs/git-model.md) ·
+[Hosting](docs/hosting.md) · [Rendering](docs/rendering.md) · [Git model](docs/git-model.md) ·
 [Interoperability](docs/interoperability.md) · [Performance](docs/performance.md)
 
-Rust generates the site; the browser client is hand-written HTML, CSS and JavaScript with no build
-step and no dependencies. See [contributing](CONTRIBUTING.md) and
+Rust generates the site; the reader is a Svelte application compiled ahead of time and shipped
+inside the binary, so building a site never needs Node. See [contributing](CONTRIBUTING.md) and
 [client development](docs/client.md).
 
 ## License

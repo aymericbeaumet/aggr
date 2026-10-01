@@ -336,7 +336,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     );
 
     let ignored_transfer = client.execute(r#"
-      const url=new URL('preferences/',new URL(window.AGGR.base,location.href));
+      const url=new URL(document.querySelector('[data-route="preferences/"]').href);
       url.searchParams.set('aggr-state',btoa(JSON.stringify({version:1,preferences:{theme:'light'}})));
       return url.href;
     "#,vec![]).await?.as_str().context("query-string transfer URL")?.to_owned();

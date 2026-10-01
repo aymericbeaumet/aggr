@@ -1,8 +1,8 @@
 # Contributing
 
 For development commands and client ownership, see [client development](docs/client.md)
-and [AGENTS.md](AGENTS.md). Run `make check` before submitting a change. The browser client
-has no build step: edit the files under `themes/default/static/` and reload.
+and [AGENTS.md](AGENTS.md). Run `make check` before submitting a change. The reader lives in
+`web/`; rebuild its committed bundle with `make client-build` after editing it.
 
 ## Contribution license
 

@@ -695,9 +695,12 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         await frame(); await frame(); await frame();
         window.scrollTo(0, fraction * (document.documentElement.scrollHeight - innerHeight));
         await frame(); await frame(); await frame();
+        // The bar measures the text, so it fills the text column: the header's own box, not the
+        // page-wide surface behind it.
         const indicator = head.querySelector('.itemhead-progress'), line = getComputedStyle(indicator);
+        const box = indicator.getBoundingClientRect(), column = head.getBoundingClientRect();
         return {progress:new DOMMatrixReadOnly(line.transform).a,
-          fill:indicator.getBoundingClientRect().width / innerWidth, transition:line.transitionDuration,
+          fill:box.width / column.width, column:Math.abs(box.left - column.left) < 0.5, transition:line.transitionDuration,
           expected:scrollY / (document.documentElement.scrollHeight - innerHeight)};
       }
       (async () => done({top:await sample(0),quarter:await sample(.25),half:await sample(.5),
@@ -720,6 +723,10 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         let fill = reading_progress[sample]["fill"]
             .as_f64()
             .context("progress line scale")?;
+        assert!(
+            reading_progress[sample]["column"] == true,
+            "the bar starts where the text column starts: {reading_progress}"
+        );
         assert!(
             (progress - expected).abs() < 0.002 && (fill - progress).abs() < 0.00001,
             "the header separator must fill linearly in both directions: {reading_progress}"
@@ -750,7 +757,8 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
           height: barBox.height, fade: Number(getComputedStyle(fade).opacity),
           gap: fadeBox.top - barBox.bottom,
           page: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth,
-          edges: {surface: [box.left + parseFloat(surface.left), box.right - parseFloat(surface.right)],
+          edges: {column: [box.left, box.right],
+            surface: [box.left + parseFloat(surface.left), box.right - parseFloat(surface.right)],
             bar: [barBox.left, barBox.left + barBox.width / new DOMMatrixReadOnly(getComputedStyle(bar).transform).a],
             fade: [fadeBox.left, fadeBox.right]}});
       })();
@@ -768,18 +776,30 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         (reduced["progress"].as_f64().unwrap_or_default() - 0.5).abs() < 0.05
             && reduced["height"].as_f64().unwrap_or_default() >= 2.0
             && reduced["fade"].as_f64() == Some(1.0)
-            && reduced["gap"].as_f64().unwrap_or(f64::MAX).abs() < 1.0,
+            && (-2.5..=0.5).contains(&reduced["gap"].as_f64().unwrap_or(f64::MAX)),
         "reading progress stays visible and follows the scroll under reduced motion: {reduced}"
     );
-    // The header spans the page rather than the reading column, and reaching past the column
-    // does not let the page scroll sideways.
+    // The header's surface and fade span the page rather than the reading column, and reaching
+    // past the column does not let the page scroll sideways. The bar measures the text, so it
+    // keeps the column's width and lines up with the rules that separate the text.
     let page = reduced["page"].as_f64().context("page width")?;
-    for layer in ["surface", "bar", "fade"] {
+    for layer in ["surface", "fade"] {
         let edges = &reduced["edges"][layer];
         assert!(
             edges[0].as_f64().unwrap_or(f64::MAX) <= 0.5
                 && edges[1].as_f64().unwrap_or_default() >= page - 0.5,
             "the header's {layer} must span the page: {reduced}"
+        );
+    }
+    for edge in 0..2 {
+        assert!(
+            (reduced["edges"]["bar"][edge].as_f64().unwrap_or(f64::MAX)
+                - reduced["edges"]["column"][edge]
+                    .as_f64()
+                    .unwrap_or_default())
+            .abs()
+                < 0.5,
+            "the bar keeps the text column's width: {reduced}"
         );
     }
     assert_eq!(reduced["scrollWidth"].as_f64(), Some(page), "{reduced}");
@@ -878,7 +898,7 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
     let external_shortcuts = client
         .execute(
             r#"
-      return {enabled:window.AGGR.discussions.map(network => network.shortcut),
+      return {enabled:JSON.parse(document.getElementById('aggr-page').textContent).site.discussions.map(network => network.shortcut),
         opened:window.__aggrOpened.map(value => { const url=new URL(value); return {host:url.host,query:url.search}; })};
     "#,
             vec![],
@@ -918,10 +938,17 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
       press('editing', 'u', {ctrlKey:true}, input); input.remove();
       const dialog = document.querySelector('#shortcut-help'); dialog.showModal();
       press('dialog', 'd', {ctrlKey:true}); dialog.close(); document.activeElement?.blur();
-      const preference = window.AGGRPreferences.values['single-key-shortcuts'];
-      window.AGGRPreferences.values['single-key-shortcuts'] = false;
+      // Preferences live in localStorage; the app re-reads them on the `storage` event.
+      const stored = localStorage.getItem('aggr:single-key-shortcuts');
+      const restore = () => {
+        if (stored === null) localStorage.removeItem('aggr:single-key-shortcuts');
+        else localStorage.setItem('aggr:single-key-shortcuts', stored);
+        window.dispatchEvent(new StorageEvent('storage', {key:'aggr:single-key-shortcuts'}));
+      };
+      localStorage.setItem('aggr:single-key-shortcuts', 'false');
+      window.dispatchEvent(new StorageEvent('storage', {key:'aggr:single-key-shortcuts'}));
       press('disabledD', 'd'); press('enabledCtrlD', 'd', {ctrlKey:true});
-      window.AGGRPreferences.values['single-key-shortcuts'] = preference;
+      restore();
       window.scrollBy = scrollBy;
       const line = parseFloat(getComputedStyle(document.querySelector('.body')).lineHeight);
       const head = document.querySelector('.itemhead').getBoundingClientRect();
@@ -957,8 +984,8 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
     let article_paths = client
         .execute(
             r#"
-      const article = document.querySelector('article.item');
-      return {current:location.pathname,older:new URL(article.dataset.nextUrl,new URL(window.AGGR.base,location.href)).pathname};
+      const model = JSON.parse(document.getElementById('aggr-page').textContent);
+      return {current:location.pathname,older:new URL(model.page.data.next.url.replace(/^\/+/,''),new URL(model.base,location.href)).pathname};
     "#,
             vec![],
         )
@@ -1007,7 +1034,9 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
     wait_for(
         client,
         &format!(
-            "location.pathname === {} && !!document.querySelector('article.item')?.dataset.previousUrl && !document.documentElement.classList.contains('is-changing')",
+            // A swap brings the page's own head metadata with it, so the `rel=prev` link is the
+            // older article's, and the busy marker is gone once the navigation has settled.
+            "location.pathname === {} && !!document.querySelector('link[rel=prev]') && !document.documentElement.hasAttribute('data-navigating')",
             serde_json::to_string(&older_path)?
         ),
     )
@@ -1015,7 +1044,7 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
     assert_eq!(
         client
             .execute(
-                "return new URL(document.querySelector('article.item').dataset.previousUrl,new URL(window.AGGR.base,location.href)).pathname",
+                "return new URL(document.querySelector('link[rel=prev]').href).pathname",
                 vec![]
             )
             .await?,
@@ -1029,7 +1058,7 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
     wait_for(
         client,
         &format!(
-            "location.pathname === {} && !!document.querySelector('article.item') && !document.documentElement.classList.contains('is-changing')",
+            "location.pathname === {} && !!document.querySelector('article.item') && !document.documentElement.hasAttribute('data-navigating')",
             serde_json::to_string(&current_path)?
         ),
     )

@@ -541,7 +541,7 @@ fn render_refresh(
     let config_sha = project.config_sha();
     let fingerprint = crate::cache::render_fingerprint(crate::cache::RenderFingerprint {
         config: &project.config,
-        project_root: &project.root,
+        theme: &crate::site::theme(),
         repo_root: project.repo.root(),
         config_sha: config_sha.as_deref(),
         data_sha: None,
@@ -754,27 +754,14 @@ impl WatchPaths {
         configs.sort();
         configs.dedup();
 
-        // Keep absent override directories as logical dependencies. Their nearest existing parent
-        // is watched shallowly so creating `templates/`, `static/`, or a configured theme starts
-        // recursive watching without restarting dev.
-        let mut themes = vec![project.root.join("templates"), project.root.join("static")];
-        if project.config.site.theme == "default" {
-            #[cfg(debug_assertions)]
-            {
-                let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes/default");
-                if source.is_dir() && !source.starts_with(&project.root) {
-                    themes.push(source);
-                }
-            }
-        } else {
-            themes.push(project.root.join(&project.config.site.theme));
-        }
-        themes = themes
+        // A development binary renders the theme from its source tree, so an edit there rebuilds
+        // without recompiling; a release binary has no theme files to watch.
+        let themes = crate::site::theme()
+            .source_dir()
+            .map(|source| normalize_watch_path(source.to_path_buf()))
+            .transpose()?
             .into_iter()
-            .map(normalize_watch_path)
-            .collect::<Result<Vec<_>>>()?;
-        themes.sort();
-        themes.dedup();
+            .collect::<Vec<_>>();
 
         let mut excluded = vec![
             state.data.clone(),
@@ -801,13 +788,6 @@ impl WatchPaths {
             .iter()
             .filter_map(|path| path.parent().map(Path::to_path_buf))
             .collect::<Vec<_>>();
-        for theme in themes.iter().filter(|path| !path.is_dir()) {
-            if let Some(parent) = nearest_existing_parent(theme)
-                && parent.starts_with(&project.root)
-            {
-                shallow.push(parent);
-            }
-        }
         shallow.retain(|path| !recursive.iter().any(|root| path.starts_with(root)));
         shallow.sort();
         shallow.dedup();
@@ -866,16 +846,6 @@ fn normalize_watch_path(path: PathBuf) -> Result<PathBuf> {
         }
     }
     Ok(normalized)
-}
-
-fn nearest_existing_parent(path: &Path) -> Option<PathBuf> {
-    let mut parent = path.parent()?;
-    loop {
-        if parent.is_dir() {
-            return Some(parent.to_path_buf());
-        }
-        parent = parent.parent()?;
-    }
 }
 
 fn rebuild_event(kind: notify::EventKind) -> bool {
@@ -1563,13 +1533,14 @@ mod tests {
         );
 
         let last_good = state.site.lazy_root().await.unwrap();
-        let theme = tmp.path().join("themes/custom/templates");
-        std::fs::create_dir_all(&theme).unwrap();
-        std::fs::write(theme.join("index.html"), "{% invalid syntax %}").unwrap();
+        // A config edit forces a new generation; an unreadable source status file makes its
+        // preparation fail, and the last good generation keeps serving.
         let config = std::fs::read_to_string(&config_path)
             .unwrap()
-            .replace("pwa = false", "pwa = false\ntheme = \"themes/custom\"");
+            .replace("pwa = false", "pwa = false\ntitle = \"Renamed\"");
         std::fs::write(&config_path, config).unwrap();
+        let unreadable_status = state.data.join("status.toml");
+        std::fs::create_dir(&unreadable_status).unwrap();
         let project = Arc::new(Project::load_offline(&config_path).await.unwrap());
         assert!(
             refresh(project.clone(), &fetch, &build, &state, false)
@@ -1585,7 +1556,7 @@ mod tests {
                 .unwrap()
                 .contains("Retained article")
         );
-        std::fs::remove_file(theme.join("index.html")).unwrap();
+        std::fs::remove_dir(&unreadable_status).unwrap();
         assert!(
             refresh(project, &fetch, &build, &state, false)
                 .await
@@ -1669,8 +1640,8 @@ mod tests {
     fn ignores_generated_and_internal_changes() {
         let root = Path::new("/project");
         let configs = vec![root.join("aggr.toml")];
-        let themes = vec![root.join("templates")];
-        let excluded = vec![root.join("templates/generated")];
+        let themes = vec![root.join("themes/default")];
+        let excluded = vec![root.join("themes/default/generated")];
         assert!(watched(
             &root.join("aggr.toml"),
             &configs,
@@ -1678,7 +1649,7 @@ mod tests {
             &excluded
         ));
         assert!(watched(
-            &root.join("templates/base.html"),
+            &root.join("themes/default/templates/base.html"),
             &configs,
             &themes,
             &excluded
@@ -1690,7 +1661,7 @@ mod tests {
             &excluded
         ));
         assert!(!watched(
-            &root.join("templates/generated/index.html"),
+            &root.join("themes/default/generated/index.html"),
             &configs,
             &themes,
             &excluded
@@ -1717,7 +1688,7 @@ mod tests {
             notify::event::ModifyKind::Any
         )));
         assert!(watched(
-            &root.join("templates"),
+            &root.join("themes/default"),
             &configs,
             &themes,
             &excluded

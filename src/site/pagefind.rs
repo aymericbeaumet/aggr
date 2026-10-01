@@ -1,5 +1,6 @@
 //! A purpose-built Pagefind index. Titles, exact/normalized original URLs, and cleaned article
-//! prose are searchable. Display metadata travels in result chunks with zero runtime weight,
+//! prose are searchable. Display metadata (the same `ClientRow` feed rows render) travels in
+//! result chunks with zero runtime weight,
 //! avoiding a second whole-corpus request before the first result can render.
 
 use std::collections::BTreeMap;
@@ -49,48 +50,6 @@ pub struct SearchCatalogue {
     pub facets: BTreeMap<String, Vec<SearchFacet>>,
 }
 
-#[derive(Serialize)]
-struct SearchDisplay<'a> {
-    #[serde(flatten)]
-    metadata: super::display::Metadata,
-    excerpt: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    preview: Option<SearchPreview<'a>>,
-}
-
-/// What a search row needs to draw a thumbnail. The ThumbHash stays out: the build has already
-/// decoded it into `data_url`, nothing in the reader reads the hash, and every document would
-/// otherwise carry it hex-encoded in the index.
-#[derive(Serialize)]
-struct SearchPreview<'a> {
-    url: &'a str,
-    width: u32,
-    height: u32,
-    alt: Option<&'a str>,
-    color: Option<&'a str>,
-    placeholder: SearchPlaceholder<'a>,
-}
-
-#[derive(Serialize)]
-struct SearchPlaceholder<'a> {
-    data_url: &'a str,
-}
-
-impl<'a> From<&'a super::context::PreviewCtx> for SearchPreview<'a> {
-    fn from(preview: &'a super::context::PreviewCtx) -> Self {
-        Self {
-            url: &preview.url,
-            width: preview.width,
-            height: preview.height,
-            alt: preview.alt.as_deref(),
-            color: preview.color.as_deref(),
-            placeholder: SearchPlaceholder {
-                data_url: &preview.placeholder.data_url,
-            },
-        }
-    }
-}
-
 impl SearchDocument {
     pub fn new(item: &ItemCtx, prose: &str) -> Self {
         let mut meta = BTreeMap::new();
@@ -104,13 +63,9 @@ impl SearchDocument {
         // data opaque so provider names, JSON keys and preview URLs cannot become search terms.
         meta.insert(
             "aggr_display".into(),
-            serde_json::to_vec(&SearchDisplay {
-                metadata: super::display::Metadata::from(item),
-                excerpt: &item.excerpt,
-                preview: item.preview.as_ref().map(SearchPreview::from),
-            })
-            .map(hex::encode)
-            .unwrap_or_default(),
+            serde_json::to_vec(&super::client::ClientRow::from(item))
+                .map(hex::encode)
+                .unwrap_or_default(),
         );
 
         let mut filters = BTreeMap::new();
@@ -501,8 +456,8 @@ mod tests {
         assert_eq!(document.filters["source"], vec!["blog"]);
         let opaque = hex::decode(&document.meta["aggr_display"]).unwrap();
         let display: serde_json::Value = serde_json::from_slice(&opaque).unwrap();
-        assert_eq!(display["source_slug"], "blog");
-        assert_eq!(display["source_query"], "Publisher display");
+        assert_eq!(display["metadata"]["source_slug"], "blog");
+        assert_eq!(display["metadata"]["source_query"], "Publisher display");
     }
 
     #[test]
@@ -528,20 +483,20 @@ mod tests {
             &hex::decode(&document.meta["aggr_display"]).expect("hex display metadata"),
         )
         .expect("JSON display metadata");
-        assert_eq!(display["original"], item().link);
-        assert_eq!(display["source_display"], "secret.example");
-        assert!(display.get("domain").is_none());
-        assert!(display.get("source_url").is_none());
-        assert!(display.get("feed_display").is_none());
-        assert!(display.get("is_aggregated").is_none());
-        assert_eq!(display["source_slug"], "blog");
+        assert_eq!(display["metadata"]["original"], item().link);
+        assert_eq!(display["metadata"]["source_display"], "secret.example");
+        assert!(display["metadata"].get("domain").is_none());
+        assert!(display["metadata"].get("source_url").is_none());
+        assert!(display["metadata"].get("feed_display").is_none());
+        assert_eq!(display["metadata"]["is_aggregated"], false);
+        assert_eq!(display["metadata"]["source_slug"], "blog");
         assert_eq!(display["excerpt"], "A concise fallback");
-        assert_eq!(display["discussions"][0]["name"], "hackernews");
+        assert_eq!(display["metadata"]["discussions"][0]["name"], "hackernews");
         assert_eq!(
-            display["discussions"][0]["url"],
+            display["metadata"]["discussions"][0]["url"],
             "https://news.ycombinator.com/item?id=42"
         );
-        assert_eq!(display["discussions"][0]["score"], 12);
+        assert_eq!(display["metadata"]["discussions"][0]["score"], 12);
         assert_eq!(document.filters["type"], ["article"]);
         assert_eq!(document.filters["category"], ["engineering"]);
         assert_eq!(document.filters["tag"], ["rust"]);
@@ -552,7 +507,7 @@ mod tests {
     #[test]
     fn static_and_search_media_metadata_share_duration_and_unknown_state() {
         let renderer =
-            crate::site::render::Renderer::new(crate::site::render::Layers::default()).unwrap();
+            crate::site::render::Renderer::new(crate::site::render::Theme::default()).unwrap();
         for (kind, action) in [
             (super::super::item_type::ItemType::Podcast, "listen"),
             (super::super::item_type::ItemType::Audio, "listen"),
@@ -572,7 +527,7 @@ mod tests {
                     serde_json::from_slice(&hex::decode(&document.meta["aggr_display"]).unwrap())
                         .unwrap();
                 assert_eq!(
-                    display["consumption"],
+                    display["metadata"]["consumption"],
                     serde_json::to_value(&item.metadata.consumption).unwrap()
                 );
                 let rendered = renderer
@@ -623,15 +578,15 @@ mod tests {
             serde_json::from_slice(&hex::decode(&document.meta["aggr_display"]).unwrap()).unwrap();
         let metadata = serde_json::to_value(&item.metadata).unwrap();
         for (key, value) in metadata.as_object().unwrap() {
-            assert_eq!(&display[key], value, "shared field {key}");
+            assert_eq!(&display["metadata"][key], value, "shared field {key}");
         }
-        assert_eq!(display["points"], 0);
-        assert_eq!(display["comments"]["count"], 12);
+        assert_eq!(display["metadata"]["points"], 0);
+        assert_eq!(display["metadata"]["comments"]["count"], 12);
         assert!(!document.meta["aggr_display"].contains("publisher"));
         assert!(!document.content.contains("comments?a="));
 
         let renderer =
-            crate::site::render::Renderer::new(crate::site::render::Layers::default()).unwrap();
+            crate::site::render::Renderer::new(crate::site::render::Theme::default()).unwrap();
         let rendered = renderer
             .render("_metadata.html", minijinja::context! { item => item })
             .unwrap();
@@ -711,7 +666,7 @@ mod tests {
         )
         .expect("JSON display metadata");
 
-        assert_eq!(display["discussions"], serde_json::json!([]));
+        assert_eq!(display["metadata"]["discussions"], serde_json::json!([]));
     }
 
     #[test]
@@ -723,9 +678,9 @@ mod tests {
         let display: serde_json::Value =
             serde_json::from_slice(&hex::decode(&document.meta["aggr_display"]).unwrap()).unwrap();
 
-        assert_eq!(display["is_aggregated"], true);
-        assert_eq!(display["feed_display"], "hnrss.org/frontpage");
-        assert_eq!(display["source_display"], "secret.example");
+        assert_eq!(display["metadata"]["is_aggregated"], true);
+        assert_eq!(display["metadata"]["feed_display"], "hnrss.org/frontpage");
+        assert_eq!(display["metadata"]["source_display"], "secret.example");
     }
 
     #[test]
@@ -740,13 +695,13 @@ mod tests {
         };
         item.category = Some("rust & friends".into());
         assert_eq!(
-            display(&item)["category"],
+            display(&item)["metadata"]["category"],
             serde_json::json!({
                 "name": "rust & friends", "slug": "rust-friends"
             })
         );
         item.category = None;
-        assert!(display(&item).get("category").is_none());
+        assert!(display(&item)["metadata"].get("category").is_none());
     }
 
     #[test]
@@ -759,9 +714,12 @@ mod tests {
             )
             .unwrap()
         };
-        assert!(display(&item).get("updated").is_none());
+        assert!(display(&item)["metadata"].get("updated").is_none());
         item.updated = Some(Utc.with_ymd_and_hms(2026, 9, 4, 12, 30, 0).unwrap());
-        assert_eq!(display(&item)["updated"], "2026-09-04T12:30:00+00:00");
+        assert_eq!(
+            display(&item)["metadata"]["updated"],
+            "2026-09-04T12:30:00+00:00"
+        );
     }
 
     #[test]

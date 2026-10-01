@@ -1,0 +1,49 @@
+{
+  "component": "ArticleHeader",
+  "props": {
+    "article": {
+      "access": {
+        "archive_lookup_url": "https://archive.example/search?q=wall",
+        "kind": "subscription_required"
+      },
+      "authors": [],
+      "has_margin_notes": false,
+      "header": {
+        "age_band": "h3",
+        "category": null,
+        "excerpt": "",
+        "labels": [],
+        "language": null,
+        "link": "https://blog.example/wall",
+        "metadata": {
+          "consumption": {
+            "action": "read",
+            "minutes": 1,
+            "words": 28
+          },
+          "date": "2026-09-30T08:00:00+00:00",
+          "discussions": [],
+          "feed_sources": [],
+          "is_aggregated": false,
+          "original": "https://blog.example/wall",
+          "reading_minutes": 1,
+          "source_display": "blog.example",
+          "source_query": "blog",
+          "source_slug": "blog",
+          "source_title": "Blog",
+          "word_count": 28
+        },
+        "path": "items/blog/2026/09/wall",
+        "preview": null,
+        "title": "Behind a paywall",
+        "url": "items/blog/wall/"
+      },
+      "next": null,
+      "previous": null,
+      "recommended": [],
+      "resources": []
+    },
+    "base": "../../../",
+    "language": "en"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "component": "Row",
+  "props": {
+    "base": "./",
+    "excerpts": true,
+    "language": "en",
+    "rank": 1,
+    "row": {
+      "age_band": "h3",
+      "category": null,
+      "excerpt": "Excerpt with </script> & <i>markup</i>",
+      "labels": [],
+      "language": null,
+      "link": "https://blog.example/escaped",
+      "metadata": {
+        "consumption": {
+          "action": "read",
+          "minutes": 1,
+          "words": 28
+        },
+        "date": "2026-09-30T04:00:00+00:00",
+        "discussions": [],
+        "feed_sources": [],
+        "is_aggregated": false,
+        "original": "https://blog.example/escaped",
+        "reading_minutes": 1,
+        "source_display": "blog.example",
+        "source_query": "blog",
+        "source_slug": "blog",
+        "source_title": "Blog",
+        "word_count": 28
+      },
+      "path": "items/blog/2026/09/escaped",
+      "preview": null,
+      "title": "Title with </script> & <b>markup</b> \"quotes\"",
+      "url": "items/blog/escaped/"
+    }
+  }
+}

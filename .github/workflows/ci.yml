@@ -50,6 +50,10 @@ jobs:
         if: matrix.name == 'linux-amd64'
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      # `cargo test` exports the client's TypeScript types with ts-rs; stale bindings fail here.
+      - name: Generated client types are committed
+        if: matrix.name == 'linux-amd64'
+        run: git diff --exit-code -- web/src/generated
 
   browser:
     name: browser (chrome)
@@ -141,15 +145,20 @@ jobs:
           save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - run: cargo build --locked
 
-  # The reader's JavaScript against its JSDoc types, in strict mode; the compiler emits nothing.
-  types:
-    name: types (tsc)
+  # The Svelte client: type-check, unit tests, then a rebuild that must reproduce the committed
+  # bundles under themes/default/static/app (Node is a development tool only; the binary embeds
+  # the committed output).
+  client:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
-      - run: make typecheck
-      - run: make client-test
+      - run: npm ci --prefix web
+      - run: npm --prefix web run verify
+      - name: Committed client assets match the sources
+        run: |
+          git add --intent-to-add -- themes/default/static/app
+          git diff --exit-code -- themes/default/static/app
 
   # Licenses, RustSec advisories, duplicate versions and registry sources of the dependency tree,
   # as configured in deny.toml. The action ships cargo-deny; no toolchain or cache is needed.

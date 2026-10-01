@@ -110,7 +110,7 @@ Pagefind, article-response, extraction, and dev caches remain in use. Offline ca
 shared asset once per build. Worker downloads reuse verified revisions across deployments.
 
 Shared template data is converted to MiniJinja values once per build. Article templates still
-receive the complete archive, including custom themes, but rendering every article no longer
+receive the complete archive, but rendering every article no longer
 serializes that archive again. Each article is parsed and highlighted once by bounded workers. Its prepared HTML and plain text
 serve reading metrics, excerpts, every collection feed, portable representations, article image
 substitution, and search indexing. Shared immutable image/preview paths are written once per build;
@@ -204,9 +204,10 @@ and warm versus cold caches determine the result.
 
 ## Reader startup and search
 
-The reader is five hand-written files embedded in the Rust binary, with no build step. Only the
-small pre-paint bootstrap blocks rendering; navigation and reader controls are deferred, and search and media are
-fetched on demand. The complete static HTML remains the first paint and the no-JavaScript fallback.
+The reader is a Svelte application compiled ahead of time and embedded in the Rust binary. Only the
+small pre-paint bootstrap blocks rendering; the module bundle is deferred, mounts from the page's
+embedded model, and loads search and media chunks on demand. The complete static HTML remains the
+first paint and the no-JavaScript fallback.
 
 Search completion uses `search-catalog.json` (version, base, document count, and facets). Pagefind's
 runtime and its filter files wait until an actual query needs them, so a reader who never searches
@@ -308,7 +309,7 @@ benefit. `make timings` writes Cargo's HTML timing report under `target/cargo-ti
 cached no-op build separately from a representative source edit, and avoid concurrent source or
 embedded-asset writes while measuring. See [Cargo profiles](https://doc.rust-lang.org/cargo/reference/profiles.html).
 
-`make check` verifies formatting, then runs frontend checks alongside Rust validation. Rust linting
+`make check` verifies formatting, then runs the frontend checks alongside Rust validation. Rust linting
 finishes before tests begin, avoiding competing Cargo processes and target-directory locks.
 Compiler parallelism remains under Cargo's control. Build, run, lint, and test Make targets use
 `--locked` so verification cannot silently update dependency versions.

@@ -48,8 +48,8 @@ and fetch caches survive restart, and nothing is committed or pushed.
 Use `aggr dev --release` to exercise the complete publication build, including its media budget
 and PWA outputs. Ordinary lazy dev omits PWA outputs; the dev server unregisters its scoped worker
 to keep browser caches from hiding edits.
-For browser code, run `make typecheck-watch` alongside dev; `make check` checks the types, client
-behavior and Rust code. See [client development](client.md) for the pinned compiler setup.
+For client code, run `make client-dev` alongside dev with `AGGR_VITE_URL` set; `make check` runs
+the Rust and frontend checks. See [client development](client.md).
 
 ## Cache and cleanup
 

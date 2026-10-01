@@ -1,0 +1,19 @@
+{
+  "component": "Pager",
+  "props": {
+    "base": "../../",
+    "kind": "river",
+    "paginator": {
+      "base_url": "page/",
+      "current_index": 2,
+      "first": "./",
+      "last": "page/4/",
+      "next": "page/3/",
+      "number_pagers": 4,
+      "offset": 2,
+      "paginate_by": 2,
+      "previous": "./",
+      "total_items": 7
+    }
+  }
+}

@@ -33,6 +33,7 @@
   {% elif item.content == 'none' and not item.body_html and not item.video and not item.document and not item.native_media and not item.interactive %}
   <p class="empty">This source publishes titles only — <a href="{{ item.link }}" title="{{ item.link }}" target="_blank" rel="noopener noreferrer">open the original</a>.</p>
   {% endif %}
+  <div data-article-content>
   {% if item.document %}
   <figure class="document-reader" aria-label="PDF document">
     <div class="document-frame media-frame"{% if item.preview %} style="--image-placeholder: {{ item.preview.color }}; --image-preview: url('{{ item.preview.placeholder.data_url }}')"{% endif %}>
@@ -121,6 +122,7 @@
   </figure>
   {% endif %}
   <div class="body e-content{% if item.has_margin_notes %} has-margin-notes{% endif %}">{{ item.body_html | rebase | safe }}</div>
+  </div>
   {% if item.next_article or item.recommended_articles %}
   <footer class="article-footer">
     {% if item.next_article %}

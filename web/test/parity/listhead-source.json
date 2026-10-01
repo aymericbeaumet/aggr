@@ -1,0 +1,14 @@
+{
+  "component": "ListHead",
+  "props": {
+    "error": null,
+    "kind": "source",
+    "scope": {
+      "kind": "source",
+      "name": "Blog",
+      "profile": "blog.example",
+      "site_url": "https://blog.example/",
+      "slug": "blog"
+    }
+  }
+}

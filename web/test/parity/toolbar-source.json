@@ -1,0 +1,14 @@
+{
+  "component": "Toolbar",
+  "props": {
+    "base": "../../../../",
+    "kind": "source",
+    "scope": {
+      "kind": "source",
+      "name": "Blog",
+      "profile": "blog.example",
+      "site_url": "https://blog.example/",
+      "slug": "blog"
+    }
+  }
+}

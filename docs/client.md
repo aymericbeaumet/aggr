@@ -1,75 +1,93 @@
 # Client development and search
 
-Rust and MiniJinja render the complete static reader. The browser client is five hand-written
-files with no build step and no dependencies: editing one and reloading is the whole loop.
-Site generation never executes JavaScript or invokes a frontend compiler, so `cargo build`,
-`aggr sync`, `aggr build` and `aggr dev` need no Node. Search is a build-time Pagefind index;
-there is no search service.
+Rust and MiniJinja render the complete static reader. The browser client is a Svelte 5 +
+TypeScript application in `web/`, compiled ahead of time by Vite and committed under
+`themes/default/static/app/`, where the binary embeds it like any other static file. Site
+generation never executes JavaScript or invokes a frontend compiler, so `cargo build`, `aggr sync`,
+`aggr build` and `aggr dev` need no Node. Search is a build-time Pagefind index; there is no
+search service.
 
-## The client
+## The page model
 
-| File | Loaded | What it owns |
-|---|---|---|
-| `themes/default/static/bootstrap.js` | render-blocking, every page | Applies saved preferences and rewrites dates before the first paint, so nothing flashes and no date column starts empty. The only blocking script, and deliberately small. |
-| `themes/default/static/app.js` | deferred module, every page | In-place page navigation, keyboard shortcuts and the selection cursor, feed page slicing, the preferences form, relative-date upkeep, the shortcut dialog, and the page modules below. |
-| `themes/default/static/search.js` | on searchable pages; index on valid query intent | The query language, the completion menu, and the result list on top of Pagefind's low-level API. |
-| `themes/default/static/reader.js` | every page | Offline downloads and status, application updates, selection sharing, and reading feedback. |
-| `themes/default/static/media.js` | on article pages with media | The podcast player, provider video facades, and playback-time readouts. |
+Every HTML page embeds the model it was rendered from in `<script id="aggr-page">`:
+`ClientPage` in [`src/site/client.rs`](../src/site/client.rs), with the site, the build versions
+and one of five views: `list` (rows, paginator, scope), `article` (header row, authors, resources,
+access notice, neighbours and recommendations), `preferences`, `offline` and `static`. Field
+names are snake_case like the templates, URLs are site paths the client joins onto `base`, and
+`cargo test` exports the TypeScript types with ts-rs into `web/src/generated/` (CI fails when
+they are stale). The article body is not in the model: it stays in the HTML as
+`<div data-article-content>`, together with the media figure.
 
-Moving between pages is instant because `app.js` swaps them in place. A link inside the archive
-is fetched as soon as it is pressed or hovered, and once a page settles the tabs, the neighbouring
-articles and the rows that stay on screen are fetched too. Following the link replaces
-`<main id="content">`, the page's own `<head>` metadata, the body's `data-kind` and `window.AGGR`
-(read from the page's `#aggr-page` JSON). The header and the tab bar stay, with their links and
-`aria-current` updated from the new page. Whatever a page sets up runs again under an
-`AbortController` that the next swap aborts. Scroll positions are kept per history entry, so
-Back returns to the same place and list cursor. Tabs activate on touch release, so a tap lands
-even while the page is still gliding from a fling. Another site, a file, or a failed or non-HTML
-response falls back to ordinary navigation, and without JavaScript every link is an ordinary link.
+## Boot and navigation
+
+The static page is the first paint. The deferred module reads the model, captures the article
+content (or a static page's `<main>`), mounts `App` into a detached `<div id="app">`, swaps it
+over the rendered one in the same task and flushes effects, so nothing paints in between; the
+captured element is moved into the new tree, never re-parsed. Lists and articles are rendered by
+components; browse and error pages are adopted whole; preferences and offline pages exist only in
+the client. If `#aggr-page` is missing or malformed the page stays static.
+
+Navigation fetches the target page, extracts its model, its content element and its `<head>`
+metadata with `DOMParser`, and re-renders `<main>` from state while the header and tab bar
+persist. A link inside the archive is fetched as soon as it is pressed or hovered (60 ms), and
+once a page settles the tabs, the neighbouring articles and the visible rows are fetched too,
+bounded to 16 speculative requests and a 24-page, five-minute cache, and off on Save-Data or slow
+connections. Scroll positions are kept per history entry, so Back returns to the same place and
+list cursor. A non-HTML response, a page without a model or one built by another app version
+falls back to ordinary navigation, and without JavaScript every link is an ordinary link.
+
+## Components and parity
+
+Components that mirror a MiniJinja partial (`Header`, `ListHead`, `Toolbar`, `Row`, `Metadata`,
+`Pager`, `RelatedCard`, `ArticleHeader`, `ArticleFooter`, and `App` for whole pages) must render
+exactly what the partial renders. `cargo test` writes fixtures to `web/test/parity/` (a props
+JSON and the partial's HTML per case; `AGGR_UPDATE_PARITY=1 cargo test --bin aggr parity`
+refreshes them after a template or model change) and vitest renders each component with
+`svelte/server`, normalises both sides (comments, attribute order, whitespace, hashed asset
+names) and compares. These components carry no `<style>`: `style.css` is the only stylesheet,
+so class names stay identical on both sides. Search results reuse `Row` from Pagefind's opaque
+per-document metadata, which is the same `ClientRow` JSON.
 
 Everything else is the platform. The reading progress bar and the folding article header are
 scroll-driven animations, with a small script standing in where scroll timelines or `calc-size()`
-are missing. The article header spans the window like the navigation above it, so a wide table
-that borrows the page margins never shows beside it; the page clips what reaches past a classic
-scrollbar rather than scrolling sideways. Rows open
-through a stretched link, so modifier and middle clicks behave natively. Keyboard help is a
-`<dialog>` opened by an invoker command. Anything without universal support sits behind
-`@supports` or a feature check and degrades to plain HTML.
+are missing. Rows open through a stretched link, so modifier and middle clicks behave natively.
+Keyboard help is a `<dialog>` opened by an invoker command. Anything without universal support
+sits behind `@supports` or a feature check and degrades to plain HTML.
 
-Each file opens with `// @ts-check`. `types/aggr.d.ts` declares the contracts they share with the
-templates, and `jsconfig.json` enables strict checking in editors and with the compiler. Hashed
-asset names are never rewritten inside file contents, so the lazy modules are imported through
-URLs the template resolves into `window.AGGR.assets`.
-
-Node and TypeScript are pinned in `mise.toml` for development checks:
+## Development
 
 ```sh
-mise install
-make typecheck
-make typecheck-watch # keep compiler diagnostics current while editing
+mise install                      # node
+npm ci --prefix web
+make client-check                 # svelte-check + vitest
+make client-build                 # rebuild the committed bundle under themes/default/static/app/
+make client-dev                   # Vite dev server with HMR
+AGGR_VITE_URL=http://127.0.0.1:5173 cargo run -- dev --config examples/aggr.toml
 ```
 
-The compiler checks the hand-written JavaScript without emitting files. `make check` and CI run
-the same check; none of the Rust build, generation, or development-server commands invoke it.
-Run the watch command beside `aggr dev` when editing the client.
+With `AGGR_VITE_URL` set, the development server replaces the compiled module tag in its HTML
+with Vite's client and the source entry, so component edits hot-swap; static HTML, media and data
+stay served by aggr. The setting accepts a local HTTP origin only and has no effect on builds.
+`make check` runs the frontend checks alongside the Rust ones; CI also rebuilds the bundle and
+fails if the committed output or the generated types differ.
 
-The same commands check the service-worker template with WebWorker types. The check renders its
-declared JSON placeholders into a temporary file and reports diagnostics against the original
-template lines. Object types in that template use `{ { ... } }` in JSDoc: adjacent opening braces
-would start a MiniJinja expression, even inside a JavaScript comment.
+Vite content-hashes the client bundle and lists it in `static/app/.vite/manifest.json`; Rust
+publishes those files verbatim (chunk names are referenced inside the bundle) and resolves the
+entry, its stylesheet and its eager imports through the manifest. Every other static file is
+hashed by Rust. Hashed names are never rewritten inside file contents.
 
-A prerendered page runs before anyone has seen it, so `app.js` waits for `prerenderingchange`
+A prerendered page runs before anyone has seen it, so the client waits for `prerenderingchange`
 before writing session state, history or a worker registration.
 
 ## Preferences
 
 `src/config/preferences.rs` holds one typed table. It produces the validation rules embedded as
-JSON in `#aggr-preferences` and the grouped `<form>` on `/preferences/`. Nothing redeclares a
-setting: adding one there adds its control, its validation and its default everywhere.
+JSON in `#aggr-preferences` and the form schema the client renders on `/preferences/`. Nothing
+redeclares a setting: adding one there adds its control, its validation and its default everywhere.
 
-`bootstrap.js` reads the rules, applies stored values to `documentElement.dataset` before paint,
-and exposes `window.AGGRPreferences`. `app.js` handles changes, cross-tab sync, and import and
-export. Values live in `localStorage` under `aggr:<setting>`.
+The pre-paint `bootstrap` script reads the rules and applies stored values to
+`documentElement.dataset` before paint; the app's preferences state handles changes, cross-tab
+sync, and import and export. Values live in `localStorage` under `aggr:<setting>`.
 
 ## Offline
 
@@ -83,10 +101,12 @@ search results mark saved articles and omit previews that are unavailable offlin
 
 ## Browser regression tests
 
-The browser suite uses a local ChromeDriver and a temporary, pinned article archive:
+The browser suite uses a local ChromeDriver and a temporary, pinned article archive. `mise.toml`
+pins the `chromedriver` npm package to the installed Chrome's major version; if its binary is
+missing after `mise install`, run `node install.js` inside that package once to download it.
 
 ```sh
-chromedriver --port=9515 --allowed-ips=127.0.0.1
+mise exec -- chromedriver --port=9515 --allowed-ips=127.0.0.1
 # In another terminal:
 AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser -- --ignored
 ```
@@ -117,7 +137,7 @@ date:2026-08-01..2026-08-31 -"sponsored post"
 
 A known qualifier without a value offers completion while it is being edited; other invalid
 recognized clauses show an error. An unknown qualifier and any `http(s)://` URL stay full text.
-The parser and controller live in `themes/default/static/search.js`.
+The parser and controller live in `web/src/search/`.
 
 Unqualified words search the indexed title and full text. Quoted phrases match together; a leading
 minus excludes a word, phrase, or facet. `category:`, `source:`, `tag:`, and `type:` accept stable

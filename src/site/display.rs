@@ -57,63 +57,77 @@ fn unwrap_emphasis(title: &str) -> &str {
 /// The display-only contract shared by static metadata and search result components.
 /// Existing item fields remain available to custom themes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct Metadata {
     pub original: String,
     pub date: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub updated: Option<String>,
     pub source_slug: String,
     pub source_query: String,
     pub source_display: String,
     pub source_title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub category: Option<Category>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub feed_display: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub feed_sources: Vec<super::context::SourceMembershipCtx>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub is_aggregated: bool,
     pub word_count: usize,
     pub reading_minutes: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub consumption: Option<Consumption>,
     pub discussions: Vec<Discussion>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub points: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub comments: Option<Comments>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct Category {
     pub name: String,
     pub slug: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct Discussion {
     pub name: String,
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub score: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct Comments {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub count: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct Consumption {
     pub action: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub minutes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub words: Option<usize>,
 }
 

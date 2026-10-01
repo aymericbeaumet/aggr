@@ -1,0 +1,148 @@
+{
+  "component": "App",
+  "props": {
+    "page": {
+      "base": "./",
+      "build": {
+        "app": "app-fixture",
+        "content": "content-fixture",
+        "version": "1.0.0"
+      },
+      "kind": "river",
+      "page": {
+        "data": {
+          "error": null,
+          "paginator": {
+            "base_url": "page/",
+            "current_index": 1,
+            "first": "./",
+            "last": "page/3/",
+            "next": "page/2/",
+            "number_pagers": 3,
+            "offset": 0,
+            "paginate_by": 3,
+            "previous": null,
+            "total_items": 7
+          },
+          "rows": [
+            {
+              "age_band": "fresh",
+              "category": null,
+              "excerpt": "",
+              "labels": [],
+              "language": null,
+              "link": "https://blog.example/many-0",
+              "metadata": {
+                "consumption": {
+                  "action": "read",
+                  "minutes": 1,
+                  "words": 28
+                },
+                "date": "2026-09-30T12:00:00+00:00",
+                "discussions": [],
+                "feed_sources": [],
+                "is_aggregated": false,
+                "original": "https://blog.example/many-0",
+                "reading_minutes": 1,
+                "source_display": "blog.example",
+                "source_query": "blog",
+                "source_slug": "blog",
+                "source_title": "Blog",
+                "word_count": 28
+              },
+              "path": "items/blog/2026/09/many-0",
+              "preview": null,
+              "title": "Entry 0",
+              "url": "items/blog/many-0/"
+            },
+            {
+              "age_band": "h3",
+              "category": null,
+              "excerpt": "",
+              "labels": [],
+              "language": null,
+              "link": "https://blog.example/many-1",
+              "metadata": {
+                "consumption": {
+                  "action": "read",
+                  "minutes": 1,
+                  "words": 28
+                },
+                "date": "2026-09-30T09:00:00+00:00",
+                "discussions": [],
+                "feed_sources": [],
+                "is_aggregated": false,
+                "original": "https://blog.example/many-1",
+                "reading_minutes": 1,
+                "source_display": "blog.example",
+                "source_query": "blog",
+                "source_slug": "blog",
+                "source_title": "Blog",
+                "word_count": 28
+              },
+              "path": "items/blog/2026/09/many-1",
+              "preview": null,
+              "title": "Entry 1",
+              "url": "items/blog/many-1/"
+            },
+            {
+              "age_band": "h3",
+              "category": null,
+              "excerpt": "",
+              "labels": [],
+              "language": null,
+              "link": "https://blog.example/many-2",
+              "metadata": {
+                "consumption": {
+                  "action": "read",
+                  "minutes": 1,
+                  "words": 28
+                },
+                "date": "2026-09-30T06:00:00+00:00",
+                "discussions": [],
+                "feed_sources": [],
+                "is_aggregated": false,
+                "original": "https://blog.example/many-2",
+                "reading_minutes": 1,
+                "source_display": "blog.example",
+                "source_query": "blog",
+                "source_slug": "blog",
+                "source_title": "Blog",
+                "word_count": 28
+              },
+              "path": "items/blog/2026/09/many-2",
+              "preview": null,
+              "title": "Entry 2",
+              "url": "items/blog/many-2/"
+            }
+          ],
+          "scope": null
+        },
+        "view": "list"
+      },
+      "path": "",
+      "site": {
+        "assets": {
+          "app": null,
+          "css": null,
+          "imports": []
+        },
+        "config_url": null,
+        "discussions": [
+          {
+            "found": false,
+            "name": "hackernews",
+            "shortcut": "H",
+            "url": "https://hn.algolia.com/?q={url}"
+          }
+        ],
+        "entries": [],
+        "excerpts": true,
+        "language": "en",
+        "pwa": false,
+        "title": "Reader"
+      },
+      "title": "Reader"
+    }
+  }
+}

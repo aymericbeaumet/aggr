@@ -3,6 +3,7 @@
 
 mod assets;
 mod budget;
+pub mod client;
 mod compressed_media;
 pub mod context;
 pub(crate) mod dev;
@@ -46,7 +47,7 @@ use directory::{
 use output_dir::MARKER;
 pub(crate) use output_dir::prepare_out_dir;
 use page::{ListPage, Pages, SharedCtx, SimplePage, archive_modified_at, default_site_description};
-use render::{Layers, Renderer};
+use render::{Renderer, Theme};
 
 const EXCERPT_CHARS: usize = 240;
 
@@ -225,7 +226,7 @@ pub fn cache_version(build: &BuildCtx) -> String {
 }
 
 /// Reader releases depend on shipped code, never on values substituted while rendering it.
-fn app_version(binary_version: &str, layers: &Layers) -> Result<String> {
+fn app_version(binary_version: &str, theme: &Theme) -> Result<String> {
     fn field(hash: &mut Sha1, bytes: &[u8]) {
         hash.update((bytes.len() as u64).to_le_bytes());
         hash.update(bytes);
@@ -234,11 +235,11 @@ fn app_version(binary_version: &str, layers: &Layers) -> Result<String> {
     field(&mut hash, b"aggr-app-v1");
     field(&mut hash, binary_version.as_bytes());
     for (kind, names) in [
-        ("templates", layers.template_names()?),
-        ("static", layers.static_names()?),
+        ("templates", theme.template_names()?),
+        ("static", theme.static_names()?),
     ] {
         for name in names {
-            let bytes = layers
+            let bytes = theme
                 .read(kind, &name)?
                 .with_context(|| format!("{kind}/{name} vanished during build"))?;
             field(&mut hash, format!("{kind}/{name}").as_bytes());
@@ -396,16 +397,26 @@ pub fn relative_root(path: &str) -> String {
     }
 }
 
-/// What `sw.js` sees: the cache name and the revisioned install-time fetch list.
+/// What the worker reads from `self.AGGR_SW`: its cache version, the application and content
+/// versions, and the revisioned install-time lists. `sw.js` is this object followed by an
+/// `importScripts` of the compiled worker, so the worker's scope stays the site root.
 #[derive(Serialize)]
-struct SwCtx<'a> {
-    site: &'a SiteCtx,
-    build: &'a BuildCtx,
+struct SwConfig {
     version: String,
+    app_version: String,
+    content_version: String,
     precache: Vec<assets::PrecacheEntry>,
     offline_catalog: Vec<offline::Article>,
     offline_count: usize,
     search_manifest: serde_json::Value,
+}
+
+fn worker_source(config: &SwConfig, worker_url: &str) -> Result<String> {
+    Ok(format!(
+        "self.AGGR_SW = {};\nimportScripts({});\n",
+        serde_json::to_string(config)?,
+        serde_json::to_string(worker_url)?
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -616,11 +627,11 @@ fn prepare_site(
         entry_shortcuts: Vec::new(),
         params: config.site.params.clone(),
     };
-    let layers = theme_layers(config, project_root)?;
+    let theme = theme();
     let mut build_ctx = BuildCtx {
         time: info.now,
         version: env!("CARGO_PKG_VERSION").to_string(),
-        app_version: app_version(env!("CARGO_PKG_VERSION"), &layers)?,
+        app_version: app_version(env!("CARGO_PKG_VERSION"), &theme)?,
         content_version: String::new(),
         config_sha: info.config_sha.clone(),
         data_sha: info.data_sha.clone(),
@@ -633,7 +644,7 @@ fn prepare_site(
         data_sha: info.data_sha.as_deref(),
     });
 
-    let renderer = Renderer::new(layers)?;
+    let renderer = Renderer::new(theme)?;
 
     // Sources: config order, enriched with stored state and counts.
     let status = store.status()?;
@@ -1277,10 +1288,10 @@ fn build_once(
                 .chain(tags.iter().map(|tag| tag.page.clone()))
                 .take(config.site.preferences.offline_items.clamp(32, 256)),
         );
-        let mut sw_ctx = SwCtx {
-            site: &site,
-            build: &build_ctx,
+        let mut sw_config = SwConfig {
             version: cache_version(&build_ctx),
+            app_version: build_ctx.app_version.clone(),
+            content_version: build_ctx.content_version.clone(),
             precache: assets::precache_entries(out, paths, &written_assets)?,
             offline_catalog: offline::catalogue(
                 out,
@@ -1291,12 +1302,16 @@ fn build_once(
             offline_count: config.site.preferences.offline_items,
             search_manifest: offline::search_manifest(out, &search_catalogue)?,
         };
-        // Include the rendered worker and every resource revision so an installation never
-        // deletes a live precache when only the theme or worker implementation changed.
-        let worker = renderer.render("sw.js", &sw_ctx)?;
-        sw_ctx.version = crate::model::sha1_hex(worker.as_bytes());
-        let sw = renderer.render("sw.js", &sw_ctx)?;
-        write(&out.join("sw.js"), sw.as_bytes())?;
+        // Version the worker by its whole source, the compiled bundle's hashed name included, so
+        // an installation never deletes a live precache when only the worker implementation or a
+        // resource revision changed.
+        let worker_url = renderer.asset_site_path("assets/app/worker.js");
+        let first = worker_source(&sw_config, &worker_url)?;
+        sw_config.version = crate::model::sha1_hex(first.as_bytes());
+        write(
+            &out.join("sw.js"),
+            worker_source(&sw_config, &worker_url)?.as_bytes(),
+        )?;
         pages += 1;
     }
 
@@ -1465,35 +1480,10 @@ fn build_report(
     )
 }
 
-/// Template/static lookup order: the project's own `templates/`+`static/`, then the configured
-/// theme directory, then the embedded default theme.
-pub fn theme_layers(config: &Config, project_root: &Path) -> Result<Layers> {
-    let mut layers = Layers::default();
-    if project_root.join("templates").is_dir() || project_root.join("static").is_dir() {
-        layers.dirs.push(project_root.to_path_buf());
-    }
-    match config.site.theme.as_str() {
-        "default" => {
-            // A development binary reads the shipped theme from its source tree so `aggr dev`
-            // can rebuild template/CSS/JS edits without recompiling Rust. Release binaries stay
-            // fully embedded and have no dependency on the build machine.
-            #[cfg(debug_assertions)]
-            {
-                let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes/default");
-                if source.is_dir() && !source.starts_with(project_root) {
-                    layers.dirs.push(source);
-                }
-            }
-        }
-        theme => {
-            let dir = project_root.join(theme);
-            if !dir.is_dir() {
-                bail!("theme {theme:?} is not a directory (git themes arrive in a later release)");
-            }
-            layers.dirs.push(dir);
-        }
-    }
-    Ok(layers)
+/// The theme every build renders with: the embedded default, read from its source tree by a
+/// development binary so `aggr dev` picks up template and asset edits without recompiling.
+pub fn theme() -> Theme {
+    Theme::development()
 }
 
 /// The host `CNAME` should carry: a release build on a domain that is not GitHub's own.
@@ -1525,6 +1515,15 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The configuration object `sw.js` hands the worker.
+    fn worker_config(worker: &str) -> serde_json::Value {
+        let line = worker
+            .lines()
+            .find_map(|line| line.strip_prefix("self.AGGR_SW = "))
+            .expect("worker configuration line");
+        serde_json::from_str(line.trim_end_matches(';')).unwrap()
+    }
     use crate::store::Status;
     use chrono::TimeZone;
 
@@ -2792,7 +2791,7 @@ category = "Science"
     }
 
     #[test]
-    fn rendered_worker_is_stable_and_versions_theme_and_worker_changes() {
+    fn rendered_worker_is_stable_across_rebuilds() {
         let dir = tempfile::tempdir().unwrap();
         let (config, sources, store) = fixture(dir.path(), 1, "pwa = true\n");
         let out = dir.path().join("out");
@@ -2801,77 +2800,48 @@ category = "Science"
         build_info.pagefind_cache = Some(dir.path().join("pagefind-cache"));
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         let original = std::fs::read_to_string(out.join("sw.js")).unwrap();
+        assert!(
+            original.starts_with("self.AGGR_SW = "),
+            "the worker carries its configuration"
+        );
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         assert_eq!(
             std::fs::read_to_string(out.join("sw.js")).unwrap(),
             original
         );
-
-        std::fs::create_dir(dir.path().join("static")).unwrap();
-        std::fs::write(dir.path().join("static/style.css"), "body { color: teal; }").unwrap();
-        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
-        let styled = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        let version = |worker: &str| {
-            worker
-                .lines()
-                .find(|line| line.starts_with("var VERSION ="))
-                .unwrap()
-                .to_owned()
-        };
-        assert_ne!(version(&styled), version(&original));
-
-        std::fs::create_dir(dir.path().join("templates")).unwrap();
-        std::fs::write(
-            dir.path().join("templates/sw.js"),
-            format!(
-                "{}\n// Worker revision test.\n",
-                include_str!("../../themes/default/templates/sw.js")
-            ),
-        )
-        .unwrap();
-        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
-        let revised = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        assert_ne!(version(&revised), version(&styled));
     }
 
     #[test]
     fn application_fingerprint_tracks_effective_assets_templates_and_binary() {
         let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        let theme = dir.path().join("theme");
-        std::fs::create_dir_all(project.join("static")).unwrap();
-        std::fs::create_dir_all(theme.join("static")).unwrap();
-        std::fs::create_dir_all(project.join("templates")).unwrap();
-        std::fs::write(project.join("static/style.css"), "body { color: teal; }").unwrap();
-        std::fs::write(theme.join("static/style.css"), "body { color: red; }").unwrap();
-        let layers = Layers {
-            dirs: vec![project.clone(), theme.clone()],
-        };
-        let original = app_version("1.2.3", &layers).unwrap();
-        assert_ne!(original, app_version("1.2.4", &layers).unwrap());
-
-        std::fs::write(theme.join("static/style.css"), "body { color: blue; }").unwrap();
+        let source = dir.path().join("theme");
+        std::fs::create_dir_all(source.join("static")).unwrap();
+        std::fs::create_dir_all(source.join("templates")).unwrap();
+        let theme = Theme::from_source_tree(source.clone());
+        let original = app_version("1.2.3", &theme).unwrap();
         assert_eq!(
             original,
-            app_version("1.2.3", &layers).unwrap(),
-            "shadowed layer bytes do not ship"
+            app_version("1.2.3", &Theme::default()).unwrap(),
+            "an empty source tree ships the embedded theme"
         );
-        std::fs::write(project.join("static/style.css"), "body { color: green; }").unwrap();
-        let styled = app_version("1.2.3", &layers).unwrap();
+        assert_ne!(original, app_version("1.2.4", &theme).unwrap());
+
+        std::fs::write(source.join("static/style.css"), "body { color: green; }").unwrap();
+        let styled = app_version("1.2.3", &theme).unwrap();
         assert_ne!(original, styled);
         std::fs::write(
-            project.join("templates/custom-include.html"),
+            source.join("templates/custom-include.html"),
             "<p>Custom include</p>",
         )
         .unwrap();
-        let template = app_version("1.2.3", &layers).unwrap();
+        let template = app_version("1.2.3", &theme).unwrap();
         assert_ne!(styled, template);
         std::fs::write(
-            project.join("templates/sw.js"),
+            source.join("templates/sw.js"),
             "/* worker implementation */",
         )
         .unwrap();
-        assert_ne!(template, app_version("1.2.3", &layers).unwrap());
+        assert_ne!(template, app_version("1.2.3", &theme).unwrap());
     }
 
     #[test]
@@ -2940,7 +2910,7 @@ category = "Science"
         let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(
             feed.contains(&format!(
-                "\"content\": {}",
+                "\"content\":{}",
                 serde_json::to_string(&original["content_version"]).unwrap()
             )),
             "{feed}"
@@ -2995,13 +2965,9 @@ category = "Science"
             article["entries"][0],
             "items/blog/2026-09-19-newest-article/"
         );
-
-        std::fs::create_dir(dir.path().join("static")).unwrap();
-        std::fs::write(dir.path().join("static/style.css"), "body { color: teal; }").unwrap();
-        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
-        let application = manifest();
-        assert_ne!(application["app_version"], article["app_version"]);
-        assert_eq!(application["content_version"], article["content_version"]);
+        // The other direction, an asset or template change moving only `app_version`, is pinned
+        // by `application_fingerprint_tracks_effective_assets_templates_and_binary`: the theme a
+        // build renders is the shipped one, so no fixture can edit it here.
     }
 
     #[test]
@@ -3626,23 +3592,15 @@ category = "Science"
         );
         // Installation caches the shell; selected offline articles download their full media family.
         let worker = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        let precache: Vec<serde_json::Value> = serde_json::from_str(
-            worker
-                .lines()
-                .find_map(|line| line.strip_prefix("var PRECACHE = "))
-                .unwrap()
-                .trim_end_matches(';'),
-        )
-        .unwrap();
+        let precache: Vec<serde_json::Value> = worker_config(&worker)["precache"]
+            .as_array()
+            .unwrap()
+            .clone();
         assert!(precache.iter().all(|entry| entry["url"] != path));
-        let catalogue: Vec<serde_json::Value> = serde_json::from_str(
-            worker
-                .lines()
-                .find_map(|line| line.strip_prefix("var OFFLINE_CATALOG = "))
-                .unwrap()
-                .trim_end_matches(';'),
-        )
-        .unwrap();
+        let catalogue: Vec<serde_json::Value> = worker_config(&worker)["offline_catalog"]
+            .as_array()
+            .unwrap()
+            .clone();
         assert!(
             catalogue[0]["resources"]
                 .as_array()
@@ -3950,14 +3908,10 @@ category = "Science"
         let out = dir.path().join("out");
         build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
         let worker = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        let entries: Vec<serde_json::Value> = serde_json::from_str(
-            worker
-                .lines()
-                .find_map(|line| line.strip_prefix("var PRECACHE = "))
-                .unwrap()
-                .trim_end_matches(';'),
-        )
-        .unwrap();
+        let entries: Vec<serde_json::Value> = worker_config(&worker)["precache"]
+            .as_array()
+            .unwrap()
+            .clone();
         let collection_roots: Vec<_> = entries
             .iter()
             .filter_map(|entry| entry["url"].as_str())
@@ -4089,16 +4043,11 @@ category = "Science"
         }
 
         let sw = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        let version = sw
-            .split("var VERSION = \"")
-            .nth(1)
-            .unwrap()
-            .split('"')
-            .next()
-            .unwrap();
+        let config = worker_config(&sw);
+        let version = config["version"].as_str().unwrap();
         assert_eq!(version.len(), 40);
         assert!(version.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert!(sw.contains("new URL(\"./\", self.registration.scope)"));
+        assert!(sw.contains("importScripts(\"assets/app/worker-"));
         assert!(sw.contains("\"assets/style-"));
         assert!(!sw.contains("\"pagefind/pagefind.js\""));
         assert!(!out.join("search-meta.json").exists());
@@ -4106,18 +4055,11 @@ category = "Science"
             !sw.contains("assets/logo-"),
             "the multi-megabyte source icon is not precached"
         );
-        // Preload is only worth enabling if the response is read: starting a navigation the
-        // worker then ignores costs a second request for every page.
-        assert!(sw.contains("navigationPreload.enable"));
-        assert!(sw.contains("event.preloadResponse"));
-        // Pages are network-first with a cached fallback; content-addressed assets are not.
-        assert!(sw.contains("function pageResponse(request, preload)"));
-        assert!(sw.contains("function assetResponse(request, name, limit)"));
-        assert!(sw.contains("var OFFLINE = SCOPE + \"offline.html\""));
-        // Complete article families and the verified index are downloaded separately from installation.
-        assert!(sw.contains("OFFLINE_CATALOG"));
-        assert!(sw.contains("OFFLINE_COUNT"));
-        assert!(sw.contains("search-manifest.json"));
+        // The worker's behaviour lives in its compiled bundle; `sw.js` carries the lists it
+        // needs: the precache, the download catalogue and limit, and the search manifest.
+        assert!(sw.contains("\"offline_catalog\":"));
+        assert!(sw.contains("\"offline_count\":"));
+        assert!(sw.contains("\"search_manifest\":"));
         assert!(sw.contains("\"offline.html\""));
         assert!(sw.contains("\"browse/\""));
         // The download catalogue includes article pages, independently of the shell precache.
@@ -4126,15 +4068,15 @@ category = "Science"
         let offline = std::fs::read_to_string(out.join("offline.html")).unwrap();
         assert!(offline.contains("id=\"offline-articles\""));
         assert!(offline.contains("<link rel=\"manifest\" href=\"/repo/manifest.webmanifest\">"));
-        assert!(offline.contains("\"pwa\": true"));
+        assert!(offline.contains("\"pwa\":true"));
         assert!(offline.contains("href=\"/repo/browse/\""), "{offline}");
-        assert!(offline.contains("\"base\": \"/repo/\""), "{offline}");
+        assert!(offline.contains("\"base\":\"/repo/\""), "{offline}");
         assert!(!offline.contains("<base "), "{offline}");
         assert!(!offline.contains("rel=\"canonical\""));
         assert!(!offline.contains("application/ld+json"));
         let not_found = std::fs::read_to_string(out.join("404.html")).unwrap();
         assert!(not_found.contains("href=\"/repo/browse/\""), "{not_found}");
-        assert!(not_found.contains("\"base\": \"/repo/\""), "{not_found}");
+        assert!(not_found.contains("\"base\":\"/repo/\""), "{not_found}");
         assert!(!not_found.contains("<base "), "{not_found}");
         assert!(!not_found.contains("rel=\"canonical\""));
         assert!(!not_found.contains("property=\"og:url\""));
@@ -4710,7 +4652,7 @@ same_as = ["https://social.example/@ada"]
         assert!(!river.contains("rel=\"manifest\""));
         assert!(!river.contains("mobile-web-app-capable"));
         assert!(!river.contains("apple-mobile-web-app-capable"));
-        assert!(river.contains("\"pwa\": false"));
+        assert!(river.contains("\"pwa\":false"));
     }
 
     #[test]
@@ -4816,14 +4758,7 @@ same_as = ["https://social.example/@ada"]
         );
         assert_eq!(published_media(&build_info.out).get(&local), Some(&hash));
         let worker = std::fs::read_to_string(build_info.out.join("sw.js")).unwrap();
-        let catalogue: serde_json::Value = serde_json::from_str(
-            worker
-                .lines()
-                .find_map(|line| line.strip_prefix("var OFFLINE_CATALOG = "))
-                .unwrap()
-                .trim_end_matches(';'),
-        )
-        .unwrap();
+        let catalogue = worker_config(&worker)["offline_catalog"].clone();
         let resources = catalogue[0]["resources"].as_array().unwrap();
         assert!(
             resources

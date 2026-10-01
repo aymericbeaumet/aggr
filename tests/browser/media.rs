@@ -383,17 +383,23 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                     ),
                 )?;
                 if !failed && label == "direct video" {
-                    let timing = client.execute(r#"
+                    // The timing line is written directly; the header's length is rendered from
+                    // state and follows the file's duration at the next frame.
+                    let timing = client.execute_async(r#"
+                      const done=arguments[arguments.length-1];
                       const media=document.querySelector('.native-video video'),host=document.querySelector('[data-media-timing]');
                       const before=document.querySelector('.body').getBoundingClientRect().top;
                       Object.defineProperties(media,{duration:{configurable:true,value:600},currentTime:{configurable:true,value:60},paused:{configurable:true,value:false}});
                       media.playbackRate=2;
                       media.dispatchEvent(new Event('durationchange'));
                       media.dispatchEvent(new Event('playing'));
-                      const playing=host.textContent,metadata=document.querySelector('.itemhead .reading-stats').textContent.trim();
-                      Object.defineProperty(media,'paused',{configurable:true,value:true});
-                      media.dispatchEvent(new Event('pause'));
-                      return {playing,paused:host.textContent,metadata,stable:Math.abs(document.querySelector('.body').getBoundingClientRect().top-before)<=1};
+                      const playing=host.textContent;
+                      requestAnimationFrame(()=>{
+                        const metadata=document.querySelector('.itemhead .reading-stats').textContent.trim();
+                        Object.defineProperty(media,'paused',{configurable:true,value:true});
+                        media.dispatchEvent(new Event('pause'));
+                        done({playing,paused:host.textContent,metadata,stable:Math.abs(document.querySelector('.body').getBoundingClientRect().top-before)<=1});
+                      });
                     "#,vec![]).await?;
                     anyhow::ensure!(
                         timing["playing"]

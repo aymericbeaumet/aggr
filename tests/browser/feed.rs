@@ -166,7 +166,7 @@ async fn selected_feed_external_shortcuts() -> Result<()> {
             let targets = client.execute(r#"
               const root=document.querySelector('.search-results:not([hidden])') || document.querySelector('[data-static-feed]');
               const row=root.querySelector('.row.is-selected'), original=row.querySelector('.u-bookmark-of').href;
-              const networks=window.AGGR.discussions.filter(network=>network.shortcut);
+              const networks=JSON.parse(document.getElementById('aggr-page').textContent).site.discussions.filter(network=>network.shortcut);
               window.__opened=[];window.open=url=>{window.__opened.push(url);return {}};
               return {keys:['O',...networks.map(network=>network.shortcut)],urls:[original,...networks.map(network=>{
                 const found=[...row.querySelectorAll('.discussion')].find(link=>link.dataset.discussion===network.name);

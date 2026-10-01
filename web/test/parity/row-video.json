@@ -1,0 +1,37 @@
+{
+  "component": "Row",
+  "props": {
+    "base": "./",
+    "excerpts": true,
+    "language": "en",
+    "rank": 1,
+    "row": {
+      "age_band": "h24",
+      "category": null,
+      "excerpt": "",
+      "labels": [],
+      "language": null,
+      "link": "https://blog.example/video",
+      "metadata": {
+        "consumption": {
+          "action": "watch"
+        },
+        "date": "2026-09-22T04:00:00+00:00",
+        "discussions": [],
+        "feed_sources": [],
+        "is_aggregated": false,
+        "original": "https://blog.example/video",
+        "reading_minutes": 0,
+        "source_display": "blog.example",
+        "source_query": "blog",
+        "source_slug": "blog",
+        "source_title": "Blog",
+        "word_count": 0
+      },
+      "path": "items/blog/2026/09/video",
+      "preview": null,
+      "title": "A recording",
+      "url": "items/blog/video/"
+    }
+  }
+}

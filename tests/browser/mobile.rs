@@ -75,108 +75,6 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
         "document.documentElement.dataset.aggrReady === 'true'",
     )
     .await?;
-    let feed_page_size = client
-        .execute(
-            r#"
-      const list = document.querySelector('.rows:not(.search-results)');
-      const pager = document.querySelector('[data-feed-pager]');
-      const original = list.querySelector('.row');
-      while (list.querySelectorAll('.row').length < 50) {
-        const index = list.querySelectorAll('.row').length;
-        const row = original.cloneNode(true);
-        row.classList.remove('is-selected');
-        row.dataset.virtualIndex = String(index);
-        row.querySelector('[data-row-open]').href = new URL('items/example/virtual-' + index + '/', location.href);
-        row.querySelector('.rank').textContent = (index + 1) + '.';
-        list.appendChild(row);
-      }
-      Array.from(list.querySelectorAll('.row')).forEach(function (row, index) { row.dataset.virtualIndex = String(index); });
-      const firstStatic = location.pathname;
-      const secondStatic = new URL('page/2/', location.href).pathname;
-      Object.assign(pager.dataset, {
-        staticPage:'1', staticPages:'2', staticPageSize:'50', totalItems:'75',
-        staticFirst:firstStatic, staticLast:secondStatic, staticNext:secondStatic
-      });
-      delete pager.dataset.staticPrevious;
-      localStorage.setItem('aggr:feed-page-size', '25');
-      window.dispatchEvent(new StorageEvent('storage', {key:'aggr:feed-page-size'}));
-      const first = Array.from(list.querySelectorAll('.row:not([hidden])'), row => row.dataset.virtualIndex);
-      for (let i = 0; i < 30; i += 1) document.dispatchEvent(new KeyboardEvent('keydown', {key:'j', bubbles:true}));
-      const cursor = list.querySelector('.row.is-selected');
-      const firstState = {
-        status:pager.querySelector('[data-page-status]').textContent,
-        next:new URL(pager.querySelector('[data-page-next]').href).searchParams.get('feed-page'),
-        cursor:cursor && cursor.dataset.virtualIndex,
-        cursorHidden:cursor && cursor.hidden
-      };
-      const secondUrl = new URL(location.href);
-      secondUrl.searchParams.set('feed-page', '2');
-      history.replaceState(history.state, '', secondUrl);
-      window.dispatchEvent(new StorageEvent('storage', {key:'aggr:feed-page-size'}));
-      const second = Array.from(list.querySelectorAll('.row:not([hidden])'), row => row.dataset.virtualIndex);
-      const secondState = {
-        selected:list.querySelector('.row.is-selected')?.dataset.virtualIndex,
-        status:pager.querySelector('[data-page-status]').textContent,
-        previous:new URL(pager.querySelector('[data-page-previous]').href).searchParams.has('feed-page'),
-        nextPath:new URL(pager.querySelector('[data-page-next]').href).pathname,
-        nextSlice:new URL(pager.querySelector('[data-page-next]').href).searchParams.has('feed-page'),
-        nextHidden:pager.querySelector('[data-page-next]').hidden
-      };
-      const finalRows = [];
-      for (let index = 50; index < 75; index += 1) {
-        const row = original.cloneNode(true);
-        row.hidden = false;
-        row.classList.remove('is-selected');
-        row.dataset.virtualIndex = String(index);
-        row.querySelector('[data-row-open]').href = new URL('items/example/virtual-' + index + '/', location.href);
-        row.querySelector('.rank').textContent = (index + 1) + '.';
-        finalRows.push(row);
-      }
-      list.replaceChildren(...finalRows);
-      Object.assign(pager.dataset, {staticPage:'2', staticPrevious:firstStatic});
-      delete pager.dataset.staticNext;
-      history.replaceState(history.state, '', secondStatic);
-      window.dispatchEvent(new StorageEvent('storage', {key:'aggr:feed-page-size'}));
-      const final = Array.from(list.querySelectorAll('.row:not([hidden])'), row => row.dataset.virtualIndex);
-      const finalState = {
-        status:pager.querySelector('[data-page-status]').textContent,
-        previousPath:new URL(pager.querySelector('[data-page-previous]').href).pathname,
-        previousSlice:new URL(pager.querySelector('[data-page-previous]').href).searchParams.get('feed-page'),
-        nextHidden:pager.querySelector('[data-page-next]').hidden
-      };
-      localStorage.removeItem('aggr:feed-page-size');
-      window.dispatchEvent(new StorageEvent('storage', {key:'aggr:feed-page-size'}));
-      const defaultVisible = list.querySelectorAll('.row:not([hidden])').length;
-      const defaultPagerHidden = pager.hidden;
-      history.replaceState(history.state, '', firstStatic);
-      return {
-        first:first, second:second, final:final,
-        all:[...new Set(first.concat(second, final))].length,
-        firstState:firstState, secondState:secondState, finalState:finalState,
-        defaultVisible:defaultVisible, defaultPagerHidden:defaultPagerHidden
-      };
-    "#,
-            vec![],
-        )
-        .await?;
-    assert_eq!(feed_page_size["first"].as_array().map(Vec::len), Some(25));
-    assert_eq!(feed_page_size["second"].as_array().map(Vec::len), Some(25));
-    assert_eq!(feed_page_size["final"].as_array().map(Vec::len), Some(25));
-    assert_eq!(feed_page_size["all"], 75);
-    assert_eq!(
-        feed_page_size["firstState"],
-        json!({"status":"page 1 / 3","next":"2","cursor":"24","cursorHidden":false})
-    );
-    assert_eq!(
-        feed_page_size["secondState"],
-        json!({"selected":"25","status":"page 2 / 3","previous":false,"nextPath":"/reader/page/2/","nextSlice":false,"nextHidden":false})
-    );
-    assert_eq!(
-        feed_page_size["finalState"],
-        json!({"status":"page 3 / 3","previousPath":"/reader/","previousSlice":"2","nextHidden":true})
-    );
-    assert_eq!(feed_page_size["defaultVisible"], 25);
-    assert_eq!(feed_page_size["defaultPagerHidden"], false);
     client
         .execute("localStorage.setItem('aggr:theme','light')", vec![])
         .await?;
@@ -361,7 +259,9 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
         assert_eq!(
             client
                 .execute(
-                    "return new URL(window.AGGR.base,location.href).href",
+                    // The tab bar is re-rendered from each arriving page's base: its feed link is
+                    // the site root the client resolved for the route now on screen.
+                    "return document.querySelector('.mobile-tabs a[data-route=\"\"]').href",
                     vec![]
                 )
                 .await?,
@@ -527,7 +427,7 @@ async fn mobile_tabs_and_tab_navigation() -> Result<()> {
             // Each tab is an ordinary link to its own page, and exactly one of them is current.
             for route in ["browse/","preferences/",""] {
                 client.find(Locator::Css(&format!(".mobile-tabs a[data-route=\"{route}\"]"))).await?.click().await?;
-                wait_booted_with(&client,&format!("location.pathname===new URL('{route}',new URL(window.AGGR.base,location.href)).pathname && document.querySelectorAll('.mobile-tabs a[aria-current]').length===1 && document.querySelector('.mobile-tabs a[aria-current]')?.dataset.route==='{route}'")).await?;
+                wait_booted_with(&client,&format!("location.pathname===new URL('{route}',{root}).pathname && document.querySelectorAll('.mobile-tabs a[aria-current]').length===1 && document.querySelector('.mobile-tabs a[aria-current]')?.dataset.route==='{route}'",root=serde_json::to_string(&fixture.base)?)).await?;
                 if route=="browse/" {
                     anyhow::ensure!(client.execute("return ['categories','sources','tags'].every(kind=>!!document.querySelector('.browse-group-'+kind+' .browse-entry-link'))",vec![]).await?==true,"Browse must expose every populated directory");
                 }
@@ -716,7 +616,7 @@ async fn mobile_physical_taps_navigate_once_without_delay() -> Result<()> {
             // is left with one entry for it rather than a second from a re-fired click.
             let released = std::time::Instant::now();
             touch(&client,"touchEnd",None).await?;
-            wait_for(&client,&format!("location.pathname===new URL('{route}',new URL(window.AGGR.base,location.href)).pathname && document.querySelector('.mobile-tabs [aria-current]')?.dataset.route==='{route}'")).await?;
+            wait_for(&client,&format!("location.pathname===new URL('{route}',{root}).pathname && document.querySelector('.mobile-tabs [aria-current]')?.dataset.route==='{route}'",root=serde_json::to_string(&fixture.base)?)).await?;
             let elapsed = released.elapsed();
             let state=client.execute(r#"
               const tab=document.querySelector('.mobile-tabs [aria-current]');
@@ -793,7 +693,8 @@ async fn mobile_article_gestures_scroll_the_page_and_keys_turn_it() -> Result<()
         phone_session(&client).await?;
         let start=format!("{}items/example/2026-09-01-story-29/",fixture.base);
         client.goto(&start).await?;
-        wait_booted_with(&client,"document.querySelector('article.item')?.dataset.nextUrl && document.querySelector('article.item')?.dataset.previousUrl").await?;
+        // The article's neighbours are part of the page model (`page.data.previous`/`next`).
+        wait_booted_with(&client,"(model=>!!(model.page.data.next && model.page.data.previous))(JSON.parse(document.getElementById('aggr-page').textContent))").await?;
         // Reading gestures belong to the page: nothing here steals them to turn the article.
         client.execute("scrollTo(0,100)",vec![]).await?;
         swipe(&client,(190.0,620.0),(180.0,300.0)).await?;
@@ -808,7 +709,7 @@ async fn mobile_article_gestures_scroll_the_page_and_keys_turn_it() -> Result<()
         wait_for(&client,"document.querySelector('.body pre').scrollLeft>0").await?;
         anyhow::ensure!(client.current_url().await?.as_str()==start,"horizontal code scrolling must not turn the article");
         // The keys that do turn it take the whole page with them, in both directions.
-        let neighbors=client.execute("const article=document.querySelector('article.item');return {next:new URL(article.dataset.nextUrl,new URL(window.AGGR.base,location.href)).href,previous:new URL(article.dataset.previousUrl,new URL(window.AGGR.base,location.href)).href}",vec![]).await?;
+        let neighbors=client.execute("const model=JSON.parse(document.getElementById('aggr-page').textContent),root=new URL(model.base,location.href),resolve=url=>new URL(url.replace(/^\\/+/,''),root).href;return {next:resolve(model.page.data.next.url),previous:resolve(model.page.data.previous.url)}",vec![]).await?;
         client.execute("document.activeElement?.blur()",vec![]).await?;
         key(&client,"j").await?;
         wait_booted_with(&client,&format!("location.href==={}",neighbors["next"])).await?;
@@ -876,4 +777,137 @@ async fn mobile_feed_search_stays_below_header_while_articles_and_results_scroll
     }.await;
     report_failure(&client, "mobile-pinned-search", &result).await;
     finish(client, result).await
+}
+
+/// The feed-page-size preference slices the static pages in the client: every row stays in the
+/// document (hidden outside the slice), the pager walks the slices with `?feed-page=N` and the
+/// cursor only ever rests on a visible row. The slice is taken from the page model, so this
+/// builds a real archive: 75 articles over two static pages of 50, three slices of 25.
+#[tokio::test]
+#[ignore = "requires a local Chrome WebDriver"]
+async fn feed_page_size_slices_static_pages_and_keeps_the_cursor_visible() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fixture = Fixture::with_pwa(false)?;
+    let config = fixture.directory.path().join("aggr.toml");
+    std::fs::write(
+        &config,
+        std::fs::read_to_string(&config)?.replace("items_per_page=3", "items_per_page=50"),
+    )?;
+    let archive = fixture.directory.path().join(".aggr/data");
+    let date = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")?;
+    for index in 46..=75 {
+        let published = (date + chrono::Duration::hours(index)).to_rfc3339();
+        std::fs::write(
+            archive.join(format!(
+                "items/example/2026/09/2026-09-01-story-{index:02}.md"
+            )),
+            format!(
+                "---\ntitle: Article {index}\nlink: https://publisher.invalid/story-{index}\nsource: example\npublished: {published}\nupdated: 2026-09-05T12:00:00Z\nfirst_seen: {published}\ncontent: feed\nlabels: [reading, rust]\n---\n\nThis entry explores archive topic {index}.\n"
+            ),
+        )?;
+    }
+    crate::harness::git(&archive, &["add", "items"])?;
+    crate::harness::git(&archive, &["commit", "-qm", "page size fixture articles"])?;
+    fixture.build()?;
+    let client = browser_client().await?;
+    let result = catch_panics(feed_page_size_contracts(&client, &fixture)).await;
+    report_failure(&client, "feed-page-size", &result).await;
+    finish(client, result).await
+}
+
+async fn feed_page_size_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
+    const VISIBLE: &str = "return [...document.querySelectorAll('[data-static-feed] .row')].filter(row => !row.hidden).map(row => row.dataset.url)";
+    const STATE: &str = r#"
+      const rows = [...document.querySelectorAll('[data-static-feed] .row')];
+      const pager = document.querySelector('[data-feed-pager]');
+      const link = name => pager.querySelector('[data-page-' + name + ']');
+      const cursor = rows.findIndex(row => row.classList.contains('is-selected'));
+      return {
+        visible: rows.map((row, index) => [row, index]).filter(([row]) => !row.hidden).map(([, index]) => index),
+        cursor, cursorHidden: cursor === -1 ? null : rows[cursor].hidden,
+        status: pager.querySelector('[data-page-status]').textContent, pagerHidden: pager.hidden,
+        previousHidden: link('previous').hidden, previousPath: new URL(link('previous').href).pathname,
+        previousSlice: new URL(link('previous').href).searchParams.get('feed-page'),
+        nextHidden: link('next').hidden, nextPath: new URL(link('next').href).pathname,
+        nextSlice: new URL(link('next').href).searchParams.get('feed-page')
+      };
+    "#;
+    client.goto(&fixture.base).await?;
+    wait_booted_with(
+        client,
+        "document.querySelectorAll('[data-static-feed] .row').length === 50",
+    )
+    .await?;
+    // The preference arrives as a stored value, as another tab's change would.
+    client.execute("localStorage.setItem('aggr:feed-page-size','25');window.dispatchEvent(new StorageEvent('storage',{key:'aggr:feed-page-size'}))", vec![]).await?;
+    wait_for(client, "document.querySelector('[data-feed-pager] [data-page-status]')?.textContent === 'page 1 / 3'").await?;
+    // The cursor walks the slice on screen and stops at its last row.
+    client.execute("for (let i = 0; i < 30; i += 1) document.dispatchEvent(new KeyboardEvent('keydown', {key:'j', bubbles:true}))", vec![]).await?;
+    let first = client.execute(STATE, vec![]).await?;
+    let first_urls = client.execute(VISIBLE, vec![]).await?;
+    anyhow::ensure!(
+        first["visible"] == json!((0..25).collect::<Vec<_>>())
+            && first["cursor"] == 24
+            && first["cursorHidden"] == false
+            && first["status"] == "page 1 / 3"
+            && first["previousHidden"] == true
+            && first["nextHidden"] == false
+            && first["nextPath"] == "/reader/"
+            && first["nextSlice"] == "2",
+        "the first slice shows 25 rows and holds the cursor: {first}"
+    );
+    client
+        .find(Locator::Css("[data-feed-pager] [data-page-next]"))
+        .await?
+        .click()
+        .await?;
+    wait_for(client, "new URL(location.href).searchParams.get('feed-page') === '2' && document.querySelector('[data-feed-pager] [data-page-status]')?.textContent === 'page 2 / 3'").await?;
+    let second = client.execute(STATE, vec![]).await?;
+    let second_urls = client.execute(VISIBLE, vec![]).await?;
+    anyhow::ensure!(
+        second["visible"] == json!((25..50).collect::<Vec<_>>())
+            && second["cursor"] == 25
+            && second["cursorHidden"] == false
+            && second["previousPath"] == "/reader/"
+            && second["previousSlice"] == Value::Null
+            && second["nextPath"] == "/reader/page/2/"
+            && second["nextSlice"] == Value::Null
+            && second["nextHidden"] == false,
+        "the second slice follows with the cursor on its first row: {second}"
+    );
+    client
+        .find(Locator::Css("[data-feed-pager] [data-page-next]"))
+        .await?
+        .click()
+        .await?;
+    wait_for(client, "location.pathname === '/reader/page/2/' && document.querySelector('[data-feed-pager] [data-page-status]')?.textContent === 'page 3 / 3'").await?;
+    let last = client.execute(STATE, vec![]).await?;
+    let last_urls = client.execute(VISIBLE, vec![]).await?;
+    anyhow::ensure!(
+        last["visible"] == json!((0..25).collect::<Vec<_>>())
+            && last["previousPath"] == "/reader/"
+            && last["previousSlice"] == "2"
+            && last["nextHidden"] == true,
+        "the static second page is the last slice and points back at the previous page's last slice: {last}"
+    );
+    let distinct: std::collections::BTreeSet<String> = [first_urls, second_urls, last_urls]
+        .iter()
+        .flat_map(|urls| urls.as_array().cloned().unwrap_or_default())
+        .filter_map(|url| url.as_str().map(str::to_owned))
+        .collect();
+    anyhow::ensure!(
+        distinct.len() == 75,
+        "every article appears in exactly one slice: {}",
+        distinct.len()
+    );
+    // Without the preference the static page is the page: every row shows and the pager stays.
+    client.execute("localStorage.removeItem('aggr:feed-page-size');window.dispatchEvent(new StorageEvent('storage',{key:'aggr:feed-page-size'}))", vec![]).await?;
+    wait_for(client, "document.querySelector('[data-feed-pager] [data-page-status]')?.textContent === 'page 2 / 2'").await?;
+    let unsliced = client.execute(STATE, vec![]).await?;
+    anyhow::ensure!(
+        unsliced["visible"].as_array().map(Vec::len) == Some(25)
+            && unsliced["pagerHidden"] == false,
+        "the default page size shows the whole static page: {unsliced}"
+    );
+    Ok(())
 }

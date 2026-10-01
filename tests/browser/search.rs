@@ -231,7 +231,8 @@ async fn search_articles_only_appear_as_results() -> Result<()> {
         client.find(Locator::Css(".nav-primary [data-feed-action]")).await?.click().await?;
         wait_for(&client,"!new URL(location.href).searchParams.has('q') && !document.querySelector('[data-static-feed]').hidden").await?;
         client.find(Locator::Css(".brand")).await?.click().await?;
-        anyhow::ensure!(client.execute("return document.activeElement.id!=='q' && scrollY===0 && !document.querySelector('.search-completions:not([hidden])')",vec![]).await?==true,"site title returns to the feed top without focusing search");
+        // The return to the top may animate, so the settled state is awaited rather than asserted.
+        wait_for(&client,"document.activeElement.id!=='q' && scrollY===0 && !document.querySelector('.search-completions:not([hidden])')").await.context("site title returns to the feed top without focusing search")?;
         Ok(())
     }.await;
     report_failure(&client, "search-articles-only", &result).await;
@@ -247,7 +248,7 @@ async fn search_preview_errors_keep_geometry_and_readable_fallbacks() -> Result<
     let result = async {
         client.goto(&format!("{}?q=source:publisher.invalid", fixture.base)).await?;
         wait_for(&client, "!!document.querySelector('.search-results .preview-image')?.naturalWidth").await?;
-        let before = client.execute("const image=document.querySelector('.search-results .preview-image');window.previewImage=image;window.previewSource=image.src;const r=image.parentElement.getBoundingClientRect();image.src=new URL('missing-preview.png',new URL(window.AGGR.base,location.href)).href;return {width:r.width,height:r.height}", vec![]).await?;
+        let before = client.execute("const image=document.querySelector('.search-results .preview-image');window.previewImage=image;window.previewSource=image.src;const r=image.parentElement.getBoundingClientRect();image.src=new URL('missing-preview.png',new URL(JSON.parse(document.getElementById('aggr-page').textContent).base,location.href)).href;return {width:r.width,height:r.height}", vec![]).await?;
         wait_for(&client,"window.previewImage.parentElement.classList.contains('is-error')").await?;
         let failed=client.execute("const image=window.previewImage,r=image.parentElement.getBoundingClientRect();return {width:r.width,height:r.height,color:getComputedStyle(image).color,alt:image.alt}",vec![]).await?;
         anyhow::ensure!(before["width"]==failed["width"] && before["height"]==failed["height"] && failed["color"]!="rgba(0, 0, 0, 0)" && failed["alt"].as_str().is_some_and(|alt|!alt.is_empty()),"search image failures preserve space and readable alt text: {failed}");
@@ -354,10 +355,13 @@ async fn search_intent_keeps_incomplete_queries_light_and_hides_obsolete_results
         anyhow::ensure!(incomplete == json!({"runtimeRequested":false,"error":null,"feedHidden":true}), "an incomplete facet needs only the catalogue and has no validation error: {incomplete}");
         client.execute("const input=document.querySelector('#q');input.value='Article';input.dispatchEvent(new Event('input',{bubbles:true}))", vec![]).await?;
         wait_for(&client, "document.querySelectorAll('.search-results .row').length > 0").await?;
-        anyhow::ensure!(client.execute(r#"
+        // The state drops the rows at once; the document follows at the next frame, well inside
+        // the typing delay before the next search starts.
+        anyhow::ensure!(client.execute_async(r#"
+          const done=arguments[arguments.length-1];
           const input=document.querySelector('#q');
           input.value='Article source:'; input.dispatchEvent(new Event('input',{bubbles:true}));
-          return !document.querySelector('.search-results .row') && document.querySelector('[data-static-feed]').hidden;
+          requestAnimationFrame(()=>done(!document.querySelector('.search-results .row') && document.querySelector('[data-static-feed]').hidden));
         "#, vec![]).await? == true, "changing the query hides obsolete selectable rows before its typing delay");
         wait_for(&client, "document.querySelectorAll('.search-completion').length > 0").await?;
         anyhow::ensure!(client.execute("return document.querySelector('.search-error').hidden", vec![]).await? == true, "completing a clause remains an incomplete query, not an error");
@@ -462,21 +466,17 @@ async fn rich_search_across_the_query_language() -> Result<()> {
             "published search catalogue: {}",
             json!({"version":published["version"],"docs":published["docs"]})
         );
-        eprintln!("browser search catalogue: {}", client.execute_async("const done=arguments[arguments.length-1];fetch(new URL('search-catalog.json',new URL(window.AGGR.base,location.href)),{cache:'no-store'}).then(r=>r.json()).then(m=>done({version:m.version,docs:m.docs})).catch(e=>done(String(e)))",vec![]).await.unwrap_or(Value::Null));
+        eprintln!("browser search catalogue: {}", client.execute_async("const done=arguments[arguments.length-1];fetch(new URL('search-catalog.json',new URL(JSON.parse(document.getElementById('aggr-page').textContent).base,location.href)),{cache:'no-store'}).then(r=>r.json()).then(m=>done({version:m.version,docs:m.docs})).catch(e=>done(String(e)))",vec![]).await.unwrap_or(Value::Null));
     }
     let _ = set_offline(&client, false).await;
     finish(client, result).await
 }
 
 async fn search_query(client: &Client, query: &str, count: usize) -> Result<()> {
-    // Two queries in a row can want the same number of articles, so the count only answers for
-    // this one once the previous answer has been cleared away.
-    client
-        .execute(
-            "const status=document.querySelector('#search-status');if(status)status.textContent=''",
-            vec![],
-        )
-        .await?;
+    // Two queries in a row can want the same number of articles. Changing the text hides the
+    // previous results and empties the status at once, so the count below can only be this
+    // query's. The status node is Svelte's: emptying it from here would detach the text node
+    // the component keeps updating, and no count would ever show again.
     client.execute("const input=document.querySelector('#q');input.focus();input.value=arguments[0];input.setSelectionRange(input.value.length,input.value.length);input.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#search-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))", vec![json!(query)]).await?;
     wait_for(client, &format!("document.querySelector('#search-status')?.textContent === '{} {}' && !document.querySelector('.search-error:not([hidden])')", count, if count == 1 { "article" } else { "articles" })).await?;
     anyhow::ensure!(
@@ -637,8 +637,8 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
         .await?
         .click()
         .await?;
-    // The stylesheet numbers the results, so the second page continues the count rather than
-    // starting again at one.
+    // Results are drawn by the feed's own row, rank included, so the second page continues the
+    // count rather than starting again at one.
     wait_for(
         client,
         "document.querySelectorAll('.search-results .row').length===18",
@@ -646,12 +646,12 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
     .await?;
     let numbering = client
         .execute(
-            "return getComputedStyle(document.querySelector('.search-results')).counterReset",
+            "const ranks=[...document.querySelectorAll('.search-results .row .rank')].map(rank=>rank.textContent);return {first:ranks[0],last:ranks.at(-1)}",
             vec![],
         )
         .await?;
     anyhow::ensure!(
-        numbering == "rank 25",
+        numbering["first"] == "26." && numbering["last"] == "43.",
         "page two is numbered from 26: {numbering}"
     );
     anyhow::ensure!(
@@ -809,6 +809,12 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
             client.current_url().await?.query().is_none(),
             "archive scope must not rewrite its unsearched route"
         );
+        // The clear button appears once the field is in use: a reader reaches it by tapping
+        // the field first, and it then takes the scoped seed away, back to the whole archive.
+        client
+            .execute("document.querySelector('#q').focus()", vec![])
+            .await?;
+        wait_for(client, "!document.querySelector('.search-clear').hidden").await?;
         client
             .find(Locator::Css(".search-clear"))
             .await?

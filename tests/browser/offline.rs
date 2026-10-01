@@ -186,9 +186,12 @@ async fn offline_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         .await?;
     wait_for(client, "!!document.querySelector('.body pre')").await?;
     // Selected downloads retain complete articles independently of evictable visited pages.
-    client.execute("window.AGGRPreferences.values['offline-items']=2;document.dispatchEvent(new Event('aggr:preferences'))", vec![]).await?;
-    wait_for(client, "window.AGGROffline?.requested === 2 && !window.AGGROffline.downloading && window.AGGROffline.saved.length === 2 && window.AGGROffline.search?.phase === 'ready'").await?;
-    let downloaded = client.execute("return new URL(window.AGGROffline.saved[1].url, new URL(window.AGGR.base, document.baseURI)).href", vec![]).await?;
+    // The preference is the worker's configuration: a stored value reaches the app through
+    // the `storage` event (as another tab's change would), and the worker broadcasts its
+    // `AGGR_OFFLINE_STATUS` report to every window, which the contract listens for directly.
+    client.execute("window.__offlineStatus=null;navigator.serviceWorker.addEventListener('message',event=>{if(event.data?.type==='AGGR_OFFLINE_STATUS')window.__offlineStatus=event.data});localStorage.setItem('aggr:offline-items','2');window.dispatchEvent(new StorageEvent('storage',{key:'aggr:offline-items'}))", vec![]).await?;
+    wait_for(client, "window.__offlineStatus?.requested === 2 && !window.__offlineStatus.downloading && window.__offlineStatus.saved.length === 2 && window.__offlineStatus.search?.phase === 'ready'").await?;
+    let downloaded = client.execute("return new URL(window.__offlineStatus.saved[1].url, document.querySelector('[data-route=\"\"]').href).href", vec![]).await?;
     client.execute("window.scrollTo(0,300)", vec![]).await?;
     let read_article = client.current_url().await?;
     wait_for(

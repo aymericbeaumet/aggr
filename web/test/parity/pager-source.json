@@ -1,0 +1,19 @@
+{
+  "component": "Pager",
+  "props": {
+    "base": "../../../../",
+    "kind": "source",
+    "paginator": {
+      "base_url": "sources/blog/page/",
+      "current_index": 2,
+      "first": "sources/blog/",
+      "last": "sources/blog/page/3/",
+      "next": "sources/blog/page/3/",
+      "number_pagers": 3,
+      "offset": 3,
+      "paginate_by": 3,
+      "previous": "sources/blog/",
+      "total_items": 7
+    }
+  }
+}

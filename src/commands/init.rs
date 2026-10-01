@@ -15,7 +15,7 @@ pub const WORKFLOW: &str = "\
 name: aggr
 on:
   schedule: [{ cron: \"7,37 * * * *\" }]
-  push: { paths: [\"*.toml\", \"**/*.toml\", themes/**, templates/**, static/**] }
+  push: { paths: [\"*.toml\", \"**/*.toml\"] }
   workflow_dispatch:
 permissions: { contents: write, pages: write, id-token: write }
 jobs:
@@ -71,16 +71,7 @@ mod tests {
             push.get("branches").is_none(),
             "the default branch is resolved from the event instead of being hardcoded"
         );
-        assert_eq!(
-            push["paths"],
-            serde_json::json!([
-                "*.toml",
-                "**/*.toml",
-                "themes/**",
-                "templates/**",
-                "static/**"
-            ])
-        );
+        assert_eq!(push["paths"], serde_json::json!(["*.toml", "**/*.toml"]));
         assert_eq!(
             workflow["jobs"]["aggr"]["if"],
             "github.event_name != 'push' || github.ref_name == github.event.repository.default_branch"

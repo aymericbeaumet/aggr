@@ -1,0 +1,39 @@
+
+<div aria-live="polite" class="sr-only" id="reader-announcement" role="status"></div>
+<div class="pull-refresh" hidden="" id="pull-refresh" role="status"></div>
+<div aria-live="polite" class="connection-status" hidden="" id="connection-status" role="status">
+  <span id="connection-status-message"></span>
+  <button hidden="" id="connection-retry" type="button">Retry</button>
+  <button hidden="" id="pwa-refresh" title="Refresh and keep your place" type="button">↻ Refresh to update</button>
+</div>
+<header class="top" data-nosnippet="">
+  <nav aria-label="Site navigation" class="nav" data-site-navigation="">
+    <a class="brand" data-route="" href="../" rel="home"><img alt="" class="brand-icon" height="20" src="../assets/favicon-32-7967c1a90e5a.png" width="20"><span class="brand-title">reader</span></a>
+    <div class="nav-primary">
+      <a class="menu-link" data-feed-action="" data-kinds="river" data-route="" href="../">feed</a>
+      <span aria-hidden="true" class="nav-separator">|</span>
+      <a aria-current="page" class="menu-link" data-kinds="browse categories category sources source tags tag" data-route="browse/" href="../browse/">browse</a>
+      <span aria-hidden="true" class="nav-separator">|</span>
+      <a class="menu-link" data-kinds="preferences" data-route="preferences/" href="../preferences/">preferences</a>
+    </div>
+    <div class="nav-actions">
+      <a class="config-link" data-route="aggr.toml" href="../aggr.toml" rel="noopener noreferrer" target="_blank">aggr.toml <span aria-hidden="true">↗</span></a>
+    </div>
+  </nav>
+</header>
+<nav aria-label="Main navigation" class="mobile-tabs" data-nosnippet="" data-site-navigation="">
+  <a data-feed-action="" data-kinds="river" data-route="" href="../">
+    <svg aria-hidden="true" fill="none" height="22" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" viewBox="0 0 24 24" width="22"><path d="M4 5h16M4 12h16M4 19h10"></path></svg>
+    <span>feed</span>
+  </a>
+  <a aria-current="page" data-kinds="browse categories category sources source tags tag" data-route="browse/" href="../browse/">
+    <svg aria-hidden="true" fill="none" height="22" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" viewBox="0 0 24 24" width="22"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"></path></svg>
+    <span>browse</span>
+  </a>
+  <a data-kinds="preferences" data-route="preferences/" href="../preferences/">
+    <svg aria-hidden="true" fill="none" height="22" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" viewBox="0 0 24 24" width="22"><path d="M4 7h5m4 0h7M4 17h9m4 0h3M9 4v6M13 14v6"></path></svg>
+    <span>preferences</span>
+  </a>
+</nav>
+<main class="main" id="content" tabindex="-1"></main>
+<footer class="footer" data-nosnippet=""><a href="https://github.com/aymericbeaumet/aggr" rel="noopener noreferrer" target="_blank">built with aggr</a></footer>

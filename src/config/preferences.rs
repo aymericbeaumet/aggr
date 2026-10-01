@@ -34,6 +34,7 @@ pub struct ReaderPreferences {
 }
 
 /// One selectable value of a setting, as rendered in a `<select>`.
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PreferenceOption {
     pub value: String,
@@ -134,6 +135,7 @@ impl Default for ReaderPreferences {
 }
 
 /// How `/preferences/` renders a setting.
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Control {
@@ -143,37 +145,46 @@ pub enum Control {
 }
 
 /// The browser's validation rule for one setting, consumed by the pre-paint bootstrap.
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BootstrapRule {
     pub initial: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub values: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub min: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub max: Option<i64>,
     /// `documentElement.dataset` key this setting drives, when CSS reacts to it.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub attribute: Option<&'static str>,
 }
 
 /// One rendered control on `/preferences/`.
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PreferenceField {
     pub key: &'static str,
     pub label: &'static str,
     pub control: Control,
     pub value: serde_json::Value,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<PreferenceOption>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub min: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub max: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub help: Option<&'static str>,
 }
 
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PreferenceGroup {
     pub id: &'static str,
@@ -182,6 +193,7 @@ pub struct PreferenceGroup {
 }
 
 /// Both browser-facing views of the settings, derived from one field table.
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PreferenceSchema {
     /// Keyed by setting name, for the inline validation bootstrap.

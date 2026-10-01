@@ -232,9 +232,9 @@ async fn archive_pages_swap_in_place_and_nothing_outside_the_archive_is_fetched(
         wait_booted_with(&client, "document.body.dataset.kind === 'item'").await?;
         let arrived = client.execute(r#"
           return {kept: window.__aggrDocument, href: location.href, title: document.querySelector('.itemhead h1').textContent.trim(),
-            documentTitle: document.title, top: scrollY, history: history.length, kind: window.AGGR.kind,
+            documentTitle: document.title, top: scrollY, history: history.length, kind: document.body.dataset.kind,
             tab: document.querySelector('.mobile-tabs [aria-current]')?.dataset.route ?? null,
-            base: new URL(window.AGGR.base, location.href).href};
+            base: document.querySelector('.menu-link[data-route=""]').href};
         "#, vec![]).await?;
         anyhow::ensure!(
             arrived["kept"] == "kept" && arrived["href"] == before["href"] && arrived["title"] == before["title"]

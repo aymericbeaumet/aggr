@@ -36,7 +36,7 @@ async fn reader_client_performance_metrics() -> Result<()> {
                         emulate(&client, "Network.setBlockedURLs", json!({"urls": ["*.png", "*.jpg", "*.jpeg", "*.webp", "*.gif", "*.avif"]})).await?;
                         emulate(&client, "Emulation.setDeviceMetricsOverride", json!({"width": width, "height": 844, "deviceScaleFactor": 1, "mobile": mobile})).await?;
                         emulate(&client, "Emulation.setCPUThrottlingRate", json!({"rate": rate})).await?;
-                        emulate(&client, "Page.addScriptToEvaluateOnNewDocument", json!({"source": "window.__aggrPerfErrors=[];addEventListener('error',e=>window.__aggrPerfErrors.push(e.message));addEventListener('unhandledrejection',e=>window.__aggrPerfErrors.push(String(e.reason)));requestAnimationFrame(function ready(){if(document.documentElement.dataset.aggrReady==='true'&&document.documentElement.dataset.readerReady==='true'&&document.querySelector('.search-command'))window.__aggrPerfReadyAt=performance.now();else requestAnimationFrame(ready)})"})).await?;
+                        emulate(&client, "Page.addScriptToEvaluateOnNewDocument", json!({"source": "window.__aggrPerfErrors=[];addEventListener('error',e=>window.__aggrPerfErrors.push(e.message));addEventListener('unhandledrejection',e=>window.__aggrPerfErrors.push(String(e.reason)));requestAnimationFrame(function ready(){if(document.documentElement.dataset.aggrReady==='true'&&document.querySelector('.search-command'))window.__aggrPerfReadyAt=performance.now();else requestAnimationFrame(ready)})"})).await?;
                         client.goto(&fixture.base).await?;
                         let value = client.execute_async(r#"
                           const base=arguments[0],done=arguments[arguments.length-1];
@@ -61,7 +61,7 @@ async fn reader_client_performance_metrics() -> Result<()> {
                             await until(()=>document.querySelector('.search-results .row'));
                             const firstSearchMs=performance.now()-started;
                             done({initialReadyMs,fcpMs,preferencesNavigationMs,feedNavigationMs,firstSearchMs,results:document.querySelectorAll('.search-results .row').length});
-                          })().catch(error=>done({error:error.stack||String(error),ready:window.__aggrPerfReadyAt,appReady:document.documentElement.dataset.aggrReady,readerReady:document.documentElement.dataset.readerReady,search:!!document.querySelector('.search-command'),paint:performance.getEntriesByType('paint').map(e=>({name:e.name,start:e.startTime})),clientErrors:window.__aggrPerfErrors,url:location.href}));
+                          })().catch(error=>done({error:error.stack||String(error),ready:window.__aggrPerfReadyAt,appReady:document.documentElement.dataset.aggrReady,search:!!document.querySelector('.search-command'),paint:performance.getEntriesByType('paint').map(e=>({name:e.name,start:e.startTime})),clientErrors:window.__aggrPerfErrors,url:location.href}));
                         "#, vec![json!(fixture.base)]).await?;
                         anyhow::ensure!(value.get("error").is_none(), "performance scenario ({environment}/{run}): {value}");
                         Ok(value)

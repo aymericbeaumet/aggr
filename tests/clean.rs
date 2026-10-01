@@ -114,10 +114,6 @@ fn project_layout_rejects_every_protected_archive_overlap() {
             "site output",
         ),
         ("[store]\ndir = '.'\n", "config"),
-        (
-            "[site]\ntheme = 'reader-theme'\n[store]\ndir = 'reader-theme/archive'\n",
-            "theme",
-        ),
         ("[store]\ndir = '.git/aggr-data'\n", "Git metadata"),
     ] {
         let fixture = Fixture::new(config);
@@ -136,7 +132,6 @@ fn dev_rejects_cache_overlaps_before_creating_its_namespace() {
     for (config, base, protected) in [
         ("[store]\ndir = 'archive'\n", "archive", "[store] dir"),
         ("", "aggr.toml", "config"),
-        ("[site]\ntheme = 'reader-theme'\n", "reader-theme", "theme"),
         ("", ".git", "Git metadata"),
         ("", ".", "repository"),
     ] {
@@ -236,13 +231,15 @@ fn ordinary_commands_reject_symlinks_inside_owned_cache_namespaces() {
 
 #[test]
 fn repository_cache_namespace_cannot_contain_project_inputs() {
-    let fixture =
-        Fixture::new("[site]\ntheme = '.aggr/cache/build-v1/render-v1/previous/site/theme'\n");
+    let fixture = Fixture::new(
+        "[[sources]]\nurl = './.aggr/cache/build-v1/render-v1/previous/site/subscriptions.toml'\n",
+    );
+    let collection = fixture
+        .root
+        .join(".aggr/cache/build-v1/render-v1/previous/site/subscriptions.toml");
     fixture.put(
-        &fixture
-            .root
-            .join(".aggr/cache/build-v1/render-v1/previous/site/theme/templates/base.html"),
-        "hand edited theme",
+        &collection,
+        "[[sources]]\nurl = 'https://example.com/feed.xml'\n",
     );
     fixture
         .command()
@@ -251,13 +248,8 @@ fn repository_cache_namespace_cannot_contain_project_inputs() {
         .failure()
         .stderr(predicate::str::contains("repository build cache"));
     assert_eq!(
-        std::fs::read_to_string(
-            fixture
-                .root
-                .join(".aggr/cache/build-v1/render-v1/previous/site/theme/templates/base.html")
-        )
-        .unwrap(),
-        "hand edited theme"
+        std::fs::read_to_string(&collection).unwrap(),
+        "[[sources]]\nurl = 'https://example.com/feed.xml'\n"
     );
     assert!(
         git(&fixture.root, &["branch", "--list", "aggr"])

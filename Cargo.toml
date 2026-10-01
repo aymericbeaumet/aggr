@@ -71,6 +71,7 @@ thumbhash = "0.1.0"
 resvg = { version = "0.48.1", default-features = false, features = ["text"] }
 
 [dev-dependencies]
+ts-rs = { version = "12", features = ["serde-json-impl"] }
 assert_cmd = "2"
 fantoccini = { version = "0.22", default-features = false }
 httpmock = "0.8"

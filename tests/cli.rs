@@ -174,16 +174,17 @@ fn wait_for_dev_page(port: u16, path: &str, contains: &str, timeout: Duration) -
     panic!("aggr dev did not serve {path} containing {contains:?}: {last}");
 }
 
+/// One field of the configuration object `sw.js` hands the worker.
 fn worker_json(worker: &str, name: &str) -> serde_json::Value {
-    let prefix = format!("var {name} = ");
-    serde_json::from_str(
+    let config: serde_json::Value = serde_json::from_str(
         worker
             .lines()
-            .find_map(|line| line.strip_prefix(&prefix))
+            .find_map(|line| line.strip_prefix("self.AGGR_SW = "))
             .unwrap()
             .trim_end_matches(';'),
     )
-    .unwrap()
+    .unwrap();
+    config[name].clone()
 }
 
 #[cfg(unix)]
@@ -542,14 +543,14 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
     // Complete offline downloads include the master without adding it to installation work.
     let worker = std::fs::read_to_string(repo.clone.join("_site/sw.js")).unwrap();
     assert!(
-        worker_json(&worker, "PRECACHE")
+        worker_json(&worker, "precache")
             .as_array()
             .unwrap()
             .iter()
             .all(|entry| entry["url"] != master_asset)
     );
     assert!(
-        worker_json(&worker, "OFFLINE_CATALOG")
+        worker_json(&worker, "offline_catalog")
             .as_array()
             .unwrap()
             .iter()
@@ -1653,7 +1654,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     // Navigation is the browser's again: no vendored library, one hand-written module.
     assert!(!index.contains("assets/swup-"));
     assert!(
-        index.contains("<script type=\"module\" src=\"./assets/app-"),
+        index.contains("<script type=\"module\" src=\"./assets/app/app-"),
         "{index}"
     );
     assert!(!index.contains("config@"));
@@ -1664,7 +1665,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
     let item = site.join("items/demo/2026-09-01-hello-there");
     let page = std::fs::read_to_string(item.join("index.html")).unwrap();
     assert_eq!(
-        page.matches("https://github.com/o/r/blob/").count(),
+        page.matches("href=\"https://github.com/o/r/blob/").count(),
         1,
         "{page}"
     );
@@ -1789,18 +1790,18 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(index.contains("rel=\"manifest\""), "{index}");
     let sw = std::fs::read_to_string(site.join("sw.js")).unwrap();
     assert!(sw.contains("\"assets/style-"), "{sw}");
-    assert!(sw.contains("\"assets/app-"), "{sw}");
+    assert!(sw.contains("\"assets/app/app-"), "{sw}");
     // Installation caches the shell; the separate download catalogue retains article families.
     let article = "items/demo/2026-09-01-hello-there/";
     assert!(
-        worker_json(&sw, "PRECACHE")
+        worker_json(&sw, "precache")
             .as_array()
             .unwrap()
             .iter()
             .all(|entry| entry["url"] != article)
     );
     assert!(
-        worker_json(&sw, "OFFLINE_CATALOG")
+        worker_json(&sw, "offline_catalog")
             .as_array()
             .unwrap()
             .iter()

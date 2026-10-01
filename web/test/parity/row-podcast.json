@@ -1,0 +1,48 @@
+{
+  "component": "Row",
+  "props": {
+    "base": "./",
+    "excerpts": true,
+    "language": "en",
+    "rank": 1,
+    "row": {
+      "age_band": "h24",
+      "category": null,
+      "excerpt": "Show notes.",
+      "labels": [],
+      "language": null,
+      "link": "https://blog.example/podcast",
+      "metadata": {
+        "consumption": {
+          "action": "listen",
+          "minutes": 63,
+          "seconds": 3725
+        },
+        "date": "2026-09-29T06:00:00+00:00",
+        "discussions": [],
+        "feed_sources": [],
+        "is_aggregated": false,
+        "original": "https://blog.example/podcast",
+        "reading_minutes": 1,
+        "source_display": "blog.example",
+        "source_query": "blog",
+        "source_slug": "blog",
+        "source_title": "Blog",
+        "word_count": 28
+      },
+      "path": "items/blog/2026/09/podcast",
+      "preview": {
+        "alt": null,
+        "color": "#285a8c",
+        "height": 180,
+        "placeholder": {
+          "data_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAoUlEQVR4Ae3AA6AkWZbG8f937o3IzKdyS2Oubdu2bdu2bdu2bWmMnpZKr54yMyLu+Xa3anqmhztr1a8WMP99CP57Efz3IvjvRfDfi+C/F8F/L4L/XgT/vQj+exH89yL470Xw34vgvxfBfy+C/14E/70I/nsR/Pci+O9F8N+L4L8XwX8vgv9eBP+9CP57Efz3IvjvRfDfi+C/F8F/L4L/Xvwjgc8BRfFK4pYAAAAASUVORK5CYII="
+        },
+        "url": "assets/previews/fixture.jpg",
+        "width": 320
+      },
+      "title": "An episode",
+      "url": "items/blog/podcast/"
+    }
+  }
+}
