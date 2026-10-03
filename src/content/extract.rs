@@ -43,6 +43,7 @@ pub fn extract_article(page: &str, url: &Url) -> Result<ExtractedArticle> {
     }
     let mut readability = Readability::new(page.as_ref(), Some(url.as_str()), Some(config))
         .context("parsing the original article page")?;
+    prepare_article_structure(&readability, url);
     let mut labels = Vec::new();
     for meta in readability.doc.select("meta[property]").iter() {
         if meta
@@ -133,6 +134,69 @@ pub fn extract_article(page: &str, url: &Url) -> Result<ExtractedArticle> {
         image: article.image,
         labels,
     })
+}
+
+fn prepare_article_structure(readability: &Readability, url: &Url) {
+    // Publisher breadcrumbs and jump menus remain navigation even inside an article wrapper.
+    readability
+        .doc
+        .select(
+            "[itemscope*='BreadcrumbList'], [itemtype*='BreadcrumbList'], uni-article-jumplinks",
+        )
+        .remove();
+
+    if url
+        .host_str()
+        .is_some_and(|host| host == "arstechnica.com" || host.ends_with(".arstechnica.com"))
+    {
+        let blocks = readability
+            .doc
+            .select(".post-content.post-content-double")
+            .iter()
+            .collect::<Vec<_>>();
+        if let Some((first, rest)) = blocks.split_first()
+            && !rest.is_empty()
+        {
+            let combined = blocks
+                .iter()
+                .map(|block| block.inner_html().to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            first.set_html(combined);
+            for block in rest {
+                block.remove();
+            }
+        }
+    }
+
+    if url.host_str() == Some("slack-status.com") {
+        readability
+            .doc
+            .select(".incident:has(.note)")
+            .add_class("readability-content");
+        for note in readability.doc.select(".incident .note").iter() {
+            let badge = note.select("span").first();
+            let label = badge.text().trim().to_string();
+            let date = note.select(".date");
+            let time = date.text().trim().to_string();
+            if label.is_empty() || time.is_empty() {
+                continue;
+            }
+            badge.remove();
+            date.remove();
+            note.select(".circle, .outer_circle, [aria-hidden='true']")
+                .remove();
+            note.prepend_html(format!(
+                "<h4>{} · {}</h4>",
+                escape_html(&label),
+                escape_html(&time)
+            ));
+        }
+        readability
+            .doc
+            .select(".incident .right, .incident_type_icon")
+            .remove();
+    }
 }
 
 /// GitHub gists (and blob views built the same way) show a file as a table of highlighted lines
@@ -1149,6 +1213,51 @@ mod tests {
         assert!(text.contains("complete article body"), "{text}");
         assert!(text.contains("second paragraph"), "{text}");
         assert!(!text.contains("Products About Contact"), "{text}");
+    }
+
+    #[test]
+    fn publisher_navigation_is_removed_without_dropping_article_prose() {
+        // OSNews puts BreadcrumbList inside its story; Google uses uni-article-jumplinks.
+        let page = r##"<article><div itemscope="https://schema.org/BreadcrumbList" class="breadcrumb"><a href="/">Home</a> &gt; <a href="/google">Google</a> &gt; Story</div><p>The article begins with useful prose about the decision and its consequences.</p><uni-article-jumplinks heading="In this article"><details><summary>In this article</summary><nav><a href="#next">Next</a></nav></details></uni-article-jumplinks><h2 id="next">Next</h2><p>Another useful paragraph follows the actual article heading.</p><p>In this article I explain the decision in ordinary prose.</p></article>"##;
+        let extracted = extract_article(page, &base()).unwrap();
+        let markdown = to_markdown(&extracted.html, Some(&base()));
+        assert!(!markdown.contains("[Home]"), "{markdown}");
+        assert!(!markdown.contains("\nIn this article\n"), "{markdown}");
+        assert!(markdown.contains("article begins"), "{markdown}");
+        assert!(markdown.contains("Another useful paragraph"), "{markdown}");
+        assert!(markdown.contains("In this article I explain"), "{markdown}");
+    }
+
+    #[test]
+    fn ars_article_blocks_across_an_ad_are_joined_in_order() {
+        // Ars Technica puts the opening paragraphs in one post-content block and the rest after an ad.
+        let url = Url::parse("https://arstechnica.com/story").unwrap();
+        let page = r#"<div><div class="post-content post-content-double"><p>The opening paragraphs describe the case and contain enough prose to be an article.</p></div><div class="ad-wrapper">Advertisement</div><div class="post-content post-content-double"><p>The later section explains the court filing in detail and adds more substantive prose.</p></div></div>"#;
+        let extracted = extract_article(page, &url).unwrap();
+        let markdown = to_markdown(&extracted.html, Some(&url));
+        assert!(markdown.contains("opening paragraphs"), "{markdown}");
+        assert!(markdown.contains("later section"), "{markdown}");
+        assert!(!markdown.contains("Advertisement"), "{markdown}");
+        assert!(
+            markdown.find("opening paragraphs").unwrap() < markdown.find("later section").unwrap()
+        );
+    }
+
+    #[test]
+    fn slack_incident_updates_keep_their_labels_times_and_body() {
+        // slack-status.com exposes each update as a note and the affected features in a sidebar.
+        let url = Url::parse("https://slack-status.com/incident/123").unwrap();
+        let page = r#"<main><div class="incident"><img class="incident_type_icon" src="/icon.png"><h3>Message failures</h3><div class="left"><div class="note"><span>Update</span><p>Access is being restored after the message loop was stopped.</p><p class="date"><span>6:58 AM PST</span></p></div><div class="note"><span>Investigating</span><p>We're investigating why message sending was blocked.</p><p class="date"><span>5:39 AM PST</span></p></div></div><div class="right"><p>Features affected</p><p>Messaging</p></div></div></main>"#;
+        let extracted = extract_article(page, &url).unwrap();
+        let markdown = to_markdown(&extracted.html, Some(&url));
+        assert!(markdown.contains("Update · 6:58 AM PST"), "{markdown}");
+        assert!(
+            markdown.contains("Investigating · 5:39 AM PST"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("Access is being restored"), "{markdown}");
+        assert!(!markdown.contains("Features affected"), "{markdown}");
+        assert!(!markdown.contains("icon.png"), "{markdown}");
     }
 
     #[test]
