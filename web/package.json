@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --strictPort",
     "build": "vite build && vite build --config vite.bootstrap.config.ts && vite build --config vite.worker.config.ts",
-    "check": "svelte-check --tsconfig ./tsconfig.json && tsc --noEmit -p tsconfig.worker.json",
+    "check": "svelte-check --tsgo --tsconfig ./tsconfig.json && tsc --noEmit -p tsconfig.worker.json",
     "test": "vitest run",
     "verify": "npm run check && npm test && npm run build"
   },
@@ -18,10 +18,11 @@
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@types/node": "^26.0.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
     "jsdom": "^30.0.0",
     "svelte-check": "^4.0.0",
-    "typescript": "^5.9.0",
+    "typescript": "^6.0.3",
     "vite": "^8.0.0",
-    "vitest": "^4.0.0"
+    "vitest": "^5.0.3"
   }
 }

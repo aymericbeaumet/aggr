@@ -125,7 +125,7 @@ describe('activation', () => {
     handlers.activate({ waitUntil: (promise) => waited.push(promise) });
     await Promise.all(waited);
     expect(ctx.state.configurationCount).toBe(1);
-    expect((await storage.open(ctx.names.offlineSettings)).match(`${scope}__offline_count`)).resolves.toBeTruthy();
+    await expect((await storage.open(ctx.names.offlineSettings)).match(`${scope}__offline_count`)).resolves.toBeTruthy();
   });
 
   it('tolerates optional shell resources that fail', async () => {

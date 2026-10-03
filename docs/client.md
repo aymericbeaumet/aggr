@@ -70,6 +70,9 @@ with Vite's client and the source entry, so component edits hot-swap; static HTM
 stay served by aggr. The setting accepts a local HTTP origin only and has no effect on builds.
 `make check` runs the frontend checks alongside the Rust ones; CI also rebuilds the bundle and
 fails if the committed output or the generated types differ.
+The frontend installs TypeScript 6 for `tsc` and an aliased TypeScript 7 for Svelte's `--tsgo`
+checker; both are needed until `svelte-check` can use TypeScript 7 alone. The checker writes
+temporary files under ignored `web/.svelte-check/`.
 
 Vite content-hashes the client bundle and lists it in `static/app/.vite/manifest.json`; Rust
 publishes those files verbatim (chunk names are referenced inside the bundle) and resolves the
