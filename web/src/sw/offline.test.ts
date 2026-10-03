@@ -36,6 +36,17 @@ describe('offline articles', () => {
     expect(await (await storage.open(ctx.names.offlinePages)).match(`${scope}items/older/`)).toBeTruthy();
   });
 
+  it('persists saved articles in catalogue order when downloads finish out of order', async () => {
+    const { ctx, state } = harness();
+    state.network = async (url) => {
+      if (url.endsWith('large.webp')) await new Promise((resolve) => setTimeout(resolve, 20));
+      return new Response(url);
+    };
+    await saveOfflineArticles(ctx, 2);
+    ctx.state.configurationCount = 1;
+    expect((await readOfflineStatus(ctx)).saved.map((item) => item.title)).toEqual(['Newest']);
+  });
+
   it('offline search is committed only after the complete manifest passes size and digest verification', async () => {
     const { ctx, state, storage } = harness();
     state.network = async (url) => (url.endsWith('search-manifest.json') ? Response.json(manifest) : new Response('corrupt'));

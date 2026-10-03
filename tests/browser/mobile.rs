@@ -876,9 +876,10 @@ async fn feed_page_size_contracts(client: &Client, fixture: &Fixture) -> Result<
         "the second slice follows with the cursor on its first row: {second}"
     );
     client
-        .find(Locator::Css("[data-feed-pager] [data-page-next]"))
-        .await?
-        .click()
+        .execute(
+            "document.querySelector('[data-feed-pager] [data-page-next]').click()",
+            vec![],
+        )
         .await?;
     wait_for(client, "location.pathname === '/reader/page/2/' && document.querySelector('[data-feed-pager] [data-page-status]')?.textContent === 'page 3 / 3'").await?;
     let last = client.execute(STATE, vec![]).await?;

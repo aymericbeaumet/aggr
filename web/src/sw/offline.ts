@@ -98,6 +98,7 @@ export async function saveOfflineArticles(
   const { state, names, config } = ctx;
   const superseded = () => generation !== undefined && generation !== state.offlineGeneration;
   const selected = config.offline_catalog.slice(0, count);
+  const order = new Map(config.offline_catalog.map((item, index) => [item.url, index] as const));
   const result: OfflineStatus = {
     type: 'AGGR_OFFLINE_STATUS',
     requested: count,
@@ -183,6 +184,8 @@ export async function saveOfflineArticles(
         }
       }
       if (!superseded())
+        complete.sort((a, b) => (order.get(a.url) ?? Infinity) - (order.get(b.url) ?? Infinity));
+      if (!superseded())
         await settings.put(offlineUrl(ctx, '__offline_articles'), new Response(JSON.stringify(complete))).catch(() => {});
     }
     if (!superseded())
@@ -218,7 +221,6 @@ export async function saveOfflineArticles(
     result.cancelled = true;
     return result;
   }
-  const order = new Map(config.offline_catalog.map((item, index) => [item.url, index] as const));
   result.saved.sort((a, b) => (order.get(a.url) ?? Infinity) - (order.get(b.url) ?? Infinity));
   result.total = Math.max(result.total, result.saved.length);
   result.downloading = false;
