@@ -706,7 +706,11 @@ mod tests {
         let class = regex::Regex::new(r"\.([a-z][a-z0-9_-]*)").unwrap();
         // Only the element a rule applies to is positioned, never the ancestors that select it.
         let positioned: BTreeSet<String> = rules(css)
-            .filter(|(_, block)| block.contains("position: relative"))
+            .filter(|(_, block)| {
+                ["relative", "absolute", "fixed", "sticky"]
+                    .iter()
+                    .any(|position| block.contains(&format!("position: {position}")))
+            })
             .flat_map(|(prelude, _)| selectors(&prelude))
             .flat_map(|selector| {
                 class

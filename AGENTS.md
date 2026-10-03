@@ -240,6 +240,8 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   original provenance, reject archive lookup pages as snapshots, and show an honest fallback on failure.
   Capture code-language hints before Readability strips classes; preserve explicit plain text and
   legacy inline code. Decode publisher email-protection payloads into escaped text, never markup.
+  Keep publisher breadcrumbs and article jump menus out of bodies; join article segments split by ads
+  before Readability scores them. Status incident updates retain their label and timestamp together.
   Publisher-feed reconciliation enriches media in place and records canonical dedupe aliases; keep article paths
   and hand-edited content, reject ambiguous matches, and leave repeats unchanged.
 - Canonical publisher IDs are normalized article hostnames: lowercase/punycode, without trailing dots

@@ -158,6 +158,11 @@ neighboring figure. Ordinary comment containers and sidebars still follow the no
 versions change with these rules while raw HTTP responses remain reusable. A figure already absent
 from both stored HTML and Markdown needs a fresh extraction; rendering cannot reconstruct it.
 
+Publisher breadcrumbs and article jump menus are removed before extraction. Ars Technica articles
+split into repeated content blocks by ads are joined before Readability selects a candidate, so
+the opening paragraphs remain in order. Slack status updates keep each status label and time with
+its message; old flattened captures are reorganized during builds without changing stored Markdown.
+
 Charts that a page draws in the browser (Vega-Lite specifications streamed in a Next.js payload,
 as on openai.com) leave an empty placeholder in the server HTML, and aggr never executes page
 scripts. When the specification carries its data inline, the placeholder receives that data as a

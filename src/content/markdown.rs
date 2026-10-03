@@ -23,7 +23,7 @@ const LAYOUT_INLINE_ELEMENTS: &[&str] = &["a", "label", "span", "time", "small"]
 /// (`<strong>libheif</strong><span>Image decoder</span>` in a CSS-laid-out list).
 const TEXT_INLINE_ELEMENTS: &[&str] = &["strong", "b", "em", "i", "code"];
 /// Punctuation that belongs to the words before it, never to the wrapper that carries it.
-const SENTENCE_PUNCTUATION: [char; 8] = ['.', ',', ';', ':', '!', '?', ')', ']'];
+const SENTENCE_PUNCTUATION: [char; 11] = ['.', ',', ';', ':', '!', '?', ')', ']', '}', '”', '’'];
 
 const FOOTNOTE_REF_START: char = '\u{e000}';
 const FOOTNOTE_REF_END: char = '\u{e001}';
@@ -2585,6 +2585,14 @@ fn restore_inline_layout_boundaries(html: &str) -> String {
         if html[next_content..].starts_with(SENTENCE_PUNCTUATION) {
             continue;
         }
+        // latent.space: a link following an opening delimiter still belongs inside it.
+        if html[..tag_start]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| matches!(ch, '(' | '[' | '{' | '“' | '‘'))
+        {
+            continue;
+        }
         if tag.name == "a" && next.name == "a" {
             if anchor_is_citation || is_numbered_citation(html, position) {
                 continue;
@@ -3792,5 +3800,23 @@ List:       openbsd-tech
     fn inline_boundary_repair_respects_existing_content_whitespace() {
         let html = "<pre><span>left </span><span> right</span></pre>";
         assert_eq!(restore_inline_layout_boundaries(html), html);
+    }
+
+    #[test]
+    fn inline_boundary_repair_keeps_links_inside_opening_punctuation() {
+        // latent.space: inline spans split the parenthesis and quote from the link that follows.
+        let html = "<p><span>February (</span><a href=\"/model\">3.1 Pro</a><span>), promised “</span><a href=\"/release\">soon</a><span>”.</span></p>";
+        let markdown = to_markdown(html, Some(&base()));
+        assert!(markdown.contains("February ([3.1 Pro]"), "{markdown}");
+        assert!(markdown.contains("), promised “[soon]"), "{markdown}");
+        assert!(
+            markdown.contains("[soon](https://example.com/release)”."),
+            "{markdown}"
+        );
+        let prose = to_markdown(
+            "<p><span>Model</span><a href=\"/model\">details</a></p>",
+            Some(&base()),
+        );
+        assert!(prose.contains("Model [details]"), "{prose}");
     }
 }

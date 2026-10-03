@@ -97,7 +97,13 @@ pub fn strip_article_metadata(
     published: Option<DateTime<Utc>>,
     source_slug: &str,
 ) -> String {
-    let markdown = strip_boundary_controls(markdown);
+    let markdown = strip_article_navigation(markdown);
+    let markdown = if source_slug == "slack-status-com" {
+        format_archived_slack_status(&markdown)
+    } else {
+        markdown
+    };
+    let markdown = strip_boundary_controls(&markdown);
     let markdown = strip_leading_metadata(&markdown, title, published, source_slug);
     let markdown = strip_site_icons(&markdown);
     let markdown = strip_leading_kind_label(&markdown);
@@ -116,6 +122,98 @@ pub fn strip_article_metadata(
         return protect_markdown_code(&markdown, tidy_markdown);
     }
     markdown
+}
+
+fn format_archived_slack_status(markdown: &str) -> String {
+    let blocks = markdown.trim().split("\n\n").collect::<Vec<_>>();
+    let is_label = |block: &str| {
+        matches!(
+            block.trim(),
+            "Update" | "Cause Identified" | "Investigating" | "Resolved" | "Monitoring"
+        )
+    };
+    let is_time = |block: &str| {
+        let block = block.trim();
+        block.len() <= 32
+            && (block.contains(" AM ") || block.contains(" PM "))
+            && block.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+    };
+    let mut headings = std::collections::BTreeMap::new();
+    let mut times = std::collections::HashSet::new();
+    for (index, block) in blocks.iter().enumerate() {
+        if !is_label(block) {
+            continue;
+        }
+        let Some(time_index) = ((index + 1)..blocks.len())
+            .take_while(|next| !is_label(blocks[*next]))
+            .find(|next| is_time(blocks[*next]))
+        else {
+            continue;
+        };
+        headings.insert(
+            index,
+            format!("#### {} · {}", block.trim(), blocks[time_index].trim()),
+        );
+        times.insert(time_index);
+    }
+    if headings.is_empty() {
+        return markdown.to_string();
+    }
+    let sidebar = blocks
+        .iter()
+        .rposition(|block| block.trim() == "Features affected")
+        .filter(|start| {
+            blocks.len() - start <= 8
+                && blocks[*start + 1..]
+                    .iter()
+                    .any(|block| block.trim() == "Status")
+        });
+    let kept = blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            if times.contains(&index)
+                || sidebar.is_some_and(|start| index >= start)
+                || (index == 0
+                    && block.trim().contains("TableIncident")
+                    && block.trim().starts_with("![]("))
+            {
+                None
+            } else {
+                Some(headings.get(&index).map_or(*block, String::as_str))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!("{kept}\n")
+}
+
+fn strip_article_navigation(markdown: &str) -> String {
+    let blocks = markdown.trim().split("\n\n").collect::<Vec<_>>();
+    let breadcrumb = blocks.first().is_some_and(|block| {
+        let compact = block.replace('\u{a0}', " ");
+        let compact = compact.trim();
+        (compact.starts_with("[Home](") || compact.starts_with("[ Home]("))
+            && compact.matches('>').count() >= 2
+            && compact.contains("](")
+            && !compact.contains('\n')
+    });
+    if !breadcrumb && !blocks.iter().any(|block| block.trim() == "In this article") {
+        return markdown.to_string();
+    }
+    let kept = blocks
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            ((index != 0 || !breadcrumb) && block.trim() != "In this article").then_some(block)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if kept.is_empty() {
+        kept
+    } else {
+        format!("{kept}\n")
+    }
 }
 
 /// Clean publisher metadata and move explicit boundary hashtags into article labels.
@@ -1574,6 +1672,32 @@ fn is_thematic_break(line: &str, starts_block: bool) -> bool {
 mod tests {
     use super::*;
     use crate::content::to_markdown;
+
+    #[test]
+    fn archived_navigation_is_hidden_without_removing_prose() {
+        // OSNews saves a Home > category > title breadcrumb; Google leaves a jump-menu label.
+        let markdown = "[\u{a0}Home](https://example.com)\u{a0}>\u{a0}[Google](https://example.com/google)\u{a0}>\u{a0}Story\n\nThe first paragraph.\n\nIn this article\n\nThe second paragraph.\n";
+        let clean = strip_article_metadata(markdown, "Story", None, "hnrss-org");
+        assert_eq!(clean, "The first paragraph.\n\nThe second paragraph.\n");
+        let prose = "In this article I explain the decision.\n\nThe second paragraph.\n";
+        assert_eq!(strip_article_metadata(prose, "", None, "blog"), prose);
+    }
+
+    #[test]
+    fn archived_slack_status_updates_pair_label_and_time() {
+        // slack-status.com: old captures have a badge paragraph, message and trailing time.
+        let markdown = "![](https://slack-status.com/img/v2/TableIncident.png)\n\n Update\n\nAccess is being restored.\n\n 6:58 AM PST\n\n Investigating\n\nWe are checking message delivery.\n\n 5:39 AM PST\n\nFeatures affected\n\nMessaging\n\nStatus\n\nIncident\n";
+        let clean = strip_article_metadata(markdown, "Incident", None, "slack-status-com");
+        assert_eq!(
+            clean,
+            "#### Update · 6:58 AM PST\n\nAccess is being restored.\n\n#### Investigating · 5:39 AM PST\n\nWe are checking message delivery.\n"
+        );
+        let unrelated = "Update\n\nThis is ordinary prose without a timestamp.\n";
+        assert_eq!(
+            strip_article_metadata(unrelated, "", None, "slack-status-com"),
+            unrelated
+        );
+    }
 
     #[test]
     fn article_tags_move_only_explicit_boundary_groups_into_labels() {
