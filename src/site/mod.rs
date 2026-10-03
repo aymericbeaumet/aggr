@@ -3,14 +3,17 @@
 
 mod assets;
 mod budget;
+pub mod client;
 mod compressed_media;
 pub mod context;
+pub(crate) mod dev;
 mod directory;
 mod display;
 mod document;
 pub(crate) mod interactive;
 pub(crate) mod item_type;
 mod native_media;
+mod offline;
 mod output_dir;
 pub mod outputs;
 mod page;
@@ -44,7 +47,7 @@ use directory::{
 use output_dir::MARKER;
 pub(crate) use output_dir::prepare_out_dir;
 use page::{ListPage, Pages, SharedCtx, SimplePage, archive_modified_at, default_site_description};
-use render::{Layers, Renderer};
+use render::{Renderer, Theme};
 
 const EXCERPT_CHARS: usize = 240;
 
@@ -223,7 +226,7 @@ pub fn cache_version(build: &BuildCtx) -> String {
 }
 
 /// Reader releases depend on shipped code, never on values substituted while rendering it.
-fn app_version(binary_version: &str, layers: &Layers) -> Result<String> {
+fn app_version(binary_version: &str, theme: &Theme) -> Result<String> {
     fn field(hash: &mut Sha1, bytes: &[u8]) {
         hash.update((bytes.len() as u64).to_le_bytes());
         hash.update(bytes);
@@ -232,11 +235,11 @@ fn app_version(binary_version: &str, layers: &Layers) -> Result<String> {
     field(&mut hash, b"aggr-app-v1");
     field(&mut hash, binary_version.as_bytes());
     for (kind, names) in [
-        ("templates", layers.template_names()?),
-        ("static", layers.static_names()?),
+        ("templates", theme.template_names()?),
+        ("static", theme.static_names()?),
     ] {
         for name in names {
-            let bytes = layers
+            let bytes = theme
                 .read(kind, &name)?
                 .with_context(|| format!("{kind}/{name} vanished during build"))?;
             field(&mut hash, format!("{kind}/{name}").as_bytes());
@@ -394,13 +397,26 @@ pub fn relative_root(path: &str) -> String {
     }
 }
 
-/// What `sw.js` sees: the cache name and the revisioned install-time fetch list.
+/// What the worker reads from `self.AGGR_SW`: its cache version, the application and content
+/// versions, and the revisioned install-time lists. `sw.js` is this object followed by an
+/// `importScripts` of the compiled worker, so the worker's scope stays the site root.
 #[derive(Serialize)]
-struct SwCtx<'a> {
-    site: &'a SiteCtx,
-    build: &'a BuildCtx,
+struct SwConfig {
     version: String,
+    app_version: String,
+    content_version: String,
     precache: Vec<assets::PrecacheEntry>,
+    offline_catalog: Vec<offline::Article>,
+    offline_count: usize,
+    search_manifest: serde_json::Value,
+}
+
+fn worker_source(config: &SwConfig, worker_url: &str) -> Result<String> {
+    Ok(format!(
+        "self.AGGR_SW = {};\nimportScripts({});\n",
+        serde_json::to_string(config)?,
+        serde_json::to_string(worker_url)?
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,23 +506,48 @@ pub(crate) fn verify_output_budget(out: &Path, limit: u64) -> Result<()> {
     Ok(())
 }
 
-fn build_once(
+#[derive(Clone)]
+struct PreparedSite {
+    site: SiteCtx,
+    build_ctx: BuildCtx,
+    renderer: Renderer,
+    all_items: Vec<Item>,
+    prepared_bodies: Vec<std::sync::Arc<content::PreparedMarkdown>>,
+    archive_items: Vec<ItemCtx>,
+    article_images: BTreeMap<String, Vec<content::LocalImage>>,
+    shared_pictures: BTreeMap<String, std::collections::BTreeSet<String>>,
+    source_ctxs: Vec<SourceCtx>,
+    subscriptions: Vec<SourceCtx>,
+    duplicate_redirects: Vec<(String, String)>,
+    river_items: Vec<ItemCtx>,
+    source_members: BTreeMap<String, Vec<usize>>,
+    categories: Vec<context::CategoryCtx>,
+    category_members: BTreeMap<String, Vec<usize>>,
+    tags: Vec<context::CategoryCtx>,
+    tag_members: BTreeMap<String, Vec<usize>>,
+    written_assets: assets::Published,
+    per_page: usize,
+}
+
+fn prepare_site(
     config: &Config,
     sources: &[Source],
     store: &Store,
     project_root: &Path,
     info: &BuildInfo,
     media_budget: &mut budget::MediaBudget,
-) -> Result<Summary> {
-    let started = std::time::Instant::now();
-    let mut phases: Vec<(&str, std::time::Duration)> = Vec::new();
-    let mut phase_started = started;
-    let mut phase = |name: &'static str| {
-        let now = std::time::Instant::now();
-        let elapsed = now.duration_since(phase_started);
-        log::debug!("build {name}: {:.3}s", elapsed.as_secs_f64());
-        phases.push((name, elapsed));
-        phase_started = now;
+    preparation_cache: Option<&dev::PreparationCache>,
+) -> Result<PreparedSite> {
+    let lazy = preparation_cache.is_some();
+    let mut phase_started = std::time::Instant::now();
+    let mut phase = |name| {
+        if lazy {
+            log::debug!(
+                "dev prepare {name}: {:.3}s",
+                phase_started.elapsed().as_secs_f64()
+            );
+        }
+        phase_started = std::time::Instant::now();
     };
     let out = &info.out;
     prepare_out_dir(out)?;
@@ -556,7 +597,7 @@ fn build_once(
         data_branch: config.store.branch.clone(),
         network_url: outputs::AGGR_NETWORK,
         instance_type_url: outputs::AGGR_INSTANCE_TYPE,
-        pwa: config.site.pwa,
+        pwa: config.site.pwa && !lazy,
         config_page_url: repository.as_deref().and_then(|repository| {
             info.config_sha
                 .as_deref()
@@ -586,11 +627,11 @@ fn build_once(
         entry_shortcuts: Vec::new(),
         params: config.site.params.clone(),
     };
-    let layers = theme_layers(config, project_root)?;
+    let theme = theme();
     let mut build_ctx = BuildCtx {
         time: info.now,
         version: env!("CARGO_PKG_VERSION").to_string(),
-        app_version: app_version(env!("CARGO_PKG_VERSION"), &layers)?,
+        app_version: app_version(env!("CARGO_PKG_VERSION"), &theme)?,
         content_version: String::new(),
         config_sha: info.config_sha.clone(),
         data_sha: info.data_sha.clone(),
@@ -603,31 +644,44 @@ fn build_once(
         data_sha: info.data_sha.as_deref(),
     });
 
-    let renderer = Renderer::new(layers)?;
+    let renderer = Renderer::new(theme)?;
 
     // Sources: config order, enriched with stored state and counts.
     let status = store.status()?;
     let stored_items: Vec<_> = store.items()?.into_iter().filter(is_visible_item).collect();
     let mut source_ctxs = source_contexts(sources, store, &status, &stored_items)?;
+    let prepared_key = preparation_cache.map(|_| {
+        crate::model::sha1_hex(
+            format!(
+                "{config:?}:{sources:?}:{site:?}:{source_ctxs:?}:{}:{:?}:{:?}:{:?}:{}:{}",
+                info.generation,
+                info.config_sha,
+                info.data_sha,
+                info.base_url,
+                info.release,
+                info.discussions.fingerprint(),
+            )
+            .as_bytes(),
+        )
+    });
+    if let (Some(cache), Some(key)) = (preparation_cache, prepared_key.as_deref())
+        && let Some(mut cached) = cache.prepared(key)
+    {
+        cached.renderer = renderer;
+        cached.build_ctx.app_version = build_ctx.app_version;
+        cached.build_ctx.time = info.now;
+        phase("cached archive metadata");
+        return Ok(cached);
+    }
     let stored_sources = source_index::capture_sources(&stored_items);
     let (mut all_items, duplicate_redirects) = visible_archive(stored_items, sources);
+    phase("archive scan");
     // Cleanup added since an item was captured reaches it here, so every build pays for every
     // stored body. Each item is independent, which is what makes the archive's share of a rebuild
     // scale with the machine instead of with one core.
-    let normalized = parallel::map(&all_items, |item| {
-        let mut front = item.front.clone();
-        let body = content::normalize_subscription_metadata(&item.body, &mut front);
-        let body = content::normalize_aggregator_metadata(&body, &mut front);
-        let (body, boundary_labels) =
-            content::normalize_article_body(&body, &front.title, front.published, &front.source);
-        front.labels = crate::model::normalize_labels(front.labels.iter().chain(&boundary_labels));
-        let body = crate::threads::clean_archived_thread(&body, &front.link);
-        Ok((body, front))
+    all_items = parallel::map(&all_items, |item| {
+        Ok(dev::normalize_item(item, preparation_cache))
     })?;
-    for (item, (body, front)) in all_items.iter_mut().zip(normalized) {
-        item.body = body;
-        item.front = front;
-    }
     all_items.sort_by(|a, b| {
         b.created_at()
             .cmp(&a.created_at())
@@ -643,19 +697,14 @@ fn build_once(
         config.site.max_items,
         config.site.max_age_days,
     );
-    phase("archive preparation");
 
     // The bounded window controls only the river. Source/category/tag pages, search, and clean
     // article pages are archives over the retained database; `[store]` retention is the explicit
     // knob for bounding those. This keeps old sources browsable without making the home feed stale.
     let prepared_bodies = parallel::map(&all_items, |item| {
-        Ok(content::PreparedMarkdown::new(&item.body))
+        Ok(dev::prepare_markdown(&item.body, preparation_cache))
     })?;
-    let prepared_by_path: BTreeMap<_, _> = all_items
-        .iter()
-        .zip(&prepared_bodies)
-        .map(|(item, prepared)| (item.path.as_str(), prepared))
-        .collect();
+    phase("normalized Markdown");
     let mut archive_items = Vec::with_capacity(all_items.len());
     let mut article_images = BTreeMap::<String, Vec<content::LocalImage>>::new();
     let mut written_assets = assets::Published::new();
@@ -664,7 +713,7 @@ fn build_once(
         .pagefind_cache
         .as_deref()
         .map(|root| crate::cache::Namespace::DeploymentMedia.dir(root));
-    let media_enabled = media_budget.allowance() > 0;
+    let media_enabled = !lazy && media_budget.allowance() > 0;
     if !media_enabled {
         media_budget.omitted = all_items
             .iter()
@@ -762,6 +811,7 @@ fn build_once(
     // A picture that comes back on article after article from the same source is that source's
     // own — a logo, a banner, a default social card. It illustrates nothing, so it is not shown
     // as an article's thumbnail or above its opening paragraph. The archive still keeps it.
+    phase("item metadata");
     let portable_bodies: BTreeMap<&str, &str> = all_items
         .iter()
         .zip(&prepared_bodies)
@@ -777,7 +827,6 @@ fn build_once(
             ctx.preview = None;
         }
     }
-    phase("media and item metadata");
 
     let subscriptions = source_ctxs.clone();
     source_index::resolve(
@@ -787,9 +836,10 @@ fn build_once(
         &duplicate_redirects,
     );
 
+    phase("source identity");
     let recommendation_text: Vec<_> = prepared_bodies
         .iter()
-        .map(content::PreparedMarkdown::plain_text)
+        .map(|prepared| prepared.plain_text())
         .collect();
     let recommendations = related::resolve(&archive_items, &recommendation_text);
     let article_links: Vec<_> = archive_items.iter().map(ArticleLinkCtx::from).collect();
@@ -807,6 +857,7 @@ fn build_once(
             .collect();
     }
 
+    phase("recommendations");
     let river_items: Vec<ItemCtx> = window
         .rendered
         .iter()
@@ -827,7 +878,6 @@ fn build_once(
         terms: tags,
         members: tag_members,
     } = taxonomy_index(&archive_items, Taxonomy::Tags);
-    let mut pages = 0;
     let per_page = config.site.items_per_page;
     build_ctx.content_version = crate::model::sha1_hex(serde_json::to_vec(&(
         &build_ctx.generation,
@@ -843,6 +893,89 @@ fn build_once(
         config.site.build_max_bytes,
         config.site.media_full_quality_days,
     ))?);
+    phase("display fingerprint");
+    let prepared = PreparedSite {
+        site,
+        build_ctx,
+        renderer,
+        all_items,
+        prepared_bodies,
+        archive_items,
+        article_images,
+        shared_pictures,
+        source_ctxs,
+        subscriptions,
+        duplicate_redirects,
+        river_items,
+        source_members,
+        categories,
+        category_members,
+        tags,
+        tag_members,
+        written_assets,
+        per_page,
+    };
+    if let (Some(cache), Some(key)) = (preparation_cache, prepared_key) {
+        cache.remember(key, &prepared);
+    }
+    Ok(prepared)
+}
+
+fn build_once(
+    config: &Config,
+    sources: &[Source],
+    store: &Store,
+    project_root: &Path,
+    info: &BuildInfo,
+    media_budget: &mut budget::MediaBudget,
+) -> Result<Summary> {
+    let started = std::time::Instant::now();
+    let mut phases: Vec<(&str, std::time::Duration)> = Vec::new();
+    let mut phase_started = started;
+    let mut phase = |name: &'static str| {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(phase_started);
+        log::debug!("build {name}: {:.3}s", elapsed.as_secs_f64());
+        phases.push((name, elapsed));
+        phase_started = now;
+    };
+    let PreparedSite {
+        site,
+        build_ctx,
+        renderer,
+        all_items,
+        prepared_bodies,
+        archive_items,
+        article_images,
+        shared_pictures,
+        source_ctxs,
+        subscriptions,
+        duplicate_redirects,
+        river_items,
+        source_members,
+        categories,
+        category_members,
+        tags,
+        tag_members,
+        written_assets,
+        per_page,
+    } = prepare_site(
+        config,
+        sources,
+        store,
+        project_root,
+        info,
+        media_budget,
+        None,
+    )?;
+    phase("archive preparation and media");
+    let out = &info.out;
+    let prepared_by_path: BTreeMap<_, _> = all_items
+        .iter()
+        .zip(&prepared_bodies)
+        .map(|(item, prepared)| (item.path.as_str(), prepared.as_ref()))
+        .collect();
+    let mut pages = 0;
     write(
         &out.join("updates.json"),
         outputs::updates(&site, &build_ctx)?.as_bytes(),
@@ -999,117 +1132,18 @@ fn build_once(
 
     let article_pairs: Vec<_> = archive_items.iter().zip(&all_items).collect();
     let article_sitemaps = parallel::map(&article_pairs, |&(ctx, item)| {
-        let mut ctx = ctx.clone();
-        ctx.video = video::VideoCtx::from_url(&item.front.link);
-        ctx.interactive = interactive::InteractiveCtx::from_item(item);
-
-        ctx.native_media = native_media::NativeMediaCtx::from_urls(
-            &item.front.link,
-            item.front
-                .extra
-                .get("audio_url")
-                .and_then(|value| value.as_str()),
-        );
-        if ctx.is_youtube
-            && let Ok(url) = url::Url::parse(&item.front.link)
-            && let Some(image) = article_images.get(&item.path).and_then(|images| {
-                let candidates = crate::sources::youtube::poster_candidates(&url);
-                images.iter().find(|image| {
-                    candidates
-                        .iter()
-                        .any(|candidate| candidate.url.as_str() == image.source)
-                })
-            })
-        {
-            ctx.article_preview = Some(ArticlePreviewCtx::from_image(image));
-        }
-        let prepared_markdown = prepared_by_path[ctx.path.as_str()];
-        let portable_html = prepared_markdown.portable_html();
-        if ctx.video.is_none()
-            && ctx.document.is_none()
-            && ctx.interactive.is_none()
-            && let Ok(base) = url::Url::parse(&item.front.link)
-        {
-            ctx.article_preview = ArticlePreviewCtx::lead_image(
-                portable_html,
-                &base,
-                article_images
-                    .get(&item.path)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-            )
-            // The source's own picture is not this article's opening image.
-            .filter(|lead| {
-                !shared_pictures
-                    .get(&item.front.source)
-                    .is_some_and(|urls| urls.contains(&lead.url))
-            });
-        }
-        let dimensions = if portable_html.contains("<img ") {
-            let retained_html = store.read_html(item)?;
-            let base = url::Url::parse(&item.front.link).ok();
-            retained_html
-                .as_deref()
-                .map(|html| content::image_dimensions(html, base.as_ref()))
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let article_url = url::Url::parse(&item.front.link).ok();
-        let local_images = article_images
-            .get(&item.path)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let (body_html, has_margin_notes) =
-            content::margin_notes(&content::external_body_links(&content::embed_body_videos(
-                &content::anchor_headings(
-                    &prepared_markdown.reader_html_with_images(local_images, &dimensions),
-                    article_url.as_ref(),
-                ),
-                local_images,
-            )));
-        ctx.body_html = Some(body_html);
-        ctx.has_margin_notes = has_margin_notes;
-        let dir = out.join(&ctx.url);
-        let representation = out.join(ctx.url.trim_end_matches('/'));
-        write(
-            &dir.join("index.html"),
-            pages_ctx
-                .simple(SimplePage {
-                    item: Some(&ctx),
-                    ..SimplePage::new("item", &ctx.title, &ctx.url, "item.html")
-                })?
-                .as_bytes(),
-        )?;
-        // Alternate representations remain portable across hosts and mirrors. Only the rendered
-        // archive page substitutes immutable site-local companions for publisher image URLs.
-        let published_body = outputs::published_markdown_body(&ctx, &item.body);
-        ctx.body_html = Some(if published_body == item.body {
-            portable_html.to_string()
-        } else {
-            content::PreparedMarkdown::new(&published_body)
-                .portable_html()
-                .to_string()
-        });
-        let mut published_front = item.front.clone();
-        published_front.title = ctx.title.clone();
-        let markdown = crate::store::frontmatter::render(&published_front, &published_body)?;
-        write(&representation.with_extension("md"), markdown.as_bytes())?;
-        write(
-            &representation.with_extension("txt"),
-            outputs::text_item(&ctx).as_bytes(),
-        )?;
-        write(
-            &representation.with_extension("rst"),
-            outputs::rst_item(&ctx).as_bytes(),
-        )?;
-        write(
-            &representation.with_extension("json"),
-            outputs::item_json(&site, &build_ctx, &ctx, &published_body)?.as_bytes(),
-        )?;
-        Ok(site
-            .absolute(&ctx.url)
-            .map(|url| outputs::SitemapUrl::new(url, Some(archive_modified_at(&ctx)))))
+        write_article(
+            out,
+            &pages_ctx,
+            &site,
+            &build_ctx,
+            store,
+            ctx,
+            item,
+            prepared_by_path[ctx.path.as_str()],
+            &article_images,
+            &shared_pictures,
+        )
     })?;
     sitemap_urls.extend(article_sitemaps.into_iter().flatten());
     phase("article pages and representations");
@@ -1212,7 +1246,7 @@ fn build_once(
     let assets = renderer.write_static(out)?;
     phase("feeds and static assets");
 
-    pagefind::build_cached(
+    let search_catalogue = pagefind::build_cached(
         out,
         &search_documents,
         &site.language,
@@ -1244,20 +1278,40 @@ fn build_once(
                 ))?
                 .as_bytes(),
         )?;
-        // Only the shell: the reader caches the pages it actually opens.
-        let paths = assets::precache_paths("", &assets);
-        let mut sw_ctx = SwCtx {
-            site: &site,
-            build: &build_ctx,
+        // The shell installs first; complete article downloads run separately.
+        let mut paths = assets::precache_paths("", &assets);
+        paths.extend(
+            source_ctxs
+                .iter()
+                .map(|source| source.page.clone())
+                .chain(categories.iter().map(|category| category.page.clone()))
+                .chain(tags.iter().map(|tag| tag.page.clone()))
+                .take(config.site.preferences.offline_items.clamp(32, 256)),
+        );
+        let mut sw_config = SwConfig {
             version: cache_version(&build_ctx),
+            app_version: build_ctx.app_version.clone(),
+            content_version: build_ctx.content_version.clone(),
             precache: assets::precache_entries(out, paths, &written_assets)?,
+            offline_catalog: offline::catalogue(
+                out,
+                &archive_items,
+                &article_images,
+                &written_assets,
+            )?,
+            offline_count: config.site.preferences.offline_items,
+            search_manifest: offline::search_manifest(out, &search_catalogue)?,
         };
-        // Include the rendered worker and every resource revision so an installation never
-        // deletes a live precache when only the theme or worker implementation changed.
-        let worker = renderer.render("sw.js", &sw_ctx)?;
-        sw_ctx.version = crate::model::sha1_hex(worker.as_bytes());
-        let sw = renderer.render("sw.js", &sw_ctx)?;
-        write(&out.join("sw.js"), sw.as_bytes())?;
+        // Version the worker by its whole source, the compiled bundle's hashed name included, so
+        // an installation never deletes a live precache when only the worker implementation or a
+        // resource revision changed.
+        let worker_url = renderer.asset_site_path("assets/app/worker.js");
+        let first = worker_source(&sw_config, &worker_url)?;
+        sw_config.version = crate::model::sha1_hex(first.as_bytes());
+        write(
+            &out.join("sw.js"),
+            worker_source(&sw_config, &worker_url)?.as_bytes(),
+        )?;
         pages += 1;
     }
 
@@ -1276,6 +1330,131 @@ fn build_once(
         println!("::notice title=aggr build::{report}");
     }
     Ok(summary)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_article(
+    out: &Path,
+    pages_ctx: &Pages<'_>,
+    site: &SiteCtx,
+    build_ctx: &BuildCtx,
+    store: &Store,
+    ctx: &ItemCtx,
+    item: &Item,
+    prepared_markdown: &content::PreparedMarkdown,
+    article_images: &BTreeMap<String, Vec<content::LocalImage>>,
+    shared_pictures: &BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> Result<Option<outputs::SitemapUrl>> {
+    let mut ctx = ctx.clone();
+    ctx.video = video::VideoCtx::from_url(&item.front.link);
+    ctx.interactive = interactive::InteractiveCtx::from_item(item);
+
+    ctx.native_media = native_media::NativeMediaCtx::from_urls(
+        &item.front.link,
+        item.front
+            .extra
+            .get("audio_url")
+            .and_then(|value| value.as_str()),
+    );
+    if ctx.is_youtube
+        && let Ok(url) = url::Url::parse(&item.front.link)
+        && let Some(image) = article_images.get(&item.path).and_then(|images| {
+            let candidates = crate::sources::youtube::poster_candidates(&url);
+            images.iter().find(|image| {
+                candidates
+                    .iter()
+                    .any(|candidate| candidate.url.as_str() == image.source)
+            })
+        })
+    {
+        ctx.article_preview = Some(ArticlePreviewCtx::from_image(image));
+    }
+    let portable_html = prepared_markdown.portable_html();
+    if ctx.video.is_none()
+        && ctx.document.is_none()
+        && ctx.interactive.is_none()
+        && let Ok(base) = url::Url::parse(&item.front.link)
+    {
+        ctx.article_preview = ArticlePreviewCtx::lead_image(
+            portable_html,
+            &base,
+            article_images
+                .get(&item.path)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+        )
+        // The source's own picture is not this article's opening image.
+        .filter(|lead| {
+            !shared_pictures
+                .get(&item.front.source)
+                .is_some_and(|urls| urls.contains(&lead.url))
+        });
+    }
+    let dimensions = if portable_html.contains("<img ") {
+        let retained_html = store.read_html(item)?;
+        let base = url::Url::parse(&item.front.link).ok();
+        retained_html
+            .as_deref()
+            .map(|html| content::image_dimensions(html, base.as_ref()))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let article_url = url::Url::parse(&item.front.link).ok();
+    let local_images = article_images
+        .get(&item.path)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let (body_html, has_margin_notes) =
+        content::margin_notes(&content::external_body_links(&content::embed_body_videos(
+            &content::anchor_headings(
+                &prepared_markdown.reader_html_with_images(local_images, &dimensions),
+                article_url.as_ref(),
+            ),
+            local_images,
+        )));
+    ctx.body_html = Some(body_html);
+    ctx.has_margin_notes = has_margin_notes;
+    let dir = out.join(&ctx.url);
+    let representation = out.join(ctx.url.trim_end_matches('/'));
+    write(
+        &dir.join("index.html"),
+        pages_ctx
+            .simple(SimplePage {
+                item: Some(&ctx),
+                ..SimplePage::new("item", &ctx.title, &ctx.url, "item.html")
+            })?
+            .as_bytes(),
+    )?;
+    // Alternate representations remain portable across hosts and mirrors. Only the rendered
+    // archive page substitutes immutable site-local companions for publisher image URLs.
+    let published_body = outputs::published_markdown_body(&ctx, &item.body);
+    ctx.body_html = Some(if published_body == item.body {
+        portable_html.to_string()
+    } else {
+        content::PreparedMarkdown::new(&published_body)
+            .portable_html()
+            .to_string()
+    });
+    let mut published_front = item.front.clone();
+    published_front.title = ctx.title.clone();
+    let markdown = crate::store::frontmatter::render(&published_front, &published_body)?;
+    write(&representation.with_extension("md"), markdown.as_bytes())?;
+    write(
+        &representation.with_extension("txt"),
+        outputs::text_item(&ctx).as_bytes(),
+    )?;
+    write(
+        &representation.with_extension("rst"),
+        outputs::rst_item(&ctx).as_bytes(),
+    )?;
+    write(
+        &representation.with_extension("json"),
+        outputs::item_json(site, build_ctx, &ctx, &published_body)?.as_bytes(),
+    )?;
+    Ok(site
+        .absolute(&ctx.url)
+        .map(|url| outputs::SitemapUrl::new(url, Some(archive_modified_at(&ctx)))))
 }
 
 /// One line with every phase's wall time and the totals, so a slow publish run shows where the
@@ -1301,35 +1480,10 @@ fn build_report(
     )
 }
 
-/// Template/static lookup order: the project's own `templates/`+`static/`, then the configured
-/// theme directory, then the embedded default theme.
-pub fn theme_layers(config: &Config, project_root: &Path) -> Result<Layers> {
-    let mut layers = Layers::default();
-    if project_root.join("templates").is_dir() || project_root.join("static").is_dir() {
-        layers.dirs.push(project_root.to_path_buf());
-    }
-    match config.site.theme.as_str() {
-        "default" => {
-            // A development binary reads the shipped theme from its source tree so `aggr dev`
-            // can rebuild template/CSS/JS edits without recompiling Rust. Release binaries stay
-            // fully embedded and have no dependency on the build machine.
-            #[cfg(debug_assertions)]
-            {
-                let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes/default");
-                if source.is_dir() && !source.starts_with(project_root) {
-                    layers.dirs.push(source);
-                }
-            }
-        }
-        theme => {
-            let dir = project_root.join(theme);
-            if !dir.is_dir() {
-                bail!("theme {theme:?} is not a directory (git themes arrive in a later release)");
-            }
-            layers.dirs.push(dir);
-        }
-    }
-    Ok(layers)
+/// The theme every build renders with: the embedded default, read from its source tree by a
+/// development binary so `aggr dev` picks up template and asset edits without recompiling.
+pub fn theme() -> Theme {
+    Theme::development()
 }
 
 /// The host `CNAME` should carry: a release build on a domain that is not GitHub's own.
@@ -1361,6 +1515,15 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The configuration object `sw.js` hands the worker.
+    fn worker_config(worker: &str) -> serde_json::Value {
+        let line = worker
+            .lines()
+            .find_map(|line| line.strip_prefix("self.AGGR_SW = "))
+            .expect("worker configuration line");
+        serde_json::from_str(line.trim_end_matches(';')).unwrap()
+    }
     use crate::store::Status;
     use chrono::TimeZone;
 
@@ -1966,6 +2129,104 @@ mod tests {
     }
 
     #[test]
+    fn dev_defers_pages_and_search_until_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(
+            dir.path(),
+            3,
+            "max_age_days = 30\nitems_per_page = 1\npwa = false\n",
+        );
+        let out = dir.path().join("lazy");
+        let mut build_info = info(out.clone());
+        build_info.development = true;
+        let site = dev::Site::prepare(
+            &config,
+            &sources,
+            store,
+            dir.path(),
+            build_info,
+            &dev::PreparationCache::default(),
+        )
+        .unwrap();
+        assert!(!out.join("index.html").exists());
+        assert!(!out.join("pagefind").exists());
+        assert!(!out.join("items").exists());
+        let home = site.response("index.html").unwrap().unwrap();
+        let home = String::from_utf8(home).unwrap();
+        assert!(home.contains("Post 2"));
+        assert!(!out.join("page/2/index.html").exists());
+        assert!(!out.join("items").exists());
+        let article = site
+            .response("items/blog/2026-09-01-post-0/index.html")
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8(article).unwrap().contains("Post 0"));
+        assert!(!out.join("items/blog/2026-09-02-post-1/index.html").exists());
+        assert!(!out.join("pagefind").exists());
+        let catalogue: serde_json::Value =
+            serde_json::from_slice(&site.response("search-catalog.json").unwrap().unwrap())
+                .unwrap();
+        assert!(
+            !out.join("pagefind").exists(),
+            "completion does not compile the full-text index"
+        );
+        let runtime = format!("{}pagefind.js", catalogue["base"].as_str().unwrap());
+        assert!(site.response(&runtime).unwrap().is_some());
+        assert!(out.join("pagefind").is_dir());
+        assert!(site.response("../data/items.md").unwrap().is_none());
+    }
+
+    #[test]
+    fn lazy_dev_uses_the_publication_page_and_export_contracts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(
+            dir.path(),
+            3,
+            "max_age_days = 30\nitems_per_page = 1\npwa = false\n",
+        );
+        let eager = dir.path().join("eager");
+        let mut eager_info = info(eager.clone());
+        eager_info.development = true;
+        build(&config, &sources, &store, dir.path(), &eager_info).unwrap();
+        let mut lazy_info = info(dir.path().join("lazy"));
+        lazy_info.development = true;
+        let lazy = dev::Site::prepare(
+            &config,
+            &sources,
+            store,
+            dir.path(),
+            lazy_info,
+            &dev::PreparationCache::default(),
+        )
+        .unwrap();
+        for path in [
+            "index.html",
+            "page/2/index.html",
+            "sources/blog.example/index.html",
+            "browse/index.html",
+            "preferences/index.html",
+            "items/blog/2026-09-01-post-0/index.html",
+            "items/blog/2026-09-01-post-0.md",
+            "items/blog/2026-09-01-post-0.json",
+            "items/blog/2026-09-01-post-0.txt",
+            "items/blog/2026-09-01-post-0.rst",
+            "feed.xml",
+            "atom.xml",
+            "rss.xml",
+            "feed.json",
+            "aggr.json",
+            "sources.opml",
+            "llms.txt",
+        ] {
+            assert_eq!(
+                lazy.response(path).unwrap().unwrap(),
+                std::fs::read(eager.join(path)).unwrap(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
     fn build_budget_preserves_text_and_archives_while_prioritizing_recent_media() {
         let dir = tempfile::tempdir().unwrap();
         let (mut config, sources, store) = fixture(dir.path(), 2, "pwa = true\n");
@@ -2530,7 +2791,7 @@ category = "Science"
     }
 
     #[test]
-    fn rendered_worker_is_stable_and_versions_theme_and_worker_changes() {
+    fn rendered_worker_is_stable_across_rebuilds() {
         let dir = tempfile::tempdir().unwrap();
         let (config, sources, store) = fixture(dir.path(), 1, "pwa = true\n");
         let out = dir.path().join("out");
@@ -2539,77 +2800,48 @@ category = "Science"
         build_info.pagefind_cache = Some(dir.path().join("pagefind-cache"));
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         let original = std::fs::read_to_string(out.join("sw.js")).unwrap();
+        assert!(
+            original.starts_with("self.AGGR_SW = "),
+            "the worker carries its configuration"
+        );
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         assert_eq!(
             std::fs::read_to_string(out.join("sw.js")).unwrap(),
             original
         );
-
-        std::fs::create_dir(dir.path().join("static")).unwrap();
-        std::fs::write(dir.path().join("static/style.css"), "body { color: teal; }").unwrap();
-        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
-        let styled = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        let version = |worker: &str| {
-            worker
-                .lines()
-                .find(|line| line.starts_with("var VERSION ="))
-                .unwrap()
-                .to_owned()
-        };
-        assert_ne!(version(&styled), version(&original));
-
-        std::fs::create_dir(dir.path().join("templates")).unwrap();
-        std::fs::write(
-            dir.path().join("templates/sw.js"),
-            format!(
-                "{}\n// Worker revision test.\n",
-                include_str!("../../themes/default/templates/sw.js")
-            ),
-        )
-        .unwrap();
-        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
-        let revised = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        assert_ne!(version(&revised), version(&styled));
     }
 
     #[test]
     fn application_fingerprint_tracks_effective_assets_templates_and_binary() {
         let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        let theme = dir.path().join("theme");
-        std::fs::create_dir_all(project.join("static")).unwrap();
-        std::fs::create_dir_all(theme.join("static")).unwrap();
-        std::fs::create_dir_all(project.join("templates")).unwrap();
-        std::fs::write(project.join("static/style.css"), "body { color: teal; }").unwrap();
-        std::fs::write(theme.join("static/style.css"), "body { color: red; }").unwrap();
-        let layers = Layers {
-            dirs: vec![project.clone(), theme.clone()],
-        };
-        let original = app_version("1.2.3", &layers).unwrap();
-        assert_ne!(original, app_version("1.2.4", &layers).unwrap());
-
-        std::fs::write(theme.join("static/style.css"), "body { color: blue; }").unwrap();
+        let source = dir.path().join("theme");
+        std::fs::create_dir_all(source.join("static")).unwrap();
+        std::fs::create_dir_all(source.join("templates")).unwrap();
+        let theme = Theme::from_source_tree(source.clone());
+        let original = app_version("1.2.3", &theme).unwrap();
         assert_eq!(
             original,
-            app_version("1.2.3", &layers).unwrap(),
-            "shadowed layer bytes do not ship"
+            app_version("1.2.3", &Theme::default()).unwrap(),
+            "an empty source tree ships the embedded theme"
         );
-        std::fs::write(project.join("static/style.css"), "body { color: green; }").unwrap();
-        let styled = app_version("1.2.3", &layers).unwrap();
+        assert_ne!(original, app_version("1.2.4", &theme).unwrap());
+
+        std::fs::write(source.join("static/style.css"), "body { color: green; }").unwrap();
+        let styled = app_version("1.2.3", &theme).unwrap();
         assert_ne!(original, styled);
         std::fs::write(
-            project.join("templates/custom-include.html"),
+            source.join("templates/custom-include.html"),
             "<p>Custom include</p>",
         )
         .unwrap();
-        let template = app_version("1.2.3", &layers).unwrap();
+        let template = app_version("1.2.3", &theme).unwrap();
         assert_ne!(styled, template);
         std::fs::write(
-            project.join("templates/sw.js"),
+            source.join("templates/sw.js"),
             "/* worker implementation */",
         )
         .unwrap();
-        assert_ne!(template, app_version("1.2.3", &layers).unwrap());
+        assert_ne!(template, app_version("1.2.3", &theme).unwrap());
     }
 
     #[test]
@@ -2678,7 +2910,7 @@ category = "Science"
         let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(
             feed.contains(&format!(
-                "content: {}",
+                "\"content\":{}",
                 serde_json::to_string(&original["content_version"]).unwrap()
             )),
             "{feed}"
@@ -2733,13 +2965,9 @@ category = "Science"
             article["entries"][0],
             "items/blog/2026-09-19-newest-article/"
         );
-
-        std::fs::create_dir(dir.path().join("static")).unwrap();
-        std::fs::write(dir.path().join("static/style.css"), "body { color: teal; }").unwrap();
-        build(&config, &sources, &store, dir.path(), &build_info).unwrap();
-        let application = manifest();
-        assert_ne!(application["app_version"], article["app_version"]);
-        assert_eq!(application["content_version"], article["content_version"]);
+        // The other direction, an asset or template change moving only `app_version`, is pinned
+        // by `application_fingerprint_tracks_effective_assets_templates_and_binary`: the theme a
+        // build renders is the shipped one, so no fixture can edit it here.
     }
 
     #[test]
@@ -3362,9 +3590,24 @@ category = "Science"
             !assets::precache_entries(&out, vec![path.clone()], &BTreeMap::new()).unwrap()[0]
                 .required
         );
-        // Media is content-addressed and cached on first view, not listed at install time.
+        // Installation caches the shell; selected offline articles download their full media family.
         let worker = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        assert!(!worker.contains(&path));
+        let precache: Vec<serde_json::Value> = worker_config(&worker)["precache"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(precache.iter().all(|entry| entry["url"] != path));
+        let catalogue: Vec<serde_json::Value> = worker_config(&worker)["offline_catalog"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(
+            catalogue[0]["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["url"] == path)
+        );
         assert_eq!(
             hash,
             crate::model::sha1_hex(std::fs::read(out.join(&path)).unwrap())
@@ -3478,6 +3721,48 @@ category = "Science"
                 images: std::slice::from_ref(&asset),
             })
             .unwrap();
+
+        let lazy_out = dir.path().join("lazy");
+        let mut lazy_info = info(lazy_out.clone());
+        lazy_info.development = true;
+        let lazy = dev::Site::prepare(
+            &config,
+            &sources,
+            Store::open(dir.path().join("data")),
+            dir.path(),
+            lazy_info,
+            &dev::PreparationCache::default(),
+        )
+        .unwrap();
+        assert!(!lazy_out.join("assets/images").exists());
+        assert!(!lazy_out.join("assets/previews").exists());
+        let lazy_feed = String::from_utf8(lazy.response("index.html").unwrap().unwrap()).unwrap();
+        assert!(lazy_feed.contains("assets/previews/"));
+        assert!(
+            !lazy_out.join("assets/images").exists(),
+            "a feed only publishes thumbnails"
+        );
+        let lazy_json_feed: serde_json::Value =
+            serde_json::from_slice(&lazy.response("feed.json").unwrap().unwrap()).unwrap();
+        assert!(
+            lazy_json_feed["items"][0]["image"]
+                .as_str()
+                .is_some_and(|url| url.contains("assets/previews/")),
+            "portable feeds retain preview metadata in lazy dev"
+        );
+        assert!(!lazy_out.join("assets/images").exists());
+        let lazy_page = String::from_utf8(
+            lazy.response("items/blog/2026-09-01-post-0/index.html")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let lazy_master = format!("assets/images/{}.png", asset.master_hash);
+        assert!(lazy_page.contains(&lazy_master));
+        assert_eq!(
+            lazy.response(&lazy_master).unwrap().unwrap(),
+            asset.master_bytes
+        );
 
         let out = dir.path().join("out");
         let mut build_info = info(out.clone());
@@ -3602,6 +3887,61 @@ category = "Science"
     }
 
     #[test]
+    fn offline_shell_includes_bounded_source_category_and_tag_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, mut sources, store) = fixture(dir.path(), 1, "preferences.offline_items=0\n");
+        sources[0].category = Some("Research".into());
+        let mut item = store.items().unwrap().remove(0);
+        item.front.labels = (0..300).map(|index| format!("topic-{index:03}")).collect();
+        let (directory, stem) = item.path.rsplit_once('/').unwrap();
+        store
+            .write_item(crate::store::NewItem {
+                dir: directory,
+                stem,
+                front: &item.front,
+                body: &item.body,
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        let worker = std::fs::read_to_string(out.join("sw.js")).unwrap();
+        let entries: Vec<serde_json::Value> = worker_config(&worker)["precache"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let collection_roots: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| entry["url"].as_str())
+            .filter(|url| url.split('/').filter(|part| !part.is_empty()).count() == 2)
+            .filter(|url| {
+                url.starts_with("sources/")
+                    || url.starts_with("categories/")
+                    || url.starts_with("tags/")
+            })
+            .collect();
+        assert_eq!(
+            collection_roots.len(),
+            32,
+            "zero automatic articles still retains the bounded browse shell"
+        );
+        for path in [
+            "sources/blog.example/",
+            "categories/research/",
+            "tags/topic-000/",
+        ] {
+            assert!(
+                collection_roots.contains(&path),
+                "{path}: {collection_roots:?}"
+            );
+            assert!(out.join(path).join("index.html").is_file());
+        }
+        assert!(!collection_roots.contains(&"tags/topic-299/"));
+    }
+
+    #[test]
     fn pwa_outputs_cover_the_shells_and_the_newest_items() {
         let dir = tempfile::tempdir().unwrap();
         let (config, sources, store) = fixture(
@@ -3703,16 +4043,11 @@ category = "Science"
         }
 
         let sw = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        let version = sw
-            .split("var VERSION = \"")
-            .nth(1)
-            .unwrap()
-            .split('"')
-            .next()
-            .unwrap();
+        let config = worker_config(&sw);
+        let version = config["version"].as_str().unwrap();
         assert_eq!(version.len(), 40);
         assert!(version.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert!(sw.contains("new URL(\"./\", self.registration.scope)"));
+        assert!(sw.contains("importScripts(\"assets/app/worker-"));
         assert!(sw.contains("\"assets/style-"));
         assert!(!sw.contains("\"pagefind/pagefind.js\""));
         assert!(!out.join("search-meta.json").exists());
@@ -3720,35 +4055,28 @@ category = "Science"
             !sw.contains("assets/logo-"),
             "the multi-megabyte source icon is not precached"
         );
-        // Preload is only worth enabling if the response is read: starting a navigation the
-        // worker then ignores costs a second request for every page.
-        assert!(sw.contains("navigationPreload.enable"));
-        assert!(sw.contains("event.preloadResponse"));
-        // Pages are network-first with a cached fallback; content-addressed assets are not.
-        assert!(sw.contains("function pageResponse(request, preload)"));
-        assert!(sw.contains("function assetResponse(request, name, limit)"));
-        assert!(sw.contains("var OFFLINE = SCOPE + \"offline.html\""));
-        // Nothing is downloaded ahead of the reader any more.
-        assert!(!sw.contains("OFFLINE_CATALOG"));
-        assert!(!sw.contains("OFFLINE_COUNT"));
-        assert!(!sw.contains("search-manifest.json"));
+        // The worker's behaviour lives in its compiled bundle; `sw.js` carries the lists it
+        // needs: the precache, the download catalogue and limit, and the search manifest.
+        assert!(sw.contains("\"offline_catalog\":"));
+        assert!(sw.contains("\"offline_count\":"));
+        assert!(sw.contains("\"search_manifest\":"));
         assert!(sw.contains("\"offline.html\""));
         assert!(sw.contains("\"browse/\""));
-        // Article pages are cached when opened, not listed at install time.
-        assert!(!sw.contains("\"items/"), "{sw}");
+        // The download catalogue includes article pages, independently of the shell precache.
+        assert!(sw.contains("\"items/"), "{sw}");
 
         let offline = std::fs::read_to_string(out.join("offline.html")).unwrap();
-        assert!(!offline.contains("id=\"offline-articles\""));
+        assert!(offline.contains("id=\"offline-articles\""));
         assert!(offline.contains("<link rel=\"manifest\" href=\"/repo/manifest.webmanifest\">"));
-        assert!(offline.contains("pwa: true"));
+        assert!(offline.contains("\"pwa\":true"));
         assert!(offline.contains("href=\"/repo/browse/\""), "{offline}");
-        assert!(offline.contains("base: \"/repo/\""), "{offline}");
+        assert!(offline.contains("\"base\":\"/repo/\""), "{offline}");
         assert!(!offline.contains("<base "), "{offline}");
         assert!(!offline.contains("rel=\"canonical\""));
         assert!(!offline.contains("application/ld+json"));
         let not_found = std::fs::read_to_string(out.join("404.html")).unwrap();
         assert!(not_found.contains("href=\"/repo/browse/\""), "{not_found}");
-        assert!(not_found.contains("base: \"/repo/\""), "{not_found}");
+        assert!(not_found.contains("\"base\":\"/repo/\""), "{not_found}");
         assert!(!not_found.contains("<base "), "{not_found}");
         assert!(!not_found.contains("rel=\"canonical\""));
         assert!(!not_found.contains("property=\"og:url\""));
@@ -4324,7 +4652,7 @@ same_as = ["https://social.example/@ada"]
         assert!(!river.contains("rel=\"manifest\""));
         assert!(!river.contains("mobile-web-app-capable"));
         assert!(!river.contains("apple-mobile-web-app-capable"));
-        assert!(river.contains("pwa: false"));
+        assert!(river.contains("\"pwa\":false"));
     }
 
     #[test]
@@ -4429,6 +4757,20 @@ same_as = ["https://social.example/@ada"]
             asset.bytes
         );
         assert_eq!(published_media(&build_info.out).get(&local), Some(&hash));
+        let worker = std::fs::read_to_string(build_info.out.join("sw.js")).unwrap();
+        let catalogue = worker_config(&worker)["offline_catalog"].clone();
+        let resources = catalogue[0]["resources"].as_array().unwrap();
+        assert!(
+            resources
+                .iter()
+                .any(|resource| resource["url"] == local && resource["revision"] == hash)
+        );
+        assert!(
+            resources
+                .iter()
+                .all(|resource| !resource["url"].as_str().unwrap().contains('#'))
+        );
+
         let markdown =
             std::fs::read_to_string(build_info.out.join("items/blog/2026-09-01-post-0.md"))
                 .unwrap();

@@ -29,13 +29,12 @@ pub struct ReaderPreferences {
     pub single_key_shortcuts: bool,
     /// Maximum lines moved by d/u, bounded by half the available viewport.
     pub scroll_amount: usize,
-    /// Retired with the offline article archive. Still accepted so existing `aggr.toml` files keep
-    /// parsing under `deny_unknown_fields`, but it no longer reaches the browser.
-    #[serde(skip_serializing)]
+    /// Recent complete articles to retain offline; zero disables automatic downloads.
     pub offline_items: usize,
 }
 
 /// One selectable value of a setting, as rendered in a `<select>`.
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PreferenceOption {
     pub value: String,
@@ -136,6 +135,7 @@ impl Default for ReaderPreferences {
 }
 
 /// How `/preferences/` renders a setting.
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Control {
@@ -145,37 +145,46 @@ pub enum Control {
 }
 
 /// The browser's validation rule for one setting, consumed by the pre-paint bootstrap.
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BootstrapRule {
     pub initial: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub values: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub min: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub max: Option<i64>,
     /// `documentElement.dataset` key this setting drives, when CSS reacts to it.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub attribute: Option<&'static str>,
 }
 
 /// One rendered control on `/preferences/`.
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PreferenceField {
     pub key: &'static str,
     pub label: &'static str,
     pub control: Control,
     pub value: serde_json::Value,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<PreferenceOption>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub min: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub max: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub help: Option<&'static str>,
 }
 
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PreferenceGroup {
     pub id: &'static str,
@@ -184,6 +193,7 @@ pub struct PreferenceGroup {
 }
 
 /// Both browser-facing views of the settings, derived from one field table.
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PreferenceSchema {
     /// Keyed by setting name, for the inline validation bootstrap.
@@ -268,10 +278,8 @@ impl ReaderPreferences {
         if !(1..=100).contains(&self.scroll_amount) {
             bail!("[site.preferences] scroll_amount must be between 1 and 100 lines");
         }
-        if self.offline_items != Self::default().offline_items {
-            log::warn!(
-                "[site.preferences] offline_items is no longer used: the reader caches pages it visits instead of downloading an archive"
-            );
+        if self.offline_items > 1000 {
+            bail!("[site.preferences] offline_items must be between 0 and 1000");
         }
         Ok(())
     }
@@ -427,6 +435,18 @@ impl ReaderPreferences {
                     ),
                 ],
             ),
+            (
+                "offline",
+                "Offline reading",
+                vec![number(
+                    "offline-items",
+                    "Recent articles to keep",
+                    0,
+                    1000,
+                    self.offline_items,
+                    "Keep articles and their archived images on this device. Set to 0 to disable downloads. Embedded players need a connection.",
+                )],
+            ),
         ]
     }
 
@@ -493,22 +513,18 @@ mod tests {
         assert_eq!(values["paragraph-indent"], false);
         assert_eq!(values["scroll-amount"], 7);
         assert_eq!(values["feed-page-size"], "50");
-        assert_eq!(values.as_object().unwrap().len(), 17);
+        assert_eq!(values.as_object().unwrap().len(), 18);
     }
 
     #[test]
-    fn retired_offline_items_parses_without_reaching_the_browser() {
+    fn offline_items_reaches_the_browser_with_validated_bounds() {
         let config = Config::parse("[site.preferences]\noffline_items=7\n").unwrap();
         let values = config.site.preferences.browser_defaults().unwrap();
-        assert!(values.get("offline-items").is_none());
-        assert!(
-            !config
-                .site
-                .preferences
-                .schema()
-                .bootstrap
-                .contains_key("offline-items")
-        );
+        assert_eq!(values["offline-items"], 7);
+        let rule = &config.site.preferences.schema().bootstrap["offline-items"];
+        assert_eq!(rule.min, Some(0));
+        assert_eq!(rule.max, Some(1000));
+        assert!(Config::parse("[site.preferences]\noffline_items=1001\n").is_err());
     }
 
     #[test]

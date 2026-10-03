@@ -231,7 +231,8 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         const titleStyle = getComputedStyle(title);
         const initial = {headTop:head.getBoundingClientRect().top,titleTop:title.getBoundingClientRect().top,titleLeft:title.getBoundingClientRect().left,
           mainTop:main.getBoundingClientRect().top,mainPadding:getComputedStyle(main).paddingTop,
-          mainPaddingLeft:parseFloat(getComputedStyle(main).paddingLeft),
+          // The page is as wide as the window; the gutter is what the column keeps inside it.
+          mainPaddingLeft:parseFloat(getComputedStyle(main).paddingLeft)-Math.max(0,(main.clientWidth-parseFloat(getComputedStyle(main).getPropertyValue('--max'))*parseFloat(getComputedStyle(document.documentElement).fontSize))/2),
           headPaddingTop:parseFloat(headStyle.paddingTop),headPaddingBottom:parseFloat(headStyle.paddingBottom),
           titleMarginBottom:parseFloat(titleStyle.marginBottom),
           topHeight:top.getBoundingClientRect().height,topOffset:getComputedStyle(document.documentElement).getPropertyValue('--top-nav-offset')};
@@ -594,7 +595,12 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
           opacity:parseFloat(getComputedStyle(tags).opacity), height:tags.getBoundingClientRect().height,
           metadata:getComputedStyle(head.querySelector('.meta')).display,
           separate:tags.getBoundingClientRect().top >= head.querySelector('.meta').getBoundingClientRect().bottom,
-          offset:parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop), bottom:head.getBoundingClientRect().bottom};
+          offset:parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop), bottom:head.getBoundingClientRect().bottom,
+          titleBox:head.querySelector('h1').getBoundingClientRect().height,
+          compact:(() => { const node = head.querySelector('.itemhead-title-compact'), box = node.getBoundingClientRect(), frame = head.getBoundingClientRect();
+            return {height:box.height, opacity:parseFloat(getComputedStyle(node).opacity), inside:box.top >= frame.top - 0.5 && box.bottom <= frame.bottom + 0.5,
+              text:node.textContent.trim()}; })(),
+          titleOpacity:parseFloat(getComputedStyle(title).opacity), titleText:title.textContent.trim()};
       }
       (async () => done({expanded:await sample(0),quarter:await sample(40),half:await sample(80),
         condensed:await sample(520),reverseHalf:await sample(80),restored:await sample(0)}))();
@@ -621,6 +627,22 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         reading_header["restored"]["size"]
     );
     assert_eq!(reading_header["condensed"]["height"], 0.0);
+    // Folded, the whole title is still there, set smaller across the full width: the large title
+    // gives way to a compact copy, and the header closes to exactly that copy's height.
+    let condensed = &reading_header["condensed"];
+    assert!(
+        (condensed["titleBox"].as_f64().unwrap_or(f64::MAX)
+            - condensed["compact"]["height"].as_f64().unwrap_or_default())
+        .abs()
+            < 1.0
+            && condensed["compact"]["opacity"] == 1.0
+            && condensed["compact"]["inside"] == true
+            && condensed["compact"]["text"] == condensed["titleText"]
+            && condensed["titleOpacity"] == 0.0
+            && reading_header["expanded"]["titleOpacity"] == 1.0
+            && reading_header["expanded"]["compact"]["opacity"] == 0.0,
+        "the folded header shows the whole title, smaller: {reading_header}"
+    );
     assert_ne!(reading_header["condensed"]["metadata"], "none");
     // `scroll-padding-top` clears the bar that never moves. The folding header above an article is
     // only knowable by measuring it, which reading must not do per frame, so the reader corrects a
@@ -673,9 +695,12 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         await frame(); await frame(); await frame();
         window.scrollTo(0, fraction * (document.documentElement.scrollHeight - innerHeight));
         await frame(); await frame(); await frame();
+        // The bar measures the text, so it fills the text column: the header's own box, not the
+        // page-wide surface behind it.
         const indicator = head.querySelector('.itemhead-progress'), line = getComputedStyle(indicator);
+        const box = indicator.getBoundingClientRect(), column = head.getBoundingClientRect();
         return {progress:new DOMMatrixReadOnly(line.transform).a,
-          fill:indicator.getBoundingClientRect().width / head.getBoundingClientRect().width, transition:line.transitionDuration,
+          fill:box.width / column.width, column:Math.abs(box.left - column.left) < 0.5, transition:line.transitionDuration,
           expected:scrollY / (document.documentElement.scrollHeight - innerHeight)};
       }
       (async () => done({top:await sample(0),quarter:await sample(.25),half:await sample(.5),
@@ -699,11 +724,85 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
             .as_f64()
             .context("progress line scale")?;
         assert!(
+            reading_progress[sample]["column"] == true,
+            "the bar starts where the text column starts: {reading_progress}"
+        );
+        assert!(
             (progress - expected).abs() < 0.002 && (fill - progress).abs() < 0.00001,
             "the header separator must fill linearly in both directions: {reading_progress}"
         );
         assert_eq!(reading_progress[sample]["transition"], "0s");
     }
+    // The bar reports where the reader is rather than moving by itself, so it keeps following the
+    // scroll under reduced motion. It is thick enough to see, and a fade under it keeps the text
+    // scrolling beneath the header from running into it.
+    emulate(
+        client,
+        "Emulation.setEmulatedMedia",
+        json!({"features":[{"name":"prefers-reduced-motion","value":"reduce"}]}),
+    )
+    .await?;
+    let reduced = client
+        .execute_async(
+            r#"
+      const done = arguments[arguments.length - 1], head = document.querySelector('.itemhead');
+      const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+      (async () => {
+        window.scrollTo(0, (document.documentElement.scrollHeight - innerHeight) / 2);
+        await frame(); await frame(); await frame();
+        const bar = head.querySelector('.itemhead-progress'), fade = head.querySelector('.itemhead-fade');
+        const box = head.getBoundingClientRect(), surface = getComputedStyle(head, '::before');
+        const barBox = bar.getBoundingClientRect(), fadeBox = fade.getBoundingClientRect();
+        done({progress: new DOMMatrixReadOnly(getComputedStyle(bar).transform).a,
+          height: barBox.height, fade: Number(getComputedStyle(fade).opacity),
+          gap: fadeBox.top - barBox.bottom,
+          page: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth,
+          edges: {column: [box.left, box.right],
+            surface: [box.left + parseFloat(surface.left), box.right - parseFloat(surface.right)],
+            bar: [barBox.left, barBox.left + barBox.width / new DOMMatrixReadOnly(getComputedStyle(bar).transform).a],
+            fade: [fadeBox.left, fadeBox.right]}});
+      })();
+    "#,
+            vec![],
+        )
+        .await?;
+    emulate(
+        client,
+        "Emulation.setEmulatedMedia",
+        json!({"features":[{"name":"prefers-reduced-motion","value":"no-preference"}]}),
+    )
+    .await?;
+    assert!(
+        (reduced["progress"].as_f64().unwrap_or_default() - 0.5).abs() < 0.05
+            && reduced["height"].as_f64().unwrap_or_default() >= 2.0
+            && reduced["fade"].as_f64() == Some(1.0)
+            && (-2.5..=0.5).contains(&reduced["gap"].as_f64().unwrap_or(f64::MAX)),
+        "reading progress stays visible and follows the scroll under reduced motion: {reduced}"
+    );
+    // The header's surface and fade span the page rather than the reading column, and reaching
+    // past the column does not let the page scroll sideways. The bar measures the text, so it
+    // keeps the column's width and lines up with the rules that separate the text.
+    let page = reduced["page"].as_f64().context("page width")?;
+    for layer in ["surface", "fade"] {
+        let edges = &reduced["edges"][layer];
+        assert!(
+            edges[0].as_f64().unwrap_or(f64::MAX) <= 0.5
+                && edges[1].as_f64().unwrap_or_default() >= page - 0.5,
+            "the header's {layer} must span the page: {reduced}"
+        );
+    }
+    for edge in 0..2 {
+        assert!(
+            (reduced["edges"]["bar"][edge].as_f64().unwrap_or(f64::MAX)
+                - reduced["edges"]["column"][edge]
+                    .as_f64()
+                    .unwrap_or_default())
+            .abs()
+                < 0.5,
+            "the bar keeps the text column's width: {reduced}"
+        );
+    }
+    assert_eq!(reduced["scrollWidth"].as_f64(), Some(page), "{reduced}");
     client.execute("window.scrollTo(0,520)", vec![]).await?;
     let header_reads = client
         .execute_async(
@@ -799,7 +898,7 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
     let external_shortcuts = client
         .execute(
             r#"
-      return {enabled:window.AGGR.discussions.map(network => network.shortcut),
+      return {enabled:JSON.parse(document.getElementById('aggr-page').textContent).site.discussions.map(network => network.shortcut),
         opened:window.__aggrOpened.map(value => { const url=new URL(value); return {host:url.host,query:url.search}; })};
     "#,
             vec![],
@@ -839,10 +938,17 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
       press('editing', 'u', {ctrlKey:true}, input); input.remove();
       const dialog = document.querySelector('#shortcut-help'); dialog.showModal();
       press('dialog', 'd', {ctrlKey:true}); dialog.close(); document.activeElement?.blur();
-      const preference = window.AGGRPreferences.values['single-key-shortcuts'];
-      window.AGGRPreferences.values['single-key-shortcuts'] = false;
+      // Preferences live in localStorage; the app re-reads them on the `storage` event.
+      const stored = localStorage.getItem('aggr:single-key-shortcuts');
+      const restore = () => {
+        if (stored === null) localStorage.removeItem('aggr:single-key-shortcuts');
+        else localStorage.setItem('aggr:single-key-shortcuts', stored);
+        window.dispatchEvent(new StorageEvent('storage', {key:'aggr:single-key-shortcuts'}));
+      };
+      localStorage.setItem('aggr:single-key-shortcuts', 'false');
+      window.dispatchEvent(new StorageEvent('storage', {key:'aggr:single-key-shortcuts'}));
       press('disabledD', 'd'); press('enabledCtrlD', 'd', {ctrlKey:true});
-      window.AGGRPreferences.values['single-key-shortcuts'] = preference;
+      restore();
       window.scrollBy = scrollBy;
       const line = parseFloat(getComputedStyle(document.querySelector('.body')).lineHeight);
       const head = document.querySelector('.itemhead').getBoundingClientRect();
@@ -878,8 +984,8 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
     let article_paths = client
         .execute(
             r#"
-      const article = document.querySelector('article.item');
-      return {current:location.pathname,older:new URL(article.dataset.nextUrl,new URL(window.AGGR.base,location.href)).pathname};
+      const model = JSON.parse(document.getElementById('aggr-page').textContent);
+      return {current:location.pathname,older:new URL(model.page.data.next.url.replace(/^\/+/,''),new URL(model.base,location.href)).pathname};
     "#,
             vec![],
         )
@@ -928,7 +1034,9 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
     wait_for(
         client,
         &format!(
-            "location.pathname === {} && !!document.querySelector('article.item')?.dataset.previousUrl && !document.documentElement.classList.contains('is-changing')",
+            // A swap brings the page's own head metadata with it, so the `rel=prev` link is the
+            // older article's, and the busy marker is gone once the navigation has settled.
+            "location.pathname === {} && !!document.querySelector('link[rel=prev]') && !document.documentElement.hasAttribute('data-navigating')",
             serde_json::to_string(&older_path)?
         ),
     )
@@ -936,7 +1044,7 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
     assert_eq!(
         client
             .execute(
-                "return new URL(document.querySelector('article.item').dataset.previousUrl,new URL(window.AGGR.base,location.href)).pathname",
+                "return new URL(document.querySelector('link[rel=prev]').href).pathname",
                 vec![]
             )
             .await?,
@@ -950,7 +1058,7 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
     wait_for(
         client,
         &format!(
-            "location.pathname === {} && !!document.querySelector('article.item') && !document.documentElement.classList.contains('is-changing')",
+            "location.pathname === {} && !!document.querySelector('article.item') && !document.documentElement.hasAttribute('data-navigating')",
             serde_json::to_string(&current_path)?
         ),
     )
@@ -1157,6 +1265,31 @@ async fn recommendation_cards_and_navigation_layout() -> Result<()> {
             anyhow::ensure!(second["top"].as_f64()>first["bottom"].as_f64(), "recommendations stack vertically at every viewport width: {layout}");
             anyhow::ensure!(layout["unusedHeight"].as_f64().unwrap().abs()<1.0, "text-only recommendations fit their content without reserving absent previews: {layout}");
             anyhow::ensure!(layout["headingMargin"].as_f64().unwrap()>=if width>600 {36.0} else {28.0}, "article header needs a little breathing room: {layout}");
+            // Scrolled under the sticky article header, a card stays under it: none of its raised
+            // metadata paints over the header or catches a tap meant for it.
+            let covered=client.execute_async(r#"
+              const done=arguments[arguments.length-1], head=document.querySelector('.itemhead');
+              const meta=document.querySelector('.article-more-card .meta');
+              const frame=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+              // Room below the short fixture article, so the cards can scroll under the header.
+              const main=document.querySelector('.main');
+              main.style.paddingBottom='150vh';
+              (async()=>{
+                // The header folds as the page scrolls, so aim twice: the metadata's top a few
+                // pixels above the header's bottom edge, under the header.
+                for (let i=0;i<3;i++) {
+                  scrollTo(0, scrollY + meta.getBoundingClientRect().top - head.getBoundingClientRect().bottom + 6);
+                  await frame();
+                }
+                const box=head.getBoundingClientRect(), under=meta.getBoundingClientRect();
+                const over=document.elementFromPoint(under.left+Math.min(under.width/2,40), box.bottom-3);
+                done({header:!!over?.closest('.itemhead'), overlapping:under.top<box.bottom-3 && under.bottom>box.bottom-3, over:over?.className||over?.tagName});
+                main.style.removeProperty('padding-bottom');
+                scrollTo(0,0);
+              })();
+            "#, vec![]).await?;
+            anyhow::ensure!(covered["overlapping"]==true && covered["header"]==true,"the sticky header stays above the cards scrolling under it: {covered}");
+            wait_for(&client,"scrollY===0").await?;
             // A card's stretched link must stop at the card. Reaching past it makes the article
             // body read and click as whichever recommendation happens to be painted last.
             let body=client.execute(r#"

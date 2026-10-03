@@ -93,10 +93,119 @@ pub(crate) enum RecordingDuration {
 
 /// Only accept structured media attached to this page or an explicitly identified primary player.
 pub fn from_html(page: &str, page_url: &url::Url, media_urls: &[url::Url]) -> Option<u64> {
-    match from_document(&scraper::Html::parse_document(page), page_url, media_urls) {
+    match from_page(
+        page,
+        &scraper::Html::parse_document(page),
+        page_url,
+        media_urls,
+    ) {
         Some(RecordingDuration::Recorded(seconds)) => Some(seconds),
         _ => None,
     }
+}
+
+/// Structured data first; failing that, the player's own JSON embedded in the page.
+pub(crate) fn from_page(
+    page: &str,
+    document: &scraper::Html,
+    page_url: &url::Url,
+    media_urls: &[url::Url],
+) -> Option<RecordingDuration> {
+    from_document(document, page_url, media_urls)
+        .or_else(|| embedded(page, page_url, media_urls).map(RecordingDuration::Recorded))
+}
+
+/// Pages without structured data often carry their player's state as JSON (Substack keeps
+/// `podcast_duration` beside the post's `canonical_url`): a numeric `…duration` key in the same
+/// JSON object as the page's own URL or the exact media URL, the nearest when there are several.
+/// Only JSON string values count (`:"…"`), not links or attributes mentioning the URL; every such
+/// mention must point at the same value; previews and drafts are not the recording.
+pub(crate) fn embedded(page: &str, page_url: &url::Url, media_urls: &[url::Url]) -> Option<u64> {
+    use std::sync::LazyLock;
+    static DURATION: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"\\?"((?:[a-z]+_)*duration)\\?"\s*:\s*([0-9]+(?:\.[0-9]+)?)"#)
+            .expect("valid duration key pattern")
+    });
+    let json_value = |index: usize| {
+        let before = page[..index].trim_end_matches(' ');
+        before.ends_with(":\"") || before.ends_with(":\\\"")
+    };
+    let mut found = None;
+    for anchor in std::iter::once(page_url).chain(media_urls) {
+        let plain = anchor.as_str().trim_end_matches('/');
+        let escaped = plain.replace('/', "\\/");
+        for needle in [plain, escaped.as_str()] {
+            for (index, _) in page.match_indices(needle).take(16) {
+                if !json_value(index) {
+                    continue;
+                }
+                let (start, end) = enclosing_object(page, index, index + needle.len());
+                let nearest = DURATION
+                    .captures_iter(&page[start..end])
+                    .filter(|capture| {
+                        let key = &capture[1];
+                        !key.contains("preview") && !key.contains("draft")
+                    })
+                    .filter_map(|capture| {
+                        let at = start + capture.get(0)?.start();
+                        seconds(&capture[2])
+                            .filter(|value| *value > 0)
+                            .map(|value| (at.abs_diff(index), value))
+                    })
+                    .min_by_key(|(distance, _)| *distance);
+                let Some((_, value)) = nearest else {
+                    continue;
+                };
+                if found.is_some_and(|previous| previous != value) {
+                    return None;
+                }
+                found = Some(value);
+            }
+        }
+    }
+    found
+}
+
+/// The JSON object around `start..end`, by brace nesting, bounded so a huge document is never
+/// scanned whole. Braces inside strings are rare in player state and only shrink the object.
+fn enclosing_object(page: &str, start: usize, end: usize) -> (usize, usize) {
+    const REACH: usize = 1_200;
+    let bytes = page.as_bytes();
+    let floor = start.saturating_sub(REACH);
+    let mut depth = 0_i32;
+    let mut object_start = floor;
+    for (offset, byte) in bytes[floor..start].iter().enumerate().rev() {
+        match byte {
+            b'}' => depth += 1,
+            b'{' if depth == 0 => {
+                object_start = floor + offset;
+                break;
+            }
+            b'{' => depth -= 1,
+            _ => {}
+        }
+    }
+    let ceiling = (end + REACH).min(page.len());
+    depth = 0;
+    let mut object_end = ceiling;
+    for (offset, byte) in bytes[end..ceiling].iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' if depth == 0 => {
+                object_end = end + offset + 1;
+                break;
+            }
+            b'}' => depth -= 1,
+            _ => {}
+        }
+    }
+    let boundary = |mut index: usize, down: bool| {
+        while !page.is_char_boundary(index) {
+            index = if down { index - 1 } else { index + 1 };
+        }
+        index
+    };
+    (boundary(object_start, true), boundary(object_end, false))
 }
 
 pub(crate) fn from_document(
@@ -201,6 +310,47 @@ fn matches_primary(value: &str, page_url: &url::Url, media_urls: &[url::Url]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_player_json_names_the_recording_by_the_page_or_media_url() {
+        let audio = url::Url::parse("https://api.substack.com/feed/podcast/1/abc.mp3").unwrap();
+        let page_url = url::Url::parse("https://example.com/p/episode").unwrap();
+        // Substack: the page's preloaded state, a JSON string holding escaped JSON, where the
+        // post names its page and its length, and the player URL is not the feed's enclosure.
+        let page = r#"<link rel="canonical" href="https://example.com/p/episode"><script>window._preloads = JSON.parse("{\"post\":{\"id\":1,\"canonical_url\":\"https:\/\/example.com\/p\/episode\",\"podcast_duration\":2352.013,\"preview_duration\":30,\"draft_free_podcast_duration\":null,\"podcast_url\":\"https:\/\/api.substack.com\/api\/v1\/audio\/upload\/x\/src\"},\"other\":{\"canonical_url\":\"https:\/\/example.com\/p\/other\",\"podcast_duration\":99}}")</script>"#;
+        assert_eq!(
+            super::embedded(page, &page_url, std::slice::from_ref(&audio)),
+            Some(2353)
+        );
+        assert_eq!(
+            super::from_html(page, &page_url, std::slice::from_ref(&audio)),
+            Some(2353)
+        );
+        // The enclosure itself anchors too; a link or attribute mentioning the URL does not.
+        let plain = r#"<a href="https://api.substack.com/feed/podcast/1/abc.mp3">play</a><script>{"duration":600,"url":"https://api.substack.com/feed/podcast/1/abc.mp3"}</script>"#;
+        assert_eq!(
+            super::embedded(plain, &page_url, std::slice::from_ref(&audio)),
+            Some(600)
+        );
+        assert_eq!(super::embedded(plain, &page_url, &[]), None);
+        // Players that disagree about the same recording say nothing.
+        assert_eq!(
+            super::embedded(
+                r#"{"duration":600,"url":"https://api.substack.com/feed/podcast/1/abc.mp3"} {"url":"https://api.substack.com/feed/podcast/1/abc.mp3","duration":601}"#,
+                &page_url,
+                std::slice::from_ref(&audio)
+            ),
+            None
+        );
+        assert_eq!(
+            super::embedded(
+                r#"{"duration":600,"url":"https://elsewhere.example/x.mp3"}"#,
+                &page_url,
+                std::slice::from_ref(&audio)
+            ),
+            None
+        );
+    }
 
     #[test]
     fn recording_duration_formats_are_strict_and_checked() {

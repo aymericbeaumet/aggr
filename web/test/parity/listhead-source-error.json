@@ -1,0 +1,17 @@
+{
+  "component": "ListHead",
+  "props": {
+    "error": {
+      "message": "HTTP 503",
+      "since": "2026-09-28T12:00:00Z"
+    },
+    "kind": "source",
+    "scope": {
+      "kind": "source",
+      "name": "Blog",
+      "profile": "blog.example",
+      "site_url": "https://blog.example/",
+      "slug": "blog"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "component": "Pager",
+  "props": {
+    "base": "../../../../",
+    "kind": "tag",
+    "paginator": {
+      "base_url": "tags/engineering/page/",
+      "current_index": 2,
+      "first": "tags/engineering/",
+      "last": "tags/engineering/page/3/",
+      "next": "tags/engineering/page/3/",
+      "number_pagers": 3,
+      "offset": 3,
+      "paginate_by": 3,
+      "previous": "tags/engineering/",
+      "total_items": 7
+    }
+  }
+}

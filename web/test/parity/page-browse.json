@@ -1,0 +1,40 @@
+{
+  "component": "App",
+  "props": {
+    "page": {
+      "base": "../",
+      "build": {
+        "app": "app-fixture",
+        "content": "content-fixture",
+        "version": "1.0.0"
+      },
+      "kind": "browse",
+      "page": {
+        "view": "static"
+      },
+      "path": "browse/",
+      "site": {
+        "assets": {
+          "app": null,
+          "css": null,
+          "imports": []
+        },
+        "config_url": null,
+        "discussions": [
+          {
+            "found": false,
+            "name": "hackernews",
+            "shortcut": "H",
+            "url": "https://hn.algolia.com/?q={url}"
+          }
+        ],
+        "entries": [],
+        "excerpts": true,
+        "language": "en",
+        "pwa": false,
+        "title": "Reader"
+      },
+      "title": "Browse"
+    }
+  }
+}

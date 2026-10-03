@@ -1,0 +1,28 @@
+{
+  "component": "Header",
+  "props": {
+    "base": "./",
+    "kind": "river",
+    "site": {
+      "assets": {
+        "app": null,
+        "css": null,
+        "imports": []
+      },
+      "config_url": null,
+      "discussions": [
+        {
+          "found": false,
+          "name": "hackernews",
+          "shortcut": "H",
+          "url": "https://hn.algolia.com/?q={url}"
+        }
+      ],
+      "entries": [],
+      "excerpts": true,
+      "language": "en",
+      "pwa": false,
+      "title": "Reader"
+    }
+  }
+}

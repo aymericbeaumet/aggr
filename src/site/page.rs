@@ -8,6 +8,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use super::client;
 use super::context::{BuildCtx, CategoryCtx, ItemCtx, PageCtx, SiteCtx, SourceCtx};
 use super::render::Renderer;
 use super::{outputs, paginate, relative_root, write};
@@ -16,13 +17,16 @@ use crate::content;
 /// Archive-wide template values prepared once per build. MiniJinja values retain their prepared
 /// representation across renders, so custom article templates still receive the entire archive
 /// without serializing it again for every page.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(super) struct SharedCtx {
     site: minijinja::Value,
     build: minijinja::Value,
     sources: minijinja::Value,
     categories: minijinja::Value,
     tags: minijinja::Value,
+    /// The plain halves of every page's client model; not a template value.
+    #[serde(skip)]
+    pub(super) client: client::Shared,
 }
 
 impl SharedCtx {
@@ -39,6 +43,7 @@ impl SharedCtx {
             sources: minijinja::Value::from_serialize(sources),
             categories: minijinja::Value::from_serialize(categories),
             tags: minijinja::Value::from_serialize(tags),
+            client: client::Shared::new(site, build),
         }
     }
 }
@@ -57,6 +62,8 @@ struct Ctx<'a> {
     category: Option<&'a CategoryCtx>,
     #[serde(skip_serializing_if = "Option::is_none")]
     schema: Option<serde_json::Value>,
+    /// `<script id="aggr-model">`: the typed page model the client boots from.
+    client_page: minijinja::Value,
 }
 
 /// What every page of one build shares: the site, the renderer, the prepared template values and
@@ -82,6 +89,7 @@ pub(super) struct ListPage<'a> {
 
 /// A standalone document: directory, utility and article pages, the offline shell and the
 /// manifest. `page_items` narrows the `items` a template sees; the default is the whole archive.
+#[derive(Clone, Copy)]
 pub(super) struct SimplePage<'a> {
     pub kind: &'a str,
     pub title: &'a str,
@@ -112,12 +120,32 @@ impl<'a> Pages<'a> {
         archive: &'a [ItemCtx],
         per_page: usize,
     ) -> Self {
+        Self::prepared(
+            site,
+            renderer,
+            shared,
+            archive,
+            minijinja::Value::from_serialize(archive),
+            per_page,
+        )
+    }
+
+    pub(super) fn prepared(
+        site: &'a SiteCtx,
+        renderer: &'a Renderer,
+        shared: SharedCtx,
+        archive: &'a [ItemCtx],
+        archive_value: minijinja::Value,
+        per_page: usize,
+    ) -> Self {
+        let mut shared = shared;
+        shared.client.site.assets = renderer.client_assets();
         Self {
             site,
             renderer,
             shared,
             archive,
-            archive_value: minijinja::Value::from_serialize(archive),
+            archive_value,
             per_page,
         }
     }
@@ -130,73 +158,86 @@ impl<'a> Pages<'a> {
         page: ListPage<'_>,
         sitemap_urls: &mut Vec<outputs::SitemapUrl>,
     ) -> Result<usize> {
-        let ListPage {
-            kind,
-            title,
-            prefix,
-            list,
-            source,
-            category,
-        } = page;
-        let site = self.site;
-        let pagination = paginate(prefix, list.len(), self.per_page);
+        let pagination = paginate(page.prefix, page.list.len(), self.per_page);
         for pager in &pagination {
-            let page_number = pager.context.current_index;
-            let page = PageCtx {
-                kind: kind.to_string(),
-                title: title.to_string(),
-                document_title: document_title(&site.title, title, kind, page_number),
-                description: page_description(site, title, kind, page_number),
-                indexable: site.indexing,
-                path: pager.path.clone(),
-                root: relative_root(&pager.path),
-                canonical_url: site.absolute(&pager.path),
-                feed_path: Some(prefix.to_string()),
-                feed_title: Some(title.to_string()),
-                paginator: Some(pager.context.clone()),
-            };
-            let page_items = &list[pager.range.clone()];
-            if let Some(url) = &page.canonical_url {
+            let html = self.list(&page, pager)?;
+            if let Some(url) = self.site.absolute(&pager.path) {
                 sitemap_urls.push(outputs::SitemapUrl::new(
                     url,
-                    page_items.iter().map(archive_modified_at).max(),
+                    page.list[pager.range.clone()]
+                        .iter()
+                        .map(archive_modified_at)
+                        .max(),
                 ));
             }
-            let schema = structured_data(site, &page, page_items, None);
-            let html = self.renderer.render(
-                "index.html",
-                Ctx {
-                    shared: &self.shared,
-                    page,
-                    items: minijinja::Value::from_serialize(page_items),
-                    item: None,
-                    source,
-                    category,
-                    schema,
-                },
-            )?;
             write(&out.join(&pager.path).join("index.html"), html.as_bytes())?;
         }
         Ok(pagination.len())
     }
 
-    /// Render one standalone document.
-    pub(super) fn simple(&self, page: SimplePage<'_>) -> Result<String> {
+    /// The page context of one pager of a list.
+    pub(super) fn list_page(&self, list: &ListPage<'_>, pager: &super::Pager) -> PageCtx {
+        let site = self.site;
+        let page_number = pager.context.current_index;
+        PageCtx {
+            kind: list.kind.to_string(),
+            title: list.title.to_string(),
+            document_title: document_title(&site.title, list.title, list.kind, page_number),
+            description: page_description(site, list.title, list.kind, page_number),
+            indexable: site.indexing,
+            path: pager.path.clone(),
+            root: relative_root(&pager.path),
+            canonical_url: site.absolute(&pager.path),
+            feed_path: Some(list.prefix.to_string()),
+            feed_title: Some(list.title.to_string()),
+            paginator: Some(pager.context.clone()),
+        }
+    }
+
+    pub(super) fn list(&self, list: &ListPage<'_>, pager: &super::Pager) -> Result<String> {
+        let site = self.site;
+        let page = self.list_page(list, pager);
+        let page_items = &list.list[pager.range.clone()];
+        let schema = structured_data(site, &page, page_items, None);
+        let client_page = minijinja::Value::from_serialize(client::ClientPage::list(
+            &self.shared.client,
+            &page,
+            &pager.context,
+            page_items,
+            list.source,
+            list.category,
+        ));
+        self.renderer.render(
+            "index.html",
+            Ctx {
+                shared: &self.shared,
+                page,
+                items: minijinja::Value::from_serialize(page_items),
+                item: None,
+                source: list.source,
+                category: list.category,
+                schema,
+                client_page,
+            },
+        )
+    }
+
+    /// The page context of one standalone document.
+    pub(super) fn simple_page(&self, page: &SimplePage<'_>) -> PageCtx {
         let SimplePage {
             kind,
             title,
             path,
-            template,
             item,
-            page_items,
-        } = page;
+            ..
+        } = *page;
         let site = self.site;
         let page_number = 1;
         let utility_fallback = matches!(kind, "404" | "offline");
         // Error, offline and manifest documents are not reading pages; everything else
         // advertises the root feeds so an article page is enough to subscribe from.
         let advertises_feeds = !matches!(kind, "404" | "offline" | "manifest");
-        let page = PageCtx {
+        PageCtx {
             kind: kind.to_string(),
             title: title.to_string(),
             document_title: document_title(&site.title, title, kind, page_number),
@@ -217,11 +258,32 @@ impl<'a> Pages<'a> {
             feed_path: advertises_feeds.then(String::new),
             feed_title: advertises_feeds.then(|| site.title.clone()),
             paginator: None,
-        };
+        }
+    }
+
+    /// Render one standalone document.
+    pub(super) fn simple(&self, page: SimplePage<'_>) -> Result<String> {
+        let page_ctx = self.simple_page(&page);
+        let SimplePage {
+            kind,
+            template,
+            item,
+            page_items,
+            ..
+        } = page;
+        let site = self.site;
+        let utility_fallback = matches!(kind, "404" | "offline");
+        let page = page_ctx;
         let items = page_items.unwrap_or(self.archive);
         let schema = (!utility_fallback)
             .then(|| structured_data(site, &page, items, item))
             .flatten();
+        let client_page = minijinja::Value::from_serialize(client::ClientPage::simple(
+            &self.shared.client,
+            &page,
+            item,
+            site,
+        ));
         self.renderer.render(
             template,
             Ctx {
@@ -234,6 +296,7 @@ impl<'a> Pages<'a> {
                 source: None,
                 category: None,
                 schema,
+                client_page,
             },
         )
     }
@@ -523,7 +586,7 @@ mod tests {
     use super::*;
     use crate::model::Item;
     use crate::site::context::{self, ArticlePreviewCtx, ItemOptions};
-    use crate::site::render::Layers;
+    use crate::site::render::Theme;
     use chrono::TimeZone;
 
     fn day(d: u32) -> DateTime<Utc> {
@@ -549,6 +612,7 @@ mod tests {
             sources: minijinja::Value::from_serialize([serde_json::json!({"name":"Publisher"})]),
             categories: minijinja::Value::from_serialize([serde_json::json!({"name":"news"})]),
             tags: minijinja::Value::from_serialize(["rust"]),
+            client: client::Shared::default(),
         };
         let mut env = minijinja::Environment::new();
         env.add_template("custom.html", "{{ site.title }} {{ build.version }} {{ sources[0].name }} {{ categories[0].name }} {{ tags[0] }} {{ items|length }} {{ items[0].title }} {{ items[1].preview.width }} {{ page.title }} {{ item is defined }}").unwrap();
@@ -574,6 +638,7 @@ mod tests {
                 source: None,
                 category: None,
                 schema: None,
+                client_page: minijinja::Value::UNDEFINED,
             };
             assert_eq!(
                 env.get_template("custom.html")
@@ -754,6 +819,7 @@ mod tests {
                 sources: minijinja::Value::from_serialize(Vec::<SourceCtx>::new()),
                 categories: minijinja::Value::from_serialize(Vec::<CategoryCtx>::new()),
                 tags: minijinja::Value::from_serialize(Vec::<CategoryCtx>::new()),
+                client: client::Shared::new(&site, &build),
             };
             let page = PageCtx {
                 kind: "item".into(),
@@ -768,7 +834,13 @@ mod tests {
                 feed_title: Some(site.title.clone()),
                 paginator: None,
             };
-            let html = Renderer::new(Layers::default())
+            let client_page = minijinja::Value::from_serialize(client::ClientPage::simple(
+                &shared.client,
+                &page,
+                Some(item),
+                &site,
+            ));
+            let html = Renderer::new(Theme::default())
                 .unwrap()
                 .render(
                     "item.html",
@@ -780,6 +852,7 @@ mod tests {
                         source: None,
                         category: None,
                         schema: None,
+                        client_page,
                     },
                 )
                 .unwrap();

@@ -1,4 +1,4 @@
-.PHONY: all build release test lint fmt fmt-check check timings msrv clean install run help
+.PHONY: all build release test lint fmt fmt-check check check-rust timings client-build client-check client-dev msrv clean install run help
 
 all: check
 
@@ -23,9 +23,25 @@ fmt:
 fmt-check:
 	cargo fmt --all -- --check
 
+# Keep the two Cargo commands ordered while frontend checks run alongside them.
 check: fmt-check
+	$(MAKE) -j check-rust client-check
+
+check-rust:
 	$(MAKE) lint
 	$(MAKE) test
+
+# Node is pinned in mise.toml and only needed to develop the reader: its compiled bundles are
+# committed under themes/default/static/app and embedded by the Rust binary.
+client-build:
+	mise exec -- npm --prefix web run build
+
+client-check:
+	mise exec -- npm --prefix web run check
+	mise exec -- npm --prefix web test
+
+client-dev:
+	mise exec -- npm --prefix web run dev
 
 # Build with the minimum supported Rust version declared in Cargo.toml.
 msrv:
@@ -49,8 +65,12 @@ help:
 	@echo "  lint       - Run clippy with warnings denied"
 	@echo "  fmt        - Format code"
 	@echo "  fmt-check  - Check formatting"
-	@echo "  check      - Format check, lint and tests (default)"
+	@echo "  check      - Rust and frontend checks (default)"
+	@echo "  check-rust - Run Rust lint and tests in sequence"
 	@echo "  timings    - Build with an HTML compiler timing report"
+	@echo "  client-build - Compile the embedded reader assets"
+	@echo "  client-check - Type-check and test the reader"
+	@echo "  client-dev - Run Vite for frontend development"
 	@echo "  msrv       - Build with the minimum supported Rust version"
 	@echo "  clean      - Remove build artifacts"
 	@echo "  install    - Install the binary locally"

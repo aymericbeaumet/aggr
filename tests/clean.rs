@@ -114,10 +114,6 @@ fn project_layout_rejects_every_protected_archive_overlap() {
             "site output",
         ),
         ("[store]\ndir = '.'\n", "config"),
-        (
-            "[site]\ntheme = 'reader-theme'\n[store]\ndir = 'reader-theme/archive'\n",
-            "theme",
-        ),
         ("[store]\ndir = '.git/aggr-data'\n", "Git metadata"),
     ] {
         let fixture = Fixture::new(config);
@@ -136,7 +132,6 @@ fn dev_rejects_cache_overlaps_before_creating_its_namespace() {
     for (config, base, protected) in [
         ("[store]\ndir = 'archive'\n", "archive", "[store] dir"),
         ("", "aggr.toml", "config"),
-        ("[site]\ntheme = 'reader-theme'\n", "reader-theme", "theme"),
         ("", ".git", "Git metadata"),
         ("", ".", "repository"),
     ] {
@@ -236,13 +231,15 @@ fn ordinary_commands_reject_symlinks_inside_owned_cache_namespaces() {
 
 #[test]
 fn repository_cache_namespace_cannot_contain_project_inputs() {
-    let fixture =
-        Fixture::new("[site]\ntheme = '.aggr/cache/build-v1/render-v1/previous/site/theme'\n");
+    let fixture = Fixture::new(
+        "[[sources]]\nurl = './.aggr/cache/build-v1/render-v1/previous/site/subscriptions.toml'\n",
+    );
+    let collection = fixture
+        .root
+        .join(".aggr/cache/build-v1/render-v1/previous/site/subscriptions.toml");
     fixture.put(
-        &fixture
-            .root
-            .join(".aggr/cache/build-v1/render-v1/previous/site/theme/templates/base.html"),
-        "hand edited theme",
+        &collection,
+        "[[sources]]\nurl = 'https://example.com/feed.xml'\n",
     );
     fixture
         .command()
@@ -251,13 +248,8 @@ fn repository_cache_namespace_cannot_contain_project_inputs() {
         .failure()
         .stderr(predicate::str::contains("repository build cache"));
     assert_eq!(
-        std::fs::read_to_string(
-            fixture
-                .root
-                .join(".aggr/cache/build-v1/render-v1/previous/site/theme/templates/base.html")
-        )
-        .unwrap(),
-        "hand edited theme"
+        std::fs::read_to_string(&collection).unwrap(),
+        "[[sources]]\nurl = 'https://example.com/feed.xml'\n"
     );
     assert!(
         git(&fixture.root, &["branch", "--list", "aggr"])
@@ -714,6 +706,8 @@ impl Drop for RunningDev {
 
 #[test]
 fn dev_clean_acquires_one_lock_and_keeps_it_while_serving() {
+    use std::io::{Read as _, Write as _};
+
     let fixture = Fixture::new("");
     let dev = fixture.dev(&fixture.root.join("aggr.toml"));
     fixture.put(&dev.join("data/stale-proof"), "disposable");
@@ -721,24 +715,45 @@ fn dev_clean_acquires_one_lock_and_keeps_it_while_serving() {
         &fixture.root.join(".aggr/cache/build-v1/stale-proof"),
         "cached",
     );
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
     let mut process = RunningDev(
         fixture
             .command()
-            .args(["dev", "--clean", "--port", "0"])
+            .args(["dev", "--clean", "--port", &port.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .unwrap(),
     );
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !dev.join("site/.aggr-site").exists() {
+    loop {
+        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut response = String::new();
+            if stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .is_ok()
+                && stream.read_to_string(&mut response).is_ok()
+                && response.starts_with("HTTP/1.1 200")
+                && response.contains("<main id=\"content\"")
+            {
+                break;
+            }
+        }
         assert!(
             process.0.try_wait().unwrap().is_none(),
             "dev --clean exited before serving"
         );
         assert!(
             Instant::now() < deadline,
-            "dev --clean did not publish a site"
+            "dev --clean did not serve a page"
         );
         std::thread::sleep(Duration::from_millis(20));
     }

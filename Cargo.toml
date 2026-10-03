@@ -1,6 +1,6 @@
 [package]
 name = "aggr"
-version = "1.10.0"
+version = "1.11.0"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
@@ -14,7 +14,7 @@ categories = ["command-line-utilities", "web-programming"]
 [dependencies]
 ammonia = "4"
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -24,7 +24,8 @@ dom_smoothie = "0.18"
 directories = "6"
 encoding_rs = "0.8"
 env_logger = "0.11"
-feed-rs = "2"
+# 3.x drops media it does not consider content; src/sources/feed.rs restores it from the XML.
+feed-rs = "3"
 futures-util = "0.3"
 glob = "0.3"
 hayro = { version = "0.7.1", features = ["embed-fonts"] }
@@ -53,7 +54,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
 sha1 = "0.11"
-sha2 = "0.10"
+sha2 = "0.11"
 slug = "0.1"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 tempfile = "3"
@@ -67,9 +68,10 @@ walkdir = "2"
 wreq = { version = "=6.0.0-rc.31", default-features = false, features = ["webpki-roots", "tokio-rt", "gzip", "brotli", "stream"] }
 wreq-util = { version = "=3.0.0-rc.14", default-features = false, features = ["emulation"] }
 thumbhash = "0.1.0"
-resvg = { version = "0.48.0", default-features = false, features = ["text"] }
+resvg = { version = "0.48.1", default-features = false, features = ["text"] }
 
 [dev-dependencies]
+ts-rs = { version = "12", features = ["serde-json-impl"] }
 assert_cmd = "2"
 fantoccini = { version = "0.22", default-features = false }
 httpmock = "0.8"

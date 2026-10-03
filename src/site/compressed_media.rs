@@ -265,7 +265,8 @@ pub(super) fn compact(mut asset: Asset) -> Result<Asset> {
     );
     let format = image::guess_format(&asset.master_bytes)
         .context("recognizing archived image for deployment compression")?;
-    if preserve_animation(&asset.master_bytes, format)? {
+    // An AVIF is already compact, and there is no decoder to re-encode it with.
+    if format == ImageFormat::Avif || preserve_animation(&asset.master_bytes, format)? {
         return Ok(asset);
     }
     let mut reader = ImageReader::with_format(Cursor::new(&asset.master_bytes), format);
@@ -602,6 +603,22 @@ mod tests {
             compact_cached(original.clone(), Some(file.path())).unwrap(),
             compact(original).unwrap()
         );
+    }
+
+    #[test]
+    fn an_avif_master_is_deployed_as_it_was_archived() {
+        // Only the `ftyp` brand: nothing past it is read.
+        let mut bytes = 20u32.to_be_bytes().to_vec();
+        bytes.extend_from_slice(b"ftypavif\0\0\0\0avif");
+        let original = Asset {
+            master_hash: crate::model::sha1_hex(&bytes),
+            master_bytes: bytes,
+            master_extension: "avif",
+            width: 1200,
+            height: 800,
+            ..cache_fixture()
+        };
+        assert_eq!(compact(original.clone()).unwrap(), original);
     }
 
     #[test]

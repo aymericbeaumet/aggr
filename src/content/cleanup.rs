@@ -4,6 +4,7 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 
+use super::dates::WrittenDate;
 use super::render_markdown;
 use super::strip::html_to_text;
 
@@ -104,6 +105,9 @@ pub fn strip_article_metadata(
     };
     let markdown = strip_boundary_controls(&markdown);
     let markdown = strip_leading_metadata(&markdown, title, published, source_slug);
+    let markdown = strip_site_icons(&markdown);
+    let markdown = strip_leading_kind_label(&markdown);
+    let markdown = strip_trailing_signature(&markdown, published);
     let markdown = strip_boundary_controls(&markdown);
     let markdown = strip_separator_rows(&markdown);
     let markdown = decorative_rules_to_breaks(&markdown);
@@ -815,14 +819,7 @@ fn leading_metadata(
         .filter_map(parse_date_only)
         .any(|candidate| {
             candidate.labelled
-                || published.is_some_and(|published| {
-                    candidate
-                        .date
-                        .signed_duration_since(published.date_naive())
-                        .num_days()
-                        .unsigned_abs()
-                        <= 1
-                })
+                || published.is_some_and(|published| candidate.date.names(published.date_naive()))
                 // A date the item does not share is still metadata when the publisher left its
                 // own separator behind it; prose never opens that way.
                 || tail
@@ -1264,16 +1261,14 @@ fn matching_leading_byline(markdown: &str, plain: &str, published: NaiveDate) ->
     let text = text.strip_prefix("By ").unwrap_or(text);
     let matches_published = |date: &str| {
         let date = date.trim();
+        // `09.18.26`: a two-digit year only reads as a date beside a name, where a version number
+        // would not stand; the date module never accepts one on its own.
         ["%m.%d.%y", "%d.%m.%y"]
             .iter()
             .find_map(|format| NaiveDate::parse_from_str(date, format).ok())
+            .map(WrittenDate::Day)
             .or_else(|| parse_date_only(date).map(|parsed| parsed.date))
-            .is_some_and(|date| {
-                date.signed_duration_since(published)
-                    .num_days()
-                    .unsigned_abs()
-                    <= 1
-            })
+            .is_some_and(|date| date.names(published))
     };
     let Some((author, _)) = [", ", " - ", " | ", " — ", " – ", " · ", " "]
         .iter()
@@ -1282,18 +1277,26 @@ fn matching_leading_byline(markdown: &str, plain: &str, published: NaiveDate) ->
     else {
         return false;
     };
+    is_person_name(author) && is_inline_paragraph(markdown)
+}
+
+/// `Eric Gullichsen`, `Jean-Luc O’Neil`, `J. R. Smith`: two to four capitalised words, the shape a
+/// byline or a sign-off gives a person's name.
+fn is_person_name(author: &str) -> bool {
     let names = author.split_whitespace().collect::<Vec<_>>();
-    if !(2..=4).contains(&names.len())
-        || author.chars().count() > 80
-        || !names.iter().all(|name| {
+    (2..=4).contains(&names.len())
+        && author.chars().count() <= 80
+        && names.iter().all(|name| {
             name.chars().next().is_some_and(char::is_uppercase)
                 && name
                     .chars()
                     .all(|ch| ch.is_alphabetic() || matches!(ch, '\'' | '’' | '-' | '.'))
         })
-    {
-        return false;
-    }
+}
+
+/// One paragraph of text, emphasis, links and line breaks: the shape of a byline, never of a
+/// quote, a list, a heading or a picture.
+fn is_inline_paragraph(markdown: &str) -> bool {
     use comrak::nodes::NodeValue;
     let arena = comrak::Arena::new();
     let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
@@ -1310,8 +1313,176 @@ fn matching_leading_byline(markdown: &str, plain: &str, published: NaiveDate) ->
                     | NodeValue::Emph
                     | NodeValue::Strong
                     | NodeValue::Link(_)
+                    | NodeValue::SoftBreak
+                    | NodeValue::LineBreak
             )
         })
+}
+
+/// `[Eric Gullichsen](…/contact.php), September 2026`: the author signing off with the date the page
+/// already shows above the article. The last paragraph goes when it is a name and a date and
+/// nothing else, and the date names the item's own day or month; a sign-off the item's date does
+/// not confirm, or that says anything more, is the author's to keep. A lone date there goes on the
+/// same evidence, as it does at the top of the article.
+/// The longest closing line read as a sign-off: a four-word name and a written-out date, with room
+/// for the name's link in the Markdown.
+const MAX_SIGNATURE_CHARS: usize = 160;
+const MAX_SIGNATURE_BYTES: usize = 1024;
+
+fn strip_trailing_signature(markdown: &str, published: Option<DateTime<Utc>>) -> String {
+    let Some(published) = published.map(|published| published.date_naive()) else {
+        return markdown.to_string();
+    };
+    let body = markdown.trim_end_matches('\n');
+    let Some((before, last)) = body.rsplit_once("\n\n") else {
+        return markdown.to_string();
+    };
+    // A name and a date are a short line, even with the name linked: anything longer is prose,
+    // and trying its every word boundary as the split would cost a long paragraph quadratic time.
+    if before.trim().is_empty() || last.len() > MAX_SIGNATURE_BYTES || !is_inline_paragraph(last) {
+        return markdown.to_string();
+    }
+    let rendered = html_to_text(&render_markdown(last));
+    if rendered.chars().count() > MAX_SIGNATURE_CHARS {
+        return markdown.to_string();
+    }
+    let names_published =
+        |date: &str| super::dates::parse(date.trim()).is_some_and(|date| date.names(published));
+    let name_and_date = |first: &str, second: &str| {
+        let first = first.trim();
+        let first = first.strip_prefix("By ").unwrap_or(first);
+        (is_person_name(first) && names_published(second))
+            || (names_published(first) && is_person_name(second.trim()))
+    };
+    // `Jane Doe<br>September 2026`: a line break is its own separator between name and date.
+    let lines: Vec<&str> = rendered
+        .lines()
+        .map(|line| line.trim().trim_start_matches(['—', '–', '-', '~']).trim())
+        .filter(|line| !line.is_empty())
+        .collect();
+    let plain = lines.join(" ");
+    let plain = plain.strip_prefix("By ").unwrap_or(&plain);
+    let signed = names_published(plain)
+        || matches!(lines.as_slice(), [first, second] if name_and_date(first, second))
+        || [", ", " - ", " — ", " – ", " | ", " · "]
+            .iter()
+            .any(|separator| {
+                plain
+                    .rsplit_once(separator)
+                    .is_some_and(|(first, second)| name_and_date(first, second))
+                    || plain
+                        .split_once(separator)
+                        .is_some_and(|(first, second)| name_and_date(first, second))
+            })
+        // `Jane Doe September 27, 2026`, which is what a line break between them renders to:
+        // with no separator the name ends at some word boundary, so each one is tried.
+        || plain
+            .match_indices(' ')
+            .any(|(at, _)| name_and_date(&plain[..at], &plain[at + 1..]));
+    if !signed {
+        return markdown.to_string();
+    }
+    // A rule that only set the sign-off apart has nothing left to separate.
+    let mut kept = before.trim_end_matches('\n');
+    if let Some((earlier, separator)) = kept.rsplit_once("\n\n")
+        && (is_thematic_break(separator.trim(), true) || is_lone_separator(separator))
+    {
+        kept = earlier.trim_end_matches('\n');
+    }
+    format!("{kept}\n")
+}
+
+/// `![](https://www.google.com/s2/favicons?domain=…)`: a site icon is the page's decoration for
+/// the link beside it, not article content. It goes wherever it sits, with the space that set it
+/// apart; an icon that was a whole link takes the link, and one that was a whole line the line.
+fn strip_site_icons(markdown: &str) -> String {
+    use comrak::nodes::NodeValue;
+    if !markdown.contains("![") {
+        return markdown.to_string();
+    }
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, markdown, &comrak::Options::default());
+    let mut lines = vec![0];
+    lines.extend(markdown.match_indices('\n').map(|(index, _)| index + 1));
+    let mut ranges = Vec::new();
+    for node in root.descendants() {
+        let icon = matches!(
+            &node.data.borrow().value,
+            NodeValue::Image(image) if crate::media::is_site_icon(&image.url)
+        );
+        if !icon {
+            continue;
+        }
+        let target = node
+            .parent()
+            .filter(|parent| {
+                matches!(parent.data.borrow().value, NodeValue::Link(_))
+                    && parent.children().count() == 1
+            })
+            .unwrap_or(node);
+        let position = target.data.borrow().sourcepos;
+        let (Some(&start_line), Some(&end_line)) = (
+            lines.get(position.start.line.wrapping_sub(1)),
+            lines.get(position.end.line.wrapping_sub(1)),
+        ) else {
+            continue;
+        };
+        let start = start_line + position.start.column.saturating_sub(1);
+        let end = end_line + position.end.column;
+        if start < end && end <= markdown.len() && markdown.get(start..end).is_some() {
+            ranges.push(start..end);
+        }
+    }
+    if ranges.is_empty() {
+        return markdown.to_string();
+    }
+    let mut out = markdown.to_string();
+    for range in ranges.iter().rev() {
+        let (mut start, mut end) = (range.start, range.end);
+        let line_start = out[..start].rfind('\n').map_or(0, |at| at + 1);
+        let line_end = out[end..].find('\n').map_or(out.len(), |at| end + at);
+        if out[line_start..start].trim().is_empty() && out[end..line_end].trim().is_empty() {
+            start = line_start;
+            end = (line_end + 1).min(out.len());
+            if out[end..].starts_with('\n') {
+                end += 1;
+            }
+        } else if out[..start].ends_with(' ') {
+            start -= 1;
+        } else if out[end..].starts_with(' ') {
+            end += 1;
+        }
+        out.replace_range(start..end, "");
+    }
+    out
+}
+
+/// `[Comment](https://simonwillison.net/elsewhere/comment/) [My comment](…) on …`: the kind of
+/// post, set before its opening link and linked to the index of every post of that kind. The link
+/// text names the page it leads to and another link follows it; a link opening the prose does
+/// neither.
+fn strip_leading_kind_label(markdown: &str) -> String {
+    after_kind_label(markdown.trim_start_matches('\n'))
+        .map_or_else(|| markdown.to_string(), str::to_string)
+}
+
+fn after_kind_label(body: &str) -> Option<&str> {
+    let (label, rest) = body.strip_prefix('[')?.split_once("](")?;
+    let (target, after) = rest.split_once(')')?;
+    let after = after.strip_prefix(' ')?;
+    if !(1..=3).contains(&label.split_whitespace().count())
+        || label.chars().count() > 40
+        || label.contains(['[', ']', '\n', '`', '*', '_'])
+        || !(after.starts_with('[') || after.starts_with("!["))
+    {
+        return None;
+    }
+    let target = url::Url::parse(target.split_whitespace().next()?).ok()?;
+    let page = target
+        .path_segments()?
+        .rfind(|segment| !segment.is_empty())?;
+    let page = page.strip_suffix(".html").unwrap_or(page);
+    (slug::slugify(label) == slug::slugify(page)).then_some(after)
 }
 
 /// A publisher's date line that sits behind a one-line lede (`Looking back on the first year.`
@@ -1368,50 +1539,8 @@ const DATE_LABELS: [&str; 10] = [
 ];
 
 struct LeadingDate {
-    date: NaiveDate,
+    date: WrittenDate,
     labelled: bool,
-}
-
-/// `Tuesday 22 Sept 2026`: the weekday names the same day the date does, so a byline that opens
-/// with one is still that date.
-fn without_weekday(value: &str) -> String {
-    const WEEKDAYS: [&str; 14] = [
-        "monday",
-        "tuesday",
-        "wednesday",
-        "thursday",
-        "friday",
-        "saturday",
-        "sunday",
-        "mon",
-        "tue",
-        "wed",
-        "thu",
-        "fri",
-        "sat",
-        "sun",
-    ];
-    let trimmed = value.trim_start();
-    let Some((head, rest)) = trimmed.split_once(char::is_whitespace) else {
-        return value.to_string();
-    };
-    let head = head.trim_end_matches([',', '.']).to_ascii_lowercase();
-    if WEEKDAYS.contains(&head.as_str()) {
-        return rest.trim_start().to_string();
-    }
-    value.to_string()
-}
-
-/// `Sept` is the month the publisher wrote; the date parser only knows `Sep`.
-fn with_known_month_abbreviations(value: String) -> String {
-    const ABBREVIATIONS: [(&str, &str); 2] = [("Sept ", "Sep "), ("Sept. ", "Sep ")];
-    let mut value = value;
-    for (from, to) in ABBREVIATIONS {
-        if let Some(at) = value.find(from) {
-            value.replace_range(at..at + from.len(), to);
-        }
-    }
-    value
 }
 
 /// `Press release issued: 22 September 2026`: a publisher can introduce its date with any short
@@ -1458,51 +1587,7 @@ fn parse_date_only(raw: &str) -> Option<LeadingDate> {
         })
         .or_else(|| colon_label(value))
         .unwrap_or((value, false));
-    let value = without_ordinal_suffixes(value);
-    let value = without_weekday(&value);
-    let value = with_known_month_abbreviations(value);
-    // `%Y%m%d` is a compact permalink date; it only ever strips a line that matches the item's
-    // own publication date, so an unrelated eight-digit number stays put.
-    [
-        "%Y-%m-%d",
-        "%Y%m%d",
-        "%Y/%m/%d",
-        "%d %B %Y",
-        "%d %b %Y",
-        "%B %d, %Y",
-        "%b %d, %Y",
-    ]
-    .iter()
-    .find_map(|format| NaiveDate::parse_from_str(value.trim(), format).ok())
-    .map(|date| LeadingDate { date, labelled })
-}
-
-fn without_ordinal_suffixes(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = String::with_capacity(value.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if index > 0
-            && bytes[index - 1].is_ascii_digit()
-            && matches!(
-                bytes.get(index..index + 2),
-                Some(b"st" | b"nd" | b"rd" | b"th")
-            )
-            && bytes
-                .get(index + 2)
-                .is_none_or(|next| !next.is_ascii_alphabetic())
-        {
-            index += 2;
-            continue;
-        }
-        let ch = value[index..]
-            .chars()
-            .next()
-            .expect("valid character boundary");
-        out.push(ch);
-        index += ch.len_utf8();
-    }
-    out
+    super::dates::parse(value).map(|date| LeadingDate { date, labelled })
 }
 
 pub(super) fn tidy_markdown(markdown: &str) -> String {
@@ -2134,8 +2219,10 @@ mod tests {
             "Date: 2026-09-22",
         ] {
             assert_eq!(
-                parse_date_only(date).map(|parsed| parsed.date.to_string()),
-                Some("2026-09-22".to_string()),
+                parse_date_only(date).map(|parsed| parsed.date),
+                Some(WrittenDate::Day(
+                    NaiveDate::from_ymd_opt(2026, 9, 22).unwrap()
+                )),
                 "{date}"
             );
         }
@@ -2146,6 +2233,176 @@ mod tests {
         // Only a phrase that says a date follows lets a line go without matching the item.
         assert_eq!(colon_label("Press release issued: x"), Some(("x", true)));
         assert_eq!(colon_label("Location: x"), Some(("x", false)));
+    }
+
+    #[test]
+    fn strips_a_bear_blog_date_line_written_day_month_comma_year() {
+        use chrono::TimeZone as _;
+
+        // sancho.bearblog.dev opens every post with its date, emphasised and comma-separated.
+        let published = Utc.with_ymd_and_hms(2026, 9, 27, 9, 0, 0).unwrap();
+        let markdown = to_markdown(
+            "<div><p><em>27 Sep, 2026</em></p><p>I recently had an experience while doing a simple Google search.</p></div>",
+            None,
+        );
+        assert_eq!(
+            strip_article_metadata(
+                &markdown,
+                "When did Google get so weird?",
+                Some(published),
+                "hnrss-org"
+            ),
+            "I recently had an experience while doing a simple Google search.\n"
+        );
+    }
+
+    #[test]
+    fn strips_a_sign_off_naming_the_author_and_the_items_own_month() {
+        use chrono::TimeZone as _;
+
+        // colo.to ends its essays with a linked name and the month they were written.
+        let published = Utc.with_ymd_and_hms(2026, 9, 28, 2, 5, 13).unwrap();
+        let markdown = to_markdown(
+            "<div><p>I remain sanguine, and amused.</p><p><a href=\"https://colo.to/contact.php\">Eric Gullichsen</a>, September 2026</p></div>",
+            None,
+        );
+        assert_eq!(
+            strip_article_metadata(
+                &markdown,
+                "Owed a billion dollars",
+                Some(published),
+                "hnrss-org"
+            ),
+            "I remain sanguine, and amused.\n"
+        );
+
+        for sign_off in [
+            "<p>— Jane Doe, 27 Sep 2026</p>",
+            "<p>Jane Doe | Sep 27, 2026</p>",
+            "<p><em>Jane Doe, September 2026</em></p>",
+            "<p>Jane Doe<br>September 27, 2026</p>",
+            "<p>By Jane Doe, 2026-09-28</p>",
+            "<p>September 2026, Jane Doe</p>",
+            // A date alone closing the article goes on the same evidence as one opening it.
+            "<p><em>28 September 2026</em></p>",
+            // The rule that only set the sign-off apart goes with it.
+            "<hr><p>Jane Doe, September 2026</p>",
+        ] {
+            let markdown = to_markdown(
+                &format!("<div><p>The last real paragraph.</p>{sign_off}</div>"),
+                None,
+            );
+            assert_eq!(
+                strip_article_metadata(&markdown, "Title", Some(published), "example-com"),
+                "The last real paragraph.\n",
+                "{sign_off}"
+            );
+        }
+    }
+
+    #[test]
+    fn strips_the_post_kind_label_and_site_icon_opening_a_link_post() {
+        // simonwillison.net opens each "elsewhere" post with its kind and the linked site's icon.
+        let stored = "[Comment](https://simonwillison.net/elsewhere/comment/) ![](https://www.google.com/s2/favicons?domain=news.ycombinator.com&sz=128) [My comment](https://news.ycombinator.com/item?id=49851693#49871741) on [S3 Is the Future, S3 Is the Past](https://news.ycombinator.com/item?id=49851693) — Hacker News\n\nOne thing I find notable about S3 today.\n";
+        assert_eq!(
+            strip_article_metadata(
+                stored,
+                "S3 Is the Future, S3 Is the Past",
+                None,
+                "simonwillison-net"
+            ),
+            "[My comment](https://news.ycombinator.com/item?id=49851693#49871741) on [S3 Is the Future, S3 Is the Past](https://news.ycombinator.com/item?id=49851693) — Hacker News\n\nOne thing I find notable about S3 today.\n"
+        );
+        let captured = to_markdown(
+            "<div><p><a href=\"https://simonwillison.net/elsewhere/release/\">Release</a> <img src=\"https://www.google.com/s2/favicons?domain=github.com&amp;sz=128\" alt=\"\" width=\"14\" height=\"14\"> <a href=\"https://github.com/simonw/llm/releases/tag/0.30\">llm 0.30</a> — the new release.</p><p>Details follow.</p></div>",
+            None,
+        );
+        assert_eq!(
+            strip_article_metadata(&captured, "llm 0.30", None, "simonwillison-net"),
+            "[llm 0.30](https://github.com/simonw/llm/releases/tag/0.30) — the new release.\n\nDetails follow.\n"
+        );
+    }
+
+    #[test]
+    fn site_icons_go_wherever_they_sit_and_other_opening_links_stay() {
+        assert_eq!(
+            strip_site_icons(
+                "Read on ![](https://icons.duckduckgo.com/ip3/lwn.net.ico) [LWN](https://lwn.net/).\n\n[![](https://example.com/favicon.ico)](https://example.com/) \n\n![](https://www.google.com/s2/favicons?domain=a.com)\n\nText with ![a diagram](https://example.com/diagram.png).\n\n```\n![](https://example.com/favicon.ico)\n```\n"
+            ),
+            "Read on [LWN](https://lwn.net/).\n\nText with ![a diagram](https://example.com/diagram.png).\n\n```\n![](https://example.com/favicon.ico)\n```\n"
+        );
+        for opening in [
+            // Prose opening with a link: the link does not name its own target.
+            "[Rust](https://www.rust-lang.org/) [1.90](https://blog.rust-lang.org/) shipped today.\n",
+            // The label names its target but introduces prose, not another link.
+            "[Comment](https://example.com/comment/) is what I wrote here.\n",
+            // A label that is a sentence, not a kind.
+            "[Why we moved to a monorepo this year](https://example.com/why-we-moved-to-a-monorepo-this-year/) [part two](https://example.com/2)\n",
+        ] {
+            assert_eq!(strip_leading_kind_label(opening), opening, "{opening}");
+        }
+    }
+
+    #[test]
+    fn a_long_closing_paragraph_is_prose_and_is_decided_quickly() {
+        use chrono::TimeZone as _;
+
+        let published = Utc.with_ymd_and_hms(2026, 9, 28, 2, 5, 13).unwrap();
+        let paragraph = "Jane Doe wrote about September 2026 and more ".repeat(4000);
+        let markdown = format!("The first paragraph.\n\n{}\n", paragraph.trim_end());
+        let started = std::time::Instant::now();
+        assert_eq!(
+            strip_article_metadata(&markdown, "Title", Some(published), "example-com"),
+            markdown
+        );
+        // Trying every word boundary took minutes on paragraphs this long.
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn keeps_a_closing_line_the_items_date_does_not_confirm_or_that_says_more() {
+        use chrono::TimeZone as _;
+
+        let published = Utc.with_ymd_and_hms(2026, 9, 28, 2, 5, 13).unwrap();
+        for closing in [
+            // Another month, or another year.
+            "<p>Eric Gullichsen, August 2026</p>",
+            "<p>Eric Gullichsen, September 2025</p>",
+            // More than a name and a date.
+            "<p>Eric Gullichsen, September 2026, from a café in Lisbon</p>",
+            "<p>Thanks for reading, September 2026</p>",
+            // Not a name.
+            "<p>see you next week, September 2026</p>",
+            "<p>London, 28 September 2026</p>",
+            // Not a paragraph of text.
+            "<ul><li>Eric Gullichsen, September 2026</li></ul>",
+            "<blockquote><p>Eric Gullichsen, September 2026</p></blockquote>",
+        ] {
+            let markdown = to_markdown(
+                &format!("<div><p>The last real paragraph.</p>{closing}</div>"),
+                None,
+            );
+            assert_eq!(
+                strip_article_metadata(&markdown, "Title", Some(published), "example-com"),
+                markdown,
+                "{closing}"
+            );
+        }
+        // Without the item's own date there is nothing to confirm it against.
+        let markdown = to_markdown(
+            "<div><p>Body.</p><p>Eric Gullichsen, September 2026</p></div>",
+            None,
+        );
+        assert_eq!(
+            strip_article_metadata(&markdown, "Title", None, "example-com"),
+            markdown
+        );
+        // An article that is nothing but the sign-off keeps it.
+        let markdown = to_markdown("<div><p>Eric Gullichsen, September 2026</p></div>", None);
+        assert_eq!(
+            strip_article_metadata(&markdown, "Title", Some(published), "example-com"),
+            markdown
+        );
     }
 
     #[test]

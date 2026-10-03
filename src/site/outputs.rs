@@ -1929,7 +1929,7 @@ mod tests {
         assert_eq!(
             feed.authors
                 .iter()
-                .map(|author| author.name.as_str())
+                .map(|author| author.name.as_deref().unwrap_or_default())
                 .collect::<Vec<_>>(),
             ["Example & Reader"]
         );
@@ -1954,7 +1954,7 @@ mod tests {
             entry
                 .authors
                 .iter()
-                .map(|author| author.name.as_str())
+                .map(|author| author.name.as_deref().unwrap_or_default())
                 .collect::<Vec<_>>(),
             ["A & B"]
         );
@@ -1990,7 +1990,7 @@ mod tests {
             entry
                 .authors
                 .iter()
-                .map(|author| author.name.as_str())
+                .map(|author| author.name.as_deref().unwrap_or_default())
                 .collect::<Vec<_>>(),
             ["A & B"]
         );
@@ -2226,7 +2226,7 @@ mod tests {
             feed.entries[0]
                 .authors
                 .iter()
-                .map(|author| author.name.as_str())
+                .map(|author| author.name.as_deref().unwrap_or_default())
                 .collect::<Vec<_>>(),
             ["Host"]
         );

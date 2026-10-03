@@ -1,0 +1,42 @@
+{
+  "component": "Row",
+  "props": {
+    "base": "./",
+    "excerpts": true,
+    "language": "en",
+    "rank": 1,
+    "row": {
+      "age_band": "fresh",
+      "category": null,
+      "excerpt": "",
+      "labels": [],
+      "language": null,
+      "link": "https://blog.example/comments",
+      "metadata": {
+        "comments": {
+          "url": "https://lobste.rs/s/fixture"
+        },
+        "consumption": {
+          "action": "read",
+          "minutes": 1,
+          "words": 28
+        },
+        "date": "2026-09-30T12:00:00+00:00",
+        "discussions": [],
+        "feed_sources": [],
+        "is_aggregated": false,
+        "original": "https://blog.example/comments",
+        "reading_minutes": 1,
+        "source_display": "blog.example",
+        "source_query": "blog",
+        "source_slug": "blog",
+        "source_title": "Blog",
+        "word_count": 28
+      },
+      "path": "items/blog/2026/09/comments",
+      "preview": null,
+      "title": "Comments without a count or points",
+      "url": "items/blog/comments/"
+    }
+  }
+}

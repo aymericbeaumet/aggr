@@ -71,7 +71,7 @@ async fn run_prevalidated(
     let discussions_fingerprint = discussions.fingerprint();
     let fingerprint = crate::cache::render_fingerprint(crate::cache::RenderFingerprint {
         config: &project.config,
-        project_root: &project.root,
+        theme: &site::theme(),
         repo_root: project.repo.root(),
         config_sha: config_sha.as_deref(),
         data_sha: data_sha.as_deref(),

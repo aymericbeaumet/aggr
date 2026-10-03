@@ -1,0 +1,43 @@
+{
+  "component": "ArticleHeader",
+  "props": {
+    "article": {
+      "access": {
+        "kind": "titles_only"
+      },
+      "authors": [],
+      "has_margin_notes": false,
+      "header": {
+        "age_band": "h3",
+        "category": null,
+        "excerpt": "",
+        "labels": [],
+        "language": null,
+        "link": "https://blog.example/titles",
+        "metadata": {
+          "date": "2026-09-30T09:00:00+00:00",
+          "discussions": [],
+          "feed_sources": [],
+          "is_aggregated": false,
+          "original": "https://blog.example/titles",
+          "reading_minutes": 0,
+          "source_display": "blog.example",
+          "source_query": "blog",
+          "source_slug": "blog",
+          "source_title": "Blog",
+          "word_count": 0
+        },
+        "path": "items/blog/2026/09/titles",
+        "preview": null,
+        "title": "Titles only",
+        "url": "items/blog/titles/"
+      },
+      "next": null,
+      "previous": null,
+      "recommended": [],
+      "resources": []
+    },
+    "base": "../../../",
+    "language": "en"
+  }
+}

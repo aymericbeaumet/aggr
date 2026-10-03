@@ -1,4 +1,4 @@
-//! The service worker: registration, the precached shell, and reading offline what has been read.
+//! The service worker: registration, complete selected downloads, and visited-page fallbacks.
 
 use std::sync::atomic::Ordering;
 
@@ -20,6 +20,29 @@ async fn disabled_shortcuts_service_worker_checks_and_manifest_identity() -> Res
     let result = catch_panics(service_worker_contracts(&client, &fixture)).await;
     report_failure(&client, "service-worker", &result).await;
     finish(client, result).await
+}
+
+/// Wait for the worker to take control of the page; when it never does, report how far each
+/// registration got, since a worker stuck installing and one that never claimed fail alike.
+async fn wait_controlled(client: &Client) -> Result<()> {
+    let Err(error) = wait_for(client, "!!navigator.serviceWorker.controller").await else {
+        return Ok(());
+    };
+    let registrations = client
+        .execute_async(
+            r#"
+      const done = arguments[arguments.length - 1];
+      navigator.serviceWorker.getRegistrations().then(
+        list => done(list.map(registration => ({scope: registration.scope,
+          installing: registration.installing?.state ?? null, waiting: registration.waiting?.state ?? null,
+          active: registration.active?.state ?? null}))),
+        failure => done(String(failure)));
+    "#,
+            vec![],
+        )
+        .await
+        .unwrap_or(Value::Null);
+    Err(error.context(format!("service worker registrations: {registrations}")))
 }
 
 async fn service_worker_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
@@ -60,7 +83,7 @@ async fn service_worker_contracts(client: &Client, fixture: &Fixture) -> Result<
 
     // The browser confirms the real registration: it succeeds, its worker takes control, and the
     // precached shell is served with no network.
-    wait_for(client, "!!navigator.serviceWorker.controller").await?;
+    wait_controlled(client).await?;
     let registration = client
         .execute_async(
             r#"
@@ -139,7 +162,7 @@ async fn offline_reading_contracts(client: &Client, fixture: &Fixture) -> Result
     .await?;
     client.goto(&fixture.base).await?;
     wait_booted(client).await?;
-    wait_for(client, "!!navigator.serviceWorker.controller").await?;
+    wait_controlled(client).await?;
     client
         .execute("localStorage.setItem('aggr:theme','dark')", vec![])
         .await?;
@@ -162,8 +185,13 @@ async fn offline_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         .click()
         .await?;
     wait_for(client, "!!document.querySelector('.body pre')").await?;
-    // What has been read is what is kept: the worker caches the pages someone opened, and their
-    // content-addressed pictures, and never downloads an archive ahead of them.
+    // Selected downloads retain complete articles independently of evictable visited pages.
+    // The preference is the worker's configuration: a stored value reaches the app through
+    // the `storage` event (as another tab's change would), and the worker broadcasts its
+    // `AGGR_OFFLINE_STATUS` report to every window, which the contract listens for directly.
+    client.execute("window.__offlineStatus=null;navigator.serviceWorker.addEventListener('message',event=>{if(event.data?.type==='AGGR_OFFLINE_STATUS')window.__offlineStatus=event.data});localStorage.setItem('aggr:offline-items','2');window.dispatchEvent(new StorageEvent('storage',{key:'aggr:offline-items'}))", vec![]).await?;
+    wait_for(client, "window.__offlineStatus?.requested === 2 && !window.__offlineStatus.downloading && window.__offlineStatus.saved.length === 2 && window.__offlineStatus.search?.phase === 'ready'").await?;
+    let downloaded = client.execute("return new URL(window.__offlineStatus.saved[1].url, document.querySelector('[data-route=\"\"]').href).href", vec![]).await?;
     client.execute("window.scrollTo(0,300)", vec![]).await?;
     let read_article = client.current_url().await?;
     wait_for(
@@ -194,7 +222,9 @@ async fn offline_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         "the article opened before must read the same way with no network"
     );
     screenshot(client, "mobile-dark").await?;
-    // An article nobody opened was never downloaded, and says so instead of failing blankly.
+    client.goto(downloaded.as_str().unwrap()).await?;
+    wait_for(client, "!!document.querySelector('article.item')").await?;
+    // An article outside the selected download count still has the honest fallback.
     client
         .goto(&format!(
             "{}items/example/2026-09-01-story-30/",

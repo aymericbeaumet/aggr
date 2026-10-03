@@ -7,6 +7,7 @@ use scraper::{Html, Selector};
 use serde::Serialize;
 use url::Url;
 
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResourceLink {
     pub label: String,

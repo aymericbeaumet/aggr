@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="listhead"><h1>Offline</h1></div>
-<p>This page has not been opened on this device yet, so there is no saved copy. Pages you have read recently are still available.</p>
-<p>Return to the <a href="{{ '' | url_for }}">feed</a>, or reconnect and try again.</p>
+<p>This page has not been saved. Open one of your downloaded articles below, or reconnect and try again.</p>
+<p id="offline-empty">No complete articles are available yet.</p>
+<ul id="offline-articles"></ul>
 {% endblock %}

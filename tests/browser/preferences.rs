@@ -23,7 +23,7 @@ async fn preference_controls_transfer_and_import() -> Result<()> {
 
 async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
     phone_session(client).await?;
-    // The bootstrap's validation rules are covered by web/src/preferences/bootstrap.test.ts; the
+    // The bootstrap's schema is covered by src/config/preferences.rs; the
     // browser confirms the shared script runs before paint: the stored theme is on <html> while the
     // head is still parsing and the app has not loaded, and an invalid stored value has already
     // fallen back to its default.
@@ -81,7 +81,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
         .await?;
     wait_for(
         client,
-        "document.querySelectorAll('[data-preference]').length === 17",
+        "document.querySelectorAll('[data-preference]').length === 18",
     )
     .await?;
     let preference_controls = client
@@ -118,12 +118,19 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
             "feed-page-size",
             "date-format",
             "scroll-amount",
-            "single-key-shortcuts"
+            "single-key-shortcuts",
+            "offline-items"
         ])
     );
     assert_eq!(
         preference_controls["groups"],
-        json!(["Appearance", "Reading", "Feed", "Keyboard"])
+        json!([
+            "Appearance",
+            "Reading",
+            "Feed",
+            "Keyboard",
+            "Offline reading"
+        ])
     );
     assert_eq!(
         preference_controls["defaults"]["single-key-shortcuts"],
@@ -284,7 +291,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
         .await?;
     wait_for(
         client,
-        "document.querySelectorAll('[data-preference]').length === 17",
+        "document.querySelectorAll('[data-preference]').length === 18",
     )
     .await?;
     client
@@ -329,7 +336,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     );
 
     let ignored_transfer = client.execute(r#"
-      const url=new URL('preferences/',new URL(window.AGGR.base,location.href));
+      const url=new URL(document.querySelector('[data-route="preferences/"]').href);
       url.searchParams.set('aggr-state',btoa(JSON.stringify({version:1,preferences:{theme:'light'}})));
       return url.href;
     "#,vec![]).await?.as_str().context("query-string transfer URL")?.to_owned();
@@ -392,7 +399,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
     client.goto(&copied_link).await?;
     wait_for(
         client,
-        "!document.querySelector('#preferences-import').hidden && document.querySelectorAll('#preferences-import-summary li').length === 17",
+        "!document.querySelector('#preferences-import').hidden && document.querySelectorAll('#preferences-import-summary li').length === 18",
     )
     .await?;
     assert_eq!(

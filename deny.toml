@@ -51,19 +51,31 @@ highlight = "all"
 # Known duplicate generations, listed by their older version so a third one warns again. Remove an
 # entry when cargo-deny reports that the skipped crate was not encountered.
 skip = [
-  # RustCrypto 0.10 → 0.11: aggr and syntect use sha2/sha1 0.10 beside the 0.11 line.
+  # RustCrypto 0.10 → 0.11: aggr is on sha2 0.11, while sha1 and syntect keep the 0.10 line.
   { crate = "digest@0.10", reason = "sha1/sha2 0.10 generation" },
-  { crate = "sha2@0.10", reason = "sha1/sha2 0.10 generation" },
   { crate = "block-buffer@0.10", reason = "sha1/sha2 0.10 generation" },
   { crate = "crypto-common@0.1", reason = "sha1/sha2 0.10 generation" },
   { crate = "cpufeatures@0.2", reason = "sha1/sha2 0.10 generation" },
-  # html5ever 0.38 → 0.39: htmd and markup5ever_rcdom lag scraper/ammonia.
+  # html5ever 0.38 → 0.39 → 0.40: ammonia is on 0.40, scraper and dom_smoothie (dom_query) on
+  # 0.39, htmd and markup5ever_rcdom on 0.38. Each generation brings its own atoms.
   { crate = "html5ever@0.38", reason = "htmd and markup5ever_rcdom" },
   { crate = "markup5ever@0.38", reason = "htmd and markup5ever_rcdom" },
-  # Servo CSS crates: lol_html pins the previous selectors/cssparser generation.
+  { crate = "html5ever@0.39", reason = "scraper, dom_query (dom_smoothie)" },
+  { crate = "markup5ever@0.39", reason = "scraper, dom_query (dom_smoothie)" },
+  { crate = "web_atoms@0.2", reason = "html5ever 0.38/0.39 generation" },
+  { crate = "string_cache@0.9", reason = "markup5ever 0.38/0.39 generation" },
+  { crate = "string_cache_codegen@0.6", reason = "markup5ever 0.38/0.39 generation" },
+  # Servo CSS crates: ammonia is on cssparser 0.38, scraper and dom_query on 0.37, and lol_html
+  # pins the generation before.
   { crate = "selectors@0.37", reason = "lol_html" },
   { crate = "cssparser@0.36", reason = "lol_html" },
+  { crate = "cssparser@0.37", reason = "scraper, dom_query (dom_smoothie)" },
   { crate = "cssparser-macros@0.6", reason = "lol_html" },
+  # phf 0.13 → 0.14: web_atoms 0.3 (ammonia) moved on; comrak, cssparser 0.36/0.37 and lol_html did not.
+  { crate = "phf@0.13", reason = "comrak, cssparser 0.36/0.37, lol_html" },
+  { crate = "phf_codegen@0.13", reason = "cssparser 0.36/0.37 and markup5ever 0.38/0.39 generation" },
+  { crate = "phf_generator@0.13", reason = "phf_codegen 0.13" },
+  { crate = "phf_shared@0.13", reason = "phf 0.13" },
   # hashbrown: indexmap 1 (serde_yaml via pagefind) and pagefind's own 0.16 beside 0.17.
   { crate = "hashbrown@0.12", reason = "indexmap 1 via serde_yaml (pagefind)" },
   { crate = "hashbrown@0.16", reason = "pagefind" },

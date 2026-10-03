@@ -15,4 +15,5 @@ mod no_js;
 mod offline;
 mod preferences;
 mod responsive;
+mod restoration;
 mod search;

@@ -32,7 +32,7 @@ async fn pdf_fallback_is_actionable_without_a_native_viewer_or_javascript() -> R
             let fallback = client.find(fantoccini::Locator::Css(".document-fallback a")).await?;
             anyhow::ensure!(fallback.is_displayed().await?, "native object reveals the actionable fallback when no viewer is available");
             anyhow::ensure!(fallback.attr("href").await?.as_deref() == Some(format!("{}document.pdf", fixture.base).as_str()), "fallback retains the original document URL");
-            let geometry = client.execute("const frame=document.querySelector('.document-frame'),caption=document.querySelector('.document-reader figcaption'),style=getComputedStyle(caption);return {height:frame.getBoundingClientRect().height,centered:style.textAlign==='center',italic:style.fontStyle==='italic',fallback:document.querySelector('.document-fallback').textContent,booted:typeof window.Swup==='function'}", vec![]).await?;
+            let geometry = client.execute("const frame=document.querySelector('.document-frame'),caption=document.querySelector('.document-reader figcaption'),style=getComputedStyle(caption);return {height:frame.getBoundingClientRect().height,centered:style.textAlign==='center',italic:style.fontStyle==='italic',fallback:document.querySelector('.document-fallback').textContent,booted:document.documentElement.dataset.aggrReady==='true'}", vec![]).await?;
             anyhow::ensure!(geometry["height"].as_f64().unwrap_or_default() >= 384.0 && geometry["centered"] == true && geometry["italic"] == true, "failed documents preserve viewer geometry and caption styling: {geometry}");
             if scripts_blocked { anyhow::ensure!(geometry["booted"] == false, "fallback works before application scripts load"); }
         }
@@ -383,17 +383,23 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                     ),
                 )?;
                 if !failed && label == "direct video" {
-                    let timing = client.execute(r#"
+                    // The timing line is written directly; the header's length is rendered from
+                    // state and follows the file's duration at the next frame.
+                    let timing = client.execute_async(r#"
+                      const done=arguments[arguments.length-1];
                       const media=document.querySelector('.native-video video'),host=document.querySelector('[data-media-timing]');
                       const before=document.querySelector('.body').getBoundingClientRect().top;
                       Object.defineProperties(media,{duration:{configurable:true,value:600},currentTime:{configurable:true,value:60},paused:{configurable:true,value:false}});
                       media.playbackRate=2;
                       media.dispatchEvent(new Event('durationchange'));
                       media.dispatchEvent(new Event('playing'));
-                      const playing=host.textContent,metadata=document.querySelector('.itemhead .reading-stats').textContent.trim();
-                      Object.defineProperty(media,'paused',{configurable:true,value:true});
-                      media.dispatchEvent(new Event('pause'));
-                      return {playing,paused:host.textContent,metadata,stable:Math.abs(document.querySelector('.body').getBoundingClientRect().top-before)<=1};
+                      const playing=host.textContent;
+                      requestAnimationFrame(()=>{
+                        const metadata=document.querySelector('.itemhead .reading-stats').textContent.trim();
+                        Object.defineProperty(media,'paused',{configurable:true,value:true});
+                        media.dispatchEvent(new Event('pause'));
+                        done({playing,paused:host.textContent,metadata,stable:Math.abs(document.querySelector('.body').getBoundingClientRect().top-before)<=1});
+                      });
                     "#,vec![]).await?;
                     anyhow::ensure!(
                         timing["playing"]
@@ -441,6 +447,19 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                         ))],
                     )
                     .await?;
+                let modified = client.execute(r#"
+                  const link = document.querySelector('[data-video-embed]');
+                  let intercepted = false;
+                  link.addEventListener('click', event => { intercepted = event.defaultPrevented; event.preventDefault(); }, {once:true});
+                  link.dispatchEvent(new MouseEvent('click', {ctrlKey:true, bubbles:true, cancelable:true}));
+                  return {intercepted, mounted:!!document.querySelector('.video-player iframe'), role:link.getAttribute('role')};
+                "#, vec![]).await?;
+                anyhow::ensure!(
+                    modified["intercepted"] == false
+                        && modified["mounted"] == false
+                        && modified["role"] == "button",
+                    "modified provider clicks preserve the original link: {modified}"
+                );
                 let before = media_box(client, ".video-player").await?;
                 fixture.media.blocked.store(true, Ordering::Relaxed);
                 client

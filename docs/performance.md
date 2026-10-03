@@ -81,8 +81,7 @@ single 294.9 s pass, publishing 39 fewer media groups out of 12,210.
 measures it. A development snapshot (`aggr dev` without `--release`) is served from a local cache
 and skips the check: when an archive is larger than the limit, measuring it costs a second complete
 build, which on a 3,000-item instance was 205 s followed by 319 s. `aggr dev --release` still
-applies the budget, and its snapshot keeps every archived rendition rather than the published
-selection, so the local cache holds more bytes than the site would.
+applies the budget and prepares the complete published site.
 
 Every stage that is CPU-bound runs on the machine's parallelism rather than a fixed slot count.
 Reading the archive (one file read and parse per item) and re-deriving stored bodies both run on the
@@ -111,17 +110,30 @@ Pagefind, article-response, extraction, and dev caches remain in use. Offline ca
 shared asset once per build. Worker downloads reuse verified revisions across deployments.
 
 Shared template data is converted to MiniJinja values once per build. Article templates still
-receive the complete archive, including custom themes, but rendering every article no longer
+receive the complete archive, but rendering every article no longer
 serializes that archive again. Each article is parsed and highlighted once by bounded workers. Its prepared HTML and plain text
 serve reading metrics, excerpts, every collection feed, portable representations, article image
 substitution, and search indexing. Shared immutable image/preview paths are written once per build;
 verified asset hashes are reused instead of rereading the same bytes for naming.
 
-Dev snapshots share immutable asset bytes across responses and rebuilds. Content-addressed image,
-theme, and versioned search files reuse their existing buffers when their lengths still match;
-mutable pages and manifests are reread, and removed paths disappear from the next snapshot. Up to
-four workers read remaining files, with replacement loading off the async runtime thread. An
-in-flight response keeps its original bytes while the next complete snapshot is promoted.
+Ordinary dev snapshots prepare archive metadata and static assets, then materialize pages, portable
+representations, media and search on demand. Feed pages read previews rather than all body images.
+The parsed Markdown and normalized body caches survive theme reloads, and shared template values
+are prepared once per generation. Search indexing uses a separate lock so an index build does not
+block already available page and asset responses. Media bytes are read for the response, never
+copied into a permanent archive-sized memory map. Each generation has its own disposable directory;
+an in-flight request retains its generation until it finishes, and a failed preparation leaves the
+previous snapshot available. `dev --release` retains the complete publication build for verification.
+
+On the cached instance used for the previous full-dev benchmark (3,540 stored items, 3,283 visible
+articles), request-driven preparation measured 29.65 seconds cold and 2.02 seconds with prepared
+metadata reused. The first home page then took 0.27 and 0.23 seconds respectively; a repeated page
+read took under 0.1 ms. The previous complete render took 427.7 seconds and wrote 4.17 GB before
+loading its memory snapshot. These measurements cover snapshot preparation and page requests;
+source syncing and the server's input/fingerprint scans are separate. The reproducible ignored
+benchmark is `site::dev::benchmarks::cached_archive_prepare_and_first_page`, with
+`AGGR_BENCH_CONFIG` and `AGGR_BENCH_DATA` pointing to an existing configuration and archive.
+It reads that archive and puts all output and derived caches in a temporary directory.
 
 Pagefind output is reused by its input fingerprint. Upstream Pagefind can order internal metadata
 differently on a cold rebuild, producing different bytes for an equivalent index. Preserving the
@@ -192,16 +204,20 @@ and warm versus cold caches determine the result.
 
 ## Reader startup and search
 
-The reader is four hand-written files embedded in the Rust binary, with no build step. Only the
-small pre-paint bootstrap blocks rendering; the core module is deferred, and search and media are
-fetched on demand. The complete static HTML remains the first paint and the no-JavaScript fallback.
+The reader is a Svelte application compiled ahead of time and embedded in the Rust binary. Only the
+small pre-paint bootstrap blocks rendering; the module bundle is deferred, mounts from the page's
+embedded model, and loads search and media chunks on demand. The complete static HTML remains the
+first paint and the no-JavaScript fallback.
 
 Search completion uses `search-catalog.json` (version, base, document count, and facets). Pagefind's
 runtime and its filter files wait until an actual query needs them, so a reader who never searches
 downloads none of it. See [client development](client.md) for the search contract.
 
-Prefetching is the browser's: a `speculationrules` document rule with moderate eagerness, which
-lets the browser spend its own budget and cancel work the reader moved away from.
+Prefetching is bounded. A press, or a mouse resting on a link for 60 ms, fetches that page.
+Once a page settles, the reader also fetches the tabs, the neighbouring articles and the rows
+that stay on screen for half a second. That is at most ten guesses per page, and none at all
+under Save-Data or on a 2G connection. Fetched pages stay in memory for five minutes, 24 at most,
+and are parsed while the browser is idle, so following a link only has to swap the content.
 
 ## Measuring changes
 
@@ -293,7 +309,7 @@ benefit. `make timings` writes Cargo's HTML timing report under `target/cargo-ti
 cached no-op build separately from a representative source edit, and avoid concurrent source or
 embedded-asset writes while measuring. See [Cargo profiles](https://doc.rust-lang.org/cargo/reference/profiles.html).
 
-`make check` verifies formatting, then runs frontend checks alongside Rust validation. Rust linting
+`make check` verifies formatting, then runs the frontend checks alongside Rust validation. Rust linting
 finishes before tests begin, avoiding competing Cargo processes and target-directory locks.
 Compiler parallelism remains under Cargo's control. Build, run, lint, and test Make targets use
 `--locked` so verification cannot silently update dependency versions.

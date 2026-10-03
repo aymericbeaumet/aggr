@@ -268,15 +268,11 @@ impl Layout {
         }
         let configs = resolve_paths(configs)?;
 
-        let mut themes = vec![
-            project.root.join("templates"),
-            project.root.join("static"),
+        // A development binary renders the theme from its source tree; nothing in the project
+        // itself is a theme input.
+        let themes = resolve_paths(vec![
             Path::new(env!("CARGO_MANIFEST_DIR")).join("themes/default"),
-        ];
-        if project.config.site.theme != "default" {
-            themes.push(rooted(&project.root, Path::new(&project.config.site.theme)));
-        }
-        let themes = resolve_paths(themes)?;
+        ])?;
 
         let mut git = vec![repo.join(".git")];
         git.extend(git_metadata_paths(&repo)?);
@@ -389,13 +385,8 @@ fn protected_paths(project: &Project, repo: &Path) -> Result<Vec<PathBuf>> {
         repo.join(".git"),
         repo.join(&project.config.store.dir),
         project.config_path.clone(),
-        project.root.join("templates"),
-        project.root.join("static"),
     ];
     protected.extend(git_metadata_paths(repo)?);
-    if project.config.site.theme != "default" {
-        protected.push(project.root.join(&project.config.site.theme));
-    }
     protected.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("themes/default"));
     protected.extend(project.config.loaded_files.iter().cloned());
     protect_local_sources(&project.config_path, &mut BTreeSet::new(), &mut protected)?;

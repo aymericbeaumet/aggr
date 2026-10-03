@@ -1,5 +1,5 @@
-//! Navigation: archive boundaries, the speculation rules the browser prepares pages with, video
-//! provider facades, and the reader's modules across base paths.
+//! Navigation: archive boundaries, pages swapped in place and fetched ahead, video provider
+//! facades, and the reader's modules across base paths.
 
 use anyhow::{Context as _, Result};
 use fantoccini::{Client, Locator};
@@ -194,44 +194,96 @@ async fn video_facade_contracts(client: &Client, fixture: &Fixture) -> Result<()
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
-async fn speculation_rules_prepare_the_archive_and_nothing_outside_it() -> Result<()> {
+async fn archive_pages_swap_in_place_and_nothing_outside_the_archive_is_fetched() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fixture = Fixture::with_pwa(false)?;
     let client = browser_client().await?;
     let result = async {
         client.goto(&fixture.base).await?;
         wait_booted_with(&client, "document.querySelectorAll('[data-row-open]').length === 3").await?;
-        // Preparing the next page is the browser's job, declared in markup rather than driven by
-        // script. What matters is which links it may take at its word.
-        let speculation = client.execute(r#"
-          const declared = document.querySelector('script[type=speculationrules]');
-          const rules = JSON.parse(declared.textContent);
-          const prefetch = rules.prefetch[0], prerender = rules.prerender[0];
-          const excluded = prefetch.where.and.find(clause => clause.not).not.selector_matches;
-          const matches = (node, selector) => !!node && node.matches(selector);
-          // Every link on this page that leaves the archive, whichever ones the fixture renders.
+        // Pages are fetched ahead by the reader itself, so the browser's own speculation rules
+        // would only prepare documents no click will load.
+        anyhow::ensure!(
+            client.execute("return !document.querySelector('script[type=speculationrules]')", vec![]).await? == true,
+            "no speculation rules compete with the reader's own fetching"
+        );
+        // Once the page has settled, the tabs and the rows the reader lingers on are fetched
+        // ahead; a link that leaves the archive never is, whichever ones the fixture renders.
+        wait_for(&client, r#"(() => {
+          const fetched = new Set(performance.getEntriesByType('resource').filter(entry => entry.initiatorType === 'fetch').map(entry => entry.name));
+          return [...document.querySelectorAll('.mobile-tabs a[data-route], .rows .row [data-row-open]')].every(link => fetched.has(link.href) || link.href.split('#')[0] === location.href.split('#')[0]);
+        })()"#).await?;
+        let outward = client.execute(r#"
+          const fetched = new Set(performance.getEntriesByType('resource').map(entry => entry.name));
           const outward = [...document.querySelectorAll('a[target="_blank"], .u-bookmark-of, .config-link')];
-          return {
-            eagerness:[prefetch.eagerness, prerender.eagerness],
-            article:matches(document.querySelector('.row [data-row-open]'), prerender.where.selector_matches),
-            route:matches(document.querySelector('[data-site-navigation] a[data-route]'), prerender.where.selector_matches),
-            outward:outward.length,
-            kept:outward.filter(link => !link.matches(excluded)).map(link => link.className || link.href)
-          };
+          return {count: outward.length, fetched: outward.filter(link => fetched.has(link.href)).map(link => link.href)};
         "#, vec![]).await?;
         anyhow::ensure!(
-            speculation["eagerness"] == json!(["moderate", "moderate"])
-                && speculation["article"] == true
-                && speculation["route"] == true,
-            "the archive's own pages are the ones worth preparing: {speculation}"
+            outward["count"].as_u64().unwrap_or(0) > 0 && outward["fetched"] == json!([]),
+            "a link that leaves the archive must never be fetched before someone follows it: {outward}"
         );
+        // Following a row swaps the article in: the same document, a new address, its own title
+        // and kind, and one history entry for it.
+        let before = client.execute(r#"
+          window.__aggrDocument = 'kept';
+          return {history: history.length, href: document.querySelector('.row [data-row-open]').href, title: document.querySelector('.row [data-row-open]').textContent.trim()};
+        "#, vec![]).await?;
+        client.find(Locator::Css(".row [data-row-open]")).await?.click().await?;
+        wait_booted_with(&client, "document.body.dataset.kind === 'item'").await?;
+        let arrived = client.execute(r#"
+          return {kept: window.__aggrDocument, href: location.href, title: document.querySelector('.itemhead h1').textContent.trim(),
+            documentTitle: document.title, top: scrollY, history: history.length, kind: document.body.dataset.kind,
+            tab: document.querySelector('.mobile-tabs [aria-current]')?.dataset.route ?? null,
+            base: document.querySelector('.menu-link[data-route=""]').href};
+        "#, vec![]).await?;
         anyhow::ensure!(
-            speculation["outward"].as_u64().unwrap_or(0) > 0 && speculation["kept"] == json!([]),
-            "a link that leaves the archive must never be fetched before someone follows it: {speculation}"
+            arrived["kept"] == "kept" && arrived["href"] == before["href"] && arrived["title"] == before["title"]
+                && arrived["documentTitle"].as_str().unwrap_or("").contains(before["title"].as_str().unwrap_or("?"))
+                && arrived["top"] == 0 && arrived["kind"] == "item" && arrived["tab"] == Value::Null
+                && arrived["history"].as_u64() == before["history"].as_u64().map(|length| length + 1)
+                && arrived["base"] == fixture.base.as_str(),
+            "an archive link swaps the page in place: {arrived} after {before}"
+        );
+        // Back is instant too: the feed returns with its place and its cursor, still in place.
+        client.back().await?;
+        wait_booted_with(&client, "document.body.dataset.kind === 'river' && !!document.querySelector('.row.is-selected')").await?;
+        let returned = client.execute(r#"
+          return {kept: window.__aggrDocument, selected: document.querySelector('.row.is-selected [data-row-open]').href,
+            tab: document.querySelector('.mobile-tabs [aria-current]')?.dataset.route};
+        "#, vec![]).await?;
+        anyhow::ensure!(
+            returned["kept"] == "kept" && returned["tab"] == "" && returned["selected"] == before["href"],
+            "Back swaps the feed back in with its cursor: {returned}"
+        );
+        // A page arriving while the last one still glides is held where it belongs until it is
+        // still; asking for its top in the meantime is the reader's call, and the hold lets go.
+        let held = client.execute_async(r#"
+          const done = arguments[arguments.length - 1], root = document.documentElement;
+          const frame = () => new Promise(resolve => requestAnimationFrame(() => resolve()));
+          (async () => {
+            root.style.paddingBottom = '200vh';
+            scrollTo(0, 300); await frame(); await frame();
+            document.querySelector('.row [data-row-open]').click();
+            while (document.body.dataset.kind !== 'item') await frame();
+            // A fling carrying the article as Back is pressed.
+            const fling = () => { if (document.body.dataset.kind === 'item') { scrollBy(0, 4); requestAnimationFrame(fling); } };
+            fling(); await frame(); await frame();
+            history.back();
+            while (document.body.dataset.kind !== 'river') await new Promise(resolve => setTimeout(resolve));
+            const arrived = {held: root.style.overflow === 'hidden', at: scrollY};
+            document.querySelector('.brand').click();
+            for (let i = 0; i < 20; i++) await frame();
+            done({...arrived, top: scrollY, overflow: root.style.overflow});
+            root.style.removeProperty('padding-bottom');
+          })();
+        "#, vec![]).await?;
+        anyhow::ensure!(
+            held["held"] == true && held["at"] == 300 && held["top"] == 0 && held["overflow"] == "",
+            "the title takes a held page to its top and ends the hold: {held}"
         );
         Ok(())
     }.await;
-    report_failure(&client, "speculation-rules", &result).await;
+    report_failure(&client, "in-place-navigation", &result).await;
     finish(client, result).await
 }
 
@@ -304,7 +356,7 @@ async fn reader_modules_survive_every_base_path() -> Result<()> {
                     )
                     .await?;
                 anyhow::ensure!(
-                    controls["count"] == 17,
+                    controls["count"] == 18,
                     "every setting renders a control ({base_path}): {controls}"
                 );
                 anyhow::ensure!(
@@ -314,6 +366,40 @@ async fn reader_modules_survive_every_base_path() -> Result<()> {
                 client.goto(&format!("{}items/example/2026-09-01-story-36/", fixture.base)).await?;
                 wait_for(&client, "!!document.querySelector('.native-audio.is-enhanced')").await?;
                 screenshot(&client, if mobile {"podcast-player-mobile"} else {"podcast-player-desktop"}).await?;
+                // The player names what is playing, shows the archived length before anything
+                // loads, and marks each jump with its length inside a circling arrow.
+                let player = client.execute(r#"
+                  const card = document.querySelector('.native-audio');
+                  return {episode: card.querySelector('.audio-episode')?.textContent.trim(),
+                    title: document.querySelector('.itemhead h1').textContent.trim(),
+                    heading: card.querySelector('.audio-heading').innerText,
+                    duration: card.querySelector('[data-audio-duration]').textContent,
+                    skips: [...card.querySelectorAll('[data-audio-skip]')].map(button => button.querySelector('svg') ? button.querySelector('span')?.textContent : null)};
+                "#, vec![]).await?;
+                anyhow::ensure!(
+                    player["episode"] == player["title"]
+                        && !player["heading"].as_str().unwrap_or("").contains("Listen")
+                        && !player["heading"].as_str().unwrap_or("").contains("Ready when you are")
+                        && player["duration"] == "10:00"
+                        && player["skips"] == json!(["30", "15", "15", "30"]),
+                    "the player is titled by its episode and shows its length ({base_path}): {player}"
+                );
+                // Idle recordings show remaining duration without claiming a finish time.
+                let volume = client.execute(r#"
+                  const card = document.querySelector('.native-audio'), volume = card.querySelector('[data-audio-volume]');
+                  volume.value = '0.5';
+                  volume.dispatchEvent(new Event('input', {bubbles: true}));
+                  return {estimate: card.querySelector('[data-audio-ends-at]').textContent, text: card.innerText};
+                "#, vec![]).await?;
+                anyhow::ensure!(
+                    volume["estimate"] == "10:00 remaining" && !volume["text"].as_str().unwrap_or("").contains("Ends at"),
+                    "an idle player shows duration, not a finish time ({base_path}): {volume}"
+                );
+                // A player reached in place is enhanced like one that was loaded.
+                client.find(Locator::Css(".brand")).await?.click().await?;
+                wait_booted_with(&client, "document.body.dataset.kind === 'river' && !document.querySelector('.native-audio')").await?;
+                client.back().await?;
+                wait_for(&client, "document.body.dataset.kind === 'item' && !!document.querySelector('.native-audio.is-enhanced')").await?;
                 Ok(())
             }
             .await;

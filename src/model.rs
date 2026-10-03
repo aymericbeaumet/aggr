@@ -185,7 +185,7 @@ impl ArticleImage {
                 && if variants_only {
                     extension == "webp"
                 } else {
-                    matches!(extension, "jpg" | "png" | "gif" | "webp")
+                    matches!(extension, "jpg" | "png" | "gif" | "webp" | "avif")
                 }
                 && image.width > 0
                 && image.height > 0

@@ -103,6 +103,23 @@ fn source_host(source: &SourceCtx) -> Option<String> {
         .or_else(|| urls.iter().find_map(publisher_identity))
 }
 
+/// The website a source's feed names as its own, when every article the source brought is
+/// published there. A source reached through a directory (a podcast's Apple Podcasts or Spotify
+/// listing) or a feed host is then that website's own feed rather than an aggregator of it, so
+/// its articles do not read as the website's "via" the listing.
+fn own_website(source: &SourceCtx, authors: &BTreeMap<String, Option<String>>) -> Option<String> {
+    let website = source
+        .site_url
+        .as_deref()
+        .and_then(|value| url::Url::parse(value).ok())
+        .and_then(|url| publisher_identity(&url))?;
+    authors
+        .get(&source.slug)
+        .and_then(Option::as_ref)
+        .filter(|host| **host == website)
+        .cloned()
+}
+
 /// The label an item's publisher reads by. Grouping is by host, but the canonical name a source's
 /// own metadata resolved to keeps the account path where one host carries many publishers
 /// (`youtube.com/@channel`) and the port where one host serves many ports. A label naming any
@@ -159,11 +176,25 @@ pub(super) fn resolve(
         }
     }
 
+    // Who published each source's articles, where all of them agree.
+    let mut authors = BTreeMap::<String, Option<String>>::new();
+    for item in items.iter() {
+        let host = publisher_page(item).and_then(|root| publisher_identity(&root));
+        authors
+            .entry(item.source.clone())
+            .and_modify(|seen| {
+                if *seen != host {
+                    *seen = None;
+                }
+            })
+            .or_insert(host);
+    }
+
     // Archive IDs remain stable; only the public collections are grouped by trusted host metadata.
     let mut feed_ids = BTreeMap::new();
     let mut grouped = BTreeMap::<String, Vec<SourceCtx>>::new();
     for source in std::mem::take(sources) {
-        if let Some(host) = source_host(&source) {
+        if let Some(host) = own_website(&source, &authors).or_else(|| source_host(&source)) {
             feed_ids.insert(source.slug.clone(), host.clone());
             grouped.entry(host).or_default().push(source);
         }
@@ -590,6 +621,50 @@ mod tests {
             assert_eq!(source.count, 1);
             assert!(source.listed, "a configured feed is a source you follow");
         }
+    }
+
+    #[test]
+    fn a_podcast_listing_whose_episodes_live_on_its_own_website_is_that_website() {
+        let mut podcast = source(
+            "https://podcasts.apple.com/us/podcast/lennys-podcast-product-career-growth/id1627920305",
+        );
+        podcast.slug = "podcasts-apple-com-lennys".into();
+        podcast.name = "Lenny's Podcast: Product | Career | Growth".into();
+        podcast.site_url = Some("https://www.lennysnewsletter.com/podcast".into());
+        let mut aggregator = source("https://hnrss.org/frontpage");
+        aggregator.slug = "hnrss".into();
+        aggregator.name = "Hacker News".into();
+        aggregator.site_url = Some("https://news.ycombinator.com/".into());
+        let mut sources = vec![podcast, aggregator];
+        let mut items = vec![
+            article(
+                "podcasts-apple-com-lennys",
+                "a",
+                "https://www.lennysnewsletter.com/p/a",
+            ),
+            article(
+                "podcasts-apple-com-lennys",
+                "b",
+                "https://www.lennysnewsletter.com/p/b",
+            ),
+            article("hnrss", "c", "https://blog.example/post"),
+            article("hnrss", "d", "https://www.lennysnewsletter.com/p/d"),
+        ];
+        resolve(&mut items, &mut sources, &[], &[]);
+        // The show is its website's own feed: its episodes carry no "via".
+        for item in &items[..2] {
+            assert_eq!(item.publisher_source, "lennysnewsletter.com");
+            assert!(!item.is_aggregated, "{:?}", item.metadata.feed_sources);
+            assert!(item.metadata.feed_sources.is_empty());
+        }
+        let show = sources
+            .iter()
+            .find(|source| source.slug == "lennysnewsletter.com")
+            .unwrap();
+        assert_eq!(show.name, "Lenny's Podcast: Product | Career | Growth");
+        // An aggregator still reads as one, including for an article from that same website.
+        assert!(items[2..].iter().all(|item| item.is_aggregated));
+        assert!(sources.iter().any(|source| source.slug == "hnrss.org"));
     }
 
     #[test]

@@ -18,7 +18,7 @@
 <meta name="apple-mobile-web-app-title" content="{{ site.title }}">
 {% endif %}
 <script id="aggr-preferences" type="application/json">{{ site.preference_schema.bootstrap | json }}</script>
-<script src="{{ 'assets/bootstrap.js' | url_for }}"></script>
+<script src="{{ 'assets/app/bootstrap.js' | url_for }}"></script>
 <meta name="aggr:network" content="{{ site.network_url }}">
 <meta name="aggr:instance" content="{{ 'aggr.json' | url_for }}">
 <meta name="aggr:source" content="{{ site.config_url or ('aggr.toml' | url_for) }}">
@@ -56,6 +56,10 @@
 {% else %}<meta name="twitter:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | site_path }}"><meta name="twitter:image:alt" content="{{ site.title }} app icon">{% endif %}
 {% endif %}
 <link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
+{% if client_page.site.assets.app %}
+{% for chunk in client_page.site.assets.imports %}<link rel="modulepreload" href="{{ chunk | url_for }}">{% endfor %}
+{% if client_page.site.assets.css %}<link rel="stylesheet" href="{{ client_page.site.assets.css | url_for }}">{% endif %}
+{% endif %}
 <noscript><style>.progressive-image,.preview-image,.article-lead img{color:inherit}</style></noscript>
 {% if page.feed_path is not none %}{% set feed_path = page.feed_path %}{% set feed_title = page.feed_title or site.title %}
 <link rel="alternate" type="application/atom+xml" title="{{ feed_title }}" href="{{ (feed_path ~ 'atom.xml') | url_for }}">
@@ -69,54 +73,12 @@
 {% if site.pwa %}
 <link rel="manifest" href="{{ 'manifest.webmanifest' | url_for }}">
 {% endif %}
-<script>window.AGGR = {base: {{ page.root | json }}, kind: {{ page.kind | json }}, pwa: {{ site.pwa | json }}, discussions: {{ site.discussions | json }}, entries: {{ site.entry_shortcuts | json }}, assets: {search: {{ ('assets/search.js' | url_for) | json }}, media: {{ ('assets/media.js' | url_for) | json }}}, content: {{ build.content_version | json }}};</script>
-<script type="speculationrules">
-{
-  "prefetch": [{
-    "where": {"and": [
-      {"href_matches": "/*"},
-      {"not": {"selector_matches": "[target], [download], [rel~=external], .u-bookmark-of, .discussion, .config-link, .footer a"}}
-    ]},
-    "eagerness": "moderate"
-  }],
-  "prerender": [{
-    "where": {"selector_matches": ".rows .row [data-row-open], .article-more-link, [data-site-navigation] a[data-route]"},
-    "eagerness": "moderate"
-  }]
-}
-</script>
+<script id="aggr-page" type="application/json">{{ client_page | json }}</script>
 {% if schema %}<script type="application/ld+json">{{ schema | json }}</script>{% endif %}
 {% block head %}{% endblock %}
 </head>
 <body data-kind="{{ page.kind }}">
 <a class="skip-link" href="#content">skip to content</a>
-<header class="top" data-nosnippet>
-  <nav class="nav" data-site-navigation aria-label="Site navigation">
-    <a class="brand" data-route="" rel="home" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/favicon-32.png' | url_for }}" alt="" width="20" height="20"><span class="brand-title">{{ site.title | lower }}</span></a>
-    <div class="nav-primary">
-      <a class="menu-link" data-route="" data-kinds="river" data-feed-action href="{{ '' | url_for }}"{% if page.kind == 'river' %} aria-current="page"{% endif %}>feed</a>
-      <span class="nav-separator" aria-hidden="true">|</span>
-      <a class="menu-link" data-route="browse/" data-kinds="browse categories category sources source tags tag" href="{{ 'browse/' | url_for }}"{% if page.kind in ['browse', 'categories', 'category', 'sources', 'source', 'tags', 'tag'] %} aria-current="page"{% endif %}>browse</a>
-      <span class="nav-separator" aria-hidden="true">|</span>
-      <a class="menu-link" data-route="preferences/" data-kinds="preferences" href="{{ 'preferences/' | url_for }}"{% if page.kind == 'preferences' %} aria-current="page"{% endif %}>preferences</a>
-    </div>
-    <div class="nav-actions">
-      <a class="config-link"{% if not site.config_page_url and not site.config_url %} data-route="aggr.toml"{% endif %} href="{{ site.config_page_url or site.config_url or ('aggr.toml' | url_for) }}" target="_blank" rel="noopener noreferrer">aggr.toml <span aria-hidden="true">↗</span></a>
-    </div>
-  </nav>
-</header>
-<nav class="mobile-tabs" data-site-navigation aria-label="Main navigation" data-nosnippet>
-  {% for route, label, kinds, icon in [
-    ['', 'feed', ['river'], 'M4 5h16M4 12h16M4 19h10'],
-    ['browse/', 'browse', ['browse', 'categories', 'category', 'sources', 'source', 'tags', 'tag'], 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z'],
-    ['preferences/', 'preferences', ['preferences'], 'M4 7h5m4 0h7M4 17h9m4 0h3M9 4v6M13 14v6']
-  ] %}
-  <a data-route="{{ route }}" data-kinds="{{ kinds | join(' ') }}"{% if label == 'feed' %} data-feed-action{% endif %} href="{{ route | url_for }}"{% if page.kind in kinds %} aria-current="page"{% endif %}>
-    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ icon }}"/></svg>
-    <span>{{ label }}</span>
-  </a>
-  {% endfor %}
-</nav>
 {% macro key_pair(first, second, separator='+', platform='') %}<span class="key-pair"{% if platform %} data-platform-key="{{ platform }}"{% endif %}><kbd>{{ first }}</kbd><small>{{ separator }}</small><kbd>{{ second }}</kbd></span>{% endmacro %}
 <dialog id="shortcut-help" class="shortcut-help" aria-labelledby="shortcut-help-title" aria-keyshortcuts="?" data-nosnippet>
   <form method="dialog">
@@ -175,11 +137,47 @@
     </div>
   </form>
 </dialog>
+<div id="app">
+<div id="reader-announcement" class="sr-only" role="status" aria-live="polite"></div>
+<div id="pull-refresh" class="pull-refresh" role="status" hidden></div>
+<div id="connection-status" class="connection-status" role="status" aria-live="polite" hidden>
+  <span id="connection-status-message"></span>
+  <button id="connection-retry" type="button" hidden>Retry</button>
+  <button id="pwa-refresh" type="button" title="Refresh and keep your place" hidden>↻ Refresh to update</button>
+</div>
+<header class="top" data-nosnippet>
+  <nav class="nav" data-site-navigation aria-label="Site navigation">
+    <a class="brand" data-route="" rel="home" href="{{ '' | url_for }}"><img class="brand-icon" src="{{ 'assets/favicon-32.png' | url_for }}" alt="" width="20" height="20"><span class="brand-title">{{ site.title | lower }}</span></a>
+    <div class="nav-primary">
+      <a class="menu-link" data-route="" data-kinds="river" data-feed-action href="{{ '' | url_for }}"{% if page.kind == 'river' %} aria-current="page"{% endif %}>feed</a>
+      <span class="nav-separator" aria-hidden="true">|</span>
+      <a class="menu-link" data-route="browse/" data-kinds="browse categories category sources source tags tag" href="{{ 'browse/' | url_for }}"{% if page.kind in ['browse', 'categories', 'category', 'sources', 'source', 'tags', 'tag'] %} aria-current="page"{% endif %}>browse</a>
+      <span class="nav-separator" aria-hidden="true">|</span>
+      <a class="menu-link" data-route="preferences/" data-kinds="preferences" href="{{ 'preferences/' | url_for }}"{% if page.kind == 'preferences' %} aria-current="page"{% endif %}>preferences</a>
+    </div>
+    <div class="nav-actions">
+      <a class="config-link"{% if not site.config_page_url and not site.config_url %} data-route="aggr.toml"{% endif %} href="{{ site.config_page_url or site.config_url or ('aggr.toml' | url_for) }}" target="_blank" rel="noopener noreferrer">aggr.toml <span aria-hidden="true">↗</span></a>
+    </div>
+  </nav>
+</header>
+<nav class="mobile-tabs" data-site-navigation aria-label="Main navigation" data-nosnippet>
+  {% for route, label, kinds, icon in [
+    ['', 'feed', ['river'], 'M4 5h16M4 12h16M4 19h10'],
+    ['browse/', 'browse', ['browse', 'categories', 'category', 'sources', 'source', 'tags', 'tag'], 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z'],
+    ['preferences/', 'preferences', ['preferences'], 'M4 7h5m4 0h7M4 17h9m4 0h3M9 4v6M13 14v6']
+  ] %}
+  <a data-route="{{ route }}" data-kinds="{{ kinds | join(' ') }}"{% if label == 'feed' %} data-feed-action{% endif %} href="{{ route | url_for }}"{% if page.kind in kinds %} aria-current="page"{% endif %}>
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ icon }}"/></svg>
+    <span>{{ label }}</span>
+  </a>
+  {% endfor %}
+</nav>
 <main id="content" class="main{% if page.paginator %} h-feed{% endif %}" tabindex="-1">
 {% if page.paginator %}<data class="p-name" value="{{ page.title }}" hidden></data>{% endif %}
 {% block content %}{% endblock %}
 </main>
 <footer class="footer" data-nosnippet><a href="https://github.com/aymericbeaumet/aggr" target="_blank" rel="noopener noreferrer">built with aggr</a></footer>
-<script type="module" src="{{ 'assets/app.js' | url_for }}"></script>
+</div>
+{% if client_page.site.assets.app %}<script type="module" src="{{ client_page.site.assets.app | url_for }}"></script>{% endif %}
 </body>
 </html>

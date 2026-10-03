@@ -11,7 +11,7 @@ pub use preferences::ReaderPreferences;
 use source_entries::deserialize_sources;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -49,7 +49,6 @@ pub struct SiteConfig {
     pub description: Option<String>,
     /// BCP 47 language tag used by HTML and syndication formats.
     pub language: String,
-    pub theme: String,
     pub items_per_page: usize,
     /// Items shown in the recent home feed. Source/category/tag archives remain complete.
     pub max_items: usize,
@@ -69,6 +68,9 @@ pub struct SiteConfig {
     pub pwa: bool,
     /// Initial browser preferences; saved reader choices take precedence.
     pub preferences: ReaderPreferences,
+    /// Accepted only as `"default"`: custom themes are gone, and an older config that still
+    /// spells out the default must keep loading.
+    pub theme: Option<String>,
     /// Optional public identity attached to the site's Schema.org metadata.
     pub identity: Option<SiteIdentityConfig>,
     /// Free-form values exposed to templates as `site.params`.
@@ -99,7 +101,6 @@ impl Default for SiteConfig {
             title: "aggr".into(),
             description: None,
             language: "en".into(),
-            theme: "default".into(),
             items_per_page: 50,
             max_items: 5000,
             max_age_days: 365,
@@ -111,6 +112,7 @@ impl Default for SiteConfig {
             out: PathBuf::from("_site"),
             pwa: true,
             preferences: ReaderPreferences::default(),
+            theme: None,
             identity: None,
             params: toml::Table::new(),
         }
@@ -553,9 +555,16 @@ impl Config {
         if !language::is_well_formed(&self.site.language) {
             bail!("[site] language must be a BCP 47 tag such as `en` or `fr-FR`");
         }
-        validate_theme(&self.site.theme).context("[site] theme")?;
         if self.site.items_per_page == 0 {
             bail!("[site] items_per_page must be at least 1");
+        }
+        if self
+            .site
+            .theme
+            .as_deref()
+            .is_some_and(|theme| theme != "default")
+        {
+            bail!("[site] theme: custom themes are not supported; remove the setting");
         }
         if self.site.build_max_bytes == 0 {
             bail!("[site] build_max_bytes must be at least 1");
@@ -654,44 +663,6 @@ impl Config {
             .or_else(|| std::env::var("GITHUB_REPOSITORY").ok())
             .filter(|repo| !repo.is_empty())
     }
-}
-
-/// A theme is the built-in default or a directory inside the repository. Anything else would let
-/// `[site] theme` make the renderer walk and hash an arbitrary directory.
-fn validate_theme(theme: &str) -> Result<()> {
-    if theme == "default" {
-        return Ok(());
-    }
-    if theme.trim().is_empty() {
-        bail!(
-            "must be \"default\" or a directory relative to the repository (e.g. \"themes/mine\")"
-        );
-    }
-    let mut named = false;
-    for component in Path::new(theme).components() {
-        match component {
-            Component::CurDir => {}
-            Component::Normal(part) => {
-                if part
-                    .to_str()
-                    .is_some_and(|part| part.eq_ignore_ascii_case(".git"))
-                {
-                    bail!("{theme:?} must not point into .git");
-                }
-                named = true;
-            }
-            Component::ParentDir => bail!("{theme:?} must not leave the repository"),
-            Component::RootDir | Component::Prefix(_) => {
-                bail!("{theme:?} must be relative to the repository")
-            }
-        }
-    }
-    if !named {
-        bail!(
-            "must be \"default\" or a directory relative to the repository (e.g. \"themes/mine\")"
-        );
-    }
-    Ok(())
 }
 
 fn describe(raw: &SourceConfig) -> String {
@@ -1535,7 +1506,6 @@ images = false
         assert_eq!(config.site.title, compiled.site.title);
         assert_eq!(config.site.description, compiled.site.description);
         assert_eq!(config.site.language, compiled.site.language);
-        assert_eq!(config.site.theme, compiled.site.theme);
         assert_eq!(config.site.items_per_page, compiled.site.items_per_page);
         assert_eq!(compiled.site.items_per_page, 50);
         assert_eq!(config.site.max_items, compiled.site.max_items);
@@ -1789,44 +1759,6 @@ same_as = ["https://social.example/@ada"]
         assert!(Config::parse("[site]\nlanguage = \"fr-FR\"\n").is_ok());
         let error = Config::parse("[site]\nlanguage = \"en_US\"\n").unwrap_err();
         assert!(error.to_string().contains("BCP 47"), "{error}");
-    }
-
-    #[test]
-    fn site_theme_is_the_default_or_a_directory_inside_the_repository() {
-        for theme in [
-            "default",
-            "themes/mine",
-            "./themes/mine",
-            "mine/",
-            "my.git-theme",
-        ] {
-            assert!(validate_theme(theme).is_ok(), "rejected {theme:?}");
-            let config = format!("[site]\ntheme = {theme:?}\n");
-            assert!(Config::parse(&config).is_ok(), "rejected {theme:?}");
-        }
-
-        for theme in [
-            "",
-            "   ",
-            ".",
-            "./",
-            "../mine",
-            "themes/../../mine",
-            "/etc",
-            "/",
-            ".git",
-            ".GIT",
-            "themes/.git/hooks",
-            "mine/.Git",
-        ] {
-            assert!(validate_theme(theme).is_err(), "accepted {theme:?}");
-            let config = format!("[site]\ntheme = {theme:?}\n");
-            let error = Config::parse(&config).unwrap_err();
-            assert!(
-                format!("{error:#}").starts_with("[site] theme: "),
-                "{theme:?}: {error:#}"
-            );
-        }
     }
 
     #[test]

@@ -16,10 +16,9 @@ use crate::store::SourceState;
 
 pub async fn run(project: &Project) -> Result<()> {
     println!(
-        "config: {} ({} source(s), theme {:?})",
+        "config: {} ({} source(s))",
         project.config_path.display(),
-        project.sources.len(),
-        project.config.site.theme
+        project.sources.len()
     );
     if let Some(repository) = project.config.repository() {
         println!("repository: {repository}");

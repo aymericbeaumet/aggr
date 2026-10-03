@@ -11,6 +11,7 @@
 mod access;
 mod aggregator;
 mod cleanup;
+mod dates;
 mod extract;
 #[path = "content_highlight.rs"]
 mod highlight;

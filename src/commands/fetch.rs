@@ -469,6 +469,9 @@ async fn fetch_one_inner(
             // Assign paths in feed order before downloading so completion order cannot change
             // collision suffixes or make a slow article hold up later downloads.
             let mut candidates = Vec::new();
+            // Known recordings the feed never dated: their page is asked once a day, after the
+            // link state is released, so an archived episode still gets its length.
+            let mut undated_recordings: Vec<(RawItem, String)> = Vec::new();
             {
                 let archived = options.archived_links.state();
                 for raw in items.into_iter().rev() {
@@ -478,6 +481,11 @@ async fn fetch_one_inner(
                         if let Some(path) = existing_paths
                             .and_then(|paths| keys.iter().find_map(|key| paths.get(key)))
                         {
+                            if raw.extra.contains_key("audio_url")
+                                && !raw.extra.contains_key("duration_seconds")
+                            {
+                                undated_recordings.push((raw.clone(), path.to_string()));
+                            }
                             added += usize::from(reconcile_duration(
                                 &raw,
                                 path,
@@ -510,6 +518,31 @@ async fn fetch_one_inner(
                         continue;
                     }
                     candidates.push((raw, keys, known, existing_path));
+                }
+            }
+            for (mut raw, path) in undated_recordings {
+                let dated = store
+                    .read_item(&path)?
+                    .front
+                    .extra
+                    .get("duration_seconds")
+                    .and_then(serde_yaml_ng::Value::as_u64)
+                    .is_some_and(|seconds| seconds > 0);
+                if dated {
+                    continue;
+                }
+                if let Some(seconds) =
+                    recording::infer(&raw, source, client, cache_dir, article_failures).await?
+                {
+                    raw.extra.insert("duration_seconds".into(), seconds.into());
+                    added += usize::from(reconcile_duration(
+                        &raw,
+                        &path,
+                        source,
+                        store,
+                        options,
+                        transaction.as_deref_mut(),
+                    )?);
                 }
             }
             // Reserve the whole source together to avoid cycles between overlapping feeds.
@@ -874,7 +907,7 @@ fn recording_duration(
         .and_then(|value| url::Url::parse(value).ok())
         .into_iter()
         .collect();
-    match crate::media_duration::from_document(document, url, &media) {
+    match crate::media_duration::from_page(page, document, url, &media) {
         Some(crate::media_duration::RecordingDuration::Recorded(seconds)) => Some(seconds),
         _ => None,
     }

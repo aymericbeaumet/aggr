@@ -73,7 +73,7 @@ ordinary feed or website; nothing here is public configuration.
 | `podcast.rs` | Apple Podcasts show URLs, `open.spotify.com/show/<ID>`, Deezer show URLs, and the hosting providers whose show URL maps to a known feed endpoint | [podcast sources](podcasts.md) |
 | `feed.rs`, `html.rs` | every other `http(s)` URL: as a feed, then advertised and conventional endpoints, then the page's article list | [configuring sources](sources.md) |
 | `aggr.rs` | repository URLs, selected at configuration time (`type = "aggr"` engine) | [source definitions](#source-definitions-and-collections), [the git model](git-model.md#copying-another-instance) |
-| `youtube.rs` | not a dispatcher: it drops Shorts from every source's items, recognizes video URLs for inline players and posters, and reads public durations | [themes](themes.md#video-and-lead-media) |
+| `youtube.rs` | not a dispatcher: it drops Shorts from every source's items, recognizes video URLs for inline players and posters, and reads public durations | [themes](rendering.md#video-and-lead-media) |
 
 ### Qwen
 
@@ -181,8 +181,26 @@ media and no sharing links (Apple Newsroom's `image-sharesheet` figures, for exa
 before extraction so its picture survives; genuine share widgets with intent or social links are
 still removed.
 
+A video facade (`<lite-youtube videoid>`, `<lite-vimeo videoid>`) is an empty custom element a
+publisher script upgrades into a player, so Readability discards it. Before extraction it becomes
+the YouTube or Vimeo embed it stands for, titled from its `title`, `videotitle` or play label, and
+the Markdown keeps it as a link to the video, which the reader plays inline. Retained HTML from
+before this change no longer holds the facade; only a refresh re-captures those items.
+
+Site icons are page decoration, not content: images from favicon services (Google's `s2/favicons`,
+`gstatic` favicon URLs, DuckDuckGo's icon service) and `favicon.*` or `apple-touch-icon*` files are
+dropped from the body with the space that set them apart, and never become an item's preview. A
+post-kind label opening the article, a link whose text names the page it leads to and that is
+followed by another link (Simon Willison's `Comment` before `My comment on …`), is dropped too.
+
 Shared boundary cleanup removes a compact leading `By Name Name MM.DD.YY` paragraph only when its
-date matches the item's publication date. A standalone editorial note at either document
+date matches the item's publication date, and a closing sign-off such as `Eric Gullichsen,
+September 2026` on the same terms: the last paragraph, a name and a date and nothing else. A lone
+date line at either boundary goes when it names the item's own day. Dates are read in the forms
+publishers write them (`27 Sep, 2026`, `September 27th, 2026 at 3:04 pm`, `2026-09-27`,
+`27.09.2026`, RFC 3339 and 2822 stamps) and to the precision written: `September 2026` matches any
+day that month, and an ambiguous `04/05/2026` matches either reading. A line reads as a date only
+when all of it is one, so prose that mentions a date stays. A standalone editorial note at either document
 boundary such as `This article was updated on 08 September 2026.` is removed too, because the
 item metadata already shows publication and update times; the same words inside prose stay. It preserves headings, quotations, code, normal prose,
 later bylines, and existing front matter. Builds apply the same cleanup to older archived bodies
@@ -191,7 +209,7 @@ without rewriting their stored Markdown or HTML.
 OpenReview papers can use verified public metadata and an identity-matched author preprint instead
 of the challenged web application; see [OpenReview ingestion](openreview.md). Canvas applications
 can retain their safe prose and automatically load the sandboxed live original inside the reader; see
-[reader behavior](themes.md#reader-behavior). Neither route executes publisher scripts during fetching.
+[reader behavior](rendering.md#reader-behavior). Neither route executes publisher scripts during fetching.
 
 `wreq = 6.0.0-rc.31` and `wreq-util = 3.0.0-rc.14` are exact prerelease pins: both published
 packages use Apache-2.0 and declare Rust 1.85 compatibility, preserving aggr's Rust 1.96 minimum.
@@ -225,7 +243,7 @@ retain the verified companion without fetching its publisher again.
 The build publishes admitted documents under immutable same-origin URLs; oversized or unavailable
 companions leave the original-link fallback. Store retention removes the current item's companion
 through an ordinary commit, leaving its historical Git object intact. See
-[PDF reader behavior](themes.md#pdf-documents) and [build budgets](build-budget.md).
+[PDF reader behavior](rendering.md#pdf-documents) and [build budgets](build-budget.md).
 
 ## A local snapshot and its original
 

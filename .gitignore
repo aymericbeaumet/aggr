@@ -2,4 +2,4 @@
 /_site
 /.aggr
 /web/node_modules
-/web/.svelte-kit
+/web/.svelte-check

@@ -18,6 +18,8 @@ Combine full text with `source:`, `category:`, `tag:`, `date:`, `sort:`, quoted 
 exclusions such as `-tag:sponsored`. Completion suggests real archive values and dates; hover over
 the field for syntax help. See [client development](client.md) for the search contract.
 
+Archived points and comment counts appear alongside metadata only when the source recorded them.
+
 ## Sharing a passage
 
 Selecting text inside an article offers a **Share** action above the selection. The link it copies
@@ -59,7 +61,7 @@ See [`config.default.toml`](../config.default.toml) for every setting.
 Under **Transfer preferences**, share or copy a link, save a JSON file, or import one on another
 device. Links and files include only these settings, not reading history, and imported settings
 need confirmation before applying. Preference links keep their payload in the URL fragment so
-it is not sent to the server. Older preference links still work. Reset restores the defaults
+it is not sent to the server. Only versioned preference links and files are accepted. Reset restores the defaults
 without clearing reading history. Resetting also restores the site's offline-download count.
 
 ## Offline reading
@@ -84,7 +86,7 @@ separately.
 | `O` | Open the original for the selected feed item or current article. |
 | Uppercase network key | Open the selected/current item's matched discussion, or search that enabled network for its original URL. Built-ins use `H`, `R`, and `X`. |
 | `u` / `d` in articles | Scroll up / down. |
-| `g f`, `g l`, `g p` | Feed, browse, preferences. |
+| `g f` (or `g i`), `g b` (or `g l`), `g p` | Feed, browse, preferences. |
 | `g 1` … `g 9` | Open one of the first nine feed entries. |
 | `?` | Show keyboard help. |
 

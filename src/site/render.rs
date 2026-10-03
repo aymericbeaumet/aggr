@@ -1,5 +1,6 @@
-//! minijinja environment with the layered template/static lookup: project overrides → theme →
-//! embedded default.
+//! minijinja environment over the default theme: embedded in every binary, and read from its
+//! source tree by a development binary so `aggr dev` renders template, CSS and JavaScript edits
+//! without recompiling.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -32,15 +33,43 @@ pub fn default_theme_hash() -> String {
     crate::model::sha1_hex(&bytes)
 }
 
-/// Directories consulted before the embedded theme, most specific first. Each may contain
-/// `templates/` and `static/`.
+/// The default theme. A release binary reads only the copy embedded at compile time; a
+/// development binary reads the same theme from its source tree first, so `aggr dev` renders
+/// template, CSS and JavaScript edits without recompiling Rust. A file missing from the source
+/// tree falls back to the embedded copy.
 #[derive(Debug, Clone, Default)]
-pub struct Layers {
-    pub dirs: Vec<PathBuf>,
+pub struct Theme {
+    source: Option<PathBuf>,
 }
 
-impl Layers {
-    /// Reject anything that could escape a layer directory.
+impl Theme {
+    /// The theme as this binary should read it: the source tree under `CARGO_MANIFEST_DIR` when a
+    /// development binary can see it, otherwise the embedded copy. Release binaries stay fully
+    /// embedded and never depend on the build machine.
+    pub fn development() -> Self {
+        #[cfg(debug_assertions)]
+        {
+            let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes/default");
+            if source.is_dir() {
+                return Self::from_source_tree(source);
+            }
+        }
+        Self::default()
+    }
+
+    /// Read `templates/` and `static/` under `dir` before the embedded copy.
+    pub(crate) fn from_source_tree(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            source: Some(dir.into()),
+        }
+    }
+
+    /// The source tree read before the embedded copy, when there is one.
+    pub fn source_dir(&self) -> Option<&Path> {
+        self.source.as_deref()
+    }
+
+    /// Reject anything that could escape the source tree.
     fn check_name(name: &str) -> Result<(), Error> {
         let bad = name.is_empty()
             || name.starts_with('/')
@@ -59,8 +88,8 @@ impl Layers {
 
     pub fn read(&self, kind: &str, name: &str) -> Result<Option<Cow<'static, [u8]>>, Error> {
         Self::check_name(name)?;
-        for dir in &self.dirs {
-            let path = dir.join(kind).join(name);
+        if let Some(source) = &self.source {
+            let path = source.join(kind).join(name);
             match std::fs::read(&path) {
                 Ok(bytes) => return Ok(Some(Cow::Owned(bytes))),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -75,12 +104,12 @@ impl Layers {
         Ok(DefaultTheme::get(&format!("{kind}/{name}")).map(|file| file.data))
     }
 
-    /// Every static file name across all layers, deduplicated with the most specific winning.
+    /// Every static file name, embedded or in the source tree, deduplicated.
     pub fn static_names(&self) -> Result<Vec<String>> {
         self.names("static")
     }
 
-    /// Every effective template name, including custom includes and the service worker.
+    /// Every effective template name, including includes and the service worker.
     pub fn template_names(&self) -> Result<Vec<String>> {
         self.names("templates")
     }
@@ -90,11 +119,12 @@ impl Layers {
         let mut names: Vec<String> = DefaultTheme::iter()
             .filter_map(|path| path.strip_prefix(&prefix).map(str::to_string))
             .collect();
-        for dir in &self.dirs {
-            let root = dir.join(kind);
-            if !root.is_dir() {
-                continue;
-            }
+        if let Some(root) = self
+            .source
+            .as_ref()
+            .map(|source| source.join(kind))
+            .filter(|root| root.is_dir())
+        {
             for entry in walkdir::WalkDir::new(&root) {
                 let entry = entry.with_context(|| format!("walking {}", root.display()))?;
                 if entry.file_type().is_file() {
@@ -109,10 +139,75 @@ impl Layers {
     }
 }
 
+#[derive(Clone)]
 pub struct Renderer {
     env: Environment<'static>,
-    layers: Layers,
+    theme: Theme,
     assets: BTreeMap<String, Asset>,
+    client: Option<ClientBundle>,
+}
+
+/// The compiled reader, as Vite's manifest under `static/app/` describes it: static names of the
+/// entry module, its stylesheet and the chunks it imports eagerly. Vite already content-hashes
+/// these names and references them from inside the bundle, so they are published verbatim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClientBundle {
+    app: String,
+    css: Option<String>,
+    imports: Vec<String>,
+    files: std::collections::BTreeSet<String>,
+}
+
+impl ClientBundle {
+    const MANIFEST: &'static str = "app/.vite/manifest.json";
+    const ENTRY: &'static str = "src/main.ts";
+
+    fn load(theme: &Theme) -> Result<Option<Self>> {
+        let Some(bytes) = theme
+            .read("static", Self::MANIFEST)
+            .map_err(|err| anyhow::anyhow!("{err}"))?
+        else {
+            return Ok(None);
+        };
+        let manifest: BTreeMap<String, serde_json::Value> =
+            serde_json::from_slice(&bytes).context("parsing the client manifest")?;
+        let file =
+            |chunk: &serde_json::Value| chunk["file"].as_str().map(|file| format!("app/{file}"));
+        let files = manifest
+            .values()
+            .flat_map(|chunk| {
+                file(chunk).into_iter().chain(
+                    chunk["css"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|css| css.as_str().map(|css| format!("app/{css}"))),
+                )
+            })
+            .collect();
+        let entry = manifest
+            .get(Self::ENTRY)
+            .with_context(|| format!("client manifest has no {} entry", Self::ENTRY))?;
+        let app = file(entry).context("client manifest entry has no file")?;
+        let css = entry["css"]
+            .as_array()
+            .and_then(|css| css.first())
+            .and_then(|css| css.as_str())
+            .map(|css| format!("app/{css}"));
+        let imports = entry["imports"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|key| key.as_str())
+            .filter_map(|key| manifest.get(key).and_then(file))
+            .collect();
+        Ok(Some(Self {
+            app,
+            css,
+            imports,
+            files,
+        }))
+    }
 }
 
 #[derive(Clone)]
@@ -122,21 +217,22 @@ struct Asset {
 }
 
 impl Renderer {
-    pub fn new(layers: Layers) -> Result<Self> {
+    pub fn new(theme: Theme) -> Result<Self> {
         let mut env = Environment::new();
         env.set_trim_blocks(true);
         env.set_lstrip_blocks(true);
         env.set_formatter(html_formatter);
-        let loader_layers = layers.clone();
+        let loader_theme = theme.clone();
         env.set_loader(move |name| {
-            loader_layers
+            loader_theme
                 .read("templates", name)?
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                 .map(Ok)
                 .transpose()
         });
 
-        let assets = asset_map(&layers)?;
+        let client = ClientBundle::load(&theme)?;
+        let assets = asset_map(&theme, client.as_ref())?;
         // Paths are ours (slugified ASCII), so `/` must not come out as `&#x2f;`.
         // `url_for` is what the browser resolves: it walks up from the page being rendered, so
         // the output works at `/`, under a nested mount, or from a file, and no `<base>` element is
@@ -191,9 +287,28 @@ impl Renderer {
 
         Ok(Self {
             env,
-            layers,
+            theme,
             assets,
+            client,
         })
+    }
+
+    /// Site paths of the compiled reader, empty until a bundle is built into the theme.
+    pub fn client_assets(&self) -> super::client::ClientAssets {
+        let Some(client) = &self.client else {
+            return super::client::ClientAssets::default();
+        };
+        let site = |name: &str| format!("assets/{name}");
+        super::client::ClientAssets {
+            app: Some(site(&client.app)),
+            css: client.css.as_deref().map(site),
+            imports: client.imports.iter().map(|name| site(name)).collect(),
+        }
+    }
+
+    /// A site-relative path with the content-hashed asset name substituted.
+    pub fn asset_site_path(&self, path: &str) -> String {
+        site_path(&self.assets, path)
     }
 
     pub fn render<S: Serialize>(&self, template: &str, ctx: S) -> Result<String> {
@@ -207,10 +322,19 @@ impl Renderer {
     }
 
     /// Copy every static file into `<out>/assets/`.
+    /// Freeze every effective template before exposing a lazy dev generation. A later edit may
+    /// create a new generation, but cannot change an in-flight page from this one.
+    pub(crate) fn freeze_templates(&self) -> Result<()> {
+        for name in self.theme.template_names()? {
+            self.env.get_template(&name)?;
+        }
+        Ok(())
+    }
+
     pub fn write_static(&self, out: &Path) -> Result<Vec<String>> {
         for asset in self.assets.values() {
             let Some(bytes) = self
-                .layers
+                .theme
                 .read("static", &asset.source)
                 .map_err(|err| anyhow::anyhow!("{err}"))?
             else {
@@ -231,12 +355,23 @@ impl Renderer {
     }
 }
 
-fn asset_map(layers: &Layers) -> Result<BTreeMap<String, Asset>> {
-    layers
+fn asset_map(theme: &Theme, client: Option<&ClientBundle>) -> Result<BTreeMap<String, Asset>> {
+    theme
         .static_names()?
         .into_iter()
+        // The manifest describes the bundle; it is not part of the site.
+        .filter(|name| !name.starts_with("app/.vite/"))
         .map(|name| {
-            let bytes = layers
+            if client.is_some_and(|client| client.files.contains(&name)) {
+                return Ok((
+                    name.clone(),
+                    Asset {
+                        source: name.clone(),
+                        output: name,
+                    },
+                ));
+            }
+            let bytes = theme
                 .read("static", &name)
                 .map_err(|err| anyhow::anyhow!("{err}"))?
                 .with_context(|| format!("static file {name} vanished during build"))?;
@@ -386,12 +521,15 @@ mod tests {
         "404.html",
         "offline.html",
         "manifest.webmanifest",
-        "sw.js",
     ];
 
     /// Classes the stylesheet styles that no template, client source or Rust string spells out
     /// as a whole, because the name is assembled from data at build or run time.
     const GENERATED_CLASSES: &[(&str, &str)] = &[
+        (
+            "age-h24",
+            "`age-` plus the band from context::age_band, in _item.html and Row.svelte",
+        ),
         (
             "syntax-comment",
             "syntect ClassStyle::SpacedPrefixed { prefix: \"syntax-\" } in content_highlight.rs",
@@ -517,12 +655,17 @@ mod tests {
         assert!(declared.contains("row") && declared.contains("table-scroll"));
         assert!(!declared.contains("5rem") && !declared.contains("body p"));
         // This file's own assertions must not vouch for a class, and neither may the stylesheet.
-        let corpus = ["themes/default/templates", "themes/default/static", "src"]
-            .iter()
-            .flat_map(|dir| read_tree(&repository_path(dir)))
-            .filter(|(name, _)| name != "site/render.rs" && !name.ends_with(".css"))
-            .map(|(_, text)| text)
-            .collect::<Vec<_>>();
+        let corpus = [
+            "themes/default/templates",
+            "themes/default/static",
+            "web/src",
+            "src",
+        ]
+        .iter()
+        .flat_map(|dir| read_tree(&repository_path(dir)))
+        .filter(|(name, _)| name != "site/render.rs" && !name.ends_with(".css"))
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>();
         let unused = declared
             .iter()
             .filter(|name| {
@@ -563,7 +706,11 @@ mod tests {
         let class = regex::Regex::new(r"\.([a-z][a-z0-9_-]*)").unwrap();
         // Only the element a rule applies to is positioned, never the ancestors that select it.
         let positioned: BTreeSet<String> = rules(css)
-            .filter(|(_, block)| block.contains("position: relative"))
+            .filter(|(_, block)| {
+                ["relative", "absolute", "fixed", "sticky"]
+                    .iter()
+                    .any(|position| block.contains(&format!("position: {position}")))
+            })
             .flat_map(|(prelude, _)| selectors(&prelude))
             .flat_map(|selector| {
                 class
@@ -757,24 +904,6 @@ mod tests {
         assert!(css.contains("var(--image-placeholder, var(--code))"));
         assert!(css.contains("inline-size: min(100%, var(--image-width, 100%))"));
         assert!(css.contains("aspect-ratio: var(--image-ratio)"));
-        // Content-addressed media is safe to serve from the cache without revalidating. Published
-        // PDFs are content-addressed the same way, so they belong with the images and previews
-        // rather than in the bounded page cache a later visit can evict them from.
-        let worker_file = DefaultTheme::get("templates/sw.js").unwrap();
-        let worker = std::str::from_utf8(worker_file.data.as_ref()).unwrap();
-        assert!(worker.contains("(images|previews|documents)"));
-        assert!(worker.contains("assetResponse(request, ASSETS, ASSET_LIMIT)"));
-    }
-
-    #[test]
-    fn embedded_worker_serves_versioned_search_resources_from_the_cache() {
-        let worker_file = DefaultTheme::get("templates/sw.js").unwrap();
-        let worker = std::str::from_utf8(worker_file.data.as_ref()).unwrap();
-        // The index lives under an immutable version, so it never needs revalidating.
-        assert!(worker.contains("pagefind\\/[0-9a-f]{64}\\/"));
-        // Nothing is downloaded ahead of the reader: no archive, no index prefetch.
-        assert!(!worker.contains("OFFLINE_CATALOG"));
-        assert!(!worker.contains("search-manifest.json"));
     }
 
     #[test]
@@ -806,22 +935,23 @@ mod tests {
         assert!(!preferences.contains("preferences-config"));
         assert!(!preferences.contains(">aggr.toml <span aria-hidden=\"true\">↗</span></a>"));
         assert!(preferences.contains("<noscript>"));
-        // Every control is rendered from the typed schema, not built in the browser.
-        assert!(preferences.contains("site.preference_schema.groups"));
-        assert!(preferences.contains("<select"));
-        assert!(preferences.contains("data-preference="));
-        assert!(!preferences.contains("data-preferences-root"));
+        // The client renders every control from the schema the page embeds; the template ships
+        // only the shell and its no-JavaScript note.
+        assert!(!preferences.contains("<select"));
+        assert!(!preferences.contains("data-preference="));
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();
         assert!(base.contains("<script id=\"aggr-preferences\" type=\"application/json\">"));
         // The rules come from the typed table in src/config/preferences.rs; nothing redeclares them.
         assert!(base.contains("site.preference_schema.bootstrap | json"));
-        assert!(base.contains("<script src=\"{{ 'assets/bootstrap.js' | url_for }}\"></script>"));
-        let bootstrap = DefaultTheme::get("static/bootstrap.js").unwrap();
+        assert!(
+            base.contains("<script src=\"{{ 'assets/app/bootstrap.js' | url_for }}\"></script>")
+        );
+        // The compiled pre-paint script reads the schema from the page; it redeclares no setting.
+        let bootstrap = DefaultTheme::get("static/app/bootstrap.js").unwrap();
         let bootstrap = std::str::from_utf8(bootstrap.data.as_ref()).unwrap();
-        assert!(bootstrap.contains("AGGRPreferences"));
-        assert!(!bootstrap.contains("attribute: \"textSize\""));
+        assert!(!bootstrap.contains("textSize"));
         assert!(!base.contains("aggr:reading-history"));
 
         let index_file = DefaultTheme::get("templates/index.html").unwrap();
@@ -850,7 +980,7 @@ mod tests {
 
     #[test]
     fn embedded_theme_unifies_article_navigation_and_recommendations() {
-        let renderer = Renderer::new(Layers::default()).unwrap();
+        let renderer = Renderer::new(Theme::default()).unwrap();
         renderer.env.get_template("item.html").unwrap();
 
         let css_file = DefaultTheme::get("static/style.css").unwrap();
@@ -911,7 +1041,7 @@ mod tests {
     #[test]
     fn article_lead_and_posters_render_the_localised_alt_text() {
         // Only the media blocks are under test; the rest of the page tolerates a sparse context.
-        let mut renderer = Renderer::new(Layers::default()).unwrap();
+        let mut renderer = Renderer::new(Theme::default()).unwrap();
         renderer
             .env
             .set_undefined_behavior(minijinja::UndefinedBehavior::Chainable);
@@ -997,7 +1127,7 @@ mod tests {
 
     #[test]
     fn embedded_theme_groups_collection_directories_under_browse() {
-        let renderer = Renderer::new(Layers::default()).unwrap();
+        let renderer = Renderer::new(Theme::default()).unwrap();
         renderer.env.get_template("browse.html").unwrap();
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
@@ -1055,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_wins_over_embedded_and_rejects_escapes() {
+    fn source_tree_wins_over_embedded_and_rejects_escapes() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("templates")).unwrap();
         std::fs::write(
@@ -1063,10 +1193,8 @@ mod tests {
             "custom {{ site.title }}",
         )
         .unwrap();
-        let layers = Layers {
-            dirs: vec![dir.path().to_path_buf()],
-        };
-        let renderer = Renderer::new(layers.clone()).unwrap();
+        let theme = Theme::from_source_tree(dir.path());
+        let renderer = Renderer::new(theme.clone()).unwrap();
         let out = renderer
             .render(
                 "index.html",
@@ -1074,9 +1202,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out, "custom T");
-        assert!(layers.read("templates", "../Cargo.toml").is_err());
-        assert!(layers.read("templates", "/etc/passwd").is_err());
-        assert!(layers.read("templates", "missing.html").unwrap().is_none());
+        assert!(
+            theme.read("templates", "base.html").unwrap().is_some(),
+            "a file missing from the source tree comes from the embedded copy"
+        );
+        assert!(theme.read("templates", "../Cargo.toml").is_err());
+        assert!(theme.read("templates", "/etc/passwd").is_err());
+        assert!(theme.read("templates", "missing.html").unwrap().is_none());
     }
 
     #[test]
@@ -1096,7 +1228,7 @@ mod tests {
 
     #[test]
     fn filters_work() {
-        let renderer = Renderer::new(Layers::default()).unwrap();
+        let renderer = Renderer::new(Theme::default()).unwrap();
         let out = renderer
             .render_str_for_test(
                 "{{ 'sources/' | url_for }} {{ 'https://www.a.b/c' | domain }} \
@@ -1133,7 +1265,7 @@ mod tests {
 
     #[test]
     fn html_escaping_keeps_slashes_and_blocks_scripts() {
-        let mut renderer = Renderer::new(Layers::default()).unwrap();
+        let mut renderer = Renderer::new(Theme::default()).unwrap();
         renderer
             .env
             .add_template(

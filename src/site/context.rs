@@ -105,14 +105,17 @@ pub struct SiteIdentityCtx {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct DiscussionLinkCtx {
     pub name: String,
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub shortcut: Option<String>,
     /// A direct link to a matching discussion rather than the provider's search page.
     pub found: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub score: Option<i64>,
 }
 
@@ -161,6 +164,7 @@ pub struct PageCtx {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct PaginatorCtx {
     /// Maximum number of entries in one pager.
     pub paginate_by: usize,
@@ -309,7 +313,7 @@ impl ArticlePreviewCtx {
         images
             .iter()
             .find(|image| {
-                !crate::media::is_status_badge(&image.source)
+                crate::media::is_artwork(&image.source)
                     && image.width >= MIN_LEAD_WIDTH
                     && !body_sources.contains(&image.source)
                     && !body_originals.contains(image.original.as_str())
@@ -382,6 +386,7 @@ pub struct SourceCtx {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct SourceMembershipCtx {
     pub slug: String,
     pub query_value: String,
@@ -760,26 +765,8 @@ impl ItemCtx {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ArticleLinkCtx {
-    pub title: String,
-    pub url: String,
-    pub metadata: super::display::Metadata,
-    pub excerpt: String,
-    pub preview: Option<PreviewCtx>,
-}
-
-impl From<&ItemCtx> for ArticleLinkCtx {
-    fn from(item: &ItemCtx) -> Self {
-        Self {
-            title: item.title.clone(),
-            url: item.url.clone(),
-            metadata: super::display::Metadata::from(item),
-            excerpt: item.excerpt.clone(),
-            preview: item.preview.clone(),
-        }
-    }
-}
+/// Chronological neighbours and suggestions are rows: the shape the client renders everywhere.
+pub type ArticleLinkCtx = super::client::ClientRow;
 
 pub struct ItemOptions<'a> {
     pub source_name: &'a str,
@@ -1486,7 +1473,10 @@ mod tests {
         assert_eq!(search.meta["title"], context.title);
         let search_display: serde_json::Value =
             serde_json::from_slice(&hex::decode(&search.meta["aggr_display"]).unwrap()).unwrap();
-        assert_eq!(search_display["source_title"], context.source_title);
+        assert_eq!(
+            search_display["metadata"]["source_title"],
+            context.source_title
+        );
         assert_eq!(item.front.title, "🚀 Café #1 🧑🏽‍💻");
         assert_eq!(item.body, "Keep body emoji 🚀");
     }

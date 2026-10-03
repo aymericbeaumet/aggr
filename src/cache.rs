@@ -126,11 +126,12 @@ pub fn dev(config_path: &Path) -> Result<PathBuf> {
     Ok(dev_under(&base, config_path))
 }
 
-/// Exact key for reusable rendered output. The data commit, effective config files, layered theme,
-/// output URL and embedded defaults all participate; wall-clock time deliberately does not.
+/// Exact key for reusable rendered output. The data commit, effective config files, the theme
+/// (embedded, plus its source tree for a development binary), output URL and embedded defaults
+/// all participate; wall-clock time deliberately does not.
 pub struct RenderFingerprint<'a> {
     pub config: &'a crate::config::Config,
-    pub project_root: &'a Path,
+    pub theme: &'a crate::site::render::Theme,
     /// Loaded config files are named relative to this root so a checkout elsewhere (another
     /// clone, a CI runner) shares the fingerprint of the same bytes.
     pub repo_root: &'a Path,
@@ -145,7 +146,7 @@ pub struct RenderFingerprint<'a> {
 pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     let RenderFingerprint {
         config,
-        project_root,
+        theme,
         repo_root,
         config_sha,
         data_sha,
@@ -202,23 +203,23 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     for (identity, digest) in remote_configs {
         hash_field(&mut hash, identity.as_bytes(), digest.as_bytes());
     }
-    for (index, dir) in crate::site::theme_layers(config, project_root)?
-        .dirs
-        .iter()
-        .enumerate()
-    {
-        // A layer can be the project root itself (a project that overrides `templates/`), and
-        // the renderer only ever reads these two subdirectories of a layer. Hashing the whole
-        // layer would walk the repository, its caches and the previous output on every build.
-        for kind in LAYER_KINDS {
-            hash_tree(&mut hash, &format!("layer-{index}/{kind}"), &dir.join(kind))?;
+    if let Some(source) = theme.source_dir() {
+        // A development binary renders from the theme's source tree, and the renderer only ever
+        // reads these two subdirectories of it; nothing else under it can change a page.
+        for kind in THEME_KINDS {
+            hash_tree(
+                &mut hash,
+                &format!("theme-source/{kind}"),
+                &source.join(kind),
+            )?;
         }
     }
     Ok(hex::encode(hash.finalize()))
 }
 
-/// The subdirectories of a theme layer the renderer reads (`Layers::read` and `Layers::names`).
-const LAYER_KINDS: [&str; 2] = ["templates", "static"];
+/// The subdirectories of the theme source tree the renderer reads (`Theme::read` and
+/// `Theme::names`).
+const THEME_KINDS: [&str; 2] = ["templates", "static"];
 
 /// Directory names a tree hash skips wherever it meets them: the repository, aggr's own state and
 /// a previous build output are never rendered, and walking them would read every cached file.
@@ -246,6 +247,7 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("content-access", "content/access.rs"),
         source!("content-aggregator", "content/aggregator.rs"),
         source!("content-cleanup", "content/cleanup.rs"),
+        source!("content-dates", "content/dates.rs"),
         source!("content-extract", "content/extract.rs"),
         source!("content-markdown", "content/markdown.rs"),
         source!("content-module", "content/module.rs"),
@@ -273,6 +275,9 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("store", "store/mod.rs"),
         source!("frontmatter", "store/frontmatter.rs"),
         source!("site", "site/mod.rs"),
+        source!("site-client", "site/client.rs"),
+        source!("site-dev", "site/dev.rs"),
+        source!("site-offline", "site/offline.rs"),
         source!("source-index", "site/source_index.rs"),
         source!("assets", "site/assets.rs"),
         source!("budget", "site/budget.rs"),
@@ -313,6 +318,8 @@ const RENDER_INDEPENDENT_SOURCES: &[&str] = &[
     // This module: the fingerprint, the raw-response cache and the cache layout. Changing how a
     // key is computed is deliberately versioned through the `schema` field instead.
     "cache.rs",
+    // Test-only: writes the parity fixtures the frontend checks itself against.
+    "site/client/parity.rs",
     // Git plumbing decides which commit is rendered; the commit itself is the `data-sha` field.
     "git.rs",
     // HTTP fetches bytes into the data branch and the private article cache; what was fetched
@@ -1270,13 +1277,18 @@ mod tests {
         );
     }
 
-    /// A minimal project: `aggr.toml` importing `sources.toml`, plus one project template.
+    /// A minimal project: `aggr.toml` importing `sources.toml`.
     fn write_fixture(root: &Path) -> Vec<PathBuf> {
         std::fs::write(root.join("aggr.toml"), "[site]\ntitle = \"one\"\n").unwrap();
         std::fs::write(root.join("sources.toml"), "[[sources]]\nurl = \"x\"\n").unwrap();
+        vec![root.join("aggr.toml"), root.join("sources.toml")]
+    }
+
+    /// A theme source tree holding one template, as a development binary reads it.
+    fn write_theme_source(root: &Path) -> crate::site::render::Theme {
         std::fs::create_dir_all(root.join("templates")).unwrap();
         std::fs::write(root.join("templates/index.html"), "one").unwrap();
-        vec![root.join("aggr.toml"), root.join("sources.toml")]
+        crate::site::render::Theme::from_source_tree(root)
     }
 
     #[test]
@@ -1285,11 +1297,13 @@ mod tests {
         let config_path = root.path().join("aggr.toml");
         let mut config = crate::config::Config::parse("[site]\ntitle = \"one\"\n").unwrap();
         config.loaded_files = write_fixture(root.path());
+        let source = tempdir().unwrap();
+        let theme = write_theme_source(source.path());
         macro_rules! fingerprint {
             ($discussions:expr) => {
                 render_fingerprint(RenderFingerprint {
                     config: &config,
-                    project_root: root.path(),
+                    theme: &theme,
                     repo_root: root.path(),
                     config_sha: Some("config"),
                     data_sha: Some("data"),
@@ -1303,7 +1317,7 @@ mod tests {
         }
         let first = fingerprint!(None);
 
-        std::fs::write(root.path().join("templates/index.html"), "two").unwrap();
+        std::fs::write(source.path().join("templates/index.html"), "two").unwrap();
         let theme_changed = fingerprint!(None);
         assert_ne!(first, theme_changed);
 
@@ -1328,7 +1342,7 @@ mod tests {
             config.loaded_files = loaded_files;
             render_fingerprint(RenderFingerprint {
                 config: &config,
-                project_root: root,
+                theme: &crate::site::render::Theme::default(),
                 repo_root: root,
                 config_sha: Some("config"),
                 data_sha: Some("data"),
@@ -1509,14 +1523,16 @@ mod tests {
     }
 
     #[test]
-    fn render_fingerprint_hashes_only_the_theme_subdirectories_of_a_project_root_layer() {
+    fn render_fingerprint_hashes_only_the_theme_subdirectories_of_the_source_tree() {
         let root = tempdir().unwrap();
         let mut config = crate::config::Config::parse("[site]\ntitle = \"one\"\n").unwrap();
         config.loaded_files = write_fixture(root.path());
+        let source = tempdir().unwrap();
+        let theme = write_theme_source(source.path());
         let fingerprint = || {
             render_fingerprint(RenderFingerprint {
                 config: &config,
-                project_root: root.path(),
+                theme: &theme,
                 repo_root: root.path(),
                 config_sha: Some("config"),
                 data_sha: Some("data"),
@@ -1529,8 +1545,8 @@ mod tests {
         };
         let initial = fingerprint();
 
-        // The project root is layer 0 because it carries `templates/`. Everything else in it, and
-        // repository state that strays under a theme directory, is not rendered.
+        // Only `templates/` and `static/` of the source tree are rendered. Anything else beside
+        // them, and repository state that strays under them, is not.
         for unrelated in [
             ".git/objects/pack/large.pack",
             ".aggr/cache/build-v1/articles-v1/bodies/a.html",
@@ -1541,18 +1557,18 @@ mod tests {
             "static/.aggr/junk",
             "templates/_site/index.html",
         ] {
-            let path = root.path().join(unrelated);
+            let path = source.path().join(unrelated);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, format!("unrelated {unrelated}")).unwrap();
         }
         assert_eq!(fingerprint(), initial);
 
-        std::fs::create_dir_all(root.path().join("static")).unwrap();
-        std::fs::write(root.path().join("static/style.css"), "body{}").unwrap();
+        std::fs::create_dir_all(source.path().join("static")).unwrap();
+        std::fs::write(source.path().join("static/style.css"), "body{}").unwrap();
         let static_changed = fingerprint();
         assert_ne!(static_changed, initial);
 
-        std::fs::write(root.path().join("templates/index.html"), "two").unwrap();
+        std::fs::write(source.path().join("templates/index.html"), "two").unwrap();
         assert_ne!(fingerprint(), static_changed);
     }
 

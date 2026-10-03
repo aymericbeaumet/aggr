@@ -140,7 +140,7 @@ impl Fetcher {
     ) -> Option<Thumbnail> {
         let candidates = candidates
             .iter()
-            .filter(|candidate| !crate::media::is_status_badge(&candidate.url))
+            .filter(|candidate| crate::media::is_artwork(&candidate.url))
             .take(MAX_CANDIDATES)
             .filter_map(|candidate| safe_url(&candidate.url, None).map(|url| (candidate, url)))
             .collect::<Vec<_>>();
@@ -169,7 +169,7 @@ impl Fetcher {
         }
         for asset in assets
             .iter()
-            .filter(|asset| !crate::media::is_status_badge(&asset.source_url))
+            .filter(|asset| crate::media::is_artwork(&asset.source_url))
             .take(MAX_ASSET_FALLBACKS)
         {
             let Some(url) = safe_url(&asset.source_url, None) else {
@@ -380,7 +380,7 @@ pub fn candidates(explicit: &[Candidate], html: Option<&str>, base: &Url) -> Vec
         let Some(url) = safe_url(&candidate.url, Some(base)).map(|url| url.to_string()) else {
             continue;
         };
-        if crate::media::is_status_badge(&url) {
+        if !crate::media::is_artwork(&url) {
             continue;
         }
         let alt = clean_alt(candidate.alt.as_deref());
@@ -418,7 +418,7 @@ pub(crate) fn ordered_article_candidates(
         .chain(groups.metadata)
         .chain(extracted.map(|url| Candidate { url, alt: None }))
         .chain(groups.body)
-        .filter(|candidate| !crate::media::is_status_badge(&candidate.url))
+        .filter(|candidate| crate::media::is_artwork(&candidate.url))
         .collect()
 }
 
