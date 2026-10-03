@@ -131,7 +131,7 @@ jobs:
       - uses: actions/checkout@v7
       - id: msrv
         run: echo "version=$(perl -ne 'print $1 if /^rust-version = "(.*)"/' Cargo.toml)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: ./.github/actions/native-deps
