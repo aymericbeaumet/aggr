@@ -126,7 +126,11 @@ fn count_limits_remove_whole_families_only_from_the_affected_feed() {
     assert!(!old.exists());
     assert!(companions.iter().all(|file| !file.exists()));
     assert!(unrelated.exists());
-    let relative = old.strip_prefix(fixture.data()).unwrap().to_str().unwrap();
+    let relative = old
+        .strip_prefix(fixture.data())
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
     assert!(
         git(
             &fixture.data(),
