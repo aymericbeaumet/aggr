@@ -25,7 +25,7 @@ https://example.com
 https://example.org/blog
 """
 
-[fetch]
+[defaults]
 content = "light"
 
 [[sources]]
@@ -69,6 +69,8 @@ to it: `youtu.be` and `m.youtube.com` are `youtube.com`, `open.spotify.com` is `
 ```toml
 [[sources]]
 url = "https://www.youtube.com/@SomeChannel"    # -> sources/youtube-com-somechannel/
+
+[[sources]]
 url = "https://open.spotify.com/show/abc123"    # -> sources/spotify-com-show-abc123/
 ```
 
@@ -92,7 +94,7 @@ name; the same slug written twice is an error rather than something aggr renames
 
 The same canonical name labels each item's publisher in the reader, read from the article's own URL
 rather than from whichever subscription carried it: a repository release reads
-`github.com/torvalds` whether you follow the repository or found it on Hacker News. A YouTube watch
+`github.com/torvalds` whether you follow the repository or found it in another feed. A YouTube watch
 URL is the one link that cannot carry its account, so aggr takes the channel from the page it
 already downloads and keeps it with the item; items archived before that read `youtube.com` until
 they are fetched again.
@@ -102,7 +104,7 @@ they are fetched again.
 aggr tries the URL as a feed, follows RSS/Atom/JSON Feed discovery metadata, probes the
 conventional endpoints under that section (`feed.xml`, `rss.xml`, `atom.xml`, `index.xml`, `feed`,
 `rss`), the nested shapes some sites use instead (`feed/rss`, `feed/atom`, `rss/all.rss`), and
-finally falls back to conservative article discovery on the page itself. A page that redirects to
+in heavy mode falls back to conservative article discovery on the page itself. A page that redirects to
 another origin leaves the subscribed origin's endpoints in the probe set: a status page moving to a
 status app does not move the feed. At an origin root that has answered nothing, the sections a site
 keeps its writing under (`/blog`, `/posts`, `/news`) are the last thing tried.
@@ -113,12 +115,77 @@ itself; before believing that, aggr probes the conventional endpoints and prefer
 parses. `aggr check` says which it was, so a feed that quietly became a shell reads as
 `2 item(s) (extracted)` rather than as health. A section URL
 is treated as a directory, so `https://example.com/blog` and `https://example.com/blog/` probe the
-same endpoints. A discovered feed that publishes no entries is skipped in favour of the listing.
+same endpoints. In heavy mode, a discovered feed that publishes no entries can fall back to the listing.
 The endpoint that answered is remembered, so the probe happens once per source.
 
-In the default heavy content mode aggr downloads each original page and extracts its main article;
-use `content = "light"` on a source to trust its feed content instead. The default first import
-considers the newest 100 entries from each feed, then every later run adds newly observed entries.
+The default `[defaults] content = "light"` uses feed content without original-page extraction,
+transcript downloads, or optional recording-duration probes. Discovery can request a site's HTML
+to find a feed, but a source without a usable feed reports a failure instead of scraping an article
+listing. Some feeds provide only summaries; the reader keeps the original link. Set
+`content = "heavy"` globally or on a source to permit HTML discovery and full article extraction.
+
+## Upgrading to 1.12
+
+Version 1.12 changes the capture schema and enables retention by default. The stable `@v1`
+workflow selects the latest published v1 binary automatically, so review configuration and limits
+before the next scheduled sync.
+
+| Previous setting | New setting |
+| --- | --- |
+| `[fetch] content` | `[defaults] content` |
+| Separate `images`, `previews`, and `documents` settings | One `media` policy under `[defaults]` or on a source |
+| Image `original` / `compact` | Media `local` / `compressed` |
+| `[fetch] max_items_per_source` or source `limit` | `max_items` under `[defaults]` or on a source |
+| `[store] max_items` / `max_age_days` | The same names under `[defaults]` or on a source |
+
+The retired keys are configuration errors. `[fetch]` retains transport settings, and `[store]`
+retains branch/path and HTML-preservation settings. The unified media policy applies to images,
+previews, and PDFs together; independent controls for those media types have been removed.
+
+Omitted limits now mean **250 items, 730 days, and 1 GB of retained article files per feed**.
+Sync removes excess articles and their companions from the current tree in ordinary commits;
+Git history remains. To keep an unbounded current archive, explicitly set `max_items = 0`,
+`max_age_days = 0`, `max_bytes = 0`, and clear any `since` cutoff. To retain full article extraction
+and original media, choose `content = "heavy"` and `media = "local"`. Sources override each field
+independently; see [storage limits](storage.md) for cleanup and recovery behavior.
+
+## Capture defaults and per-source limits
+
+`[defaults]` selects content, media and retained-corpus limits. The same keys on a `[[sources]]`
+table override only those values for its feed or expanded source group:
+
+```toml
+[defaults]
+content = "light"
+media = "remote"
+max_items = 250
+max_age_days = 730
+max_bytes = 1000000000
+# since = "2026-01-01"
+
+[[sources]]
+url = "https://example.com/feed.xml"
+content = "heavy"
+media = "local"
+max_items = 100
+
+[[sources]]
+url = "https://history.example/feed.xml"
+max_age_days = 0
+since = false
+```
+
+Limits apply per feed, including repository sources: count, age and total retained bytes, with
+article companions included in the byte total. They bound which items are admitted and retained;
+they are not a per-run batch size. Candidates outside the count or date limits are skipped before
+expensive article and media work. Zero disables the corresponding numeric limit. An absolute
+`since` date and `max_age_days` both apply, using the newer cutoff; `since = false` clears an
+inherited absolute date without changing the relative-age limit.
+
+Reducing a limit can remove items and companions from the current data tree in ordinary commits.
+Historical Git objects remain. These corpus limits are independent of the generated site's
+`[site] build_max_bytes` and disposable `[cache]` limits. `[fetch]` configures transport, including
+concurrency, request timeouts and retries.
 
 Articles are deduplicated across sources by normalized original URL, so following both Hacker
 News and a publisher keeps one copy. Existing archived duplicates appear once in the reader;
@@ -131,8 +198,8 @@ to its `[[sources]]` table. This flag is not inherited by the contained sources.
 ## Keeping an archive current with aggr itself
 
 Two different things can be out of date. Items the source still lists are re-fetched by
-`sync --refresh`, which rewrites them from the live page. Items the source has stopped listing can
-still be improved from what aggr already retained: `sync --reprocess` re-derives every stored body
+`sync --refresh` using the current content and media policies. Items the source has stopped listing
+can still be improved from what aggr already retained: `sync --reprocess` re-derives every stored body
 from its retained HTML companion, so content cleanup added in a later release reaches the archive
 without a single extra request. Both discard hand edits, and both write ordinary commits.
 
@@ -145,8 +212,8 @@ to be listed again.
 Public show URLs work for Apple Podcasts, Spotify, Deezer, YouTube, SoundCloud, Podbean,
 Buzzsprout, Spreaker, Acast, Libsyn, and Simplecast. They resolve to publisher RSS where available.
 Spotify and Deezer can discover a full publisher feed through Apple's public catalog, verifying
-show identity and matching episodes before using it; their public episode listings remain a
-fallback. Podcast enclosures play inside articles. See [podcast sources](podcasts.md) for accepted
+show identity and matching episodes before using it. Heavy mode can use public episode listings
+when no feed is available. Podcast enclosures play inside articles. See [podcast sources](podcasts.md) for accepted
 URLs and provider limits. Episode text and artwork are archived; audio/video playback is not
 available offline through these adapters.
 
@@ -179,71 +246,75 @@ their media keep their original order and read as one article: no separators, pe
 trailing thread counters such as `(1/3)`. The original link in the article metadata reaches the
 thread; unavailable continuations are logged. See [public threads](interoperability.md#public-threads).
 
-## Article images
+## Media
 
-`images` chooses what happens to an article's pictures, globally and per source:
+`media` controls body images, previews and PDF companions together, globally and per source:
 
-| Value | What is archived |
+| Value | What is retained |
 | --- | --- |
-| `"remote"` | Nothing. The reader loads the publisher's URL, which is not guaranteed offline. |
-| `"original"` | The publisher's exact bytes, plus lossless responsive renditions. The default. |
-| `"compact"` | One bounded JPEG master and no renditions. |
-
-`true` and `false` remain accepted spellings of `"original"` and `"remote"`.
+| `"remote"` | Default. Publisher URLs remain remote; no media bytes are downloaded. |
+| `"local"` | Exact supported raster originals, small previews and bounded PDF companions. |
+| `"compressed"` | Bounded image masters, small previews and bounded PDF companions. |
 
 ```toml
-[fetch]
-images = "original"
+[defaults]
+media = "local"
 
 [[sources]]
 url = "https://blog.rust-lang.org"
 
 [[sources]]
 url = "https://example.com/feed.xml"
-images = "remote" # leave this source's body images at their publisher URLs
+media = "remote"
 
 [[sources]]
 url = "https://heavy.example/feed.xml"
-images = { mode = "compact", quality = 60, max_axis = 1280 }
+media = { mode = "compressed", quality = 60, max_axis = 1280 }
 ```
 
-A compact master is resized to fit `max_axis` with the same high-quality filter the renditions
+### Article images
+
+A compressed master is resized to fit `max_axis` with the same high-quality filter the renditions
 use, then encoded as JPEG at `quality`; transparency is kept as PNG rather than flattened onto a
 background, and an animation stays an animation. `quality` accepts 1-100 and `max_axis` accepts
 320-8192, defaulting to 72 and 1600 —
-the same bounds a release build applies to older articles' published media, so a compact archive
+the same bounds a release build applies to older articles' published media, so a compressed archive
 already holds the image the site would publish. The reduced copy is kept only when it is actually
 smaller than the response it replaces.
 
-Compaction is what makes an archive small, because images are nearly all of its bytes. It is also
-the one image setting that cannot be undone: the publisher's exact bytes are not kept anywhere, so
-a later `"original"` run cannot restore what a compact run stored. Changing any of these values
-affects newly archived images only; images already in the archive are left exactly as they are.
+Compression can reduce media-heavy archives. It is lossy: the publisher's exact bytes are not
+kept, so a later `"local"` run cannot restore discarded detail. Changing these values leaves
+archived files untouched. The effective policy controls both new
+captures and publication: remote mode skips existing local companions too. Use
+`sync --backfill-media` after opting into preservation to fill missing media while keeping retained
+bodies and hand edits. Per-feed limits apply before and after backfill; newly saved media can cause
+older article families to be removed when the configured byte limit is exceeded.
 
-Under `"original"`, for every accepted JPEG, PNG, GIF, or WebP image, aggr keeps the exact
-publisher response as the
-master. When the bounded media budget permits it, safe static 8-bit images also get responsive
+Under `"local"`, for every accepted JPEG, PNG, GIF, or WebP image, aggr keeps the exact publisher
+response as the master. At build time, when the bounded publication budget permits it, safe static
+8-bit images also get responsive
 320, 640, 960, 1280, and 1600-pixel renditions where useful, plus a full-width rendition. These
 are resized once with a high-quality filter, encoded as lossless WebP, then decoded and
 pixel-compared before aggr offers them to the browser. The exact master always remains the
 fallback, so choosing a smaller rendition introduces no lossy compression and a high-density
 display is never forced to upscale it. A rendition is retained only when it is smaller than the
-master. Masters above 32 megapixels skip the full-width encode and pair bounded responsive copies
+master. These derived files are cached locally and never newly committed to the archive. Masters
+above 32 megapixels skip the full-width encode and pair bounded responsive copies
 with the original as the largest candidate; an existing WebP master is not duplicated.
 
 Animated GIF/WebP, images with an ICC color profile, and high-bit-depth images keep only their
 exact master, with no renditions.
 
-Under `"compact"`, an animated GIF wider or taller than `max_axis` is resized and re-encoded as a
+Under `"compressed"`, an animated GIF wider or taller than `max_axis` is resized and re-encoded as a
 GIF, keeping its frames, their timing, and the loop the original asked for. An animation that
 already fits usually keeps its exact bytes: publishers' GIFs are frame-differenced, and
 re-encoding composites every frame again, which tends to cost more than it saves. The comparison
 is made per image and the smaller result wins, so compaction never grows an animation. Animations
 longer than 400 frames are left alone rather than spend a re-encode on every frame.
 
-Expect little from `"compact"` on a long animation that is heavy in bytes but modest in
+Expect little from `"compressed"` on a long animation that is heavy in bytes but modest in
 dimensions; what shrinks it is a smaller `max_axis`, not a lower `quality`, which JPEG uses and
-GIF does not. The images a compact archive cannot reduce at all, and therefore still stores as
+GIF does not. The images a compressed archive cannot reduce at all, and therefore still stores as
 publisher bytes, are colour-managed and high-bit-depth originals, animated WebP and APNG, which
 aggr can decode but not write, and AVIF, which it archives without decoding.
 
@@ -272,40 +343,35 @@ other local media enters a bounded cache after a successful view. Preferences re
 ready only when its full retained resource set is saved. A publisher-hosted fallback is never
 guaranteed offline.
 
-Enabling image archiving also fills missing media in retained captures. Exact raster masters and
-responsive renditions increase the append-only data branch and Git history, and normal retention
-cannot reclaim historical objects; `"compact"` bounds how fast that grows, but cannot shrink what
+Use `sync --backfill-media` to fill missing media after choosing local or compressed capture.
+Exact raster masters increase the append-only data branch and Git history, and normal retention
+cannot reclaim historical objects; `"compressed"` bounds how fast that grows, but cannot shrink what
 earlier runs already committed. Before publishing an archive, make sure storing and
 redistributing a source's images is compatible with its terms and your local law. Use
-`images = "remote"` for sources whose media you should not retain.
+`media = "remote"` for sources whose media you should not retain.
 
 ## Previews
 
-Small local previews are enabled by default. They can be disabled globally or per source:
+With `media = "remote"`, aggr records a safe publisher URL, alternative text and available
+thumbnail dimensions without downloading image bytes. The browser loads the thumbnail lazily.
+Unknown geometry uses a stable fallback; remote pictures have no generated ThumbHash. An older
+capture without a saved publisher thumbnail URL can omit its thumbnail.
 
-```toml
-[fetch]
-previews = true
+With `media = "local"` or `"compressed"`, aggr creates a suitable preview at most 256 pixels per
+side, with validated dimensions and an inline placeholder. A matching retained body image is
+reused. Missing previews never prevent article capture. `sync --backfill-media` fills missing
+opted-in previews without replacing existing thumbnails or article bodies.
 
-[[sources]]
-url = "https://blog.rust-lang.org"
+## PDF companions and offline publication
 
-[[sources]]
-url = "https://example.com/feed.xml"
-previews = false # override the default for one source
-```
+`media = "remote"` keeps the publisher PDF URL without retaining document bytes. Local and
+compressed media modes preserve exact bounded PDF companions; compression applies to images.
 
-aggr downloads and resizes a suitable image to at most 256 pixels per side, encodes it as lossless
-WebP (up to 384 KiB), and records its intrinsic dimensions, alt text, and dominant color. The color
-reserves a calm placeholder while the thumbnail loads. A missing or unusable preview never prevents
-saving the article. Previews appear in feed and search rows and article pages. If the publisher
-supplies no usable preview, aggr tries video posters and article images; a direct PDF can supply
-its first page. PDF rasterization uses a bounded input and output size with two concurrent
-decoders; rendering itself has no hard CPU or allocation limit. Existing retained images also
-supply missing previews during builds without modifying the archive. Videos without published
-artwork or a poster do not yet provide frame thumbnails. Enabling remote previews applies to new
-items; run with `--refresh` to fill missing previews on existing items without replacing stored
-previews.
+For a reader with local resources, choose local or compressed media, sync or backfill those
+resources, then use `aggr build --hermetic`. That command makes no network requests and refuses
+publication when a required asset is missing. Live video, audio and interactive embeds become
+links. `build --offline` also makes no requests but permits publisher-hosted resources in the
+resulting reader. See [commands](commands.md) and [storage](storage.md).
 
 ## Collections
 
@@ -393,9 +459,10 @@ To import subscriptions instead of stored articles, name the repository's `aggr.
 explicitly (for example, `https://github.com/friend/reads/blob/main/aggr.toml`). Bare repository
 URLs import data.
 
-An aggr source copies every visible item retained in the other instance's current data tree by
-default. Set `limit` only when you deliberately want the newest N items. Items that exist only in
-older commits are not copied, so this is a useful content replica rather than a clone of the other
-repository's complete history. When previews or article images are enabled for the mirror source,
-existing local companions are copied with the article without contacting the publisher. Disabled
-media stays omitted.
+An aggr source copies visible items from the other instance's current data tree within the same
+per-source `max_items`, `max_age_days`, `since` and `max_bytes` limits. Use zero to disable a numeric
+limit explicitly. Items that exist only in older commits are not copied, so this is a useful
+content replica rather than a clone of the other
+repository's complete history. With local or compressed media enabled for the mirror source,
+existing local companions are copied with the article without contacting the publisher. Remote
+media stays omitted from the local archive.

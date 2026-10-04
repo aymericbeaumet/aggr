@@ -17,6 +17,45 @@ pub(crate) fn prepare_out_dir(out: &Path) -> Result<()> {
     std::fs::create_dir_all(&resolved).with_context(|| format!("creating {}", resolved.display()))
 }
 
+/// Promote a verified staged tree and retain the previous tree until replacement succeeds.
+pub(crate) fn promote(staging: &Path, out: &Path) -> Result<()> {
+    let out = validate_replaceable_output(out)?;
+    let parent = out.parent().context("output parent")?;
+    std::fs::create_dir_all(parent)?;
+    let transaction = tempfile::Builder::new()
+        .prefix(".aggr-publish-")
+        .tempdir_in(parent)?;
+    let next = transaction.path().join("next");
+    // A cache can be on another filesystem. Copy only when rename cannot cross that boundary.
+    if let Err(error) = std::fs::rename(staging, &next) {
+        if error.kind() != std::io::ErrorKind::CrossesDevices {
+            return Err(error.into());
+        }
+        for entry in walkdir::WalkDir::new(staging).follow_links(false) {
+            let entry = entry?;
+            let target = next.join(entry.path().strip_prefix(staging)?);
+            if entry.file_type().is_dir() {
+                std::fs::create_dir_all(target)?;
+            } else if entry.file_type().is_file() {
+                std::fs::copy(entry.path(), target)?;
+            } else {
+                bail!("staged output contains a non-file entry");
+            }
+        }
+    }
+    let previous = transaction.path().join("previous");
+    if out.exists() {
+        std::fs::rename(&out, &previous)?;
+    }
+    if let Err(error) = std::fs::rename(&next, &out) {
+        if previous.exists() {
+            std::fs::rename(&previous, &out).context("restoring previous output")?;
+        }
+        return Err(error).context("promoting generated output");
+    }
+    Ok(())
+}
+
 fn validate_replaceable_output(out: &Path) -> Result<PathBuf> {
     if out
         .components()

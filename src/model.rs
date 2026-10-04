@@ -27,6 +27,8 @@ pub struct RawItem {
     pub preview_candidates: Vec<crate::preview::Candidate>,
     /// Already encoded local bytes; replicas carry these without contacting the publisher.
     pub preview: Option<crate::preview::Thumbnail>,
+    /// Publisher preview metadata; retaining it never downloads the image.
+    pub remote_preview: Option<RemotePreview>,
     /// Exact article image masters and verified lossless renditions for newly retained items.
     pub images: Vec<crate::media::Asset>,
     /// A bounded PDF retained alongside the article, including bytes carried by replicas.
@@ -78,6 +80,52 @@ pub enum ContentKind {
     Extracted,
     #[default]
     None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemotePreview {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+impl RemotePreview {
+    pub fn new(url: &str, alt: Option<String>) -> Option<Self> {
+        let preview = Self {
+            url: url.into(),
+            alt: alt.as_deref().and_then(image_alt),
+            width: None,
+            height: None,
+        };
+        preview.is_valid().then_some(preview)
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.url.len() <= 8192
+            && url::Url::parse(&self.url).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+            })
+            && self.width.is_none_or(|v| (1..=24_000).contains(&v))
+            && self.height.is_none_or(|v| (1..=24_000).contains(&v))
+    }
+}
+
+fn deserialize_remote_preview<'de, D>(deserializer: D) -> Result<Option<RemotePreview>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml_ng::Value::deserialize(deserializer)?;
+    Ok(serde_yaml_ng::from_value::<RemotePreview>(value)
+        .ok()
+        .filter(RemotePreview::is_valid))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,6 +343,12 @@ pub struct FrontMatter {
         skip_serializing_if = "Option::is_none"
     )]
     pub preview: Option<Preview>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_remote_preview",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub remote_preview: Option<RemotePreview>,
     /// Exact publisher image companions plus optional verified lossless responsive renditions.
     #[serde(
         default,

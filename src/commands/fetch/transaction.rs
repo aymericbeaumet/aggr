@@ -149,6 +149,10 @@ impl SourceTransaction {
         self.track_relative(Path::new("sources").join(slug).join("seen.txt"))
     }
 
+    pub(super) fn track_evictions(&mut self, slug: &str) -> Result<()> {
+        self.track_relative(Path::new("sources").join(slug).join("evicted.json"))
+    }
+
     pub(super) fn track_state(&mut self, slug: &str) -> Result<()> {
         self.track_relative(Path::new("sources").join(slug).join("state.toml"))
     }
@@ -235,6 +239,43 @@ mod tests {
     use httpmock::prelude::*;
     use std::sync::Arc;
     use url::Url;
+
+    #[test]
+    fn rollback_restores_cleared_policy_eviction_markers() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path());
+        let source = source();
+        let item = crate::model::Item {
+            path: "items/blog/old".into(),
+            front: crate::model::FrontMatter {
+                source: "blog".into(),
+                link: "https://example.com/old".into(),
+                ..Default::default()
+            },
+            body: String::new(),
+        };
+        store
+            .record_evictions(
+                std::slice::from_ref(&item),
+                std::slice::from_ref(&item.path),
+                &[source],
+                &crate::config::Defaults::default(),
+            )
+            .unwrap();
+        let path = root.path().join("sources/blog/evicted.json");
+        let original = fs::read(&path).unwrap();
+        let mut transaction = SourceTransaction::new(root.path()).unwrap();
+        transaction.track_evictions("blog").unwrap();
+        let mut evictions = store.evictions("blog").unwrap();
+        evictions.clear(&crate::model::dedupe_keys(&RawItem {
+            link: item.front.link,
+            ..Default::default()
+        }));
+        store.save_evictions("blog", &evictions).unwrap();
+        assert!(!path.exists());
+        transaction.rollback().unwrap();
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
 
     #[test]
     fn rollback_removes_new_document_and_restores_existing_item() {
@@ -413,7 +454,7 @@ mod tests {
         let mut configured = source();
         configured.content = ContentMode::Light;
         configured.html = false;
-        configured.previews = false;
+        configured.previews = crate::config::PreviewPolicy::Disabled;
         configured.images = crate::config::ImagePolicy::Remote;
         configured.engine = Engine::Feed {
             url: Url::parse(&server.url("/feed.json")).unwrap(),

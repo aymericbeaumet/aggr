@@ -1,6 +1,8 @@
 # Published-site budget
 
-aggr preserves article text while fitting the generated site to a configured byte budget. The
+aggr preserves article text while fitting the generated site to a configured byte budget.
+Images, previews, and PDFs use publisher URLs by default; the media policy below applies when
+local preservation is explicitly enabled. The
 default is 1,000,000,000 bytes, matching a conservative decimal interpretation of GitHub Pages'
 1 GB published-site limit. The Git archive and its original image masters remain unchanged.
 
@@ -50,6 +52,9 @@ only the local resources the build actually publishes.
 
 ## Enforcing the limit
 
+`build --hermetic` publishes all required local resources or fails. It never falls back to
+publisher URLs to meet the budget and does not use the cached media allowance heuristic.
+
 The default theme loads one shared, minified bootstrap for preferences and dates before paint,
 instead of repeating those scripts inline. This removes about 6,445 bytes per page and adds one
 4,537-byte content-addressed asset. JavaScript and CSS files are published once and reused across
@@ -90,9 +95,9 @@ not on their availability. Raw publisher responses and complete rendered sites a
 Actions cache uploads. See [performance](performance.md#caches-on-github-actions) for the transfer
 tradeoffs.
 
-Individual entries are bounded and validated, but this cache has no total-size cap or automatic
-expiration. Older encoding-policy entries can remain until cache cleanup or host eviction. It
-stores reusable compressed copies and receipts, not another copy of every full-quality master.
+Derived media is bounded by `[cache] media_max_bytes` (2 GiB by default); obsolete generations
+and inactive entries are evicted after successful operations. See [storage](storage.md).
+It stores reusable publication copies and receipts.
 
 ## Archive growth
 
@@ -100,7 +105,8 @@ This budget controls deployment size, not acquisition or repository growth. Pres
 masters still consumes Git storage, and append-only history retains earlier objects. Measure
 repository bytes separately; [the public-instance baseline](benchmarks.md) illustrates the cost.
 
-Leave `[store] max_items` and `max_age_days` unset to retain all captured articles in the current
-archive. Explicit store retention is independent: it removes current articles through ordinary
+Per-feed `[defaults]` limits retain 250 items, 730 days, and 1 GB by default. Set `max_items`,
+`max_age_days`, and `max_bytes` to zero to retain an unbounded current archive. Source fields
+override each value independently. Retention removes current article families through ordinary
 commits and cannot reclaim their historical Git objects. The build budget never enables retention
 or removes articles to make room for media.

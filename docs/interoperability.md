@@ -124,7 +124,7 @@ is kept byte for byte as the master and served as-is, its size is read from the 
 box so the space is reserved before it loads, and it carries a flat stand-in preview instead of a
 ThumbHash. It gains no WebP renditions. A CDN that answers `auto=format` with AVIF regardless of
 `Accept` — Linear's, for one — is archived this way rather than skipped. Having no decoder also
-means AVIF cannot be compacted: under `images = "compact"` it keeps its exact bytes, as
+means AVIF cannot be compacted: under `media = "compressed"` it keeps its exact bytes, as
 colour-managed and high-bit-depth images do.
 
 AVIF support stops there deliberately, and two gaps follow from never decoding it. An animated AVIF
@@ -232,7 +232,7 @@ In heavy content mode, direct PDF articles and explicitly resolved PDF alternate
 item-owned document companion. Capture obeys `fetch.max_body_bytes` (10 MB by default) and accepts
 at most 16 MiB. It requires a PDF signature and a compatible response type, and validates the
 stored path and content hash before publication. HTML challenges never
-become document companions. Fetching does not run the PDF or launch a browser.
+become document companions. Fetching does not run the PDF or start a browser.
 
 Later syncs repair missing companions without replacing the article's body, HTML, or existing
 media. Automatic repairs are bounded to eight attempts per source per run and share the capture
@@ -380,8 +380,8 @@ repository's complete Git history.
 
 Retention removes an item from the current static site and discovery outputs. Append-only Git
 history still contains the old object while its ancestor commits remain reachable, but search
-engines are not a Git-history recovery interface. Keep the default unlimited store retention when
-the live site is intended to remain a complete archive.
+engines are not a Git-history recovery interface. Set `[defaults] max_items`, `max_age_days`, and
+`max_bytes` to zero, and clear `since`, when the live site should keep the complete captured archive.
 
 ## Preservation boundary
 

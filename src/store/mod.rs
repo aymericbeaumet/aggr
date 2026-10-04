@@ -1,6 +1,7 @@
 //! The data branch as a directory tree: per-source state and dedupe keys, the status file,
 //! and the `items/` pairs. Everything here is plain files; `git.rs` turns them into commits.
 
+pub mod evictions;
 pub mod frontmatter;
 pub mod retention;
 
@@ -32,6 +33,35 @@ pub const GITIGNORE: &str = "\
 pub struct Store {
     root: PathBuf,
     image_cache: Option<crate::media::StoredAssetCache>,
+    archive_sizes: Option<std::sync::Arc<BTreeMap<String, u64>>>,
+}
+
+#[derive(Default)]
+struct ItemFamily {
+    files: Vec<PathBuf>,
+    bytes: u64,
+}
+
+fn companion_owner(name: &str) -> Option<&str> {
+    let (stem, extension) = name.rsplit_once('.')?;
+    if matches!(extension, "md" | "html") {
+        return Some(stem);
+    }
+    if !matches!(
+        extension,
+        "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" | "svg" | "pdf"
+    ) {
+        return None;
+    }
+    for marker in [".image-", ".preview-", ".document-"] {
+        if let Some((owner, suffix)) = stem.rsplit_once(marker)
+            && suffix.len() == 12
+            && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Some(owner);
+        }
+    }
+    stem.strip_suffix(".preview")
 }
 
 /// Per-source fetch state, stored as `sources/<slug>/state.toml`. Only rewritten when it changes,
@@ -174,7 +204,117 @@ impl Store {
         Self {
             root: root.into(),
             image_cache: None,
+            archive_sizes: None,
         }
+    }
+
+    /// Git object sizes cover companions omitted from a lightweight offline snapshot.
+    pub fn with_archive_sizes(mut self, sizes: std::sync::Arc<BTreeMap<String, u64>>) -> Self {
+        self.archive_sizes = Some(sizes);
+        self
+    }
+
+    fn item_families(&self, paths: &[String]) -> Result<BTreeMap<String, ItemFamily>> {
+        let mut families: BTreeMap<_, _> = paths
+            .iter()
+            .map(|path| (path.clone(), ItemFamily::default()))
+            .collect();
+        for path in paths {
+            self.checked_path(Path::new(&format!("{path}.md")))?;
+            self.checked_path(Path::new(&format!("{path}.html")))?;
+        }
+        let mut add = |relative: &Path, size: u64| {
+            let Some(owner) = relative
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(companion_owner)
+            else {
+                return;
+            };
+            let key = relative
+                .with_file_name(owner)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if let Some(family) = families.get_mut(&key) {
+                family.files.push(relative.to_path_buf());
+                family.bytes = family.bytes.saturating_add(size);
+            }
+        };
+        if let Some(sizes) = &self.archive_sizes {
+            for (relative, size) in sizes.iter() {
+                add(Path::new(relative), *size);
+            }
+        } else if self.root.join("items").exists() {
+            for entry in walkdir::WalkDir::new(self.root.join("items")) {
+                let entry = entry.context("accounting for article files")?;
+                if entry.file_type().is_dir() {
+                    continue;
+                }
+                let relative = entry
+                    .path()
+                    .strip_prefix(&self.root)
+                    .context("article path outside store")?;
+                let Some(owner) = relative
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(companion_owner)
+                else {
+                    continue;
+                };
+                let key = relative
+                    .with_file_name(owner)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if paths.binary_search(&key).is_ok() {
+                    let checked = self.checked_path(relative)?;
+                    add(relative, fs::metadata(checked)?.len());
+                }
+            }
+        }
+        Ok(families)
+    }
+
+    pub fn retention_plan(
+        &self,
+        items: &[Item],
+        defaults: crate::config::Limits,
+        sources: &[crate::config::Source],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<String>> {
+        let mut paths: Vec<_> = items.iter().map(|item| item.path.clone()).collect();
+        paths.sort();
+        let limits: BTreeMap<_, _> = sources
+            .iter()
+            .map(|source| (source.slug.as_str(), source.limits))
+            .collect();
+        let sizes = self
+            .item_families(&paths)?
+            .into_iter()
+            .map(|(path, family)| (path, family.bytes))
+            .collect();
+        Ok(retention::plan(
+            items,
+            &sizes,
+            |source| limits.get(source).copied().unwrap_or(defaults),
+            now,
+        ))
+    }
+
+    pub fn retained_items(
+        &self,
+        defaults: crate::config::Limits,
+        sources: &[crate::config::Source],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Item>> {
+        let items = self.items()?;
+        let removed: BTreeSet<_> = self
+            .retention_plan(&items, defaults, sources, now)?
+            .into_iter()
+            .collect();
+        Ok(items
+            .into_iter()
+            .filter(|item| !removed.contains(&item.path))
+            .collect())
     }
 
     /// Reuse validated image results only in the caller's existing disposable cache boundary.
@@ -524,67 +664,18 @@ impl Store {
         Ok(())
     }
 
-    /// Delete an item's companions and Markdown. Its dedupe keys stay in `seen.txt`.
-    pub fn remove_item(&self, path: &str) -> Result<()> {
-        for extension in ["md", "html"] {
-            self.checked_path(Path::new(&format!("{path}.{extension}")))?;
-        }
-        if let Ok(item) = self.read_item(path)
-            && let Some(preview) = &item.front.preview
-            && let Some(stem) = Path::new(path).file_name().and_then(|name| name.to_str())
-            && preview.is_valid_for(stem)
-        {
-            let parent = Path::new(path).parent().unwrap_or_else(|| Path::new(""));
-            let relative = parent.join(&preview.file);
-            let file = self.checked_path(&relative)?;
-            match fs::remove_file(&file) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    return Err(err).with_context(|| format!("removing {}", file.display()));
-                }
-            }
-        }
-        if let Ok(item) = self.read_item(path)
-            && let Some(stem) = Path::new(path).file_name().and_then(|name| name.to_str())
-        {
-            let parent = Path::new(path).parent().unwrap_or_else(|| Path::new(""));
-            if let Some(document) = item
-                .front
-                .document
-                .as_ref()
-                .filter(|document| document.is_valid_for(stem))
-            {
-                let file = self.checked_path(&parent.join(&document.file))?;
-                match fs::remove_file(&file) {
-                    Ok(()) => {}
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(err) => {
-                        return Err(err).with_context(|| format!("removing {}", file.display()));
-                    }
-                }
-            }
-            for image in item
-                .front
-                .images
-                .iter()
-                .filter(|image| image.is_valid_for(stem))
-            {
-                for file in std::iter::once(&image.original).chain(&image.variants) {
-                    let path = self.checked_path(&parent.join(&file.file))?;
-                    match fs::remove_file(&path) {
-                        Ok(()) => {}
-                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(err) => {
-                            return Err(err)
-                                .with_context(|| format!("removing {}", path.display()));
-                        }
-                    }
-                }
-            }
-        }
-        for ext in ["md", "html"] {
-            let file = self.checked_path(Path::new(&format!("{path}.{ext}")))?;
+    /// Delete complete owned families, including obsolete companions absent from front matter.
+    pub fn remove_items(&self, paths: &[String]) -> Result<()> {
+        let mut paths = paths.to_vec();
+        paths.sort();
+        let families = self.item_families(&paths)?;
+        // Validate the complete batch before deleting anything.
+        let files = families
+            .values()
+            .flat_map(|family| &family.files)
+            .map(|relative| self.checked_path(relative))
+            .collect::<Result<Vec<_>>>()?;
+        for file in files {
             match fs::remove_file(&file) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -594,6 +685,11 @@ impl Store {
             }
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn remove_item(&self, path: &str) -> Result<()> {
+        self.remove_items(&[path.to_owned()])
     }
 
     pub fn read_item(&self, path: &str) -> Result<Item> {
@@ -1467,7 +1563,7 @@ mod tests {
             }));
         let mut bytes = std::io::Cursor::new(Vec::new());
         image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
-        crate::media::prepare_asset(
+        crate::media::prepare_legacy_asset(
             &crate::media::Candidate {
                 url: source.parse().unwrap(),
                 alt: None,
@@ -1700,7 +1796,7 @@ mod tests {
         image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
         let mut bytes = bytes.into_inner();
         bytes.resize(minimum_bytes.max(bytes.len()), 0);
-        crate::media::prepare_asset(
+        crate::media::prepare_legacy_asset(
             &crate::media::Candidate {
                 url: url::Url::parse("https://publisher.example/image.png").unwrap(),
                 alt: Some("Diagram".into()),
@@ -1868,7 +1964,7 @@ mod tests {
             url: url::Url::parse("https://publisher.example/image.png").unwrap(),
             alt: Some("Diagram".into()),
         };
-        let asset = crate::media::prepare_asset(
+        let asset = crate::media::prepare_legacy_asset(
             &candidate,
             bytes.into_inner(),
             &crate::media::MediaLimits::default(),
@@ -1935,7 +2031,7 @@ mod tests {
         let image = image::DynamicImage::new_rgb8(640, 400);
         let mut bytes = std::io::Cursor::new(Vec::new());
         image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
-        let asset = crate::media::prepare_asset(
+        let asset = crate::media::prepare_legacy_asset(
             &crate::media::Candidate {
                 url: url::Url::parse("https://publisher.example/image.png").unwrap(),
                 alt: Some("Diagram".into()),

@@ -79,10 +79,10 @@ export async function trim(caches: CacheStorageLike, name: string, limit: number
 }
 
 /**
- * Fetch one resource to store: fresh from the network, complete, and within `timeout` for the
- * whole body rather than only its headers.
+ * Fetch one complete resource within `timeout` for the whole body. Mutable files require a
+ * fresh response; content-addressed files can reuse a response already in the HTTP cache.
  */
-export async function fetchEntry(fetch: Fetch, url: string, timeout: number, signal?: AbortSignal): Promise<Response> {
+export async function fetchEntry(fetch: Fetch, url: string, timeout: number, signal?: AbortSignal, cache: RequestCache = 'reload'): Promise<Response> {
   const controller = new AbortController();
   const abort = () => controller.abort();
   if (signal) {
@@ -91,7 +91,7 @@ export async function fetchEntry(fetch: Fetch, url: string, timeout: number, sig
   }
   const timer = setTimeout(abort, timeout);
   try {
-    const response = await fetch(url, { signal: controller.signal, cache: 'reload', priority: 'low' });
+    const response = await fetch(url, { signal: controller.signal, cache, priority: 'low' });
     if (!response.ok || response.type === 'opaque') throw new Error('network');
     // Keep the deadline active while reading a stalled response body, not only its headers.
     const bytes = await response.arrayBuffer();

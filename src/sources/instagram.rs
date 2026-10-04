@@ -48,6 +48,7 @@ fn username(url: &Url) -> Option<&str> {
 }
 
 pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
+    super::require_heavy(source, "Instagram")?;
     let previous = if ctx.state.identity == source.identity {
         Validators::from_state(ctx.state)
     } else {
@@ -236,7 +237,7 @@ mod tests {
             );
         });
         let config = crate::config::Config::parse(&format!(
-            "[fetch]\nretries=0\n[[sources]]\nurl={:?}\nheaders={{'X-Reader-Test'='configured'}}",
+            "[fetch]\nretries=0\n[defaults]\ncontent=\"heavy\"\n[[sources]]\nurl={:?}\nheaders={{'X-Reader-Test'='configured'}}",
             server.url("/finntonry/")
         ))
         .unwrap();

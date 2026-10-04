@@ -780,6 +780,7 @@ mod tests {
         };
         let render = |item: &ItemCtx, base_url: Option<&str>| {
             let site = SiteCtx {
+                hermetic: false,
                 title: "Reader".into(),
                 description: String::new(),
                 identity: None,

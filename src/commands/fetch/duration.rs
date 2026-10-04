@@ -5,29 +5,30 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 
 use crate::cache::Namespace;
-use crate::config::{Engine, Source};
+use crate::config::Source;
 use crate::store::SourceState;
 
-const PARSER_VERSION: &[u8] = b"itunes-duration-seconds-v1\n";
+const PARSER_VERSION: &[u8] = b"source-selection-v3:light-feed-only\n";
 
 pub(super) struct Receipt {
     path: PathBuf,
+    version: Vec<u8>,
 }
 
-/// A parser change needs one unconditional response, without changing archived no-op state.
+/// Parser or policy changes need one unconditional enumeration, without rewriting archive state.
 pub(super) fn prepare(
     source: &Source,
     state: &mut SourceState,
     cache_dir: &Path,
 ) -> Result<Option<Receipt>> {
-    if !matches!(source.engine, Engine::Feed { .. }) {
-        return Ok(None);
-    }
+    let mut version = PARSER_VERSION.to_vec();
+    version.extend(crate::store::evictions::source_policy(source)?.as_bytes());
     let receipt = Receipt {
         path: Namespace::FeedParsing.dir(cache_dir).join(format!(
             "{}.receipt",
             crate::model::sha1_hex(source.identity.as_bytes())
         )),
+        version,
     };
     if receipt.current()? {
         return Ok(None);
@@ -51,10 +52,10 @@ impl Receipt {
                 self.path.display()
             );
         }
-        if metadata.len() != PARSER_VERSION.len() as u64 {
+        if metadata.len() != self.version.len() as u64 {
             return Ok(false);
         }
-        Ok(fs::read(&self.path).context("reading feed parser receipt")? == PARSER_VERSION)
+        Ok(fs::read(&self.path).context("reading source parser receipt")? == self.version)
     }
 
     /// Called only after the source transaction succeeds; failed sources must retry parsing.
@@ -70,7 +71,7 @@ impl Receipt {
         let mut temporary = tempfile::NamedTempFile::new_in(directory)
             .context("creating temporary feed parser receipt")?;
         temporary
-            .write_all(PARSER_VERSION)
+            .write_all(&self.version)
             .context("writing feed parser receipt")?;
         temporary
             .persist(&self.path)
@@ -133,6 +134,80 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn content_mode_changes_revalidate_sources_without_discarding_endpoint_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut source = super::super::tests::source();
+        let original = SourceState {
+            identity: source.identity.clone(),
+            resolved_url: Some("https://example.com/news".into()),
+            etag: Some("same-page".into()),
+            body_hash: Some("same-body".into()),
+            ..Default::default()
+        };
+        prepare(&source, &mut original.clone(), directory.path())
+            .unwrap()
+            .unwrap()
+            .commit()
+            .unwrap();
+        source.content = crate::config::ContentMode::Light;
+        let mut next = original.clone();
+        let changed = prepare(&source, &mut next, directory.path())
+            .unwrap()
+            .expect("a cached HTML response must be reconsidered under feed-only mode");
+        assert!(next.etag.is_none() && next.body_hash.is_none());
+        assert_eq!(next.resolved_url, original.resolved_url);
+        changed.commit().unwrap();
+        assert!(
+            prepare(&source, &mut next, directory.path())
+                .unwrap()
+                .is_none()
+        );
+
+        source.content = crate::config::ContentMode::Heavy;
+        assert!(
+            prepare(&source, &mut next, directory.path())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn limits_and_media_changes_revalidate_unchanged_git_mirrors() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut source = super::super::tests::source();
+        source.engine = crate::config::Engine::Aggr {
+            url: "https://example.com/reader.git".parse().unwrap(),
+            branch: "aggr".into(),
+            sources: Vec::new(),
+        };
+        let mut state = SourceState {
+            identity: source.identity.clone(),
+            body_hash: Some("unchanged git commit".into()),
+            ..Default::default()
+        };
+        for iteration in 0..3 {
+            if iteration == 1 {
+                source.limits.max_items += 1;
+            }
+            if iteration == 2 {
+                source.images = crate::config::ImagePolicy::Remote;
+            }
+            let receipt = prepare(&source, &mut state, directory.path())
+                .unwrap()
+                .expect("effective source options must reselect the same upstream commit");
+            assert!(state.body_hash.is_none());
+            receipt.commit().unwrap();
+            state.body_hash = Some("unchanged git commit".into());
+            assert!(
+                prepare(&source, &mut state, directory.path())
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(state.body_hash.as_deref(), Some("unchanged git commit"));
+        }
     }
 
     #[test]

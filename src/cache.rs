@@ -1,6 +1,10 @@
 //! Cache locations and namespaces. Build/CI state belongs to the repository; dev state belongs
 //! to the operating system's standard cache directory and is isolated per configuration file.
 
+mod limits;
+pub use limits::LimitReport;
+pub(crate) use limits::mark_used;
+
 use std::collections::BTreeSet;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -11,6 +15,10 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest as _, Sha1};
 use url::Url;
+
+pub fn enforce_limits(root: &Path, config: &crate::config::CacheConfig) -> Result<LimitReport> {
+    limits::enforce_limits(root, config)
+}
 
 const BUILD_NAMESPACE: &str = "build-v1";
 const DEV_NAMESPACE: &str = "dev-v1";
@@ -48,7 +56,6 @@ pub enum Namespace {
 
 impl Namespace {
     /// Test-only: unit tests pin the reusable workflow's cache list to this registry.
-    #[cfg(test)]
     pub const ALL: [Namespace; 11] = [
         Namespace::Articles,
         Namespace::Render,
@@ -236,6 +243,8 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
     }
     &[
         source!("config", "config.rs"),
+        source!("source-policy", "config/policy.rs"),
+        source!("retention", "store/retention.rs"),
         source!("language", "config/language.rs"),
         source!("preferences", "config/preferences.rs"),
         source!("repository-url", "config/repository_url.rs"),
@@ -274,10 +283,13 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("pdf-preview", "preview/pdf.rs"),
         source!("store", "store/mod.rs"),
         source!("frontmatter", "store/frontmatter.rs"),
+        source!("offline-build", "commands/offline.rs"),
         source!("site", "site/mod.rs"),
         source!("site-client", "site/client.rs"),
         source!("site-dev", "site/dev.rs"),
         source!("site-offline", "site/offline.rs"),
+        source!("site-hermetic", "site/hermetic.rs"),
+        source!("site-precache", "site/precache.rs"),
         source!("source-index", "site/source_index.rs"),
         source!("assets", "site/assets.rs"),
         source!("budget", "site/budget.rs"),
@@ -318,6 +330,7 @@ const RENDER_INDEPENDENT_SOURCES: &[&str] = &[
     // This module: the fingerprint, the raw-response cache and the cache layout. Changing how a
     // key is computed is deliberately versioned through the `schema` field instead.
     "cache.rs",
+    "cache/",
     // Test-only: writes the parity fixtures the frontend checks itself against.
     "site/client/parity.rs",
     // Git plumbing decides which commit is rendered; the commit itself is the `data-sha` field.
@@ -334,8 +347,8 @@ const RENDER_INDEPENDENT_SOURCES: &[&str] = &[
     // Generated documents and their oracles. Test-only: the conversion they exercise is
     // fingerprinted through `content/markdown.rs` itself.
     "content/markdown/fuzz.rs",
-    // Retention plans remove files from the checkout in sync; the build sees the resulting tree.
-    "store/retention.rs",
+    // Re-admission bookkeeping changes sync decisions; builds consume the resulting item tree.
+    "store/evictions.rs",
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -679,6 +692,8 @@ impl ArticleCache {
         if !matches!(final_url.scheme(), "http" | "https") {
             return Ok(None);
         }
+        mark_used(&meta_path);
+        mark_used(&body_path);
         Ok(Some(ArticleResponse {
             bytes,
             final_url,
@@ -728,6 +743,8 @@ impl ArticleCache {
                 .context("serializing article cache metadata")?
                 .as_bytes(),
         )?;
+        mark_used(&meta_path);
+        mark_used(&body_path);
         Ok(response)
     }
 
@@ -742,7 +759,11 @@ impl ArticleCache {
         else {
             return Ok(None);
         };
-        Ok(serde_json::from_slice(&content).ok())
+        let parsed = serde_json::from_slice(&content).ok();
+        if parsed.is_some() {
+            mark_used(&path);
+        }
+        Ok(parsed)
     }
 
     pub fn store_extracted(
@@ -751,10 +772,10 @@ impl ArticleCache {
         final_url: &Url,
         content: &crate::content::ExtractedArticle,
     ) -> Result<()> {
-        write(
-            &self.extracted_path(body_hash, final_url),
-            &serde_json::to_vec(content)?,
-        )
+        let path = self.extracted_path(body_hash, final_url);
+        write(&path, &serde_json::to_vec(content)?)?;
+        mark_used(&path);
+        Ok(())
     }
 
     fn extracted_path(&self, body_hash: &str, final_url: &Url) -> PathBuf {

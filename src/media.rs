@@ -1,9 +1,9 @@
 //! Bounded local copies of article-body images.
 //!
-//! Under `images = "original"` the publisher's bytes remain the master, and responsive renditions
+//! Under `media = "local"` the publisher's bytes remain the master, and responsive renditions
 //! are resized once from the oriented decode and encoded as lossless WebP, then decoded again to
-//! prove pixel equality before use. Under `images = "compact"` one bounded, lossy master replaces
-//! both; see [`compact`]. `images = "remote"` never reaches this module.
+//! prove pixel equality before use. Under `media = "compressed"` one bounded, lossy master replaces
+//! both; see [`compact`]. `media = "remote"` never reaches this module.
 
 pub mod compact;
 pub mod placeholder;
@@ -14,7 +14,7 @@ mod vector;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -408,6 +408,65 @@ pub(crate) fn image_failure_generation() -> &'static str {
     GENERATION.get_or_init(|| hex::encode(implementation_fingerprint()))
 }
 
+/// Only codec dependencies invalidate image receipts; unrelated CLI/network upgrades do not.
+pub(crate) fn codec_fingerprint() -> &'static str {
+    static FINGERPRINT: OnceLock<String> = OnceLock::new();
+    FINGERPRINT.get_or_init(|| codec_fingerprint_for(include_str!("../Cargo.lock")))
+}
+
+fn codec_fingerprint_for(lockfile: &str) -> String {
+    let Ok(lock) = toml::from_str::<toml::Table>(lockfile) else {
+        return hex::encode(Sha256::digest(lockfile.as_bytes()));
+    };
+    let Some(packages) = lock.get("package").and_then(toml::Value::as_array) else {
+        return hex::encode(Sha256::digest(lockfile.as_bytes()));
+    };
+    let mut wanted = BTreeSet::from([
+        "image".to_owned(),
+        "resvg".to_owned(),
+        "thumbhash".to_owned(),
+    ]);
+    loop {
+        let previous = wanted.len();
+        for package in packages {
+            let Some(name) = package.get("name").and_then(toml::Value::as_str) else {
+                continue;
+            };
+            if !wanted.contains(name) {
+                continue;
+            }
+            if let Some(dependencies) = package.get("dependencies").and_then(toml::Value::as_array)
+            {
+                for dependency in dependencies.iter().filter_map(toml::Value::as_str) {
+                    if let Some(name) = dependency.split_whitespace().next() {
+                        wanted.insert(name.to_owned());
+                    }
+                }
+            }
+        }
+        if wanted.len() == previous {
+            break;
+        }
+    }
+    let mut relevant = packages
+        .iter()
+        .filter(|package| {
+            package
+                .get("name")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|name| wanted.contains(name))
+        })
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    relevant.sort();
+    let mut hash = Sha256::new();
+    for package in relevant {
+        hash.update(package.as_bytes());
+        hash.update(b"\0");
+    }
+    hex::encode(hash.finalize())
+}
+
 fn implementation_fingerprint() -> &'static [u8; 32] {
     static IMPLEMENTATION: OnceLock<[u8; 32]> = OnceLock::new();
     IMPLEMENTATION.get_or_init(|| {
@@ -420,7 +479,7 @@ fn implementation_fingerprint() -> &'static [u8; 32] {
         hash.update(include_bytes!(
             "media/fonts/AtkinsonHyperlegible-Regular.ttf"
         ));
-        hash.update(include_bytes!("../Cargo.lock"));
+        hash.update(codec_fingerprint().as_bytes());
         hash.finalize().into()
     })
 }
@@ -651,6 +710,7 @@ pub struct Fetcher {
     decode_limit: Arc<Semaphore>,
     limits: MediaLimits,
     failure_cache: Option<PathBuf>,
+    failed_requests: Mutex<BTreeSet<String>>,
 }
 
 impl Fetcher {
@@ -694,6 +754,7 @@ impl Fetcher {
             decode_limit: Arc::new(Semaphore::new(limits.decode_concurrency)),
             limits,
             failure_cache: None,
+            failed_requests: Mutex::default(),
         })
     }
 
@@ -706,11 +767,27 @@ impl Fetcher {
         self
     }
 
-    fn failure_path(&self, url: &Url, source: &Source) -> Option<PathBuf> {
+    fn failure_key(url: &Url, source: &Source) -> String {
         let key = format!("{}\n{:?}", url, http::source_headers(source, url));
+        crate::model::sha1_hex(key.as_bytes())
+    }
+
+    fn failure_path(&self, url: &Url, source: &Source) -> Option<PathBuf> {
         self.failure_cache
             .as_ref()
-            .map(|root| root.join(crate::model::sha1_hex(key.as_bytes())))
+            .map(|root| root.join(Self::failure_key(url, source)))
+    }
+
+    pub(crate) fn failed_this_run(&self, candidate_url: &str, source: &Source) -> bool {
+        Url::parse(candidate_url)
+            .ok()
+            .and_then(|url| image_request_url(&url))
+            .is_some_and(|url| {
+                self.failed_requests
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .contains(&Self::failure_key(&url, source))
+            })
     }
 
     fn recently_failed(&self, request_url: &Url, source: &Source) -> bool {
@@ -740,6 +817,10 @@ impl Fetcher {
         source: &Source,
         reason: &str,
     ) {
+        self.failed_requests
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(Self::failure_key(request_url, source));
         log::warn!(
             "{}: could not archive image {}: {reason}",
             source.slug,
@@ -999,6 +1080,17 @@ pub fn prepare_asset(candidate: &Candidate, bytes: Vec<u8>, limits: &MediaLimits
     prepare_asset_with_policy(candidate, bytes, limits, None)
 }
 
+#[cfg(test)]
+pub(crate) fn prepare_legacy_asset(
+    candidate: &Candidate,
+    bytes: Vec<u8>,
+    limits: &MediaLimits,
+) -> Result<Asset> {
+    let mut asset = prepare_asset(candidate, bytes, limits)?;
+    asset.renditions = derive_renditions(&asset)?;
+    Ok(asset)
+}
+
 /// Archive one response, reducing the master to `compact` when a source asks for a compact
 /// archive. Compaction needs the same intact 8-bit decode that renditions do, so an animated,
 /// colour-managed or high-depth image keeps its exact bytes under either policy.
@@ -1079,30 +1171,7 @@ pub fn prepare_asset_with_policy(
     let compact_animation = compact.is_some() && animated && !has_icc && format == ImageFormat::Gif;
     let compact = compact.filter(|_| reducible || compact_animation);
 
-    let rendition_widths = limits
-        .rendition_widths
-        .iter()
-        .copied()
-        .filter(|width| *width > 0 && *width < image.width())
-        .collect::<BTreeSet<_>>();
-    let mut renditions = Vec::with_capacity(rendition_widths.len() + 1);
-    if reducible && compact.is_none() {
-        // Avoid full-resolution RGBA copies and encoding for very large originals. Their exact
-        // master is the widest source alongside bounded lossless renditions.
-        let large = u64::from(width) * u64::from(height) > MAX_FULL_WIDTH_PIXELS;
-        let full_width = (format != ImageFormat::WebP && !large)
-            .then(|| prepare_rendition(&image, image.width(), limits.max_file_bytes, bytes.len()))
-            .flatten();
-        let responsive = large || format == ImageFormat::WebP || full_width.is_some();
-        for rendition_width in rendition_widths.into_iter().filter(|_| responsive) {
-            if let Some(rendition) =
-                prepare_rendition(&image, rendition_width, limits.max_file_bytes, bytes.len())
-            {
-                renditions.push(rendition);
-            }
-        }
-        renditions.extend(full_width);
-    }
+    let renditions = Vec::new();
     let mut asset = Asset {
         source_url: candidate.url.to_string(),
         source_hash: crate::model::sha1_hex(candidate.url.as_str().as_bytes()),
@@ -1278,6 +1347,74 @@ mod avif_tests {
         wrong.width = 1300;
         assert!(validate_stored(&bytes, &wrong, StoredKind::Master).is_err());
     }
+}
+
+/// Disposable responsive copies for publication; acquisition only archives the master.
+pub(crate) fn derive_renditions(asset: &Asset) -> Result<Vec<Rendition>> {
+    if !asset.renditions.is_empty() {
+        return Ok(asset.renditions.clone());
+    }
+    let limits = MediaLimits::default();
+    let format = image::guess_format(&asset.master_bytes)?;
+    if format == ImageFormat::Avif || is_animated(&asset.master_bytes, format, &limits)? {
+        return Ok(Vec::new());
+    }
+    let mut reader = ImageReader::with_format(Cursor::new(asset.master_bytes.as_slice()), format);
+    reader.limits(decoder_limits(&limits));
+    let mut decoder = reader.into_decoder()?;
+    if decoder
+        .icc_profile()
+        .map_or(true, |profile| profile.is_some())
+        || !safe_for_renditions(decoder.original_color_type())
+    {
+        return Ok(Vec::new());
+    }
+    let orientation = decoder.orientation()?;
+    let mut image = DynamicImage::from_decoder(decoder)?;
+    image.apply_orientation(orientation);
+    validate_dimensions(image.width(), image.height(), &limits)?;
+    let large = u64::from(image.width()) * u64::from(image.height()) > MAX_FULL_WIDTH_PIXELS;
+    let full_width = (format != ImageFormat::WebP && !large)
+        .then(|| {
+            prepare_rendition(
+                &image,
+                image.width(),
+                limits.max_file_bytes,
+                asset.master_bytes.len(),
+            )
+        })
+        .flatten();
+    if !large && format != ImageFormat::WebP && full_width.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut renditions = limits
+        .rendition_widths
+        .iter()
+        .copied()
+        .filter(|width| *width > 0 && *width < image.width())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|width| {
+            prepare_rendition(
+                &image,
+                width,
+                limits.max_file_bytes,
+                asset.master_bytes.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    renditions.extend(full_width);
+    let mut remaining = limits
+        .max_article_bytes
+        .saturating_sub(asset.master_bytes.len());
+    renditions.retain(|rendition| {
+        if rendition.bytes.len() > remaining {
+            return false;
+        }
+        remaining -= rendition.bytes.len();
+        true
+    });
+    Ok(renditions)
 }
 
 fn prepare_rendition(
@@ -1757,6 +1894,18 @@ fn dominant_color(image: &DynamicImage) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codec_cache_identity_ignores_unrelated_dependency_updates() {
+        let base = "[[package]]\nname = 'image'\nversion = '1'\ndependencies = ['png 2']\n[[package]]\nname = 'png'\nversion = '2'\n[[package]]\nname = 'clap'\nversion = '3'\n";
+        assert_eq!(
+            super::codec_fingerprint_for(base),
+            super::codec_fingerprint_for(&base.replace("version = '3'", "version = '4'"))
+        );
+        assert_ne!(
+            super::codec_fingerprint_for(base),
+            super::codec_fingerprint_for(&base.replace("version = '2'", "version = '5'"))
+        );
+    }
 
     use super::*;
     use image::{ImageBuffer, ImageEncoder as _, Rgba};
@@ -1976,7 +2125,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_exact_master_and_emits_ordered_non_upscaled_renditions() {
+    fn preserves_exact_master_without_archiving_generated_renditions() {
         let source = DynamicImage::ImageRgba8(ImageBuffer::from_fn(800, 480, |x, y| {
             Rgba([(x % 251) as u8, (y % 239) as u8, ((x + y) % 241) as u8, 255])
         }));
@@ -1996,7 +2145,7 @@ mod tests {
                 .iter()
                 .map(|rendition| rendition.width)
                 .collect::<Vec<_>>(),
-            [320, 640, 800]
+            Vec::<u32>::new()
         );
         assert!(asset.renditions.iter().all(|rendition| {
             rendition.extension == "webp"
@@ -2012,7 +2161,7 @@ mod tests {
         let metadata = asset.metadata("article");
         assert!(metadata.is_valid_for("article"));
         let files = asset.files("article");
-        assert_eq!(files.len(), 4);
+        assert_eq!(files.len(), 1);
         assert_eq!(files[0].metadata, metadata.original);
         assert_eq!(
             files[1..]
@@ -2052,12 +2201,21 @@ mod tests {
                 ((x + y) % 255) as u8,
             ])
         }));
-        let asset = prepare_asset(
+        let mut asset = prepare_asset(
             &candidate("https://example.com/alpha.png"),
             png(&source),
             &MediaLimits::default(),
         )
         .unwrap();
+        asset.renditions.push(
+            prepare_rendition(
+                &source,
+                320,
+                MediaLimits::default().max_file_bytes,
+                usize::MAX,
+            )
+            .unwrap(),
+        );
         let rendition = &asset.renditions[0];
         let expected = source
             .resize_exact(
@@ -2075,7 +2233,7 @@ mod tests {
     #[test]
     fn small_images_are_never_upscaled() {
         let image = DynamicImage::new_rgba8(200, 120);
-        let asset = prepare_asset(
+        let asset = prepare_legacy_asset(
             &candidate("https://example.com/small.png"),
             png(&image),
             &MediaLimits::default(),
@@ -2088,7 +2246,7 @@ mod tests {
         );
 
         let below_placeholder = DynamicImage::new_rgba8(40, 36);
-        let asset = prepare_asset(
+        let asset = prepare_legacy_asset(
             &candidate("https://example.com/below-placeholder.png"),
             png(&below_placeholder),
             &MediaLimits::default(),
@@ -2178,7 +2336,7 @@ mod tests {
     }
 
     #[test]
-    fn large_originals_keep_bounded_renditions_without_full_resolution_encode() {
+    fn large_originals_do_not_encode_generated_copies() {
         RENDITION_ENCODE_COUNT.set(0);
         let bytes = jpeg(&DynamicImage::new_rgb8(8001, 4000), 60);
         let limits = MediaLimits {
@@ -2194,16 +2352,16 @@ mod tests {
         assert_eq!(asset.master_bytes, bytes);
         assert_eq!(
             asset.renditions.iter().map(|r| r.width).collect::<Vec<_>>(),
-            [320]
+            Vec::<u32>::new()
         );
         assert_eq!(
             RENDITION_ENCODE_COUNT.get(),
-            1,
+            0,
             "never encode a full-resolution copy of a large master"
         );
         assert_eq!(
             fit_asset_to_budget(&mut asset, limits.max_article_bytes),
-            Some(bytes.len() + asset.renditions[0].bytes.len())
+            Some(bytes.len())
         );
         assert_eq!(
             placeholder::from_hash(&asset.placeholder.hash).unwrap(),
@@ -2236,8 +2394,8 @@ mod tests {
         );
         assert_eq!(
             RENDITION_ENCODE_COUNT.get(),
-            1,
-            "only test the full-width candidate"
+            0,
+            "do not encode responsive copies during acquisition"
         );
         let metadata = asset.metadata("compact");
         Asset::from_stored(
@@ -2281,7 +2439,7 @@ mod tests {
         let source = DynamicImage::ImageRgba8(ImageBuffer::from_fn(640, 320, |x, y| {
             Rgba([(x % 251) as u8, (y % 239) as u8, ((x + y) % 241) as u8, 255])
         }));
-        let asset = prepare_asset(
+        let asset = prepare_legacy_asset(
             &candidate("https://example.com/article.png"),
             png(&source),
             &MediaLimits::default(),
@@ -2327,7 +2485,7 @@ mod tests {
         let bytes = lossless_webp(&source, MediaLimits::default().max_file_bytes)
             .unwrap()
             .bytes;
-        let asset = prepare_asset(
+        let asset = prepare_legacy_asset(
             &candidate("https://example.com/source.webp"),
             bytes.clone(),
             &MediaLimits::default(),
@@ -2857,7 +3015,7 @@ mod tests {
             then.status(200).body(png(&DynamicImage::new_rgba8(80, 48)));
         });
         let config = crate::config::Config::parse(&format!(
-            "[[sources]]\nurl = [{:?}]",
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = [{:?}]",
             server.url("/feed")
         ))
         .unwrap();
@@ -2969,7 +3127,7 @@ mod tests {
         let base = Url::parse(&publisher.url("/p/story")).unwrap();
         let alias = publisher.url("/p/q_auto:good");
         let config = crate::config::Config::parse(&format!(
-            "[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\" }}\n",
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\" }}\n",
             publisher.url("/feed")
         ))
         .unwrap();
@@ -3039,7 +3197,7 @@ mod tests {
             .collect();
         let alias = publisher.url(format!("/p/fl_progressive:steep/{encoded}"));
         let config = crate::config::Config::parse(&format!(
-            "[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\" }}\n",
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\" }}\n",
             publisher.url("/feed")
         ))
         .unwrap();
@@ -3090,7 +3248,7 @@ mod tests {
             then.status(200).body(png(&DynamicImage::new_rgba8(96, 64)));
         });
         let config = crate::config::Config::parse(&format!(
-            "[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\" }}\n",
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\" }}\n",
             source_server.url("/feed")
         ))
         .unwrap();
@@ -3120,7 +3278,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retained_budget_skips_an_oversized_master_and_keeps_later_images() {
+    async fn acquisition_stops_after_exhausting_the_shared_download_budget() {
         use httpmock::prelude::*;
 
         let noisy = |width: u32, height: u32, salt: u64| {
@@ -3144,19 +3302,7 @@ mod tests {
             max_article_bytes: first_bytes.len() + skipped_bytes.len() + final_bytes.len(),
             ..MediaLimits::default()
         };
-        let prepared = prepare_asset(
-            &candidate("https://example.com/first.png"),
-            first_bytes.clone(),
-            &limits,
-        )
-        .unwrap();
-        let rendition_bytes = prepared
-            .renditions
-            .iter()
-            .map(|rendition| rendition.bytes.len())
-            .sum::<usize>();
-        assert!(rendition_bytes > final_bytes.len());
-        assert!(skipped_bytes.len() > rendition_bytes);
+        let retained_budget = first_bytes.len() + final_bytes.len();
 
         let server = MockServer::start_async().await;
         for (path, body) in [
@@ -3172,7 +3318,7 @@ mod tests {
                 .await;
         }
         let config = crate::config::Config::parse(&format!(
-            "[[sources]]\nurl = {:?}\n",
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\n",
             server.url("/feed")
         ))
         .unwrap();
@@ -3182,7 +3328,7 @@ mod tests {
 
         let assets = Fetcher::new(&FetchConfig::default(), limits)
             .unwrap()
-            .fetch(&candidates, &source)
+            .fetch_with_budget(&candidates, &source, retained_budget)
             .await;
 
         assert_eq!(
@@ -3190,7 +3336,7 @@ mod tests {
                 .iter()
                 .map(|asset| asset.source_url.as_str())
                 .collect::<Vec<_>>(),
-            [server.url("/first.png"), server.url("/final.png")]
+            [server.url("/first.png")]
         );
     }
 
@@ -3242,7 +3388,7 @@ mod tests {
                 .await;
         }
         let config = crate::config::Config::parse(&format!(
-            "[[sources]]\nurl = {:?}\n",
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\n",
             server.url("/feed")
         ))
         .unwrap();
@@ -3313,7 +3459,7 @@ mod tests {
             })
             .await;
         let config = crate::config::Config::parse(&format!(
-            "[[sources]]\nurl = {:?}\n",
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\n",
             server.url("/feed")
         ))
         .unwrap();

@@ -8,7 +8,9 @@ pub mod dev;
 pub mod fetch;
 pub mod init;
 pub mod lock;
+mod offline;
 pub mod server;
+pub mod storage;
 pub mod sync;
 
 use std::path::{Path, PathBuf};
@@ -47,8 +49,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     },
                 )?;
             }
-            let project = if args.data_ref.is_some() {
-                Project::load_offline(&cli.config).await?
+            let project = if args.is_offline() {
+                offline::load(&cli.config, args.data_ref.as_deref()).await?
             } else {
                 Project::load(&cli.config).await?
             };
@@ -57,6 +59,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Dev(args) => dev::run(&cli.config, &args).await,
         Command::Clean(args) => clean::run(&cli.config, &args),
+        Command::Storage(args) => {
+            let mut config = Config::load_offline(&cli.config).await?;
+            config.sources.clear();
+            let project = Project::from_config(&cli.config, config)?;
+            storage::run(&project, &args)
+        }
         Command::Check => check::run(&Project::load(&cli.config).await?).await,
     }
 }
@@ -68,18 +76,28 @@ pub struct Project {
     /// Directory holding `aggr.toml`; themes and `templates/` are resolved against it.
     pub root: PathBuf,
     pub repo: Repo,
+    /// The exact commit used to resolve offline metadata, also used for article blobs and time.
+    local_data_sha: Option<String>,
+    /// Declarations read before remote expansion, so sync cannot capture a mixed configuration.
+    source_declarations: Option<String>,
     /// The data branch checkout, established once per process by [`Project::worktree`].
     worktree: OnceLock<Worktree>,
 }
 
 impl Project {
     pub async fn load(config_path: &Path) -> Result<Self> {
+        let declarations = offline::source_declarations(config_path).await?;
         let config = Config::load(config_path).await?;
-        Self::from_config(config_path, config)
+        let mut project = Self::from_config(config_path, config)?;
+        project.source_declarations = Some(declarations);
+        Ok(project)
     }
 
     async fn load_offline(config_path: &Path) -> Result<Self> {
-        let config = Config::load_offline(config_path).await?;
+        let mut config = Config::load_offline(config_path).await?;
+        for source in &mut config.sources {
+            source.headers.clear();
+        }
         Self::from_config(config_path, config)
     }
 
@@ -99,6 +117,8 @@ impl Project {
             config_path,
             root,
             repo,
+            local_data_sha: None,
+            source_declarations: None,
             worktree: OnceLock::new(),
         };
         project.validate_layout()?;
@@ -176,7 +196,7 @@ impl Project {
             .head_matches_files(&self.config.loaded_files)
             .ok()
             .filter(|matches| *matches)
-            .and_then(|_| self.repo.head_sha().ok().flatten())
+            .and_then(|_| self.repo.local_commit("HEAD").ok())
     }
 
     pub fn config_repo_path(&self) -> Option<String> {

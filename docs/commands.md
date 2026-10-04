@@ -3,10 +3,12 @@
 | Command | Purpose |
 |---|---|
 | `aggr init [--github] [--defaults]` | Write the small starter config, optionally the GitHub workflow; `--defaults` copies the full reference config instead. |
-| `aggr sync [--fetch-only] [--dry-run] [--refresh] [--reprocess]` | Fetch new items. Normally commit and push them; `--fetch-only` writes locally without either, while `--dry-run` writes nothing. |
-| `aggr build [--release] [--out DIR] [--data-ref REF]` | Sync and render, or render a pinned data ref without fetches, commits, or pushes. |
+| `aggr sync [--fetch-only] [--dry-run] [--refresh] [--reprocess] [--backfill-media]` | Fetch new items. Normally commit and push them; `--fetch-only` writes locally without either, while `--dry-run` writes nothing. |
+| `aggr build [--release] [--out DIR] [--data-ref REF] [--offline] [--hermetic] [--report PATH]` | Sync and render, or render local data without network access. Hermetic output additionally keeps automatically loaded resources local. |
 | `aggr dev [--release] [--port 7319]` | Sync into an isolated cache, render requested pages, watch, and live-reload. Never commits or pushes. |
 | `aggr clean [--dry-run] [--out DIR]` | Remove disposable dev state, build cache, and owned output. `--dry-run` lists exact targets. |
+| `aggr storage inspect [--json]` | Report current archive, local media, generated output, cache and Git object bytes without changing them. |
+| `aggr storage prune-renditions [--dry-run\|--apply]` | Verify originals, then explicitly remove optional archived renditions in an ordinary commit. Dry run is the default. |
 | `aggr check` | Validate the config and probe every source. |
 | `aggr completions <SHELL>` | Generate shell completions. |
 
@@ -15,10 +17,12 @@ Run `aggr <command> --help` for its full options. Global `--config PATH` selects
 
 ## Starting small
 
-`aggr init` copies [the starter configuration](../examples/starter.toml): two sources, at most ten
-recent entries considered per source per run. Image archiving and unlimited store retention
-remain enabled. `aggr init --defaults` copies [`config.default.toml`](../config.default.toml)
-with all general defaults instead.
+`aggr init` copies [the starter configuration](../examples/starter.toml): two sources using feed
+content and remote media. `[defaults]` bounds each feed to 250 retained items, 730 days and
+1,000,000,000 bytes, including companions. Source tables can override individual limits; zero
+disables a numeric limit. `aggr init --defaults` copies
+[`config.default.toml`](../config.default.toml) with all general defaults instead. See
+[source configuration](sources.md#capture-defaults-and-per-source-limits).
 
 `[site] build_max_bytes` defaults to 1,000,000,000 bytes. Article text takes priority over local
 media; `media_full_quality_days = 30` controls when published images are compressed. These
@@ -27,12 +31,48 @@ and [storage measurements](benchmarks.md).
 
 ## Refreshing and reprocessing
 
-`--refresh` fills missing media companions on existing articles. `--reprocess` re-derives stored
-bodies from the HTML retained beside them, so content cleanup added since capture reaches the
-archive without refetching. This pass covers all retained articles, including renamed or removed
-sources, and skips truncated HTML. It runs once before the normal configured-source sync; repeating
+`--refresh` refetches items still listed by configured sources using the current capture policies
+and fills missing media companions. It can replace stored bodies and discard hand edits; use
+`--backfill-media` when only media should change.
+
+`--reprocess` re-derives stored bodies from the HTML retained beside them, so content cleanup added
+since capture reaches the archive without refetching. This pass covers all retained articles,
+including renamed or removed sources, and skips truncated HTML. It runs once before the normal
+configured-source sync; repeating
 it without content changes writes nothing. Hand-edited bodies are replaced. Use it after upgrading
 when you want those extraction changes applied.
+
+`--backfill-media` applies the configured media-preservation policies to already-retained articles.
+Changing a source from remote to local media does not silently download its entire history during
+the next ordinary sync. Missing companions of an existing local capture remain repairable.
+Per-feed limits apply before and after backfill: retained bodies stay unchanged, but whole article
+families may be removed when newly saved media would exceed the configured byte limit.
+
+## Offline and hermetic builds
+
+`aggr build --offline` renders the existing local data-branch head. `--data-ref REF` selects a local
+commit and also implies offline execution. These paths make no fetches, source requests, image
+repairs or live discussion lookups. They do not bootstrap or update the data checkout. Missing Git
+objects or uncaptured remote source-collection metadata fail with a local-input error; sync first
+to capture those inputs. Root configuration and local imports remain explicit build inputs.
+When captured collections are needed, their source declarations must match the snapshot: changing
+subscriptions or per-source options requires another sync. Global media defaults can still change
+locally when the source leaves that policy unspecified.
+
+`aggr build --hermetic` implies offline execution and verifies that automatically loaded reader
+resources are local. External media that cannot be captured is represented by an original link;
+missing required retained images fail with their article locations. Ordinary offline output may
+still reference publisher-hosted images. Both modes can write generated output and disposable
+caches.
+
+Set `SOURCE_DATE_EPOCH` to a nonnegative Unix timestamp to control the render clock. Offline builds
+otherwise use the selected data commit's timestamp. Pin the binary, configuration, data commit and
+public base URL as well; cold search-index ordering is not yet guaranteed byte-identical across
+builds. See [recovery](git-model.md#recovery-and-reproducibility).
+
+`--report PATH` writes JSON timing, render-pass, cache and output-size measurements outside the
+generated site. It refuses to overwrite an unrelated file. Compare cold-cache runs, warmed actual
+renders and complete render-cache hits separately.
 
 ## Local development
 
@@ -57,6 +97,10 @@ Build uses a repository-local cache; dev uses a separate OS-standard cache keyed
 path. Cleanup touches only targets it can prove disposable: archived articles, Git refs and
 history, and hand-made files are never removed. Start with `aggr clean --dry-run` to inspect them.
 
-`[store]` retention is different from cleanup. It removes articles from the current data tree
-through ordinary commits; it does not reclaim the bytes in append-only Git history. See the
+Media and response caches have configurable byte caps. `aggr storage inspect` shows their current
+size; [storage](storage.md) documents the caps and the explicit rendition migration.
+
+The per-feed limits in `[defaults]` and `[[sources]]` control retention separately from cleanup.
+They remove articles and companions from the current data tree through ordinary commits without
+reclaiming the bytes in append-only Git history. See the
 [Git model](git-model.md).

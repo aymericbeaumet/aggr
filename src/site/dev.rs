@@ -87,7 +87,7 @@ struct Collection {
 pub(crate) struct Site {
     prepared: PreparedSite,
     store: Store,
-    derive_previews: bool,
+    media_policy: assets::MediaPolicy,
     full_quality_days: u32,
     sources: Vec<Source>,
     info: BuildInfo,
@@ -320,7 +320,7 @@ impl Site {
         Ok(Self {
             prepared,
             store,
-            derive_previews: config.fetch.previews,
+            media_policy: assets::MediaPolicy::defaults(&config.defaults),
             full_quality_days: config.site.media_full_quality_days,
             sources: sources.to_vec(),
             info,
@@ -369,13 +369,9 @@ impl Site {
             Some(preview) => preview.clone(),
             None => {
                 let item = &self.prepared.all_items[index];
-                let derive = self
-                    .sources
-                    .iter()
-                    .find(|source| source.slug == item.front.source)
-                    .map_or(self.derive_previews, |source| source.previews);
+                let policy = self.media_policy.for_item(&self.sources, item);
                 let media =
-                    assets::ItemMedia::gather_preview(&self.store, item, derive, &self.media_memo)?;
+                    assets::ItemMedia::gather_preview(&self.store, item, policy, &self.media_memo)?;
                 let (preview, _, _) = media.publish(
                     self.root(),
                     &mut state.assets,
@@ -407,7 +403,7 @@ impl Site {
         let media = assets::ItemMedia::gather(
             &self.store,
             item,
-            false,
+            self.media_policy.for_item(&self.sources, item),
             &self.media_memo,
             !budget::full_quality(item.created_at(), self.info.now, self.full_quality_days),
             compact_cache.as_deref(),
@@ -729,6 +725,8 @@ mod benchmarks {
         let cache = PreparationCache::default();
         for label in ["cold", "hot"] {
             let info = BuildInfo {
+                hermetic: false,
+                metrics: Default::default(),
                 out: temporary.path().join(label),
                 base_url: None,
                 config_sha: None,

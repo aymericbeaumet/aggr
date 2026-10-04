@@ -29,10 +29,10 @@ fn local_feed_sources_persist_articles_without_paths_and_repeat_without_a_commit
         {"id":"json","url":"https://example.com/json","title":"JSON article","content_text":"JSON body"}]}"#).unwrap();
     std::fs::write(
         repository.join("aggr.toml"),
-        r#"[fetch]
+        r#"[defaults]
 content = "light"
-images = false
-previews = false
+media = "remote"
+max_age_days = 0
 
 [[sources]]
 url = ["rss.xml\natom.xml", "feed.json"]
@@ -120,10 +120,10 @@ language = "en"
 [site.params]
 excerpts = true
 
-[fetch]
+[defaults]
 content = "light"
-images = false
-previews = false
+media = "remote"
+max_age_days = 0
 
 [[sources]]
 url = "journal.xml"

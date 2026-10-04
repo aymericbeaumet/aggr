@@ -56,7 +56,7 @@ impl TestRepo {
 
     fn write_config(&self, feed_url: &str, extra: &str) {
         self.write_raw_config(&format!(
-            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n{extra}\n[fetch]\ncontent = \"light\"\nimages = false\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\nlabels = [\"example\", \"news\"]\n"
+            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n{extra}\n[defaults]\ncontent = \"light\"\nmedia = \"remote\"\nmax_age_days = 0\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\nlabels = [\"example\", \"news\"]\n"
         ));
     }
 
@@ -187,6 +187,20 @@ fn worker_json(worker: &str, name: &str) -> serde_json::Value {
     config[name].clone()
 }
 
+fn worker_catalogue(out: &std::path::Path, worker: &str) -> serde_json::Value {
+    use sha2::Digest as _;
+    let reference = worker_json(worker, "offline_catalog");
+    let bytes = std::fs::read(out.join(reference["url"].as_str().unwrap())).unwrap();
+    assert_eq!(reference["size"], bytes.len());
+    assert_eq!(
+        reference["digest"],
+        hex::encode(sha2::Sha256::digest(&bytes))
+    );
+    let articles: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(reference["count"], articles.as_array().unwrap().len());
+    articles
+}
+
 #[cfg(unix)]
 fn stop_dev(mut child: std::process::Child) -> std::process::Output {
     let status = Command::new("kill")
@@ -271,7 +285,7 @@ fn item_front(repo: &TestRepo, rev: &str, title: &str) -> (String, serde_yaml_ng
 }
 
 #[test]
-fn previews_are_optional_and_refresh_fills_missing_without_replacing_existing() {
+fn media_policy_controls_previews_and_refresh_preserves_existing_captures() {
     let server = MockServer::start();
     let mut feed = server.mock(|when, then| {
         when.method(GET).path("/feed.json");
@@ -297,18 +311,19 @@ fn previews_are_optional_and_refresh_fills_missing_without_replacing_existing() 
         then.status(404);
     });
     let repo = TestRepo::new();
-    let config = |previews| {
+    let config = |media| {
         format!(
-            "[fetch]\ncontent = \"light\"\nimages = false\npreviews = {previews}\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+            "[defaults]\ncontent = \"light\"\nmedia = \"{media}\"\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
             server.url("/feed.json"),
         )
     };
-    repo.write_raw_config(&config(false));
+    repo.write_raw_config(&config("remote"));
     repo.aggr().arg("sync").assert().success();
     old_image.assert_calls(0);
     assert!(item_front(&repo, "aggr", "old").1["preview"].is_null());
+    assert!(item_front(&repo, "aggr", "old").1["images"].is_null());
 
-    repo.write_raw_config(&config(true));
+    repo.write_raw_config(&config("local"));
     feed.delete();
     server.mock(|when, then| {
         when.method(GET).path("/feed.json");
@@ -370,21 +385,112 @@ fn previews_are_optional_and_refresh_fills_missing_without_replacing_existing() 
     missing.assert_calls(2);
     assert_eq!(repo.origin_bytes(&tip, companion.to_str().unwrap()), bytes);
 
-    let article_images = TestRepo::new();
-    article_images.write_raw_config(&config(false).replace("images = false", "images = true"));
-    article_images.aggr().arg("sync").assert().success();
-    let (path, front) = item_front(&article_images, "aggr", "old");
-    assert!(front["preview"].is_null(), "feed previews remain disabled");
+    let (path, front) = item_front(&repo, "aggr", "new");
     assert_eq!(front["images"].as_sequence().map(Vec::len), Some(1));
     let original = Path::new(&path)
         .parent()
         .unwrap()
         .join(front["images"][0]["original"]["file"].as_str().unwrap());
     assert_eq!(
-        article_images.origin_bytes("aggr", original.to_str().unwrap()),
+        repo.origin_bytes("aggr", original.to_str().unwrap()),
         preview_image(),
-        "article lead images retain their original bytes independently of feed previews"
+        "local media retains the original image alongside its preview"
     );
+}
+
+#[test]
+fn media_backfill_uses_stored_urls_without_refetching_or_replacing_articles() {
+    let server = MockServer::start();
+    let source = server.url("/cover.png");
+    let feed = server.mock(|when, then| {
+        when.method(GET).path("/feed.json");
+        then.status(200)
+            .header("content-type", "application/feed+json")
+            .json_body(serde_json::json!({
+                "version": "https://jsonfeed.org/version/1.1",
+                "title": "Image feed",
+                "items": [{
+                    "id": "preserved",
+                    "title": "Preserved article",
+                    "url": server.url("/articles/preserved"),
+                    "date_published": "2026-09-04T10:00:00Z",
+                    "content_html": format!(
+                        "<p>Preserve this original body.</p><img src=\"{source}\" alt=\"Cover\">"
+                    ),
+                }],
+            }));
+    });
+    let article = server.mock(|when, then| {
+        when.method(GET).path("/articles/preserved");
+        then.status(200).body("<p>Different live article.</p>");
+    });
+    let image = server.mock(|when, then| {
+        when.method(GET).path("/cover.png");
+        then.status(200)
+            .header("content-type", "image/png")
+            .body(preview_image());
+    });
+    let repo = TestRepo::new();
+    let config = |policies| {
+        format!(
+            "[defaults]\nmax_age_days = 0\n{policies}\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+            server.url("/feed.json")
+        )
+    };
+    repo.write_raw_config(&config(""));
+    repo.aggr().arg("sync").assert().success();
+    feed.assert_calls(1);
+    article.assert_calls(0);
+    image.assert_calls(0);
+    let (path, original_front) = item_front(&repo, "aggr", "preserved-article");
+    let original_markdown = repo.origin_show("aggr", &path);
+    let html_path = Path::new(&path).with_extension("html");
+    let original_html = repo.origin_bytes("aggr", html_path.to_str().unwrap());
+    assert_eq!(original_front["remote_preview"]["url"], source);
+    assert!(original_front["images"].is_null());
+
+    repo.write_raw_config(&config("media = \"local\""));
+    repo.aggr()
+        .args(["sync", "--backfill-media"])
+        .assert()
+        .success();
+    feed.assert_calls(1);
+    article.assert_calls(0);
+    image.assert_calls(1);
+    let (_, front) = item_front(&repo, "aggr", "preserved-article");
+    assert!(!front["preview"].is_null());
+    assert_eq!(front["images"].as_sequence().map(Vec::len), Some(1));
+    assert!(front["images"][0]["variants"].is_null());
+    let original = Path::new(&path)
+        .parent()
+        .unwrap()
+        .join(front["images"][0]["original"]["file"].as_str().unwrap());
+    assert_eq!(
+        repo.origin_bytes("aggr", original.to_str().unwrap()),
+        preview_image()
+    );
+    assert_eq!(
+        repo.origin_show("aggr", &path)
+            .split_once("\n---\n")
+            .unwrap()
+            .1,
+        original_markdown.split_once("\n---\n").unwrap().1,
+    );
+    assert_eq!(
+        repo.origin_bytes("aggr", html_path.to_str().unwrap()),
+        original_html
+    );
+
+    let tip = repo.origin_rev("aggr").unwrap();
+    repo.aggr()
+        .args(["sync", "--backfill-media"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing new"));
+    assert_eq!(repo.origin_rev("aggr").unwrap(), tip);
+    feed.assert_calls(1);
+    article.assert_calls(0);
+    image.assert_calls(1);
 }
 
 #[test]
@@ -418,7 +524,7 @@ fn one_download_can_supply_the_article_image_and_its_feed_preview() {
     });
     let repo = TestRepo::new();
     repo.write_raw_config(&format!(
-        "[fetch]\ncontent = \"light\"\nimages = true\npreviews = true\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+        "[defaults]\ncontent = \"light\"\nmedia = \"local\"\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
         server.url("/feed.json")
     ));
 
@@ -462,7 +568,7 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
     });
     let repo = TestRepo::new();
     repo.write_raw_config(&format!(
-        "[fetch]\ncontent = \"light\"\nimages = true\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+        "[defaults]\ncontent = \"light\"\nmedia = \"local\"\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
         server.url("/feed.json")
     ));
 
@@ -476,26 +582,39 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
         repo.origin_bytes("aggr", original.to_str().unwrap()),
         master
     );
-    let variants = archived["variants"].as_sequence().unwrap();
-    assert!(!variants.is_empty());
-    let full = variants.last().unwrap();
     assert_eq!(
-        full["width"].as_u64(),
-        archived["original"]["width"].as_u64()
-    );
-    let full_path = directory.join(full["file"].as_str().unwrap());
-    let full_bytes = repo.origin_bytes("aggr", full_path.to_str().unwrap());
-    assert_eq!(
-        image::guess_format(&full_bytes).unwrap(),
-        image::ImageFormat::WebP
-    );
-    assert_eq!(
-        image::load_from_memory(&full_bytes).unwrap().to_rgba8(),
-        image::load_from_memory(&master).unwrap().to_rgba8()
+        archived["variants"].as_sequence().map_or(0, Vec::len),
+        0,
+        "generated responsive copies belong in the build cache, not the archive"
     );
     assert!(repo.origin_show("aggr", &path).contains(&source));
 
-    repo.aggr().arg("build").assert().success();
+    let archive_tip = repo.origin_rev("aggr").unwrap();
+    repo.aggr()
+        // Keep this lossless-publication assertion inside the recent-media window.
+        .env("SOURCE_DATE_EPOCH", "1788602400") // 2026-09-05 10:00 UTC
+        .arg("build")
+        .assert()
+        .success();
+    assert_eq!(repo.origin_rev("aggr").unwrap(), archive_tip);
+    let master_pixels = image::load_from_memory(&master).unwrap().to_rgba8();
+    let full = std::fs::read_dir(repo.clone.join("_site/assets/images"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "webp")
+        })
+        .find_map(|path| {
+            let image = image::open(&path).unwrap().to_rgba8();
+            (image.dimensions() == master_pixels.dimensions()).then_some((path, image))
+        })
+        .expect("the build generates a full-width lossless responsive copy");
+    assert_eq!(full.1, master_pixels);
+    let full_asset = format!(
+        "assets/images/{}",
+        full.0.file_name().unwrap().to_str().unwrap()
+    );
     let source_slug = path.split('/').nth(1).unwrap();
     let item_slug = Path::new(&path).file_stem().unwrap();
     let page = std::fs::read_to_string(
@@ -529,6 +648,7 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
         "inline previews need no separate 48px file"
     );
     assert!(page.contains("type=\"image/webp\""), "{page}");
+    assert!(page.contains(&full_asset), "{page}");
     assert!(page.contains("loading=\"eager\""), "{page}");
     assert!(page.contains("fetchpriority=\"high\""), "{page}");
     let master_asset = format!(
@@ -550,7 +670,7 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
             .all(|entry| entry["url"] != master_asset)
     );
     assert!(
-        worker_json(&worker, "offline_catalog")
+        worker_catalogue(&repo.clone.join("_site"), &worker)
             .as_array()
             .unwrap()
             .iter()
@@ -625,7 +745,7 @@ fn a_compact_archive_stores_one_bounded_master_and_no_renditions() {
     });
     let repo = TestRepo::new();
     repo.write_raw_config(&format!(
-        "[fetch]\ncontent = \"light\"\nimages = {{ mode = \"compact\", quality = 60, max_axis = 320 }}\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+        "[defaults]\ncontent = \"light\"\nmedia = {{ mode = \"compressed\", quality = 60, max_axis = 320 }}\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
         server.url("/feed.json")
     ));
 
@@ -699,7 +819,7 @@ fn previews_mirror_local_bytes_and_retention_preserves_historical_blobs() {
     });
     let upstream = TestRepo::new();
     upstream.write_raw_config(&format!(
-        "[fetch]\ncontent = \"light\"\npreviews = true\n[store]\nmax_items = 1\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+        "[defaults]\ncontent = \"light\"\nmedia = \"local\"\nmax_items = 1\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
         server.url("/feed.json"),
     ));
     upstream.aggr().arg("sync").assert().success();
@@ -714,7 +834,7 @@ fn previews_mirror_local_bytes_and_retention_preserves_historical_blobs() {
 
     let replica = TestRepo::new();
     replica.write_raw_config(
-        "[fetch]\ncontent = \"heavy\"\npreviews = true\n[[sources]]\nname = \"Mirror\"\nurl = \"git@mirror.invalid:source.git # shared archive\"\n",
+        "[defaults]\ncontent = \"heavy\"\nmedia = \"local\"\nmax_age_days = 0\n[[sources]]\nname = \"Mirror\"\nurl = \"git@mirror.invalid:source.git # shared archive\"\n",
     );
     let local = url::Url::from_file_path(&upstream.origin).unwrap();
     let mirror_sync = || {
@@ -1038,7 +1158,7 @@ fn sync_deduplicates_articles_across_sources_without_extra_commits_or_state() {
     }
     let repo = TestRepo::new();
     repo.write_raw_config(&format!(
-        "[fetch]\ncontent = 'light'\nimages = false\npreviews = false\n[[sources]]\nname = 'Publisher'\nurl = '{}'\n[[sources]]\nname = 'Frontpage'\nurl = '{}'\n",
+        "[defaults]\ncontent = 'light'\nmedia = 'remote'\nmax_age_days = 0\n[[sources]]\nname = 'Publisher'\nurl = '{}'\n[[sources]]\nname = 'Frontpage'\nurl = '{}'\n",
         server.url("/publisher"), server.url("/frontpage")
     ));
     repo.aggr().arg("sync").assert().success();
@@ -1461,7 +1581,7 @@ fn feed_only_captures_are_upgraded_in_place_and_keep_hand_edits() {
     });
     let repo = TestRepo::new();
     repo.write_raw_config(&format!(
-        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\ncontent = \"heavy\"\nimages = false\npreviews = false\n[[sources]]\nurl = \"{}\"\nname = \"Demo\"\n",
+        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\n[defaults]\ncontent = \"heavy\"\nmedia = \"remote\"\nmax_age_days = 0\n[[sources]]\nurl = \"{}\"\nname = \"Demo\"\n",
         server.url("/feed.xml")
     ));
 
@@ -1573,7 +1693,7 @@ fn source_errors_are_recorded_on_transition_only_and_all_failed_is_fatal() {
     });
     let repo = TestRepo::new();
     let config = format!(
-        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\ncontent = \"light\"\n[[sources]]\nurl = \"{}\"\nname = \"ok\"\n[[sources]]\nurl = \"{}\"\nname = \"broken\"\n",
+        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\n[defaults]\ncontent = \"light\"\nmax_age_days = 0\n[[sources]]\nurl = \"{}\"\nname = \"ok\"\n[[sources]]\nurl = \"{}\"\nname = \"broken\"\n",
         server.url("/ok.xml"),
         server.url("/broken.xml")
     );
@@ -1604,7 +1724,7 @@ fn source_errors_are_recorded_on_transition_only_and_all_failed_is_fatal() {
 
     // Every source failing is the one fetch condition that fails the run.
     let config = format!(
-        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\ncontent = \"light\"\n[[sources]]\nurl = \"{}\"\nname = \"broken\"\n",
+        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\n[defaults]\ncontent = \"light\"\nmax_age_days = 0\n[[sources]]\nurl = \"{}\"\nname = \"broken\"\n",
         server.url("/broken.xml")
     );
     std::fs::write(repo.clone.join("aggr.toml"), config).unwrap();
@@ -1801,7 +1921,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
             .all(|entry| entry["url"] != article)
     );
     assert!(
-        worker_json(&sw, "offline_catalog")
+        worker_catalogue(&site, &sw)
             .as_array()
             .unwrap()
             .iter()
@@ -1884,7 +2004,7 @@ fn build_data_ref_is_offline_and_side_effect_free() {
     let repo = TestRepo::new();
     repo.write_raw_config(&format!(
         "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n\
-         [fetch]\ncontent = \"light\"\nretries = 0\n\
+         [fetch]\nretries = 0\n[defaults]\ncontent = \"light\"\nmax_age_days = 0\n\
          [[sources]]\nurl = \"{}\"\nname = \"Demo\"\n",
         server.url("/feed.xml")
     ));
@@ -1989,20 +2109,26 @@ fn check_probes_sources() {
 }
 
 #[test]
-fn store_retention_prunes_the_tree_but_keeps_seen_keys() {
+fn feed_retention_prunes_the_tree_but_keeps_seen_keys() {
     let server = MockServer::start();
     let mut feed = server.mock(|when, then| {
         when.method(GET).path("/feed.xml");
         then.status(200).body(FEED);
     });
     let repo = TestRepo::new();
-    repo.write_config(&server.url("/feed.xml"), "[store]\nmax_items = 1\n");
+    repo.write_config(&server.url("/feed.xml"), "");
 
     repo.aggr()
         .arg("sync")
         .assert()
         .success()
-        .stdout(predicate::str::contains("demo: +2"))
+        .stdout(predicate::str::contains("demo: +2"));
+    let config = std::fs::read_to_string(repo.clone.join("aggr.toml")).unwrap();
+    repo.write_raw_config(&config.replace("[defaults]\n", "[defaults]\nmax_items = 1\n"));
+    repo.aggr()
+        .arg("sync")
+        .assert()
+        .success()
         .stdout(predicate::str::contains("retention: -1"));
     let files = repo.origin_files("aggr");
     let items: Vec<&String> = files.iter().filter(|f| f.starts_with("items/")).collect();
@@ -2078,10 +2204,10 @@ repository = "o/r"
 url = [" ./subscriptions.opml\n{origin}/collection.toml ", "./feeds.txt", "{origin}/direct-feed"]
 category = "reading"
 labels = ["shared"]
-[fetch]
+[defaults]
 content = "light"
-images = false
-previews = false
+media = "remote"
+max_age_days = 0
 "#,
         origin = server.url("")
     ));
@@ -2135,10 +2261,10 @@ fn source_group_options_apply_to_fetches_and_category_pages_without_leaking() {
         r##"[site]
 title = "Test reads"
 repository = "o/r"
-[fetch]
+[defaults]
 content = "light"
-images = false
-previews = false
+media = "remote"
+max_age_days = 0
 [[sources]]
 url = """
 {origin}/Alpha/feed.xml
@@ -2200,7 +2326,7 @@ fn included_topic_files_and_automatic_html_fallback_work_end_to_end() {
     std::fs::write(
         repo.clone.join("aggr-ai.toml"),
         format!(
-            "[[sources]]\nname = \"Scraped\"\nurl = \"{}\"\n",
+            "[[sources]]\nname = \"Scraped\"\nurl = \"{}\"\ncontent = \"heavy\"\nmax_age_days = 0\n",
             server.url("/blog")
         ),
     )

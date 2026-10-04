@@ -16,7 +16,7 @@ export type SearchContext = { root: string; href: string; seed: string; scope: S
  */
 export type SearchDriver = {
   /** The page's list arrived, or the text was set from its address. */
-  arrive(): void;
+  arrive(runQuery?: boolean): void;
   leave(): void;
   /** The text or cursor changed under the reader's hands. */
   changed(): void;
@@ -97,7 +97,11 @@ class SearchState {
   /** The search module, loaded once on first intent; the chunk stays out of the first paint. */
   load(): Promise<SearchDriver> {
     this.loading ??= import('../search')
-      .then((module) => (this.driver = module.driver))
+      .then((module) => {
+        this.driver = module.driver;
+        if (this.attached) this.driver.arrive(false);
+        return this.driver;
+      })
       .catch((error: unknown) => {
         this.loading = null;
         throw error;
@@ -134,10 +138,13 @@ class SearchState {
     this.error = '';
     this.invalidate();
     this.attached = true;
-    const at = this.href;
-    this.drive((driver) => {
-      if (this.attached && this.href === at) driver.arrive();
-    });
+    if (this.driver) this.driver.arrive();
+    else if (query?.trim()) {
+      const at = this.href;
+      void this.load().then(driver => {
+        if (this.attached && this.href === at) driver.arrive();
+      }).catch(() => {});
+    }
   }
 
   leave(): void {

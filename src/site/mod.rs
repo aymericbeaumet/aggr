@@ -4,12 +4,13 @@
 mod assets;
 mod budget;
 pub mod client;
-mod compressed_media;
+pub(crate) mod compressed_media;
 pub mod context;
 pub(crate) mod dev;
 mod directory;
 mod display;
 mod document;
+pub(crate) mod hermetic;
 pub(crate) mod interactive;
 pub(crate) mod item_type;
 mod native_media;
@@ -19,6 +20,7 @@ pub mod outputs;
 mod page;
 mod pagefind;
 pub(crate) mod parallel;
+mod precache;
 mod related;
 pub mod render;
 mod source_index;
@@ -46,6 +48,7 @@ use directory::{
 };
 use output_dir::MARKER;
 pub(crate) use output_dir::prepare_out_dir;
+pub(crate) use output_dir::promote as promote_output;
 use page::{ListPage, Pages, SharedCtx, SimplePage, archive_modified_at, default_site_description};
 use render::{Renderer, Theme};
 
@@ -110,6 +113,8 @@ fn visible_archive(items: Vec<Item>, sources: &[Source]) -> (Vec<Item>, Vec<(Str
 
 /// Facts about the build that do not come from the data tree.
 pub struct BuildInfo {
+    pub hermetic: bool,
+    pub metrics: std::sync::Arc<std::sync::Mutex<BuildMetrics>>,
     pub out: PathBuf,
     pub base_url: Option<String>,
     pub config_sha: Option<String>,
@@ -406,7 +411,7 @@ struct SwConfig {
     app_version: String,
     content_version: String,
     precache: Vec<assets::PrecacheEntry>,
-    offline_catalog: Vec<offline::Article>,
+    offline_catalog: offline::Catalogue,
     offline_count: usize,
     search_manifest: serde_json::Value,
 }
@@ -417,6 +422,19 @@ fn worker_source(config: &SwConfig, worker_url: &str) -> Result<String> {
         serde_json::to_string(config)?,
         serde_json::to_string(worker_url)?
     ))
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct BuildMetrics {
+    pub passes: Vec<BuildPass>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BuildPass {
+    pub phases: BTreeMap<String, f64>,
+    pub total_seconds: f64,
+    pub media_bytes: u64,
+    pub omitted_media_groups: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,11 +464,15 @@ pub fn build(
     // usual two complete builds into one; the retry below still decides whether it was right.
     let cache = info.pagefind_cache.as_deref();
     let mut attempt = cache
-        .filter(|_| limit != u64::MAX)
+        .filter(|_| limit != u64::MAX && !info.hermetic)
         .and_then(|cache| crate::cache::budget_allowance(cache, limit))
         .map_or_else(|| budget::Attempt::new(limit), budget::Attempt::resuming);
     loop {
-        let mut media_budget = budget::MediaBudget::new(attempt.allowance());
+        let mut media_budget = budget::MediaBudget::new(if info.hermetic {
+            u64::MAX
+        } else {
+            attempt.allowance()
+        });
         let summary = build_once(
             config,
             sources,
@@ -481,6 +503,11 @@ pub fn build(
                 }
             }
             return Ok(summary);
+        }
+        if info.hermetic {
+            bail!(
+                "hermetic site requires {bytes} bytes, exceeding build_max_bytes = {limit}; increase the limit instead of omitting local assets"
+            );
         }
         let Some(next) = attempt.next(bytes - limit, media_budget.used) else {
             bail!(
@@ -571,6 +598,7 @@ fn prepare_site(
         .unwrap_or_else(|| default_site_description(&config.site.title));
     let discussion_shortcuts = context::discussion_shortcuts(&config.networks);
     let mut site = SiteCtx {
+        hermetic: info.hermetic,
         preferences: config.site.preferences.browser_defaults()?,
         preference_schema: config.site.preferences.schema(),
         title: config.site.title.clone(),
@@ -648,7 +676,11 @@ fn prepare_site(
 
     // Sources: config order, enriched with stored state and counts.
     let status = store.status()?;
-    let stored_items: Vec<_> = store.items()?.into_iter().filter(is_visible_item).collect();
+    let stored_items: Vec<_> = store
+        .retained_items(config.defaults.limits, sources, info.now)?
+        .into_iter()
+        .filter(is_visible_item)
+        .collect();
     let mut source_ctxs = source_contexts(sources, store, &status, &stored_items)?;
     let prepared_key = preparation_cache.map(|_| {
         crate::model::sha1_hex(
@@ -699,7 +731,7 @@ fn prepare_site(
     );
 
     // The bounded window controls only the river. Source/category/tag pages, search, and clean
-    // article pages are archives over the retained database; `[store]` retention is the explicit
+    // article pages are archives over the retained database; `[defaults]` retention is the explicit
     // knob for bounding those. This keeps old sources browsable without making the home feed stale.
     let prepared_bodies = parallel::map(&all_items, |item| {
         Ok(dev::prepare_markdown(&item.body, preparation_cache))
@@ -724,12 +756,7 @@ fn prepare_site(
             })
             .sum();
     }
-    let derive_preview = |item: &Item| {
-        sources
-            .iter()
-            .find(|source| source.slug == item.front.source)
-            .map_or(config.fetch.previews, |source| source.previews)
-    };
+    let media_policy = assets::MediaPolicy::defaults(&config.defaults);
     // Reading, validating and decoding archived media dominates this phase, so it runs on worker
     // threads one window at a time, which bounds the assets held in memory. Publishing stays on
     // this thread in item order: the dedupe map, memo state and archive order never depend on
@@ -746,7 +773,7 @@ fn prepare_site(
             assets::ItemMedia::gather(
                 store,
                 item,
-                derive_preview(item),
+                media_policy.for_item(sources, item),
                 &media_memo,
                 !budget::full_quality(
                     item.created_at(),
@@ -789,6 +816,11 @@ fn prepare_site(
             let (preview, local_images, local_document) =
                 media.publish(out, &mut written_assets, media_budget)?;
             ctx.preview = preview;
+            if info.hermetic {
+                ctx.video = None;
+                ctx.native_media = None;
+                ctx.interactive = None;
+            }
             ctx.document = document::DocumentCtx::from_item(item).map(|mut document| {
                 document.local_url = local_document.map(|mut local| {
                     if let Some(fragment) = url::Url::parse(&document.url)
@@ -1279,21 +1311,13 @@ fn build_once(
                 .as_bytes(),
         )?;
         // The shell installs first; complete article downloads run separately.
-        let mut paths = assets::precache_paths("", &assets);
-        paths.extend(
-            source_ctxs
-                .iter()
-                .map(|source| source.page.clone())
-                .chain(categories.iter().map(|category| category.page.clone()))
-                .chain(tags.iter().map(|tag| tag.page.clone()))
-                .take(config.site.preferences.offline_items.clamp(32, 256)),
-        );
+        let paths = precache::paths(&theme(), &renderer, &assets)?;
         let mut sw_config = SwConfig {
             version: cache_version(&build_ctx),
             app_version: build_ctx.app_version.clone(),
             content_version: build_ctx.content_version.clone(),
             precache: assets::precache_entries(out, paths, &written_assets)?,
-            offline_catalog: offline::catalogue(
+            offline_catalog: offline::publish_catalogue(
                 out,
                 &archive_items,
                 &article_images,
@@ -1323,6 +1347,19 @@ fn build_once(
     };
     let total = started.elapsed();
     log::debug!("build complete: {:.3}s", total.as_secs_f64());
+    info.metrics
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .passes
+        .push(BuildPass {
+            phases: phases
+                .iter()
+                .map(|(name, duration)| (name.to_string(), duration.as_secs_f64()))
+                .collect(),
+            total_seconds: total.as_secs_f64(),
+            media_bytes: media_budget.used,
+            omitted_media_groups: media_budget.omitted,
+        });
     let report = build_report(&phases, total, summary);
     log::info!("{report}");
     // Debug logs are never enabled in the publish workflow; a notice reaches the run summary.
@@ -1413,7 +1450,16 @@ fn write_article(
             ),
             local_images,
         )));
-    ctx.body_html = Some(body_html);
+    if site.hermetic {
+        ctx.video = None;
+        ctx.native_media = None;
+        ctx.interactive = None;
+    }
+    ctx.body_html = Some(if site.hermetic {
+        hermetic::reader_body(&body_html)?
+    } else {
+        body_html
+    });
     ctx.has_margin_notes = has_margin_notes;
     let dir = out.join(&ctx.url);
     let representation = out.join(ctx.url.trim_end_matches('/'));
@@ -1523,6 +1569,21 @@ mod tests {
             .find_map(|line| line.strip_prefix("self.AGGR_SW = "))
             .expect("worker configuration line");
         serde_json::from_str(line.trim_end_matches(';')).unwrap()
+    }
+
+    fn worker_catalogue(out: &Path, worker: &str) -> serde_json::Value {
+        use sha2::Digest as _;
+        let config = worker_config(worker);
+        let reference = &config["offline_catalog"];
+        let bytes = std::fs::read(out.join(reference["url"].as_str().unwrap())).unwrap();
+        assert_eq!(reference["size"], bytes.len());
+        assert_eq!(
+            reference["digest"],
+            hex::encode(sha2::Sha256::digest(&bytes))
+        );
+        let articles: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reference["count"], articles.as_array().unwrap().len());
+        articles
     }
     use crate::store::Status;
     use chrono::TimeZone;
@@ -2080,10 +2141,17 @@ mod tests {
         use crate::model::{FrontMatter, file_stem, item_dir};
         use crate::store::NewItem;
 
-        let config = Config::parse(&format!(
-            "[site]\ntitle = \"Demo <site>\"\n{extra}\n[[sources]]\nslug = \"blog\"\nurl = \"https://blog.example/feed\"\n"
+        let mut config = Config::parse(&format!(
+            "[site]\ntitle = \"Demo <site>\"\n{extra}\n[defaults]\nmedia = \"local\"\nmax_items = 0\nmax_age_days = 0\nmax_bytes = 0\n[[sources]]\nslug = \"blog\"\nurl = \"https://blog.example/feed\"\n"
         ))
         .unwrap();
+        config.defaults.media = crate::config::MediaPolicy::Local;
+        config.defaults.limits = crate::config::Limits {
+            max_items: 0,
+            max_age_days: 0,
+            max_bytes: 0,
+            since: None,
+        };
         let sources = config.resolve_sources(&|_| None).unwrap();
         let store = Store::open(root.join("data"));
         for i in 0..count {
@@ -2113,6 +2181,8 @@ mod tests {
 
     fn info(out: PathBuf) -> BuildInfo {
         BuildInfo {
+            hermetic: false,
+            metrics: Default::default(),
             out,
             base_url: Some("https://u.github.io/repo/".into()),
             config_sha: Some("c".repeat(40)),
@@ -3597,10 +3667,7 @@ category = "Science"
             .unwrap()
             .clone();
         assert!(precache.iter().all(|entry| entry["url"] != path));
-        let catalogue: Vec<serde_json::Value> = worker_config(&worker)["offline_catalog"]
-            .as_array()
-            .unwrap()
-            .clone();
+        let catalogue = worker_catalogue(&out, &worker);
         assert!(
             catalogue[0]["resources"]
                 .as_array()
@@ -3887,7 +3954,7 @@ category = "Science"
     }
 
     #[test]
-    fn offline_shell_includes_bounded_source_category_and_tag_roots() {
+    fn offline_shell_leaves_collection_archives_and_optional_chunks_on_demand() {
         let dir = tempfile::tempdir().unwrap();
         let (config, mut sources, store) = fixture(dir.path(), 1, "preferences.offline_items=0\n");
         sources[0].category = Some("Research".into());
@@ -3922,23 +3989,26 @@ category = "Science"
                     || url.starts_with("tags/")
             })
             .collect();
-        assert_eq!(
-            collection_roots.len(),
-            32,
-            "zero automatic articles still retains the bounded browse shell"
-        );
+        assert!(collection_roots.is_empty(), "{collection_roots:?}");
         for path in [
             "sources/blog.example/",
             "categories/research/",
             "tags/topic-000/",
         ] {
-            assert!(
-                collection_roots.contains(&path),
-                "{path}: {collection_roots:?}"
-            );
             assert!(out.join(path).join("index.html").is_file());
         }
-        assert!(!collection_roots.contains(&"tags/topic-299/"));
+        assert!(out.join("tags/topic-299/index.html").is_file());
+        for entry in &entries {
+            let path = entry["url"].as_str().unwrap();
+            assert!(
+                !["/search-", "/media-", "/Form-"]
+                    .iter()
+                    .any(|name| path.contains(name)),
+                "{path}"
+            );
+        }
+        assert_eq!(worker_config(&worker)["offline_count"], 0);
+        assert_eq!(worker_catalogue(&out, &worker).as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -4061,9 +4131,18 @@ category = "Science"
         assert!(sw.contains("\"offline_count\":"));
         assert!(sw.contains("\"search_manifest\":"));
         assert!(sw.contains("\"offline.html\""));
-        assert!(sw.contains("\"browse/\""));
-        // The download catalogue includes article pages, independently of the shell precache.
-        assert!(sw.contains("\"items/"), "{sw}");
+        assert!(!sw.contains("\"browse/\""));
+        assert!(!sw.contains("\"items/"), "{sw}");
+        let catalogue = worker_catalogue(&out, &sw);
+        assert_eq!(catalogue.as_array().unwrap().len(), 3);
+        assert_eq!(config["offline_count"], 2);
+        assert!(
+            catalogue
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["url"].as_str().unwrap().starts_with("items/"))
+        );
 
         let offline = std::fs::read_to_string(out.join("offline.html")).unwrap();
         assert!(offline.contains("id=\"offline-articles\""));
@@ -4758,7 +4837,7 @@ same_as = ["https://social.example/@ada"]
         );
         assert_eq!(published_media(&build_info.out).get(&local), Some(&hash));
         let worker = std::fs::read_to_string(build_info.out.join("sw.js")).unwrap();
-        let catalogue = worker_config(&worker)["offline_catalog"].clone();
+        let catalogue = worker_catalogue(&build_info.out, &worker);
         let resources = catalogue[0]["resources"].as_array().unwrap();
         assert!(
             resources

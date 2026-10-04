@@ -39,6 +39,8 @@ pub(super) fn load_project(config_path: &Path) -> Result<Project> {
         sources: Vec::new(),
         config_path,
         repo: crate::git::Repo::discover(&root)?,
+        local_data_sha: None,
+        source_declarations: None,
         root,
         worktree: Default::default(),
     })

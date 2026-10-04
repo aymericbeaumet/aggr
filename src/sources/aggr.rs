@@ -28,9 +28,9 @@ pub async fn fetch(
     url: &Url,
     branch: &str,
     only: &[String],
-    limit: Option<usize>,
-    _source: &Source,
+    source: &Source,
     ctx: &Context<'_>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Fetch> {
     let remote = url.to_string();
     let advertised_tip = {
@@ -54,6 +54,7 @@ pub async fn fetch(
         .join("mirrors")
         .join(mirror_key(&remote, branch));
     let via = human_url(url);
+    let limits = source.limits;
     let (checked_out_tip, items) = {
         let mirror_dir = dir.clone();
         let (remote, branch, via, only) = (
@@ -64,7 +65,14 @@ pub async fn fetch(
         );
         with_mirror_lock(dir, move || -> Result<_> {
             let checked_out_tip = git::mirror(&remote, &branch, &mirror_dir)?;
-            let items = read_items(&Store::open(&mirror_dir), &mirror_dir, &via, &only, limit)?;
+            let items = read_items(
+                &Store::open(&mirror_dir),
+                &mirror_dir,
+                &via,
+                &only,
+                limits,
+                now,
+            )?;
             Ok((checked_out_tip, items))
         })
         .await?
@@ -129,19 +137,23 @@ pub fn read_items(
     store_root: &Path,
     via: &str,
     only: &[String],
-    limit: Option<usize>,
+    limits: crate::config::Limits,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<RawItem>> {
     let mut items = store.items()?;
+    let cutoff = limits.cutoff(now);
     items.retain(|item| {
-        !item.front.hidden && (only.is_empty() || only.contains(&item.front.source))
+        !item.front.hidden
+            && (only.is_empty() || only.contains(&item.front.source))
+            && cutoff.is_none_or(|cutoff| item.created_at() >= cutoff)
     });
     items.sort_by(|a, b| {
         b.created_at()
             .cmp(&a.created_at())
             .then_with(|| b.path.cmp(&a.path))
     });
-    if let Some(limit) = limit {
-        items.truncate(limit);
+    if limits.max_items > 0 {
+        items.truncate(limits.max_items);
     }
     items
         .iter()
@@ -198,7 +210,17 @@ pub(crate) fn persistent_extra(raw: &RawItem) -> std::collections::BTreeMap<Stri
 
 /// Load optional mirror companions only after the caller has decided this item will be written.
 /// All failures remain best-effort: the retained Markdown still points at publisher images.
-pub(crate) async fn hydrate_companions(mut raw: RawItem) -> RawItem {
+#[cfg(test)]
+pub(crate) async fn hydrate_companions(raw: RawItem) -> RawItem {
+    hydrate_companions_with_policy(raw, true, true, true).await
+}
+
+pub(crate) async fn hydrate_companions_with_policy(
+    mut raw: RawItem,
+    previews: bool,
+    images: bool,
+    documents: bool,
+) -> RawItem {
     let Some(locator) = take_companion_locator(&mut raw) else {
         return raw;
     };
@@ -206,7 +228,14 @@ pub(crate) async fn hydrate_companions(mut raw: RawItem) -> RawItem {
     let loaded = tokio::task::spawn_blocking(move || -> Result<_> {
         let store = Store::open(locator.store_root);
         let item = store.read_item(&locator.item_path)?;
-        let preview = match (&item.front.preview, store.read_preview(&item)?) {
+        let preview = match (
+            &item.front.preview,
+            if previews {
+                store.read_preview(&item)?
+            } else {
+                None
+            },
+        ) {
             (Some(metadata), Some(bytes)) => Some(crate::preview::Thumbnail {
                 extension: if metadata.file.ends_with(".webp") {
                     "webp"
@@ -221,8 +250,23 @@ pub(crate) async fn hydrate_companions(mut raw: RawItem) -> RawItem {
             }),
             _ => None,
         };
-        let images = store.read_image_assets(&item)?;
-        let document = store.read_document(&item)?;
+        let images = if images {
+            store
+                .read_image_assets(&item)?
+                .into_iter()
+                .map(|mut image| {
+                    image.renditions.clear();
+                    image
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let document = if documents {
+            store.read_document(&item)?
+        } else {
+            None
+        };
         Ok((preview, images, document))
     })
     .await;
@@ -278,6 +322,7 @@ pub fn convert(item: &Item, html: Option<String>, via: &str) -> RawItem {
         content_html,
         preview_candidates: Vec::new(),
         preview: None,
+        remote_preview: front.remote_preview.clone(),
         images: Vec::new(),
         document: None,
         extra,
@@ -314,6 +359,12 @@ pub fn mirror_key(remote: &str, branch: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    const UNBOUNDED: crate::config::Limits = crate::config::Limits {
+        max_items: 0,
+        max_age_days: 0,
+        max_bytes: 0,
+        since: None,
+    };
     use super::*;
     use crate::model::FrontMatter;
     use chrono::{TimeZone, Utc};
@@ -566,17 +617,49 @@ mod tests {
                 })
                 .unwrap();
         }
-        let all = read_items(&store, tmp.path(), "v", &[], None).unwrap();
+        let all = read_items(&store, tmp.path(), "v", &[], UNBOUNDED, Utc::now()).unwrap();
         assert_eq!(all.len(), 3);
         assert!(all[0].id.as_deref().unwrap().ends_with("2026-09-03-x"));
-        let only_b = read_items(&store, tmp.path(), "v", &["b".into()], None).unwrap();
+        let only_b = read_items(
+            &store,
+            tmp.path(),
+            "v",
+            &["b".into()],
+            UNBOUNDED,
+            Utc::now(),
+        )
+        .unwrap();
         assert_eq!(only_b.len(), 1);
         assert_eq!(
-            read_items(&store, tmp.path(), "v", &[], Some(2))
-                .unwrap()
-                .len(),
+            read_items(
+                &store,
+                tmp.path(),
+                "v",
+                &[],
+                crate::config::Limits {
+                    max_items: 2,
+                    ..UNBOUNDED
+                },
+                Utc::now(),
+            )
+            .unwrap()
+            .len(),
             2
         );
+        let recent = read_items(
+            &store,
+            tmp.path(),
+            "v",
+            &[],
+            crate::config::Limits {
+                max_age_days: 1,
+                ..UNBOUNDED
+            },
+            Utc.with_ymd_and_hms(2026, 9, 3, 12, 0, 0).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recent.len(), 1);
+        assert!(recent[0].id.as_deref().unwrap().ends_with("2026-09-03-x"));
     }
 
     #[tokio::test]
@@ -611,7 +694,15 @@ mod tests {
             })
             .unwrap();
 
-        let mirrored = read_items(&store, tmp.path(), "https://reader.invalid", &[], None).unwrap();
+        let mirrored = read_items(
+            &store,
+            tmp.path(),
+            "https://reader.invalid",
+            &[],
+            UNBOUNDED,
+            Utc::now(),
+        )
+        .unwrap();
         assert_eq!(mirrored.len(), 1);
         assert!(mirrored[0].images.is_empty());
         let hydrated = hydrate_companions(mirrored.into_iter().next().unwrap()).await;
@@ -625,7 +716,15 @@ mod tests {
             .join("items/hn/2026/09")
             .join(&front.images[0].original.file);
         std::fs::remove_file(&original).unwrap();
-        let degraded = read_items(&store, tmp.path(), "https://reader.invalid", &[], None).unwrap();
+        let degraded = read_items(
+            &store,
+            tmp.path(),
+            "https://reader.invalid",
+            &[],
+            UNBOUNDED,
+            Utc::now(),
+        )
+        .unwrap();
         assert_eq!(degraded.len(), 1);
         assert!(
             hydrate_companions(degraded.into_iter().next().unwrap())
@@ -635,7 +734,15 @@ mod tests {
         );
 
         std::fs::write(original, b"not an image").unwrap();
-        let degraded = read_items(&store, tmp.path(), "https://reader.invalid", &[], None).unwrap();
+        let degraded = read_items(
+            &store,
+            tmp.path(),
+            "https://reader.invalid",
+            &[],
+            UNBOUNDED,
+            Utc::now(),
+        )
+        .unwrap();
         assert_eq!(degraded.len(), 1);
         assert!(
             hydrate_companions(degraded.into_iter().next().unwrap())

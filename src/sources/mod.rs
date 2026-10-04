@@ -13,7 +13,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::config::{Engine, Source};
+use crate::config::{ContentMode, Engine, Source};
 use crate::http;
 use crate::model::RawItem;
 use crate::store::SourceState;
@@ -93,7 +93,23 @@ pub enum Fetch {
     },
 }
 
+fn require_heavy(source: &Source, provider: &str) -> Result<()> {
+    anyhow::ensure!(
+        source.content == ContentMode::Heavy,
+        "{provider} provides HTML articles rather than RSS, Atom, or JSON Feed; use a feed URL or set content = \"heavy\" for this source"
+    );
+    Ok(())
+}
+
 pub async fn fetch(source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
+    fetch_at(source, ctx, chrono::Utc::now()).await
+}
+
+pub(crate) async fn fetch_at(
+    source: &Source,
+    ctx: &Context<'_>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Fetch> {
     let mut fetched = match &source.engine {
         Engine::Feed { url } if instagram::is_profile_url(url) => {
             instagram::fetch(url, source, ctx).await
@@ -105,8 +121,7 @@ pub async fn fetch(source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
             url,
             branch,
             sources,
-            limit,
-        } => aggr::fetch(url, branch, sources, *limit, source, ctx).await,
+        } => aggr::fetch(url, branch, sources, source, ctx, now).await,
     }?;
     if let Fetch::Changed { items, .. } = &mut fetched {
         items.retain(|item| {
@@ -137,6 +152,50 @@ impl Validators {
 #[cfg(test)]
 mod tests {
     use super::normalize_language;
+
+    #[tokio::test]
+    async fn light_mode_rejects_non_feed_adapters_before_network_requests() {
+        use httpmock::prelude::*;
+
+        crate::http::install_crypto_provider();
+        let server = MockServer::start_async().await;
+        let requests = server
+            .mock_async(|when, then| {
+                when.method(GET);
+                then.status(200).body("<article>HTML only</article>");
+            })
+            .await;
+        let config = crate::config::Config::parse(&format!(
+            "[[sources]]\nurl = {:?}\n",
+            server.url("/profile")
+        ))
+        .unwrap();
+        let source = config.sources().unwrap().remove(0);
+        let client = crate::http::Client::new(&config.fetch).unwrap();
+        let state = crate::store::SourceState::default();
+        let cache = tempfile::tempdir().unwrap();
+        let ctx = super::Context {
+            client: &client,
+            state: &state,
+            cache_dir: cache.path(),
+        };
+        let url = source.engine.url().unwrap();
+        for (name, result) in [
+            (
+                "Instagram",
+                super::instagram::fetch(url, &source, &ctx).await,
+            ),
+            ("Qwen", super::qwen::fetch(url, &source, &ctx).await),
+        ] {
+            let error = match result {
+                Err(error) => format!("{error:#}"),
+                Ok(_) => panic!("{name} HTML requires heavy mode"),
+            };
+            assert!(error.contains(name), "{error}");
+            assert!(error.contains("content = \"heavy\""), "{error}");
+        }
+        requests.assert_calls_async(0).await;
+    }
 
     #[test]
     fn declared_languages_are_canonicalised_and_garbage_is_dropped() {
