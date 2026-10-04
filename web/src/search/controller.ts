@@ -336,7 +336,7 @@ function refresh(): void {
 }
 
 export const driver: SearchDriver = {
-  arrive() {
+  arrive(runQuery = true) {
     sessionFor();
     cancelQuery();
     contextWork?.abort();
@@ -348,7 +348,9 @@ export const driver: SearchDriver = {
     search.open = false;
     search.busy = false;
     search.error = '';
-    if (search.active) void run(restore());
+    if (search.active) {
+      if (runQuery) void run(restore());
+    }
     else {
       hideResults();
       search.address = '';

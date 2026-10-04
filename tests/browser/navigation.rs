@@ -207,11 +207,11 @@ async fn archive_pages_swap_in_place_and_nothing_outside_the_archive_is_fetched(
             client.execute("return !document.querySelector('script[type=speculationrules]')", vec![]).await? == true,
             "no speculation rules compete with the reader's own fetching"
         );
-        // Once the page has settled, the tabs and the rows the reader lingers on are fetched
-        // ahead; a link that leaves the archive never is, whichever ones the fixture renders.
+        // A keyboard focus expresses intent; merely showing rows does not fetch their pages.
+        client.execute("document.querySelector('.rows .row [data-row-open]').focus()", vec![]).await?;
         wait_for(&client, r#"(() => {
           const fetched = new Set(performance.getEntriesByType('resource').filter(entry => entry.initiatorType === 'fetch').map(entry => entry.name));
-          return [...document.querySelectorAll('.mobile-tabs a[data-route], .rows .row [data-row-open]')].every(link => fetched.has(link.href) || link.href.split('#')[0] === location.href.split('#')[0]);
+          return fetched.has(document.querySelector('.rows .row [data-row-open]').href);
         })()"#).await?;
         let outward = client.execute(r#"
           const fetched = new Set(performance.getEntriesByType('resource').map(entry => entry.name));

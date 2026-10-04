@@ -28,6 +28,7 @@ export function immutable(scopePath: string, pathname: string): boolean {
   const name = rest.split('/').pop() || '';
   const stem = name.includes('.') ? name.slice(0, name.lastIndexOf('.')) : name;
   if (/^(images|previews|documents)\//.test(rest.slice('assets/'.length)) && /^[0-9a-f]{40}$/.test(stem)) return true;
+  if (rest.startsWith('assets/app/') && /\.(js|css)$/.test(name) && /-[A-Za-z0-9_-]{8}$/.test(stem)) return true;
   return /-[0-9a-f]{12}$/.test(stem);
 }
 

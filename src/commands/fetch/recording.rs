@@ -40,6 +40,9 @@ async fn infer_at(
     failures: &super::ArticleFailures,
     now: SystemTime,
 ) -> Result<Option<u64>> {
+    if source.content == crate::config::ContentMode::Light {
+        return Ok(None);
+    }
     if raw.extra.get("duration_seconds").is_some_and(|value| {
         value.as_u64().is_some_and(|seconds| seconds > 0)
             || value
@@ -264,6 +267,36 @@ mod tests {
             Some("not a url")
         ));
         assert!(!is_recording("https://publisher.example/paper.pdf", None));
+    }
+
+    #[tokio::test]
+    async fn light_mode_never_probes_an_undated_recording_page() {
+        crate::http::install_crypto_provider();
+        let server = MockServer::start_async().await;
+        let endpoint = server
+            .mock_async(|when, then| {
+                when.path("/episode");
+                then.status(200).body(page(&server.url("/audio.mp3")));
+            })
+            .await;
+        let raw = episode(server.url("/episode"), server.url("/audio.mp3"));
+        let mut source = super::super::tests::source();
+        source.content = crate::config::ContentMode::Light;
+        let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        assert!(
+            infer(
+                &raw,
+                &source,
+                &client,
+                cache.path(),
+                &super::super::ArticleFailures::default()
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        endpoint.assert_calls_async(0).await;
     }
 
     #[tokio::test]

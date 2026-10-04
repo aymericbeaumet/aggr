@@ -2,6 +2,7 @@
 
 use std::io::{Cursor, Read as _, Write as _};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use anyhow::{Context, Result, ensure};
@@ -21,6 +22,31 @@ const POLICY: &str = "deployment-media-v1";
 const MAX_RECEIPT_BYTES: usize = 16 * 1024;
 const CACHE_LOCK_STRIPES: usize = 64;
 
+static COMPACT_HITS: AtomicU64 = AtomicU64::new(0);
+static COMPACT_MISSES: AtomicU64 = AtomicU64::new(0);
+static RESPONSIVE_HITS: AtomicU64 = AtomicU64::new(0);
+static RESPONSIVE_MISSES: AtomicU64 = AtomicU64::new(0);
+static ENCODED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Serialize)]
+pub(crate) struct CacheStatistics {
+    compressed_hits: u64,
+    compressed_misses: u64,
+    responsive_hits: u64,
+    responsive_misses: u64,
+    encoded_bytes: u64,
+}
+
+pub(crate) fn cache_statistics() -> CacheStatistics {
+    CacheStatistics {
+        compressed_hits: COMPACT_HITS.load(Ordering::Relaxed),
+        compressed_misses: COMPACT_MISSES.load(Ordering::Relaxed),
+        responsive_hits: RESPONSIVE_HITS.load(Ordering::Relaxed),
+        responsive_misses: RESPONSIVE_MISSES.load(Ordering::Relaxed),
+        encoded_bytes: ENCODED_BYTES.load(Ordering::Relaxed),
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Receipt {
@@ -33,6 +59,8 @@ struct Receipt {
 struct Record {
     key: String,
     policy: String,
+    #[serde(default)]
+    implementation: String,
     clear_renditions: bool,
     replacement: Option<Replacement>,
 }
@@ -74,9 +102,11 @@ fn compact_with(
     let _guard = cache_lock(&key)
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    if let Ok(record) = read_receipt(root, &key)
+    if let Ok(record) = read_receipt(root, &key, implementation)
         && let Ok(replacement) = read_replacement(root, &key, &record, asset.master_bytes.len())
     {
+        COMPACT_HITS.fetch_add(1, Ordering::Relaxed);
+        crate::cache::mark_used(&root.join(format!("{key}.json")));
         let mut restored = asset;
         if let Some((bytes, extension, width, height, placeholder)) = replacement {
             restored.master_hash = crate::model::sha1_hex(&bytes);
@@ -92,8 +122,13 @@ fn compact_with(
         return Ok(restored);
     }
     let original_hash = hex::encode(Sha256::digest(&asset.master_bytes));
+    let original_size = asset.master_bytes.len();
+    COMPACT_MISSES.fetch_add(1, Ordering::Relaxed);
     let output = compressor(asset)?;
-    if let Err(error) = save_receipt(root, &key, &original_hash, &output) {
+    if output.master_bytes.len() < original_size {
+        ENCODED_BYTES.fetch_add(output.master_bytes.len() as u64, Ordering::Relaxed);
+    }
+    if let Err(error) = save_receipt(root, &key, implementation, &original_hash, &output) {
         log::debug!("could not cache compressed deployment image: {error:#}");
     }
     Ok(output)
@@ -108,7 +143,7 @@ fn cache_lock(key: &str) -> &'static Mutex<()> {
     &locks[stripe]
 }
 
-fn implementation_key() -> &'static str {
+pub(crate) fn implementation_key() -> &'static str {
     static KEY: OnceLock<String> = OnceLock::new();
     KEY.get_or_init(|| {
         let mut hash = Sha256::new();
@@ -117,7 +152,8 @@ fn implementation_key() -> &'static str {
             include_str!("compressed_media.rs"),
             include_str!("../media/compact.rs"),
             include_str!("../media/placeholder.rs"),
-            include_str!("../../Cargo.lock"),
+            include_str!("../media.rs"),
+            crate::media::codec_fingerprint(),
         ] {
             hash.update(source.as_bytes());
         }
@@ -147,11 +183,13 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn read_receipt(root: &Path, key: &str) -> Result<Record> {
+fn read_receipt(root: &Path, key: &str, implementation: &str) -> Result<Record> {
     let bytes = read_bounded(&root.join(format!("{key}.json")), MAX_RECEIPT_BYTES)?;
     let receipt: Receipt = serde_json::from_slice(&bytes)?;
     ensure!(
-        receipt.record.key == key && receipt.record.policy == POLICY,
+        receipt.record.key == key
+            && receipt.record.policy == POLICY
+            && receipt.record.implementation == implementation,
         "stale deployment cache receipt"
     );
     ensure!(
@@ -217,7 +255,13 @@ fn read_replacement(
     )))
 }
 
-fn save_receipt(root: &Path, key: &str, original_hash: &str, output: &Asset) -> Result<()> {
+fn save_receipt(
+    root: &Path,
+    key: &str,
+    implementation: &str,
+    original_hash: &str,
+    output: &Asset,
+) -> Result<()> {
     std::fs::create_dir_all(root)?;
     let output_hash = hex::encode(Sha256::digest(&output.master_bytes));
     let replacement = if output_hash != original_hash {
@@ -236,6 +280,7 @@ fn save_receipt(root: &Path, key: &str, original_hash: &str, output: &Asset) -> 
     let record = Record {
         key: key.into(),
         policy: POLICY.into(),
+        implementation: implementation.into(),
         clear_renditions: output.renditions.is_empty(),
         replacement,
     };
@@ -245,13 +290,198 @@ fn save_receipt(root: &Path, key: &str, original_hash: &str, output: &Asset) -> 
         bytes.len() <= MAX_RECEIPT_BYTES,
         "deployment cache receipt exceeds limit"
     );
-    atomic_write(root, &format!("{key}.json"), &bytes)
+    atomic_write(root, &format!("{key}.json"), &bytes)?;
+    crate::cache::mark_used(&root.join(format!("{key}.json")));
+    Ok(())
 }
 
 fn atomic_write(root: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(root)?;
     file.write_all(bytes)?;
     file.persist(root.join(name))?;
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponsiveReceipt {
+    checksum: String,
+    record: ResponsiveRecord,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponsiveRecord {
+    key: String,
+    implementation: String,
+    payload_sha256: String,
+    renditions: Vec<ResponsivePart>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponsivePart {
+    bytes: usize,
+    sha1: String,
+    width: u32,
+    height: u32,
+}
+
+/// Original-image subscriptions derive responsive copies only when they publish them. Encoded
+/// copies belong to the disposable media cache, never to the append-only archive.
+pub(crate) fn responsive_cached(asset: Asset, root: Option<&Path>) -> Result<Asset> {
+    responsive_with(asset, root, crate::media::derive_renditions)
+}
+
+fn responsive_with(
+    mut asset: Asset,
+    root: Option<&Path>,
+    derive: impl FnOnce(&Asset) -> Result<Vec<crate::media::Rendition>>,
+) -> Result<Asset> {
+    if !asset.renditions.is_empty() {
+        return Ok(asset);
+    }
+    let Some(root) = root else {
+        asset.renditions = derive(&asset)?;
+        return Ok(asset);
+    };
+    let mut hash = Sha256::new();
+    hash.update(b"responsive-v1\0");
+    hash.update(implementation_key());
+    hash.update(&asset.master_bytes);
+    let key = hex::encode(hash.finalize());
+    let _guard = cache_lock(&key)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Ok(renditions) = read_responsive(root, &key, &asset) {
+        RESPONSIVE_HITS.fetch_add(1, Ordering::Relaxed);
+        crate::cache::mark_used(&root.join(format!("{key}.json")));
+        asset.renditions = renditions;
+        return Ok(asset);
+    }
+    RESPONSIVE_MISSES.fetch_add(1, Ordering::Relaxed);
+    asset.renditions = derive(&asset)?;
+    ENCODED_BYTES.fetch_add(
+        asset
+            .renditions
+            .iter()
+            .map(|image| image.bytes.len() as u64)
+            .sum::<u64>(),
+        Ordering::Relaxed,
+    );
+    if let Err(error) = save_responsive(root, &key, &asset.renditions) {
+        log::debug!("could not cache responsive images: {error:#}");
+    }
+    Ok(asset)
+}
+
+fn read_responsive(root: &Path, key: &str, asset: &Asset) -> Result<Vec<crate::media::Rendition>> {
+    let bytes = read_bounded(&root.join(format!("{key}.json")), MAX_RECEIPT_BYTES)?;
+    let receipt: ResponsiveReceipt = serde_json::from_slice(&bytes)?;
+    let record = receipt.record;
+    ensure!(
+        record.key == key && record.implementation == implementation_key(),
+        "stale responsive cache receipt"
+    );
+    ensure!(
+        receipt.checksum == hex::encode(Sha256::digest(serde_json::to_vec(&record)?)),
+        "corrupt responsive receipt"
+    );
+    ensure!(
+        record.renditions.len() <= crate::media::MAX_STORED_RENDITIONS,
+        "too many responsive images"
+    );
+    let limit = MediaLimits::default();
+    let total = record
+        .renditions
+        .iter()
+        .try_fold(0usize, |total, part| total.checked_add(part.bytes))
+        .context("responsive payload overflow")?;
+    ensure!(
+        total <= limit.max_article_bytes,
+        "responsive payload exceeds byte limit"
+    );
+    let payload = if total == 0 {
+        Vec::new()
+    } else {
+        read_bounded(&root.join(format!("{key}.image")), total)?
+    };
+    ensure!(
+        payload.len() == total && hex::encode(Sha256::digest(&payload)) == record.payload_sha256,
+        "corrupt responsive payload"
+    );
+    let mut offset = 0;
+    let mut previous_width = 0;
+    let mut restored = Vec::with_capacity(record.renditions.len());
+    for part in record.renditions {
+        ensure!(
+            part.bytes > 0
+                && part.bytes <= limit.max_file_bytes
+                && part.width > previous_width
+                && part.width <= asset.width
+                && part.height > 0
+                && part.height <= asset.height,
+            "invalid responsive metadata"
+        );
+        let bytes = &payload[offset..offset + part.bytes];
+        ensure!(
+            crate::model::sha1_hex(bytes) == part.sha1,
+            "responsive identity mismatch"
+        );
+        ensure!(
+            image::guess_format(bytes)? == ImageFormat::WebP,
+            "invalid responsive format"
+        );
+        let mut reader = ImageReader::with_format(Cursor::new(bytes), ImageFormat::WebP);
+        reader.limits(decoder_limits());
+        ensure!(
+            reader.into_dimensions()? == (part.width, part.height),
+            "responsive geometry mismatch"
+        );
+        previous_width = part.width;
+        offset += part.bytes;
+        restored.push(crate::media::Rendition {
+            bytes: bytes.to_vec(),
+            extension: "webp",
+            hash: part.sha1,
+            width: part.width,
+            height: part.height,
+        });
+    }
+    Ok(restored)
+}
+
+fn save_responsive(root: &Path, key: &str, renditions: &[crate::media::Rendition]) -> Result<()> {
+    std::fs::create_dir_all(root)?;
+    let payload: Vec<_> = renditions
+        .iter()
+        .flat_map(|image| image.bytes.iter().copied())
+        .collect();
+    let record = ResponsiveRecord {
+        key: key.into(),
+        implementation: implementation_key().into(),
+        payload_sha256: hex::encode(Sha256::digest(&payload)),
+        renditions: renditions
+            .iter()
+            .map(|image| ResponsivePart {
+                bytes: image.bytes.len(),
+                sha1: image.hash.clone(),
+                width: image.width,
+                height: image.height,
+            })
+            .collect(),
+    };
+    let checksum = hex::encode(Sha256::digest(serde_json::to_vec(&record)?));
+    let receipt = serde_json::to_vec(&ResponsiveReceipt { checksum, record })?;
+    ensure!(
+        receipt.len() <= MAX_RECEIPT_BYTES,
+        "responsive receipt exceeds size limit"
+    );
+    if !payload.is_empty() {
+        atomic_write(root, &format!("{key}.image"), &payload)?;
+    }
+    atomic_write(root, &format!("{key}.json"), &receipt)?;
+    crate::cache::mark_used(&root.join(format!("{key}.json")));
     Ok(())
 }
 
@@ -388,6 +618,52 @@ mod tests {
             &image,
             image::codecs::png::CompressionType::Uncompressed,
         ))
+    }
+
+    #[test]
+    fn responsive_cache_reuses_encoded_copies_and_recovers_from_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(720, 480, |x, y| {
+            Rgba([(x % 256) as u8, (y % 256) as u8, 80, 255])
+        }));
+        let original = asset(png(
+            &image,
+            image::codecs::png::CompressionType::Uncompressed,
+        ));
+        let first = responsive_cached(original.clone(), Some(root.path())).unwrap();
+        assert!(!first.renditions.is_empty());
+        assert_eq!(first.master_bytes, original.master_bytes);
+        let second = responsive_with(original.clone(), Some(root.path()), |_| {
+            anyhow::bail!("cache hit must not encode")
+        })
+        .unwrap();
+        assert_eq!(first, second);
+        let payload = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "image")
+            })
+            .unwrap();
+        std::fs::write(payload, b"corrupt").unwrap();
+        let repaired = responsive_cached(original, Some(root.path())).unwrap();
+        assert_eq!(repaired, first);
+    }
+
+    #[test]
+    fn responsive_cache_remembers_images_without_useful_renditions() {
+        let root = tempfile::tempdir().unwrap();
+        let original = cache_fixture();
+        let first =
+            responsive_with(original.clone(), Some(root.path()), |_| Ok(Vec::new())).unwrap();
+        assert!(first.renditions.is_empty());
+        let second = responsive_with(original, Some(root.path()), |_| {
+            anyhow::bail!("negative cache hit must not decode")
+        })
+        .unwrap();
+        assert_eq!(second, first);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
     #[test]

@@ -414,7 +414,9 @@ fn stored_asset_key(
 #[cfg(test)]
 mod tests {
     use super::super::tests::{candidate, png};
-    use super::super::{prepare_asset, reset_stored_decode_count, stored_decode_count};
+    use super::super::{
+        prepare_legacy_asset as prepare_asset, reset_stored_decode_count, stored_decode_count,
+    };
     use super::*;
     use image::{DynamicImage, ImageBuffer};
 

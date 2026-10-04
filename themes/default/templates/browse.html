@@ -4,6 +4,10 @@
   <header class="page-header">
     <h1 id="page-title">{{ page.title }}</h1>
     <p class="muted browse-intro">{% if page.kind == 'categories' %}Categories group sources by subject. Choose one to see all matching articles in the feed.{% elif page.kind == 'sources' %}Sources are the feeds and sites you follow. Choose one to see its articles in the feed.{% elif page.kind == 'tags' %}Tags describe topics attached to articles. Choose one to see matching articles across sources.{% else %}Browse by category, source, or tag to filter the main feed.{% endif %}</p>
+    {% if page.kind in ['browse', 'sources'] %}
+    <nav class="reading-list-actions" aria-label="Use this reading list"><a href="{{ 'sources.opml' | url_for }}" download>Download subscriptions (OPML)</a><a href="{{ 'rss.xml' | url_for }}" rel="alternate" type="application/rss+xml">Subscribe to this reader</a><a href="{{ site.config_page_url or site.config_url or ('aggr.toml' | url_for) }}" target="_blank" rel="noopener noreferrer">View reading list</a></nav>
+    <p class="muted">To share a filtered view, choose a source or category and copy its address.</p>
+    {% endif %}
   </header>
   <div class="page-body browse-directory">
     <div class="browse-groups">

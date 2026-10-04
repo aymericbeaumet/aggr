@@ -25,7 +25,7 @@ pub async fn run(project: &Project, args: &SyncArgs) -> Result<Option<Resolution
     let report = fetch::run(project, worktree, &args.fetch).await?;
 
     let mut discussions = None;
-    if !args.fetch.dry_run && !project.config.networks.is_empty() {
+    if !args.fetch.dry_run && !args.fetch.backfill_media && !project.config.networks.is_empty() {
         let cache = project.build_cache_dir()?;
         let store = crate::store::Store::open(worktree.dir());
         match super::build::resolve_discussions(project, &store, &cache, chrono::Utc::now()).await {
@@ -42,6 +42,7 @@ pub async fn run(project: &Project, args: &SyncArgs) -> Result<Option<Resolution
         return Ok(discussions);
     }
     if args.fetch_only {
+        super::offline::capture(project, worktree.dir(), discussions.as_ref()).await?;
         println!(
             "fetch only: {} new item(s), nothing committed or pushed",
             report.added()
@@ -49,6 +50,8 @@ pub async fn run(project: &Project, args: &SyncArgs) -> Result<Option<Resolution
         finish(&report)?;
         return Ok(discussions);
     }
+
+    super::offline::capture(project, worktree.dir(), discussions.as_ref()).await?;
 
     let message = commit_message(
         &report,
@@ -71,6 +74,7 @@ pub async fn run(project: &Project, args: &SyncArgs) -> Result<Option<Resolution
     }
     if let Some(head) = worktree.head_sha()? {
         if report.errors() == 0
+            && !args.fetch.backfill_media
             && let Err(err) = worktree.update_ref(LAST_GOOD, &head)
         {
             log::warn!(
@@ -81,7 +85,17 @@ pub async fn run(project: &Project, args: &SyncArgs) -> Result<Option<Resolution
         println!("{head}");
     }
     finish(&report)?;
+    trim_cache(project);
     Ok(discussions)
+}
+
+fn trim_cache(project: &Project) {
+    if let Err(err) = project
+        .build_cache_dir()
+        .and_then(|cache| crate::cache::enforce_limits(&cache, &project.config.cache))
+    {
+        log::warn!("cache limit cleanup skipped: {err:#}");
+    }
 }
 
 /// The same required synchronization stage for dev, redirected to its private cache and stopped
@@ -96,6 +110,11 @@ pub async fn run_dev(
     let report =
         fetch::run_with_cache(project, worktree, args, cache, fetch::StatePolicy::DevCache).await?;
     finish(&report)?;
+    if !args.dry_run
+        && let Err(err) = crate::cache::enforce_limits(cache, &project.config.cache)
+    {
+        log::warn!("cache limit cleanup skipped: {err:#}");
+    }
     Ok(report)
 }
 

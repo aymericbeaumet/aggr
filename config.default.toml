@@ -4,6 +4,27 @@
 # minimal file `aggr init` writes and only add what you change. Unknown keys are errors.
 # `${VAR}` in `url` and `headers` values expands from the environment (secrets in CI).
 
+[defaults]
+# Applied independently to every feed; each [[sources]] table can override any key.
+# Light uses feed content. Heavy also downloads and extracts original article pages.
+content = "light"
+# Remote keeps publisher URLs. Compressed archives bounded images; local keeps original media.
+# PDFs remain exact local copies in both compressed and local modes.
+media = "remote"
+# Per-feed retained items, publication age, and logical article bytes, including companions.
+# Exceeding a limit removes whole articles and their companions in ordinary commits; Git history stays.
+# Zero disables an individual numeric limit. Multiple limits apply together.
+max_items = 250
+max_age_days = 730
+max_bytes = 1000000000
+# Optional inclusive UTC date, combined with max_age_days using the newer cutoff.
+# since = "2026-01-01"
+# Tune only compressed media: quality is 1-100 and max_axis is 320-8192.
+# media = { mode = "compressed", quality = 72, max_axis = 1600 }
+# Compressed raster copies preserve transparency and animation where supported. Formats that
+# cannot be safely reduced retain their originals. Later policy changes do not re-download
+# existing masters; sync --backfill-media fills missing media without rewriting article bodies.
+
 [site]
 # Name shown in the navigation bar and feed metadata.
 title = "aggr"
@@ -14,8 +35,8 @@ language = "en"
 # Number of entries kept in each generated feed, source, category, and tag page. The reader can
 # split these static pages into smaller browser-side feed pages without hiding any entry from
 # no-JavaScript readers or crawlers.
-items_per_page = 50
-# Recent home-feed window. Source/category/tag archives remain complete until `[store]` retention.
+items_per_page = 25
+# Recent home-feed window. Source/category/tag archives include every retained article.
 max_items = 5000
 # Entries older than this leave the home feed but remain in archive pages.
 max_age_days = 365
@@ -54,12 +75,12 @@ letter_spacing = "normal" # normal, wide
 word_spacing = "normal" # normal, wide
 density = "compact" # compact, comfortable
 thumbnails = "show" # show, hide
-feed_page_size = 50 # 10, 25, 50
+feed_page_size = 25 # 10, 25, 50
 motion = "auto" # auto, off
 single_key_shortcuts = true
 scroll_amount = 10 # 1–100 lines for d/u, capped at half the available viewport
 # Recent complete articles and their archived images to download (0–1000); 0 disables downloads.
-offline_items = 30
+offline_items = 0
 
 # Optional public identity for Schema.org metadata. `type` is "person" or "organization".
 # [site.identity]
@@ -94,18 +115,12 @@ dir = ".aggr/data"
 html = true
 # Maximum bytes kept in each sanitized raw HTML sibling.
 html_max_bytes = 262144
-# Optional tree retention; both default to unlimited and history stays in git either way.
-# max_age_days = 730
-# max_items = 20000
 
 [fetch]
 # Maximum source requests running concurrently.
 concurrency = 16
 # Concurrent original-page downloads within each source in `heavy` mode.
 article_concurrency = 4
-# Only consider this many newest entries from one feed per run. This bounds first imports from
-# unusually deep feeds; aggr replicas use their own optional `limit` instead.
-max_items_per_source = 100
 # Total timeout for one HTTP request, in seconds.
 timeout_secs = 20
 # Maximum response body accepted from a feed, discovery page, or article, in bytes (up to
@@ -117,34 +132,10 @@ retries = 2
 # files and wildcards in the same remote repository are always allowed. Keep this false unless
 # every collection in the transitive chain is trusted.
 allow_remote_source_chains = false
-# `heavy` downloads the original page and extracts its article; `light` reuses feed content.
-content = "heavy"
-# Store one small local article thumbnail. `--refresh` also fills missing previews on old items.
-# Preview failures never prevent an article from being retained. Enabled mirrored previews reuse
-# their existing local bytes without contacting the publisher.
-previews = true
-# What to do with article images. "remote" downloads nothing and leaves them at the publisher;
-# "original" archives the publisher's exact bytes and derives lossless responsive copies;
-# "compact" archives one bounded JPEG instead and derives none. `true` and `false` remain
-# accepted spellings of "original" and "remote".
-# Images are most of an archive's size, so "compact" is the difference between gigabytes and
-# hundreds of megabytes. It cannot be undone: the publisher's bytes are not kept, and changing
-# the mode later does not re-download what earlier runs already stored.
-# Tune the reduction with a table; quality is 1-100 and max_axis is 320-8192:
-#   images = { mode = "compact", quality = 72, max_axis = 1600 }
-# Transparency is compacted to PNG rather than flattened onto a JPEG background. An animated GIF
-# larger than max_axis is resized and re-encoded as a GIF, keeping its frames, timing and loop;
-# one that already fits usually keeps its exact bytes, because re-encoding a frame-differenced
-# animation tends to cost more than it saves. The smaller result always wins.
-# What compaction cannot re-encode without losing more than size keeps its exact bytes under every
-# mode: colour-managed and high-depth originals, AVIF (which aggr archives without decoding),
-# animated WebP and APNG (which aggr cannot write), and animations beyond 400 frames.
-# Archiving also repairs missing copies during ordinary sync/build/dev, including retained items
-# absent from the latest feed. Existing local masters are reused. Failed image requests warn and
-# retry after a one-hour backoff; exact raster originals remain the fallback. SVG diagrams are
-# converted to safe local PNGs with no external resources. Every local image gets an inline
-# ThumbHash preview.
-images = "original"
+[cache]
+# Disposable caches are bounded independently of the append-only archive and published site.
+media_max_bytes = 2147483648
+response_max_bytes = 268435456
 
 # Each table's `url` names one or more resources: websites, RSS/Atom/JSON feeds, aggr TOML,
 # OPML subscriptions, or newline-separated URL lists. Resources can be local paths or remote
@@ -163,11 +154,13 @@ images = "original"
 # An item has one category and any number of labels. Source labels are merged with feed labels.
 # labels = ["programming", "rust"]
 # headers = { Authorization = "Bearer ${TOKEN}" } # `${ENV}` values are expanded
-# html = false               # skip the raw HTML sibling for this source; `[store] html = false` skips it everywhere
-# content = "heavy"          # override `[fetch] content` with `"heavy"` or `"light"`
-# previews = false           # override `[fetch] previews` for this source
-# images = "compact"         # override `[fetch] images` for this source; takes the same values,
-#                             # including `{ mode = "compact", quality = 60 }`
+# html = false               # override [store] html for this source
+# content = "heavy"          # override [defaults] content
+# media = "compressed"       # remote, compressed, local, or the compression table above
+# max_items = 100             # override only this count; age and byte limits still inherit
+# max_age_days = 0            # disable the relative-age limit for this source
+# max_bytes = 500000000       # include all companions in this feed's retained-byte limit
+# since = false              # explicitly clear an inherited absolute date
 
 # Group URLs with shared options. Use another table when the options differ.
 # [[sources]]
@@ -211,5 +204,5 @@ images = "original"
 # Alternative URL: git@github.com:friend/reads.git or https://host/x/reads.git
 # branch = "aggr"             # its data branch
 # sources = []                # only these of its source slugs; all when empty
-# limit = 200                 # optional newest-item limit; omitted imports every retained item
+# max_items = 200             # per-feed count, including repository imports
 # category = "friends"

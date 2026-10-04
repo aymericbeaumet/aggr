@@ -105,7 +105,7 @@ impl Fetcher {
         source: &Source,
         assets: &[crate::media::Asset],
     ) -> Option<Thumbnail> {
-        if !source.previews {
+        if !source.previews.archives() {
             return None;
         }
         self.fetch_with_assets_timeout(candidates, source, assets, FETCH_TIMEOUT)
@@ -114,7 +114,7 @@ impl Fetcher {
 
     /// Render the first page of an explicitly configured PDF only when no preferred preview exists.
     pub async fn fetch_document(&self, url: &Url, source: &Source) -> Option<Thumbnail> {
-        if !source.previews || !is_pdf_url(url) {
+        if !source.previews.archives() || !is_pdf_url(url) {
             return None;
         }
         let url = safe_url(url.as_str(), None)?;
@@ -349,6 +349,17 @@ fn safe_url(value: &str, base: Option<&Url>) -> Option<Url> {
 
 fn clean_alt(value: Option<&str>) -> Option<String> {
     value.and_then(crate::model::image_alt)
+}
+
+/// Select publisher metadata without downloading or decoding the referenced image.
+pub fn remote(
+    explicit: &[Candidate],
+    html: Option<&str>,
+    base: &Url,
+) -> Option<crate::model::RemotePreview> {
+    candidates(explicit, html, base)
+        .into_iter()
+        .find_map(|candidate| crate::model::RemotePreview::new(&candidate.url, candidate.alt))
 }
 
 /// Ordered, deduplicated and safe candidates, capped before any network requests begin.
@@ -706,6 +717,22 @@ fn decode(bytes: &[u8]) -> Result<(DynamicImage, image::metadata::Orientation)> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_preview_uses_publisher_metadata_without_image_bytes() {
+        let base = url::Url::parse("https://publisher.example/article").unwrap();
+        let preview = super::remote(&[], Some("<meta property='og:image' content='/cover.jpg'><meta property='og:image:alt' content='  A cover  '>"), &base).unwrap();
+        assert_eq!(preview.url, "https://publisher.example/cover.jpg");
+        assert_eq!(preview.alt.as_deref(), Some("A cover"));
+        assert_eq!((preview.width, preview.height), (None, None));
+        for unsafe_url in [
+            "javascript:alert(1)",
+            "data:image/png;base64,AAAA",
+            "https://name:secret@example.com/picture.jpg",
+        ] {
+            assert!(crate::model::RemotePreview::new(unsafe_url, None).is_none());
+        }
+    }
+
     use super::*;
     use image::{ImageBuffer, Rgba};
 
@@ -1021,7 +1048,7 @@ mod tests {
             then.status(200).body(png(64, 32, 255));
         });
         let config = crate::config::Config::parse(&format!(
-            "[[sources]]\nurl = {:?}\n",
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\n",
             server.url("/feed")
         ))
         .unwrap();
@@ -1054,9 +1081,11 @@ mod tests {
                     .body(png(64, 32, 255));
             })
             .await;
-        let config =
-            crate::config::Config::parse(&format!("[[sources]]\nurl={:?}\n", server.url("/feed")))
-                .unwrap();
+        let config = crate::config::Config::parse(&format!(
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl={:?}\n",
+            server.url("/feed")
+        ))
+        .unwrap();
         let source = config.sources().unwrap().remove(0);
         let first = [Candidate {
             url: server.url("/shared.png"),
@@ -1098,9 +1127,11 @@ mod tests {
                 then.status(500);
             })
             .await;
-        let config =
-            crate::config::Config::parse(&format!("[[sources]]\nurl={:?}\n", server.url("/feed")))
-                .unwrap();
+        let config = crate::config::Config::parse(&format!(
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl={:?}\n",
+            server.url("/feed")
+        ))
+        .unwrap();
         let source = config.sources().unwrap().remove(0);
         let mut authenticated = source.clone();
         authenticated
@@ -1178,7 +1209,7 @@ mod tests {
         )
         .unwrap();
         let config = crate::config::Config::parse(&format!(
-            "[[sources]]\nurl = {:?}\n",
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\n",
             server.url("/feed")
         ))
         .unwrap();
@@ -1217,11 +1248,13 @@ mod tests {
             when.path("/existing.png");
             then.status(500);
         });
-        let config =
-            crate::config::Config::parse(&format!("[[sources]]\nurl={:?}", server.url("/feed")))
-                .unwrap();
+        let config = crate::config::Config::parse(&format!(
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl={:?}",
+            server.url("/feed")
+        ))
+        .unwrap();
         let source = config.sources().unwrap().remove(0);
-        let asset = crate::media::prepare_asset(
+        let asset = crate::media::prepare_legacy_asset(
             &crate::media::Candidate {
                 url: Url::parse(&server.url("/existing.png")).unwrap(),
                 alt: Some("Existing media".into()),
@@ -1280,7 +1313,7 @@ mod tests {
                 .is_some()
         );
         let mut disabled = source.clone();
-        disabled.previews = false;
+        disabled.previews = crate::config::PreviewPolicy::Disabled;
         assert!(
             fetcher
                 .fetch_with_assets(&[candidate("/preferred.png")], &disabled, &[])
@@ -1309,7 +1342,7 @@ mod tests {
             then.status(200).body("not a PDF");
         });
         let config = crate::config::Config::parse(&format!(
-            "[[sources]]\nurl={:?}\nheaders={{Authorization='reader-token'}}",
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl={:?}\nheaders={{Authorization='reader-token'}}",
             server.url("/feed")
         ))
         .unwrap();
@@ -1330,7 +1363,7 @@ mod tests {
                 .is_none()
         );
         let mut disabled = source.clone();
-        disabled.previews = false;
+        disabled.previews = crate::config::PreviewPolicy::Disabled;
         assert!(fetcher.fetch_document(&url, &disabled).await.is_none());
         document.assert_calls(1);
         invalid.assert_calls(1);
@@ -1356,7 +1389,7 @@ mod tests {
             })
             .await;
         let config = crate::config::Config::parse(&format!(
-            "[[sources]]\nurl = {:?}\n",
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\n",
             server.url("/feed")
         ))
         .unwrap();
@@ -1395,7 +1428,7 @@ mod tests {
             then.status(200).body(png(64, 32, 255));
         });
         let config = crate::config::Config::parse(&format!(
-            "[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\", X-Api-Key = \"private\" }}\n",
+            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\", X-Api-Key = \"private\" }}\n",
             source_server.url("/feed"),
         )).unwrap();
         let source = config.sources().unwrap().remove(0);

@@ -1,0 +1,215 @@
+{
+  "date": "2026-10-04",
+  "profile": "optimized development profile; release-mode HTML",
+  "machine": {
+    "cpu": "Apple M4 Pro",
+    "memory_bytes": 51539607552,
+    "os": "macOS 26.6.2",
+    "architecture": "arm64"
+  },
+  "binary_sha256": "506f6f60fba0aeadd46126a813be4566ac9fc8f57004c1e87c7fe007d7c2d226",
+  "configuration": "examples/starter.toml",
+  "configuration_sha256": "ad70735aa9ccda8ba61fec9b4ddd7c4277f039295a8db94d4b6f67a650e32d53",
+  "defaults": {
+    "content": "light",
+    "media": "remote",
+    "max_items": 250,
+    "max_age_days": 730,
+    "max_bytes": 1000000000
+  },
+  "sources": 2,
+  "stored_items": 10,
+  "rendered_articles": 10,
+  "measurements": [
+    {
+      "case": "fresh-initial-import",
+      "wall_seconds": 1.722889167,
+      "report": {
+        "archive_seconds": 0.049949875,
+        "archive_sha": "812c48b026b38b68feb8201f98f2e4839dc23f24",
+        "hermetic": false,
+        "media_cache": {
+          "compressed_hits": 0,
+          "compressed_misses": 0,
+          "encoded_bytes": 0,
+          "responsive_hits": 0,
+          "responsive_misses": 0
+        },
+        "offline": false,
+        "output_bytes": 4419284,
+        "render_cache_hit": false,
+        "render_passes": [
+          {
+            "media_bytes": 0,
+            "omitted_media_groups": 0,
+            "phases": {
+              "archive preparation and media": 0.061499833,
+              "article pages and representations": 0.015488167,
+              "feed and directory pages": 0.024031042,
+              "feeds and static assets": 0.009562625,
+              "offline catalog and worker": 0.004079167,
+              "search index": 0.081494333
+            },
+            "total_seconds": 0.19615525
+          }
+        ],
+        "render_seconds": 0.33373375,
+        "report_kind": "aggr-build",
+        "retry_count": 0,
+        "schema_version": 1,
+        "sync_seconds": 1.048776167,
+        "total_seconds": 1.432459792,
+        "version": "1.11.0"
+      },
+      "full_render_cache_enabled": true
+    },
+    {
+      "case": "warm-offline-render",
+      "wall_seconds": 0.6262502920000002,
+      "report": {
+        "archive_seconds": 0.080901916,
+        "archive_sha": "812c48b026b38b68feb8201f98f2e4839dc23f24",
+        "hermetic": false,
+        "media_cache": {
+          "compressed_hits": 0,
+          "compressed_misses": 0,
+          "encoded_bytes": 0,
+          "responsive_hits": 0,
+          "responsive_misses": 0
+        },
+        "offline": true,
+        "output_bytes": 4419277,
+        "render_cache_hit": false,
+        "render_passes": [
+          {
+            "media_bytes": 0,
+            "omitted_media_groups": 0,
+            "phases": {
+              "archive preparation and media": 0.059979917,
+              "article pages and representations": 0.016224708,
+              "feed and directory pages": 0.02302375,
+              "feeds and static assets": 0.009215375,
+              "offline catalog and worker": 0.004763042,
+              "search index": 0.009825792
+            },
+            "total_seconds": 0.123032917
+          }
+        ],
+        "render_seconds": 0.268865625,
+        "report_kind": "aggr-build",
+        "retry_count": 0,
+        "schema_version": 1,
+        "sync_seconds": 8.3e-08,
+        "total_seconds": 0.349767624,
+        "version": "1.11.0"
+      },
+      "full_render_cache_enabled": false
+    }
+  ],
+  "storage": {
+    "current_tree": {
+      "files": 26,
+      "bytes": 163368
+    },
+    "originals": {
+      "files": 0,
+      "bytes": 0
+    },
+    "renditions": {
+      "files": 0,
+      "bytes": 0
+    },
+    "output": {
+      "files": 136,
+      "bytes": 4419277
+    },
+    "caches": {
+      "articles-v1": {
+        "files": 0,
+        "bytes": 0
+      },
+      "budget-v1": {
+        "files": 1,
+        "bytes": 39
+      },
+      "capture-retries-v1": {
+        "files": 0,
+        "bytes": 0
+      },
+      "deployment-media-v1": {
+        "files": 0,
+        "bytes": 0
+      },
+      "discussions-v1": {
+        "files": 0,
+        "bytes": 0
+      },
+      "feed-parsing": {
+        "files": 2,
+        "bytes": 152
+      },
+      "image-failures-v1": {
+        "files": 0,
+        "bytes": 0
+      },
+      "pagefind-v1": {
+        "files": 29,
+        "bytes": 707526
+      },
+      "recording-duration-v1": {
+        "files": 0,
+        "bytes": 0
+      },
+      "render-v1": {
+        "files": 137,
+        "bytes": 4419373
+      },
+      "validated-images-v2": {
+        "files": 0,
+        "bytes": 0
+      }
+    },
+    "git": {
+      "loose_objects": 39,
+      "packed_objects": 0,
+      "loose_bytes": 180224,
+      "packed_bytes": 0,
+      "garbage_bytes": 0
+    },
+    "history": "Deleting current-tree renditions does not reclaim append-only Git history or invalidate old blob URLs."
+  },
+  "conditions": [
+    "Fresh temporary local Git repository with no remote and no existing cache.",
+    "Initial import makes live requests to the two configured source feeds; no deployment, binary installation or Git transfer.",
+    "Warm run is offline and disables complete render-tree reuse using GITHUB_ACTIONS=true.",
+    "Other verification tasks ran concurrently.",
+    "One run of each case; source contents and network latency can vary.",
+    "Both sources completed successfully; the Rust feed contributed 10 articles and the other source contributed none under the current defaults."
+  ],
+  "first_visit": {
+    "fixture": "tests/browser/default_visit.rs",
+    "browser": "Chrome154 on macOS",
+    "fixture_articles": 45,
+    "feed_items": 25,
+    "offline_items": 0,
+    "media": "remote",
+    "compression": false,
+    "sampling": "750ms after service-worker control, before typing or navigation",
+    "no_store": {
+      "server_http_response_bytes": 833136,
+      "browser_transfer_size_bytes": 390218,
+      "budget_bytes": 1048576
+    },
+    "cacheable_versioned_assets": {
+      "cache_control": "public, max-age=31536000, immutable",
+      "server_http_response_bytes": 595352,
+      "duplicate_asset_requests": 0,
+      "budget_bytes": 786432
+    },
+    "scope": "Server response headers and bodies include service-worker installation; browser transferSize excludes worker requests. Controlled local fixture, not deployed-site timings."
+  },
+  "source_items": {
+    "blog-rust-lang-org": 10,
+    "aymericbeaumet-com": 0
+  }
+}

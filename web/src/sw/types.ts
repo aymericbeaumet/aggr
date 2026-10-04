@@ -17,6 +17,11 @@ export interface OfflineItem {
   resources: ResourceEntry[];
 }
 
+/** A versioned catalogue fetched only after the reader enables offline downloads. */
+export interface OfflineCatalogue extends SearchFile {
+  count: number;
+}
+
 /** One file of a published search index, with the size and digest that verify it. */
 export interface SearchFile {
   url: string;
@@ -41,7 +46,7 @@ export interface SwConfig {
   app_version: string;
   content_version: string;
   precache: ResourceEntry[];
-  offline_catalog: OfflineItem[];
+  offline_catalog: OfflineCatalogue;
   offline_count: number;
   /** The index this build published; its manifest is fetched from `base`. */
   search_manifest: Pick<SearchManifest, 'version' | 'base'>;

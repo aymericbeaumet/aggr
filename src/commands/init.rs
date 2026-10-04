@@ -85,12 +85,14 @@ mod tests {
     }
 
     #[test]
-    fn starter_bounds_imports_without_discarding_archive_text() {
+    fn starter_uses_the_per_feed_retention_and_capture_defaults() {
         let config = crate::config::Config::parse(MINIMAL_CONFIG).unwrap();
         assert_eq!(config.sources.len(), 2);
-        assert_eq!(config.fetch.max_items_per_source, 10);
-        assert!(config.fetch.images.archives());
-        assert_eq!(config.store.max_items, None);
+        assert_eq!(config.defaults.limits.max_items, 250);
+        assert_eq!(config.defaults.limits.max_age_days, 730);
+        assert_eq!(config.defaults.limits.max_bytes, 1_000_000_000);
+        assert_eq!(config.defaults.media, crate::config::MediaPolicy::Remote);
+        assert_eq!(config.defaults.content, crate::config::ContentMode::Light);
         assert_eq!(config.site.build_max_bytes, 1_000_000_000);
     }
 

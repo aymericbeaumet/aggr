@@ -47,6 +47,8 @@ pub enum Command {
     Dev(DevArgs),
     /// Remove disposable local caches and owned generated output; preserve archived articles.
     Clean(CleanArgs),
+    /// Inspect archive storage or remove reproducible image renditions.
+    Storage(StorageArgs),
     /// Validate the configuration and probe every source.
     Check,
     /// Generate shell completions.
@@ -81,6 +83,32 @@ pub struct FetchArgs {
     /// an item was captured reaches it (hand edits are lost).
     #[arg(long)]
     pub reprocess: bool,
+    /// Fill opted-in media without rewriting retained article bodies.
+    #[arg(long, conflicts_with_all = ["refresh", "reprocess"])]
+    pub backfill_media: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct StorageArgs {
+    #[command(subcommand)]
+    pub command: StorageCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StorageCommand {
+    /// Report archive, Git, output, and disposable cache sizes without fetching.
+    Inspect {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove verified generated renditions, preserving original images and history.
+    PruneRenditions {
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+        /// Commit and safely push the changes; without this flag only report them.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Debug, Args, Default, Clone)]
@@ -119,6 +147,15 @@ pub struct BuildArgs {
     /// Render this data-branch ref without syncing, committing, or pushing.
     #[arg(long, value_name = "REF")]
     pub data_ref: Option<String>,
+    /// Render locally available data without fetching or modifying the archive.
+    #[arg(long)]
+    pub offline: bool,
+    /// Build offline and require all automatically loaded reader resources to be local.
+    #[arg(long)]
+    pub hermetic: bool,
+    /// Write a JSON build report outside the generated site.
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
     /// Production build: absolute URLs from [site] url (or --base-url) and a CNAME for custom
     /// domains. Without it the site is built to be served from `/`.
     #[arg(long)]
@@ -151,7 +188,14 @@ impl DevArgs {
             base_url: self.base_url.clone(),
             data_ref: None,
             release: self.release,
+            ..Default::default()
         }
+    }
+}
+
+impl BuildArgs {
+    pub fn is_offline(&self) -> bool {
+        self.offline || self.hermetic || self.data_ref.is_some()
     }
 }
 

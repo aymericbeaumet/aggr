@@ -43,7 +43,17 @@ pub fn is_show_url(url: &Url) -> bool {
 
 pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
     if is_spotify_show(url) || is_deezer_show(url) {
-        return fetch_streaming_show(url, source, ctx).await;
+        let result = fetch_streaming_show(url, source, ctx).await;
+        return if source.content == crate::config::ContentMode::Light {
+            result.with_context(|| {
+                let provider = if is_spotify_show(url) { "Spotify" } else { "Deezer" };
+                format!(
+                    "{provider} needs a publisher RSS feed in light mode; use its RSS URL or set content = \"heavy\" to enable HTML episode discovery"
+                )
+            })
+        } else {
+            result
+        };
     }
     if ctx.state.identity == source.identity && ctx.state.resolved_url.is_some() {
         match feed::fetch(url, source, ctx).await {
@@ -701,6 +711,7 @@ pub fn deezer_items(page: &str, url: &Url) -> Result<(SourceMeta, Vec<RawItem>)>
                 })
                 .unwrap_or_default(),
             preview: None,
+            remote_preview: None,
             images: vec![],
             document: None,
         });
@@ -833,6 +844,7 @@ pub fn spotify_items(page: &str, url: &Url) -> Result<(SourceMeta, Vec<RawItem>)
                 })
                 .unwrap_or_default(),
             preview: None,
+            remote_preview: None,
             images: vec![],
             document: None,
         });
@@ -1068,8 +1080,10 @@ mod tests {
             persist_endpoint: true,
             headers: vec![],
             html: true,
-            previews: false,
+            previews: crate::config::PreviewPolicy::Disabled,
             images: crate::config::ImagePolicy::Remote,
+            documents: crate::config::DocumentPolicy::Original,
+            limits: crate::config::Limits::default(),
             content: crate::config::ContentMode::Light,
             engine: crate::config::Engine::Feed { url },
         }

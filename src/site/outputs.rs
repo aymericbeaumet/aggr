@@ -1207,6 +1207,7 @@ mod tests {
 
     fn site() -> SiteCtx {
         SiteCtx {
+            hermetic: false,
             title: "Example & Reader".into(),
             description: "Collected <carefully>".into(),
             identity: None,

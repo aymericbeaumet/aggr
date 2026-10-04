@@ -1,6 +1,5 @@
 import { flushSync } from 'svelte';
 import { extract, parseDocument } from '../model/extract';
-import { sitePath } from '../model/urls';
 import { page } from '../state/page.svelte';
 import { selection } from '../state/selection.svelte';
 import { arrive, settle, trackScrolling } from './arrive';
@@ -9,7 +8,7 @@ import { patchHead } from './head';
 import { address, linkIn, routable } from './routable';
 import { pageScope } from './scope';
 import { ScrollMemory, newKey } from './scroll';
-import { Speculation, frugal } from './speculation';
+import { frugal } from './speculation';
 
 /**
  * Following a link inside the archive swaps the page in place instead of loading a new document:
@@ -50,7 +49,7 @@ let token = 0;
 let pending = false;
 let mounts: PageMount[] = [];
 const memory = new ScrollMemory();
-const speculation = new Speculation();
+const prefetches = new Set<string>();
 let cache: PageCache | null = null;
 
 const idle = (run: () => void) =>
@@ -98,9 +97,9 @@ function pages(): PageCache {
   return cache;
 }
 
-/** Fetch a page the reader is about to open. Guesses are counted and bounded; intent is not. */
-function prefetch(href: string, guess = false): void {
-  if (!installed) return;
+/** Fetch only a page the reader has hovered, focused or pressed. */
+function prefetch(href: string): void {
+  if (!installed || document.hidden || !navigator.onLine || frugal(navigator.connection)) return;
   let url: URL;
   try {
     url = new URL(href, location.href);
@@ -110,8 +109,9 @@ function prefetch(href: string, guess = false): void {
   const key = address(url.href);
   if (!routable(url, root()) || key === current) return;
   const store = pages();
-  if (guess && (frugal(navigator.connection) || !speculation.admit(store.has(key)))) return;
-  store.load(url.href).page.catch(() => {});
+  if (prefetches.has(key) || prefetches.size >= 2) return;
+  prefetches.add(key);
+  void store.load(url.href).page.catch(() => {}).finally(() => prefetches.delete(key));
 }
 
 /** Leave the page on screen: keep its place and its cursor, and end what it set up. */
@@ -260,64 +260,6 @@ function pushFragment(hash: string): void {
   history.pushState({ aggr: { key: entry } }, '', hash);
 }
 
-/** The tabs and the neighbouring articles: where a reader is most likely to go from here. */
-function nearest(): string[] {
-  const base = root();
-  const links = ['', 'browse/', 'preferences/'].map((route) => new URL(route, base).href);
-  const view = page.model?.page;
-  if (view?.view === 'article') {
-    for (const neighbour of [view.data.next, view.data.previous]) {
-      if (neighbour) links.push(new URL(sitePath(neighbour.url), base).href);
-    }
-  }
-  return links;
-}
-
-/** Fetch what this page makes likely next, once the page itself has settled. */
-function speculate(signal: AbortSignal): void {
-  speculation.reset();
-  // A screen left open, or an app brought back, keeps its nearest pages fresh, so following one
-  // of them never waits on a copy that has gone stale.
-  const refresh = () => {
-    if (!document.hidden && !frugal(navigator.connection)) for (const href of nearest()) prefetch(href);
-  };
-  const timer = setInterval(refresh, PAGE_LIFETIME / 2);
-  document.addEventListener('visibilitychange', refresh, { signal });
-  signal.addEventListener('abort', () => clearInterval(timer));
-  // The tabs and neighbours are fetched as soon as this page has painted: they are what a reader
-  // reaches for first, and a tap must find them ready.
-  requestAnimationFrame(() =>
-    setTimeout(() => {
-      if (!signal.aborted && !frugal(navigator.connection)) for (const href of nearest()) prefetch(href, true);
-    }, 0),
-  );
-  idle(() => {
-    if (signal.aborted || frugal(navigator.connection) || !('IntersectionObserver' in window)) return;
-    // A row the reader lingers over, rather than every row that scrolls past.
-    const timers = new Map<Element, ReturnType<typeof setTimeout>>();
-    const observer = new IntersectionObserver((entries) => {
-      for (const seen of entries) {
-        const link = seen.target;
-        clearTimeout(timers.get(link));
-        timers.delete(link);
-        if (!seen.isIntersecting || !(link instanceof HTMLAnchorElement)) continue;
-        timers.set(
-          link,
-          setTimeout(() => {
-            observer.unobserve(link);
-            prefetch(link.href, true);
-          }, 250),
-        );
-      }
-    });
-    for (const link of document.querySelectorAll('.rows .row [data-row-open], .article-more-link')) observer.observe(link);
-    signal.addEventListener('abort', () => {
-      observer.disconnect();
-      timers.forEach((timer) => clearTimeout(timer));
-    });
-  });
-}
-
 /**
  * A tab answers the touch that lands on it, including one that lands while the page is still
  * gliding from a fling: the platform spends that touch on stopping the scroll and never sends
@@ -452,6 +394,10 @@ function install(mount: PageMount[]): void {
     { passive: true },
   );
   document.addEventListener('pointerout', () => clearTimeout(hover), { passive: true });
+  document.addEventListener('focusin', (event) => {
+    const hit = linkIn(event, root());
+    if (hit) prefetch(hit.url.href);
+  });
   // Keyboard activation of a link is a click as well; Enter on a focused link fires one.
 
   window.addEventListener('popstate', (event) => {
@@ -494,13 +440,11 @@ export const navigation = {
   install,
   go,
   prefetch,
-  speculate,
   pushFragment,
   replaceAddress,
   /** Forget every fetched page, e.g. when the content version changed. */
   clear(): void {
     cache?.clear();
-    speculation.reset();
   },
   get phase(): Phase {
     return phase;

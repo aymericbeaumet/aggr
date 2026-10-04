@@ -10,6 +10,7 @@ use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 use url::Url;
 
+use super::policy::DocumentDefaults;
 use super::{FetchConfig, SourceConfig};
 use crate::http::{self, Request, Response};
 
@@ -46,7 +47,9 @@ pub(super) async fn expand(
         trees: BTreeMap::new(),
         documents: 0,
     };
-    let sources = loader.expand_sources(sources, root_location, None, 0).await;
+    let sources = loader
+        .expand_sources(sources, root_location, None, DocumentDefaults::default(), 0)
+        .await;
     Ok(Expansion {
         sources,
         local: loader.local,
@@ -73,6 +76,7 @@ impl Loader {
         sources: Vec<SourceConfig>,
         declaring: Location,
         defaults: Option<SourceConfig>,
+        document_defaults: DocumentDefaults,
         depth: usize,
     ) -> Pin<Box<dyn Future<Output = Vec<SourceConfig>> + Send + '_>> {
         Box::pin(async move {
@@ -85,10 +89,12 @@ impl Loader {
                 if (!source.collection && super::source_kind(&source) == "aggr")
                     || source.local_feed.is_some()
                 {
+                    apply_document_defaults(&mut source, document_defaults);
                     expanded.push(source);
                     continue;
                 }
                 let Some(pattern) = source.url.clone() else {
+                    apply_document_defaults(&mut source, document_defaults);
                     expanded.push(source);
                     continue;
                 };
@@ -96,6 +102,7 @@ impl Loader {
                 let resolved = match super::expand_env(&pattern, &env) {
                     Ok(value) => value,
                     Err(_) => {
+                        apply_document_defaults(&mut source, document_defaults);
                         expanded.push(source);
                         continue;
                     }
@@ -105,10 +112,12 @@ impl Loader {
                     && super::repository_url::inferred(&resolved)
                 {
                     source.kind = Some("aggr".into());
+                    apply_document_defaults(&mut source, document_defaults);
                     expanded.push(source);
                     continue;
                 }
                 if !self.load_remote && remote_url(&resolved).ok().flatten().is_some() {
+                    apply_document_defaults(&mut source, document_defaults);
                     expanded.push(source);
                     continue;
                 }
@@ -136,6 +145,7 @@ impl Loader {
                         } else {
                             Some(url.to_string())
                         };
+                        apply_document_defaults(&mut source, document_defaults);
                         expanded.push(source);
                         continue;
                     }
@@ -149,6 +159,7 @@ impl Loader {
                     let headers = match headers {
                         Ok(headers) => headers,
                         Err(_) => {
+                            apply_document_defaults(&mut source, document_defaults);
                             expanded.push(source);
                             continue;
                         }
@@ -224,6 +235,7 @@ impl Loader {
                                 document.sources,
                                 actual,
                                 Some(source.clone()),
+                                document.defaults.inherit(document_defaults),
                                 depth + 1,
                             )
                             .await;
@@ -231,6 +243,7 @@ impl Loader {
                     } else {
                         for mut leaf in document.sources {
                             apply_defaults(&mut leaf, &source);
+                            apply_document_defaults(&mut leaf, document_defaults);
                             // Keep unresolved credentials in the configured URL for stable identity.
                             if generic {
                                 leaf.url = original_url.clone();
@@ -854,18 +867,56 @@ fn apply_defaults(source: &mut SourceConfig, defaults: &SourceConfig) {
     source.headers = headers;
     source.html = source.html.or(defaults.html);
     source.content = source.content.or(defaults.content);
-    source.previews = source.previews.or(defaults.previews);
-    source.images = source.images.or(defaults.images);
+    source.media = source.media.or(defaults.media);
+    source.limits = source.limits.inherit(defaults.limits);
     source.branch = source.branch.take().or_else(|| defaults.branch.clone());
     if source.sources.is_empty() {
         source.sources = defaults.sources.clone();
     }
-    source.limit = source.limit.or(defaults.limit);
+}
+
+fn apply_document_defaults(source: &mut SourceConfig, defaults: DocumentDefaults) {
+    source.content = source.content.or(defaults.content);
+    source.media = source.media.or(defaults.media);
+    source.limits = source.limits.inherit(defaults.limits);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn policy_defaults_follow_document_wrapper_and_leaf_precedence() {
+        crate::http::install_crypto_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("aggr.toml");
+        std::fs::write(&root, "[defaults]\nmedia='remote'\nmax_items=100\nmax_age_days=200\nsince='2026-01-01'\n[[sources]]\nurl='./outer.toml'\ncontent='heavy'\nmax_items=20\n").unwrap();
+        std::fs::write(dir.path().join("outer.toml"), "[defaults]\nmedia='local'\nmax_items=90\nmax_age_days=30\nmax_bytes=1000\n[[sources]]\nurl='./inner.toml'\nmax_bytes=2000\n").unwrap();
+        std::fs::write(dir.path().join("inner.toml"), "[defaults]\nmedia='compressed'\nmax_age_days=10\n[[sources]]\nurl='https://a.example/feed'\nmedia='remote'\nmax_items=3\nsince=false\n[[sources]]\nurl='./local.json'\n[[sources]]\nurl='https://c.example/feed'\ncontent='light'\nmax_age_days=0\n").unwrap();
+        std::fs::write(
+            dir.path().join("local.json"),
+            r#"{"version":"https://jsonfeed.org/version/1.1","title":"Local","items":[]}"#,
+        )
+        .unwrap();
+        let config = crate::config::Config::load_offline(&root).await.unwrap();
+        let sources = config.sources().unwrap();
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources[0].images, crate::config::ImagePolicy::Remote);
+        assert_eq!(sources[0].limits.max_items, 3);
+        assert_eq!(sources[0].limits.since, None);
+        assert_eq!(sources[1].engine.url().unwrap().scheme(), "file");
+        assert_eq!(
+            sources[1].images,
+            crate::config::ImagePolicy::Compact(crate::media::CompactPolicy::archive())
+        );
+        assert_eq!(sources[1].limits.max_items, 20);
+        assert_eq!(sources[1].limits.max_age_days, 10);
+        assert_eq!(sources[1].limits.max_bytes, 2000);
+        assert_eq!(sources[1].limits.since.unwrap().to_string(), "2026-01-01");
+        assert_eq!(sources[1].content, crate::config::ContentMode::Heavy);
+        assert_eq!(sources[2].content, crate::config::ContentMode::Light);
+        assert_eq!(sources[2].limits.max_age_days, 0);
+    }
 
     #[tokio::test]
     async fn collection_depth_and_document_count_are_bounded() {
@@ -1237,7 +1288,7 @@ mod tests {
             r#"{"version":"https://jsonfeed.org/version/1.1","title":"News","items":[]}"#,
         )
         .unwrap();
-        std::fs::write(dir.path().join("nested.toml"), "[[sources]]\nurl = './news.opml'\nlabels = ['child']\nheaders = { authorization = 'child' }\nimages = false\n").unwrap();
+        std::fs::write(dir.path().join("nested.toml"), "[[sources]]\nurl = './news.opml'\nlabels = ['child']\nheaders = { authorization = 'child' }\nmedia = 'remote'\n").unwrap();
         let source = SourceConfig {
             url: Some("./nested.toml".into()),
             category: Some("science".into()),
@@ -1246,7 +1297,7 @@ mod tests {
                 ("Authorization".into(), "parent".into()),
                 ("Accept".into(), "application/xml".into()),
             ]),
-            images: Some(crate::config::ImagePolicy::Original),
+            media: Some(crate::config::MediaPolicy::Local),
             ..Default::default()
         };
         let expansion = expand(vec![source], root, &FetchConfig::default(), None, true)
@@ -1257,7 +1308,7 @@ mod tests {
         assert_eq!(source.name.as_deref(), Some("Local"));
         assert_eq!(source.category.as_deref(), Some("science"));
         assert_eq!(source.labels, ["parent", "child"]);
-        assert_eq!(source.images, Some(crate::config::ImagePolicy::Remote));
+        assert_eq!(source.media, Some(crate::config::MediaPolicy::Remote));
         assert_eq!(source.headers.len(), 2);
         assert_eq!(
             source.headers.get("authorization").map(String::as_str),

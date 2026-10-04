@@ -5,7 +5,7 @@ import { fetchEntry, stale } from './caches';
 import { createContext, offlineUrl, type WorkerContext } from './context';
 import { parsePageMessage, validOfflineCount, type BuildMessage } from './messages';
 import { configureOffline, readOfflineStatus } from './offline';
-import { handleFetch } from './routing';
+import { handleFetch, immutable } from './routing';
 import type { ExtendableEventLike, FetchEventLike, MessageEventLike, WorkerEnv } from './types';
 
 export interface WorkerHandlers {
@@ -26,7 +26,8 @@ export function lifecycle(ctx: WorkerContext): WorkerHandlers {
             Promise.all(
               ctx.config.precache.map((entry) => {
                 const url = offlineUrl(ctx, entry.url);
-                return fetchEntry(ctx.fetch, url, ctx.timeouts.precache)
+                const cacheMode = immutable(ctx.scopePath, new URL(url).pathname) ? 'force-cache' : 'reload';
+                return fetchEntry(ctx.fetch, url, ctx.timeouts.precache, undefined, cacheMode)
                   .then((response) => cache.put(url, response))
                   .catch((error: unknown) => {
                     if (entry.required) throw error;

@@ -7,6 +7,7 @@
 mod harness;
 
 mod article;
+mod default_visit;
 mod feed;
 mod media;
 mod mobile;

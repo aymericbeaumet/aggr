@@ -10,6 +10,7 @@ use super::{SourceConfig, deserialize_sources, source_entries::split_lines};
 pub(super) struct Document {
     pub sources: Vec<SourceConfig>,
     pub collection: bool,
+    pub defaults: super::policy::DocumentDefaults,
 }
 
 #[derive(Debug)]
@@ -76,6 +77,7 @@ fn parse_document(text: &str, document_url: Option<&Url>) -> Result<Document> {
         bail!("import contains no sources");
     }
     let mut collection = true;
+    let mut defaults = super::policy::DocumentDefaults::default();
     let sources = if trimmed.starts_with('<') {
         if xml_root(trimmed)? == "opml" {
             opml_sources(trimmed)?
@@ -92,12 +94,14 @@ fn parse_document(text: &str, document_url: Option<&Url>) -> Result<Document> {
         #[derive(Default, Deserialize)]
         #[serde(default)]
         struct ImportedConfig {
+            defaults: super::policy::DocumentDefaults,
             #[serde(deserialize_with = "deserialize_sources")]
             sources: Vec<SourceConfig>,
         }
-        toml::from_str::<ImportedConfig>(text)
-            .context("parsing imported aggr TOML")?
-            .sources
+        let document =
+            toml::from_str::<ImportedConfig>(text).context("parsing imported aggr TOML")?;
+        defaults = document.defaults;
+        document.sources
     };
     if sources.is_empty() {
         bail!("import contains no sources");
@@ -105,6 +109,7 @@ fn parse_document(text: &str, document_url: Option<&Url>) -> Result<Document> {
     Ok(Document {
         sources,
         collection,
+        defaults,
     })
 }
 

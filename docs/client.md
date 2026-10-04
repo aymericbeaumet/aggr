@@ -29,11 +29,12 @@ the client. If `#aggr-page` is missing or malformed the page stays static.
 
 Navigation fetches the target page, extracts its model, its content element and its `<head>`
 metadata with `DOMParser`, and re-renders `<main>` from state while the header and tab bar
-persist. A link inside the archive is fetched as soon as it is pressed or hovered (60 ms), and
-once a page settles the tabs, the neighbouring articles and the visible rows are fetched too,
-bounded to 16 speculative requests and a 24-page, five-minute cache, and off on Save-Data or slow
-connections. Scroll positions are kept per history entry, so Back returns to the same place and
-list cursor. A non-HTML response, a page without a model or one built by another app version
+persist. A link inside the archive is fetched when it is pressed, focused or hovered (60 ms),
+with at most two intent prefetches in flight and a 24-page, five-minute cache. No pages are fetched
+just because their links are visible, and unvisited destinations are not refreshed periodically.
+Intent prefetch is off on Save-Data, slow connections, offline, or hidden tabs; following a link
+still uses ordinary navigation when necessary. Scroll positions are kept per history entry, so
+Back returns to the same place and list cursor. A non-HTML response, a page without a model or one built by another app version
 falls back to ordinary navigation, and without JavaScript every link is an ordinary link.
 
 ## Components and parity
@@ -95,12 +96,27 @@ sync, and import and export. Values live in `localStorage` under `aggr:<setting>
 ## Offline
 
 The service worker separates automatically cached pages from selected offline downloads. The
-offline preference saves complete article pages and their retained image renditions; readiness
+default offline-download count is zero. Installation caches the home/offline shell, small icons and
+the client's eager dependencies; collection pages and optional search, media and preferences
+chunks load when used. The worker references a versioned offline catalogue instead of embedding
+its article families; only an enabled offline preference downloads it, checking its byte count,
+SHA-256 digest, item count and local URLs before use. Saved user preferences still take precedence.
+Large app-installation icons remain available on demand.
+Content-addressed shell assets reuse the browser's HTTP cache during installation; pages and
+mutable manifests still request fresh responses. This avoids downloading the same client assets
+twice when the host permits caching.
+
+The offline preference saves complete article pages and their retained image renditions; readiness
 requires every retained file. Partial and quota failures remain visible. Any positive download
 limit also saves the complete archive search manifest, including its versioned catalogue, runtime
 and fragments. Only a fully committed index becomes active, and a previous complete index remains
 available during an update. Online/offline transitions select the matching catalogue and runtime;
 search results mark saved articles and omit previews that are unavailable offline.
+
+The optional `[site.params] introduction = true` introduction uses native `<details>` outside the Svelte
+root, so collapsing it survives navigation within the document. It appears only on the feed and
+adds no script or network dependency. Browse and source directories expose subscription downloads
+and the reading-list configuration; source/category query URLs remain shareable.
 
 ## Browser regression tests
 
@@ -117,6 +133,30 @@ AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser -- --ignored
 Set `AGGR_CHROME_BINARY` if Chrome is outside its usual location and `AGGR_BROWSER_TIMEOUT_SECS`
 (default 45) when a loaded machine needs longer waits. CI installs matching browser and driver
 versions; failure screenshots and logs are saved under `target/browser-artifacts/`.
+
+### First-visit budget
+
+The `default_visit` contract uses a fresh browser profile, 45 fixture articles, the default
+25-entry feed, remote media policies and zero selected offline downloads. On 2026-10-04,
+Chrome 154 on macOS produced these measurements over local HTTP without compression:
+
+| Measurement | Bytes |
+|---|---:|
+| Server response headers and bodies with `Cache-Control: no-store`, including service-worker installation | 833,136 |
+| Same fixture with `public, max-age=31536000, immutable` on versioned assets | 595,352 |
+| Browser navigation/resource `transferSize` with `no-store`, which omits worker requests | 390,218 |
+| Regression budget for the `no-store` server total | 1,048,576 |
+| Regression budget with cacheable versioned assets | 786,432 |
+
+The sample ends 750 ms after worker control, before typing or navigation. It also verifies zero
+external HTTP requests and zero automatic article, collection, search-index or offline-catalogue
+downloads. With cacheable assets, each asset is requested at most once: worker installation reuses
+the browser's HTTP cache. Search works afterward. These are controlled fixture bytes, not
+deployed-site timings; compression and hosting cache headers change the transfer size.
+
+```sh
+AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser default_visit -- --ignored --test-threads=1 --nocapture
+```
 
 ## Query syntax
 
@@ -182,7 +222,7 @@ values with contextual counts and date shortcuts. Articles appear exclusively in
 completing or submitting free text never opens an article suggestion. Value lists
 are scrollable without an arbitrary cutoff; completed values stop suggesting themselves. Keyboard
 and touch selection are supported; Escape closes open suggestions, and a further Escape blurs the
-search field, never clearing the query. Composition input does not launch partial searches. Enter and Tab accept the
+search field, never clearing the query. Composition input does not run partial searches. Enter and Tab accept the
 highlighted stable option identity, even when labels coincide or asynchronous counts reorder values.
 Accepting a qualifier leaves the menu open on the values it accepts, so `sour` and Enter reach the
 sources in two keystrokes. The arrows walk open suggestions and the results the rest of the time,

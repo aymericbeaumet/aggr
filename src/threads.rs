@@ -1157,8 +1157,10 @@ mod tests {
             headers: Vec::new(),
             html: true,
             content: crate::config::ContentMode::Heavy,
-            previews: true,
+            previews: crate::config::PreviewPolicy::Local,
             images: crate::config::ImagePolicy::Original,
+            documents: crate::config::DocumentPolicy::Original,
+            limits: crate::config::Limits::default(),
             engine: crate::config::Engine::Feed {
                 url: Url::parse(url).unwrap(),
             },

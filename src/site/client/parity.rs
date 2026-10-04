@@ -36,6 +36,7 @@ fn site(excerpts: bool) -> SiteCtx {
     let mut params = toml::Table::new();
     params.insert("excerpts".into(), toml::Value::Boolean(excerpts));
     SiteCtx {
+        hermetic: false,
         title: "Reader".into(),
         description: String::new(),
         identity: None,

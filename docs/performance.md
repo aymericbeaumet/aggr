@@ -1,5 +1,13 @@
 # Fetch and build performance
 
+The default path uses feed content and remote images, thumbnails, and PDFs. It downloads no image
+bytes, skips retained image decoding during publication, and leaves full extraction and preservation
+to explicit settings. Each feed defaults to 250 items, 730 days, and 1 GB of retained article files. Count and date
+selection happens before article or media requests; expired archive families are pruned before
+enrichment. The starter uses two sources. Browser startup
+loads the static reader and minimal service-worker shell; search and offline downloads wait for
+intent. See [source controls](sources.md) and [client behavior](client.md).
+
 For a pinned public-instance snapshot, actual workflow durations, storage breakdown and
 reproduction commands, see [archive and deployment measurements](benchmarks.md). Keep archive
 files, historical Git storage, published-site size and cache space separate when planning capacity.
@@ -24,15 +32,16 @@ refresh, and a compact Spotify episode index for publisher-feed reconciliation. 
 indexes instead of rescanning the whole archive once per source. The indexes retain identifiers
 and paths, not article bodies.
 
-Ordinary runs also repair missing images in retained articles, including articles outside the latest
+With local image preservation enabled, sync also repairs missing images in retained articles, including articles outside the latest
 feed window and feeds returning 304. A compact candidate index and file checks avoid rereading good
 masters. Repairs write only missing companions and preserve article bodies; unavailable images retry
 after a one-hour backoff. A missing preview companion is regenerated from available local media; if
 unavailable, only its unusable metadata pointer is omitted. It cannot roll back unrelated image
 repairs, and other file-system errors still fail with the article path. Downloads allow up to 32 MiB per image and 256 MiB per article, with at most
 512 retained images from 1,024 candidates. Raster decoding permits up to 200 megapixels and a 24,000px
-axis, one article-image decoder at a time, with a 768 MiB decoder allocation ceiling. Masters above 32 megapixels keep their exact bytes and
-bounded responsive renditions without a second full-resolution encode.
+axis, one article-image decoder at a time, with a 768 MiB decoder allocation ceiling. Masters above
+32 megapixels keep their exact bytes without a second full-resolution encode. Publication derives
+responsive copies in disposable caches; new archive commits contain no generated renditions.
 
 Source-set parsing preserves commas inside CDN URLs. Old truncated Substack transformation URLs
 recover their safely decoded original image URL for downloading while retaining the archived alias
@@ -57,8 +66,7 @@ path, so the same checkout at another location shares a fingerprint.
 
 Stored-image validation receipts live under the existing build/dev cache in `validated-images-v2`.
 They reuse verified rendition choices, derived colors, and ThumbHashes across builds
-and restarts. Keys cover every input byte, image metadata, and the compiled media implementation
-and dependency lockfile. Changed inputs, corrupt receipts, collisions, and unavailable caches fall
+and restarts. Keys cover every input byte, image metadata, and the media processing policy and relevant codec dependencies. Changed inputs, corrupt receipts, collisions, and unavailable caches fall
 back to full decoding and pixel comparison. Fresh bounded file reads and identity/size checks still
 run on hits; receipts never modify the archive. After the full-byte SHA-256 key matches, receipts
 reuse verified SHA-1 identities and transfer rendition buffers without extra hashing or cloning. There are 16,384 slots of at most 8 KiB each, capped
@@ -171,8 +179,7 @@ decide which copies to publish, independently of the reusable encoded bytes. See
 Actions caches are evictable performance aids, never the archive or a backup. New media entries
 are complete snapshots, not incremental uploads; a changed snapshot still transfers its cache
 contents, and retained snapshots consume the repository's cache quota. Separating media avoids
-copying it merely because a small backoff marker changed. The before/after fingerprints also read
-all cached media bytes twice, so cache transfer, hashing and encoding should be measured separately.
+copying it merely because a small backoff marker changed. The before/after fingerprints inspect paths and sizes; cache transfer and encoding should be measured separately.
 
 `articles-v1` holds raw original-page responses. It is private to the machine that fetched it and is
 never uploaded. `render-v1` is not cached on Actions either: the fingerprint folds each item's age
@@ -180,7 +187,7 @@ band (1 h, 3 h, 24 h) into the generation, so any item under a day old changes i
 of a 1,100-item instance is about 2.4 GB per entry. Uploading one per run exhausted the 10 GB
 repository cache quota for entries that almost never hit.
 
-Nothing in these caches expires by age except the backoff markers, so `aggr sync` sweeps the build
+In addition to the byte caps described in [storage](storage.md), `aggr sync` sweeps the build
 cache at most once a day (`cache::sweep`, remembered in `.aggr/cache/build-v1/.last-sweep`; a dry
 run never sweeps). Under `articles-v1` it removes every `bodies/<sha1>.html` that no `entries/*.toml`
 references any more (a page that changed leaves its previous body behind) and every
@@ -213,13 +220,24 @@ Search completion uses `search-catalog.json` (version, base, document count, and
 runtime and its filter files wait until an actual query needs them, so a reader who never searches
 downloads none of it. See [client development](client.md) for the search contract.
 
-Prefetching is bounded. A press, or a mouse resting on a link for 60 ms, fetches that page.
-Once a page settles, the reader also fetches the tabs, the neighbouring articles and the rows
-that stay on screen for half a second. That is at most ten guesses per page, and none at all
-under Save-Data or on a 2G connection. Fetched pages stay in memory for five minutes, 24 at most,
-and are parsed while the browser is idle, so following a link only has to swap the content.
+Navigation prefetch follows hover, focus, or touch intent, with at most two requests in flight.
+Unattended viewport, tab, and periodic destination guesses are disabled. The default service worker
+precaches only the shell and eager module dependencies. The complete offline catalogue is separate
+versioned JSON fetched and verified when downloads are enabled; optional chunks stay lazy.
 
 ## Measuring changes
+
+`aggr build --report report.json` writes structured wall timings, per-pass stage timings, retries,
+output bytes, and cache reuse outside the generated site. Compare pinned `--data-ref` builds for
+rendering work and normal builds for ingestion plus rendering. A pinned build never fetches Git
+objects, expands remote collections, or probes publishers; fetch required objects first. Keep
+`SOURCE_DATE_EPOCH`, binary, config, archive SHA, and hardware fixed for comparisons.
+
+The October 4 production investigation found a 15m11s build step, with 648.6s in the first media
+phase and 9.8s in its warm retry. Its deployed workflow omitted compression and budget caches.
+These are observations of [run 37182310698](https://github.com/aymericbeaumet/aggr-instance/actions/runs/37182310698),
+not performance claims for this implementation. New measurements must distinguish the default
+remote path from opt-in original or compact preservation.
 
 Every build logs one info line (`-v`) of the form `build: <phase> Xs, …, total Xs (N pages, M
 items)`, naming the seven phases in build order: archive preparation, media and item metadata,
