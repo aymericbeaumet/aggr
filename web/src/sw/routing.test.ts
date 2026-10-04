@@ -44,12 +44,15 @@ describe('classify', () => {
 });
 
 describe('immutable', () => {
-  it('requires a full hash in the content-addressed directories and a 12-hex suffix elsewhere', () => {
+  it('recognizes archived asset hashes and generated browser chunk hashes', () => {
     expect(immutable(scopePath, `${scopePath}assets/images/${sha1}.webp`)).toBe(true);
     expect(immutable(scopePath, `${scopePath}assets/images/${sha1.slice(1)}.webp`)).toBe(false);
     expect(immutable(scopePath, `${scopePath}assets/images/${sha1}`)).toBe(true);
     expect(immutable(scopePath, `${scopePath}assets/icons/icon-0123456789ab.svg`)).toBe(true);
     expect(immutable(scopePath, `${scopePath}assets/icons/icon-0123456789.svg`)).toBe(false);
+    expect(immutable(scopePath, `${scopePath}assets/app/page.svelte-Ck4TY_xv.js`)).toBe(true);
+    expect(immutable(scopePath, `${scopePath}assets/app/main.js`)).toBe(false);
+    expect(immutable(scopePath, `${scopePath}assets/icons/icon-Ck4TY_xv.svg`)).toBe(false);
     expect(immutable(scopePath, `${scopePath}pagefind/${sha256}/x.pf_fragment`)).toBe(true);
     expect(immutable(scopePath, `${scopePath}pagefind/${sha256.slice(1)}/x.pf_fragment`)).toBe(false);
     expect(immutable(scopePath, `${scopePath}items/${sha1}/`)).toBe(false);

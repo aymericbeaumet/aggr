@@ -39,8 +39,8 @@ pub(super) fn precache_paths(base: &str, assets: &[String]) -> Vec<String> {
             assets
                 .iter()
                 .filter(|name| {
+                    // Eager script chunks come from the module graph. Optional chunks stay lazy.
                     name.ends_with(".css")
-                        || name.ends_with(".js")
                         || name.starts_with("favicon-")
                         || name.starts_with("icon-")
                         || name.starts_with("apple-touch-icon-")

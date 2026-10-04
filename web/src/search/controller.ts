@@ -352,11 +352,7 @@ export const driver: SearchDriver = {
     else {
       hideResults();
       search.address = '';
-      // The catalogue is small, and it can wait. The articles on screen are what a first tap
-      // opens, so they get the connection before search does.
-      const warm = () => void loadCatalogue().catch(() => {});
-      if ('requestIdleCallback' in window) requestIdleCallback(warm, { timeout: 1200 });
-      else setTimeout(warm, 300);
+      // The catalogue loads when the field is used. The articles on screen get the connection first.
     }
   },
   leave() {
