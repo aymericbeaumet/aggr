@@ -8,7 +8,7 @@ use super::{
     repair::CaptureRetries,
 };
 use crate::{
-    config::{ContentMode, Engine, Source},
+    config::{Engine, Source},
     document::Asset,
     http,
     model::RawItem,
@@ -22,7 +22,7 @@ pub(super) async fn capture(
     context: &FetchOneContext<'_>,
 ) -> Option<Asset> {
     if context.options.dry_run
-        || source.content == ContentMode::Light
+        || !source.documents.archives()
         || matches!(source.engine, Engine::Aggr { .. })
     {
         return None;
@@ -79,7 +79,7 @@ pub(super) async fn repair(
     mut transaction: Option<&mut SourceTransaction>,
 ) -> Result<usize> {
     if context.options.dry_run
-        || source.content == ContentMode::Light
+        || !source.documents.archives()
         || matches!(source.engine, Engine::Aggr { .. })
     {
         return Ok(0);
@@ -194,7 +194,7 @@ mod tests {
         };
         let failures = ArticleFailures::default();
         let light = Source {
-            content: ContentMode::Light,
+            documents: crate::config::DocumentPolicy::Remote,
             ..configured.clone()
         };
         opts.refresh = true;

@@ -102,6 +102,110 @@ pub(super) fn reprocess_stored_bodies(
     }
 }
 
+/// Explicit media backfill never fetches a feed or replaces article prose.
+pub(super) async fn backfill_media(
+    source: &Source,
+    context: &FetchOneContext<'_>,
+    mut transaction: Option<&mut SourceTransaction>,
+) -> Result<usize> {
+    if context.options.dry_run {
+        return Ok(0);
+    }
+    let mut repaired = repair_archived_images(
+        source,
+        context.store,
+        context.options,
+        transaction.as_deref_mut(),
+    )
+    .await?
+        + super::documents::repair(source, context, transaction.as_deref_mut()).await?;
+    let paths = context
+        .options
+        .existing_paths
+        .get()
+        .and_then(|index| index.items.get(&source.slug))
+        .map(|items| {
+            items
+                .values()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    if !source.previews.enabled() {
+        return Ok(repaired);
+    }
+    for path in paths {
+        let item = context.store.read_item(&path)?;
+        let needs_local =
+            source.previews.archives() && context.store.read_preview(&item)?.is_none();
+        let needs_remote = item.front.remote_preview.is_none();
+        if !needs_local && !needs_remote {
+            continue;
+        }
+        let Ok(base) = url::Url::parse(&item.front.link) else {
+            continue;
+        };
+        let html = context.store.read_html(&item)?;
+        let mut explicit = item
+            .front
+            .remote_preview
+            .iter()
+            .map(|preview| preview::Candidate {
+                url: preview.url.clone(),
+                alt: preview.alt.clone(),
+            })
+            .collect::<Vec<_>>();
+        explicit.extend(
+            crate::media::markdown_candidates(&item.body, &base)
+                .into_iter()
+                .map(|image| preview::Candidate {
+                    url: image.url.into(),
+                    alt: image.alt,
+                }),
+        );
+        let mut candidates = preview::candidates(&explicit, html.as_deref(), &base);
+        let remote = candidates.iter().find_map(|candidate| {
+            crate::model::RemotePreview::new(&candidate.url, candidate.alt.clone())
+        });
+        let preview = if needs_local {
+            candidates.retain(|candidate| {
+                !context
+                    .options
+                    .media_fetcher
+                    .failed_this_run(&candidate.url, source)
+            });
+            let images = context.store.read_image_assets(&item)?;
+            context
+                .options
+                .preview_fetcher
+                .fetch_with_assets(&candidates, source, &images)
+                .await
+        } else {
+            None
+        };
+        if preview.is_none() && (!needs_remote || remote.is_none()) {
+            continue;
+        }
+        let mut planned = Planned::from_existing(item, &path)?;
+        if let Some(preview) = &preview {
+            planned.front.preview = Some(preview.metadata(&planned.stem));
+        }
+        if needs_remote {
+            planned.front.remote_preview = remote;
+        }
+        let raw = RawItem {
+            preview,
+            ..Default::default()
+        };
+        if let Some(transaction) = transaction.as_deref_mut() {
+            transaction.track_item(&planned, &raw)?;
+        }
+        persist_item(context.store, context.options, planned, raw).await?;
+        repaired += 1;
+    }
+    Ok(repaired)
+}
+
 pub(super) async fn repair_archived_images(
     source: &Source,
     store: &Arc<Store>,
@@ -218,7 +322,7 @@ pub(super) async fn repair_archived_images(
             continue;
         }
         let preview = if preview_missing {
-            let retained_images = if images.is_empty() && source.previews {
+            let retained_images = if images.is_empty() && source.previews.archives() {
                 store.read_image_assets(&existing)?
             } else {
                 Vec::new()
@@ -226,6 +330,11 @@ pub(super) async fn repair_archived_images(
             let candidates = archive
                 .candidates
                 .iter()
+                .filter(|candidate| {
+                    !options
+                        .media_fetcher
+                        .failed_this_run(candidate.url.as_str(), source)
+                })
                 .map(|candidate| preview::Candidate {
                     url: candidate.url.to_string(),
                     alt: candidate.alt.clone(),
@@ -360,7 +469,9 @@ pub(super) async fn repair_recordings(
     context: &FetchOneContext<'_>,
     mut transaction: Option<&mut SourceTransaction>,
 ) -> Result<usize> {
-    if matches!(source.engine, Engine::Aggr { .. }) {
+    if source.content == crate::config::ContentMode::Light
+        || matches!(source.engine, Engine::Aggr { .. })
+    {
         return Ok(0);
     }
     let Some(items) = context
@@ -598,7 +709,7 @@ pub(super) async fn repair_feed_captures(
                 .await;
         }
         let has_stored_preview = context.store.read_preview(&existing)?.is_some();
-        if source.previews
+        if source.previews.archives()
             && !has_stored_preview
             && let Ok(base) = url::Url::parse(&raw.link)
         {
@@ -807,7 +918,7 @@ mod tests {
             })
             .unwrap();
         let configured = Source {
-            previews: false,
+            previews: crate::config::PreviewPolicy::Disabled,
             engine: Engine::Feed {
                 url: Url::parse(&server.url("/feed")).unwrap(),
             },
@@ -928,7 +1039,7 @@ mod tests {
             })
             .unwrap();
         let configured = Source {
-            previews: false,
+            previews: crate::config::PreviewPolicy::Disabled,
             engine: Engine::Feed {
                 url: Url::parse(&server.url("/feed")).unwrap(),
             },
@@ -1101,7 +1212,11 @@ mod tests {
             let healthy = root.path().join("items/blog/healthy.md");
             let healthy_modified = fs::metadata(&healthy).unwrap().modified().unwrap();
             let configured = Source {
-                previews,
+                previews: if previews {
+                    crate::config::PreviewPolicy::Local
+                } else {
+                    crate::config::PreviewPolicy::Disabled
+                },
                 engine: Engine::Feed {
                     url: Url::parse(&server.url("/feed")).unwrap(),
                 },
@@ -1673,6 +1788,7 @@ mod tests {
             public_url: Some("https://open.spotify.com/show/1sz1NhoHqbpXbzNlpOnFoz".into()),
             content: ContentMode::Light,
             images: crate::config::ImagePolicy::Remote,
+            documents: crate::config::DocumentPolicy::Original,
             engine: Engine::Feed {
                 url: Url::parse(&server.url("/feed")).unwrap(),
             },
@@ -1948,6 +2064,7 @@ mod tests {
             content: ContentKind::Feed,
             html: None,
             preview: None,
+            remote_preview: None,
             images: Vec::new(),
             document: None,
             html_truncated: false,
@@ -1992,6 +2109,7 @@ mod tests {
             content: ContentKind::Extracted,
             html: Some("post.html".into()),
             preview: Some(preview.clone()),
+            remote_preview: None,
             images: vec![image.clone()],
             document: None,
             html_truncated: true,

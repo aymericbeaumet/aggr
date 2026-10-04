@@ -12,6 +12,7 @@ use crate::model::{ContentKind, Item, normalize_category, normalize_labels};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SiteCtx {
+    pub hermetic: bool,
     pub title: String,
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1006,6 +1007,7 @@ mod tests {
     #[test]
     fn site_links_follow_the_three_url_contracts() {
         let site = |base_url: Option<&str>| SiteCtx {
+            hermetic: false,
             title: "Reader".into(),
             description: String::new(),
             identity: None,

@@ -43,6 +43,8 @@ items/<source>/<yyyy>/<mm>/<yyyy-mm-dd>-<slug>.html    stripped HTML from which 
 sources/<source>/state.toml                            identity, resolved_url, title/site URL, language, ETag, Last-Modified, body hash
 sources/<source>/seen.txt                              "<key> <yyyy-mm-dd>" per line, append-only
 status.toml                                            sources currently failing; absent when all is well
+.aggr-sources.json                                     resolved source presentation metadata and remote collection digests
+.aggr-discussions.json                                 captured discussion matches for local rendering
 ```
 
 - **Bootstrap files are regenerated.** `README.md`, `.gitattributes`, and `.gitignore` are written
@@ -66,6 +68,13 @@ status.toml                                            sources currently failing
   history) that invalidates the discovered `resolved_url` when the config changes, alongside the
   upstream title, site URL, and conditional-GET validators. Neither it nor `status.toml` holds
   anything a sync cannot rebuild.
+- **Render metadata travels with the archive.** `.aggr-sources.json` captures resolved source
+  names, categories, labels, public URLs and preservation options, plus collection identities and
+  digests. A digest of the locally expanded source declarations prevents an offline build from
+  silently restoring removed subscriptions or obsolete source options. It excludes fetching headers
+  and credentials from the saved metadata. `.aggr-discussions.json` captures resolved
+  discussion links. Sync writes these only when their contents change, so offline builds can use
+  the selected commit's inputs without contacting collection or discussion providers.
 - **Deleted stays deleted.** Dedupe keys derived from the entry id, normalized original URL, and
   `title|published` are appended to `seen.txt` when an item is written. They are never removed, so
   deleting a current item does not make a later fetch add it again.
@@ -189,16 +198,22 @@ aggr build --data-ref refs/aggr/last-good \
   --release --base-url "https://reads.example.net/"
 ```
 
-With `--data-ref`, `build` skips source synchronization, discussion-network lookups, commits, and
-pushes, then renders the selected stored tree. Unavailable feeds, article pages, and discussion
-services therefore do not prevent this recovery build. Configuration loading can still fetch
-remote collections, so this is fully offline only when the effective config is local. Nor does
-the flag freeze every other build input: the current theme and binary affect HTML, and
-time-dependent presentation can change between builds. The `Aggr-Config` trailer pins the tracked
-root config commit only; remote collection bodies are cache inputs, not committed data. For a
-repeatable recovery, keep all local collection files and theme files in the primary branch, pin or
-vendor remote collections, retain the matching aggr binary, and record the intended public base
-URL. The render cache is an optimization, not part of the archive. `status.toml` and
+With `--data-ref`, `build` resolves only locally available Git objects and materializes a temporary
+snapshot without fetching, updating the data checkout, or invoking checkout hooks and filters.
+It skips synchronization, live discussion lookups, commits and pushes. `--offline` selects the local
+data-branch tip with the same contract. Missing local objects fail instead of triggering a fetch.
+Remote collection expansion uses the selected commit's captured source metadata; an older archive
+without that metadata requires a fully local effective source configuration or a prior sync.
+
+The render clock is the selected commit's timestamp, or an explicitly supplied `SOURCE_DATE_EPOCH`.
+The current binary, root configuration, local imports and public base URL are also inputs. The
+`Aggr-Config` trailer identifies the tracked root configuration commit; retain its matching local
+files and the binary when reproducing a build. Search-index serialization can still differ between
+cold builds, so this is not a promise of byte-identical output. Offline execution does not make
+publisher-hosted media available offline; `--hermetic` adds checks for automatically loaded external
+resources. See [commands](commands.md#offline-and-hermetic-builds).
+
+The render cache is an optimization, not part of the archive. `status.toml` and
 `sources/<source>/state.toml` are regenerated and self-healing: a malformed or missing file is read
 as absent, logged, and rewritten by the next sync that has something to record, so neither needs
 restoring from history.
@@ -213,8 +228,13 @@ editor:
 - **Fix a source:** remove `sources/<slug>/state.toml` to force a full refetch. Existing items still
   deduplicate through `seen.txt`.
 
-Do not rebase, squash, delete, or force-push the data branch. Retention (`[store] max_age_days` and
-`max_items`) deletes files from its current tree in a normal commit, so older reachable commits keep
+Do not rebase, squash, delete, or force-push the data branch. Per-feed retention (`[defaults] max_age_days`,
+`max_items`, `max_bytes`, and `since`) deletes files from its current tree in a normal commit, so older reachable commits keep
 their contents. The generated site and sitemap contain only visible items in the current retained
 tree; historical Git objects are durable but are no longer public article pages after retention
 removes them.
+
+Policy eviction removes the complete article family, including obsolete image, preview, and PDF
+companions. Compact `sources/<slug>/evicted.json` records distinguish policy evictions from manual
+deletions: a changed policy can admit those articles again when they remain available upstream.
+Ordinary same-policy syncs leave these records unchanged. See [storage limits](storage.md).

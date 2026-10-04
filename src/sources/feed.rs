@@ -310,6 +310,23 @@ async fn discovery_ladder(
         }
     }
 
+    if source.content == crate::config::ContentMode::Light {
+        let candidates = dedupe(
+            section_feed_urls(&body.final_url)
+                .into_iter()
+                .chain(common_feed_urls(&body.final_url))
+                .chain(configured_feed_urls(source.engine.url(), &body.final_url))
+                .collect(),
+        );
+        if let Some(discovered) = probe_feeds(candidates, &body.final_url, source, ctx, true).await
+        {
+            return Ok(discovered);
+        }
+        bail!(
+            "light mode only imports RSS, Atom, or JSON Feed; no feed was discovered; use a feed URL or set content = \"heavy\" for HTML extraction"
+        );
+    }
+
     if super::podcast::is_spotify_show(&body.final_url) {
         let (meta, items) = super::podcast::spotify_items(&page, &body.final_url)?;
         return Ok(Fetch::Changed {
@@ -1278,6 +1295,7 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<RawItem> {
             })
             .collect(),
         preview: None,
+        remote_preview: None,
         images: Vec::new(),
         document: None,
     })
@@ -1830,8 +1848,10 @@ Second paragraph.</media:description></media:group>
             persist_endpoint: true,
             headers: vec![],
             html: true,
-            previews: false,
+            previews: crate::config::PreviewPolicy::Disabled,
             images: crate::config::ImagePolicy::Original,
+            documents: crate::config::DocumentPolicy::Original,
+            limits: crate::config::Limits::default(),
             content: crate::config::ContentMode::Light,
             engine: crate::config::Engine::Feed { url },
         }
@@ -2614,6 +2634,53 @@ Second paragraph.</media:description></media:group>
     }
 
     #[tokio::test]
+    async fn light_mode_rejects_html_items_without_requesting_articles_or_more_listings() {
+        let server = MockServer::start_async().await;
+        let homepage = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/");
+                then.status(200).body(
+                    "<title>News</title><article><h2><a href=\"/story\">One story</a></h2><p>HTML article body.</p></article>",
+                );
+            })
+            .await;
+        let article = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/story");
+                then.status(200).body("<article>Full article.</article>");
+            })
+            .await;
+        let listing = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/blog");
+                then.status(200).body("<article>Another listing.</article>");
+            })
+            .await;
+        let configured = Url::parse(&server.url("/")).unwrap();
+        let source = source(configured.clone());
+        let client = crate::http::Client::new(&crate::config::FetchConfig {
+            retries: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let state = crate::store::SourceState::default();
+        let cache = tempfile::tempdir().unwrap();
+        let ctx = Context {
+            client: &client,
+            state: &state,
+            cache_dir: cache.path(),
+        };
+        let error = match fetch(&configured, &source, &ctx).await {
+            Err(error) => error,
+            Ok(_) => panic!("light mode cannot import HTML article cards"),
+        };
+        assert!(format!("{error:#}").contains("content = \"heavy\""));
+        homepage.assert_calls_async(1).await;
+        article.assert_calls_async(0).await;
+        listing.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
     async fn falls_back_to_article_cards_when_a_site_has_no_feed() {
         let server = MockServer::start_async().await;
         server
@@ -2625,7 +2692,10 @@ Second paragraph.</media:description></media:group>
             })
             .await;
         let configured = Url::parse(&server.url("/news")).unwrap();
-        let source = source(configured.clone());
+        let source = Source {
+            content: crate::config::ContentMode::Heavy,
+            ..source(configured.clone())
+        };
         let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
         let state = crate::store::SourceState::default();
         let cache = tempfile::tempdir().unwrap();
@@ -2669,7 +2739,10 @@ Second paragraph.</media:description></media:group>
             })
             .await;
         let configured = Url::parse(&server.url("/")).unwrap();
-        let source = source(configured.clone());
+        let source = Source {
+            content: crate::config::ContentMode::Heavy,
+            ..source(configured.clone())
+        };
         let client = crate::http::Client::new(&crate::config::FetchConfig::default()).unwrap();
         let state = crate::store::SourceState::default();
         let cache = tempfile::tempdir().unwrap();

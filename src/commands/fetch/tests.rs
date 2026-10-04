@@ -20,8 +20,10 @@ pub(crate) fn source() -> Source {
         headers: vec![],
         html: true,
         content: ContentMode::Heavy,
-        previews: false,
+        previews: crate::config::PreviewPolicy::Disabled,
         images: crate::config::ImagePolicy::Original,
+        documents: crate::config::DocumentPolicy::Original,
+        limits: crate::config::Limits::default(),
         engine: crate::config::Engine::Feed {
             url: Url::parse("https://blog.example/feed").unwrap(),
         },
@@ -40,7 +42,6 @@ async fn mirrored_articles_never_download_the_original_even_in_heavy_mode() {
         url: Url::parse("https://github.com/example/archive.git").unwrap(),
         branch: "aggr".into(),
         sources: Vec::new(),
-        limit: None,
     };
     let raw = RawItem {
         link: server.url("/article"),
@@ -78,11 +79,12 @@ async fn changed_mirror_hydrates_only_new_writable_companions() {
         "items/source/known-corrupt",
     )
     .unwrap();
-    let known = hydrate_new_mirror_companions_with(known, true, false, true, true, |_| async {
-        calls.fetch_add(1, Ordering::SeqCst);
-        panic!("known mirror companion must not be read")
-    })
-    .await;
+    let known =
+        hydrate_new_mirror_companions_with(known, true, false, true, true, false, |_| async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            panic!("known mirror companion must not be read")
+        })
+        .await;
     assert!(known.images.is_empty());
 
     let mut new = RawItem {
@@ -96,12 +98,13 @@ async fn changed_mirror_hydrates_only_new_writable_companions() {
         "items/source/new",
     )
     .unwrap();
-    let new = hydrate_new_mirror_companions_with(new, false, false, true, true, |mut raw| async {
-        calls.fetch_add(1, Ordering::SeqCst);
-        crate::sources::aggr::discard_companion_locator(&mut raw);
-        raw
-    })
-    .await;
+    let new =
+        hydrate_new_mirror_companions_with(new, false, false, true, true, false, |mut raw| async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            crate::sources::aggr::discard_companion_locator(&mut raw);
+            raw
+        })
+        .await;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(new.images.is_empty());
 
@@ -110,11 +113,12 @@ async fn changed_mirror_hydrates_only_new_writable_companions() {
         link: "https://example.com/dry".into(),
         ..Default::default()
     };
-    let _ = hydrate_new_mirror_companions_with(dry_run, false, true, true, true, |_| async {
-        calls.fetch_add(1, Ordering::SeqCst);
-        panic!("dry-run mirror companion must not be read")
-    })
-    .await;
+    let _ =
+        hydrate_new_mirror_companions_with(dry_run, false, true, true, true, false, |_| async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            panic!("dry-run mirror companion must not be read")
+        })
+        .await;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
@@ -155,12 +159,19 @@ async fn mirrored_companions_respect_source_media_options() {
         placeholder: crate::media::placeholder::from_bytes(&preview.bytes).unwrap(),
         renditions: Vec::new(),
     };
-    let disabled =
-        hydrate_new_mirror_companions_with(mirrored(), false, false, false, false, |_| async {
+    let disabled = hydrate_new_mirror_companions_with(
+        mirrored(),
+        false,
+        false,
+        false,
+        false,
+        false,
+        |_| async {
             calls.fetch_add(1, Ordering::SeqCst);
             panic!("disabled mirror companions must not be read")
-        })
-        .await;
+        },
+    )
+    .await;
     assert!(disabled.preview.is_none());
     assert!(disabled.images.is_empty());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -171,6 +182,7 @@ async fn mirrored_companions_respect_source_media_options() {
         false,
         false,
         true,
+        false,
         |mut raw| async {
             calls.fetch_add(1, Ordering::SeqCst);
             raw.preview = Some(preview.clone());
@@ -188,6 +200,7 @@ async fn mirrored_companions_respect_source_media_options() {
         false,
         false,
         true,
+        false,
         false,
         |mut raw| async {
             calls.fetch_add(1, Ordering::SeqCst);
@@ -208,7 +221,7 @@ pub(super) fn options() -> Options {
         existing_paths: Arc::default(),
         dry_run: false,
         refresh: false,
-        html: true,
+        backfill_media: false,
         html_max_bytes: 1000,
         article_concurrency: 4,
         preparation_limit: Arc::new(Semaphore::new(preparation_slots(
@@ -218,7 +231,6 @@ pub(super) fn options() -> Options {
             StatePolicy::PersistentBranch,
         ))),
         recording_limit: Arc::new(Semaphore::new(RECORDING_PROBE_SLOTS)),
-        max_items_per_source: 200,
         preview_fetcher: Arc::new(preview::Fetcher::new().unwrap()),
         media_fetcher: Arc::new(
             media::Fetcher::new(
@@ -534,6 +546,7 @@ async fn slow_first_article_does_not_block_later_downloads_or_change_filenames()
     let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
     let configured = Source {
         images: crate::config::ImagePolicy::Remote,
+        documents: crate::config::DocumentPolicy::Original,
         engine: Engine::Feed {
             url: Url::parse(&server.url("/feed")).unwrap(),
         },
@@ -1206,15 +1219,22 @@ async fn mirrored_document_is_retained_when_image_options_are_disabled() {
         link: "https://publisher.invalid/paper.pdf".into(),
         ..Default::default()
     };
-    let hydrated =
-        hydrate_new_mirror_companions_with(raw, false, false, false, false, |mut raw| async {
+    let hydrated = hydrate_new_mirror_companions_with(
+        raw,
+        false,
+        false,
+        false,
+        false,
+        true,
+        |mut raw| async {
             raw.document = Some(crate::document::Asset {
                 source_url: raw.link.clone(),
                 bytes: b"%PDF-1.7\nfixture".to_vec(),
             });
             raw
-        })
-        .await;
+        },
+    )
+    .await;
     assert!(hydrated.document.is_some());
 }
 
@@ -1276,4 +1296,366 @@ async fn known_subscription_wall_tries_archives_after_publisher_denies_a_fresh_c
     available.assert_calls(1);
     lookup.assert_calls(1);
     denied.assert_calls(1);
+}
+
+#[tokio::test]
+async fn media_backfill_preserves_prose_and_never_refetches_feeds_or_articles() {
+    crate::http::install_crypto_provider();
+    let server = MockServer::start_async().await;
+    let feed = server
+        .mock_async(|when, then| {
+            when.path("/feed");
+            then.status(500);
+        })
+        .await;
+    let article = server
+        .mock_async(|when, then| {
+            when.path("/article");
+            then.status(500);
+        })
+        .await;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(80, 40)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let image = server
+        .mock_async(|when, then| {
+            when.path("/picture.png");
+            then.status(200)
+                .header("content-type", "image/png")
+                .body(png.into_inner());
+        })
+        .await;
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(root.path()));
+    let front = FrontMatter {
+        title: "Hand-edited title".into(),
+        link: server.url("/article"),
+        source: "blog".into(),
+        labels: vec!["hand-edited".into()],
+        hidden: true,
+        first_seen: Utc::now(),
+        ..Default::default()
+    };
+    let body = format!(
+        "Hand-edited prose stays byte for byte.\n\n![Diagram]({})\n",
+        server.url("/picture.png")
+    );
+    let html = format!(
+        "<p>Original capture</p><img src='{}'>",
+        server.url("/picture.png")
+    );
+    store
+        .write_item(NewItem {
+            dir: "items/blog",
+            stem: "article",
+            front: &front,
+            body: &body,
+            html: Some(&html),
+            preview: None,
+            images: &[],
+        })
+        .unwrap();
+    let configured = Source {
+        content: ContentMode::Light,
+        previews: crate::config::PreviewPolicy::Remote,
+        documents: crate::config::DocumentPolicy::Remote,
+        engine: Engine::Feed {
+            url: Url::parse(&server.url("/feed")).unwrap(),
+        },
+        ..source()
+    };
+    let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+    let failures = ArticleFailures::default();
+    for changed in [true, false] {
+        let (_, archive) = index_archive(store.items().unwrap());
+        let opts = Options {
+            backfill_media: true,
+            existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+            ..options()
+        };
+        let report = fetch_one(
+            &configured,
+            FetchOneContext {
+                store: &store,
+                store_root: root.path(),
+                client: &client,
+                cache_dir: cache.path(),
+                options: &opts,
+                article_failures: &failures,
+                state_policy: StatePolicy::PersistentBranch,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(!report.unchanged, changed);
+    }
+    let retained = store.read_item("items/blog/article").unwrap();
+    assert_eq!(retained.body, body);
+    assert_eq!(retained.front.title, front.title);
+    assert_eq!(retained.front.labels, front.labels);
+    assert_eq!(retained.front.first_seen, front.first_seen);
+    assert!(retained.front.hidden);
+    assert_eq!(
+        fs::read_to_string(root.path().join("items/blog/article.html")).unwrap(),
+        html
+    );
+    assert_eq!(retained.front.images.len(), 1);
+    assert!(retained.front.images[0].variants.is_empty());
+    assert_eq!(
+        retained.front.remote_preview.as_ref().unwrap().url,
+        server.url("/picture.png")
+    );
+    feed.assert_calls_async(0).await;
+    article.assert_calls_async(0).await;
+    image.assert_calls_async(1).await;
+}
+
+#[tokio::test]
+async fn undated_policy_evictions_keep_capture_time_when_limits_change() {
+    crate::http::install_crypto_provider();
+    let server = MockServer::start_async().await;
+    let feed = server.mock_async(|when, then| {
+        when.path("/feed");
+        then.status(200).header("content-type", "application/feed+json").json_body(serde_json::json!({
+            "version": "https://jsonfeed.org/version/1.1", "title": "Undated feed",
+            "items": [{"id":"old", "title":"Undated article", "url":server.url("/old"), "content_text":"Retained feed body."}]
+        }));
+    }).await;
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(root.path()));
+    let mut configured = Source {
+        content: ContentMode::Light,
+        images: crate::config::ImagePolicy::Remote,
+        limits: crate::config::Limits {
+            max_items: 0,
+            max_age_days: 0,
+            max_bytes: 0,
+            since: None,
+        },
+        engine: Engine::Feed {
+            url: Url::parse(&server.url("/feed")).unwrap(),
+        },
+        ..source()
+    };
+    let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
+    let first_seen = options().now;
+    for stage in 0..3 {
+        if stage == 1 {
+            let item = store.items().unwrap().remove(0);
+            configured.limits.max_items = 1;
+            configured.limits.max_age_days = 1;
+            store
+                .record_evictions(
+                    std::slice::from_ref(&item),
+                    std::slice::from_ref(&item.path),
+                    std::slice::from_ref(&configured),
+                    &crate::config::Defaults::default(),
+                )
+                .unwrap();
+            store.remove_item(&item.path).unwrap();
+            configured.limits.max_items = 2;
+        } else if stage == 2 {
+            configured.limits.max_age_days = 0;
+        }
+        let (_, archive) = index_archive(store.items().unwrap());
+        let options = Options {
+            now: first_seen + chrono::Duration::days(if stage == 0 { 0 } else { 10 }),
+            existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+            ..options()
+        };
+        fetch_one(
+            &configured,
+            FetchOneContext {
+                store: &store,
+                store_root: root.path(),
+                client: &client,
+                cache_dir: cache.path(),
+                options: &options,
+                article_failures: &ArticleFailures::default(),
+                state_policy: StatePolicy::PersistentBranch,
+            },
+        )
+        .await
+        .unwrap();
+        let items = store.items().unwrap();
+        if stage == 1 {
+            assert!(
+                items.is_empty(),
+                "a count change cannot reset an undated article's age"
+            );
+        } else {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].front.first_seen, first_seen);
+        }
+    }
+    feed.assert_calls_async(3).await;
+    assert!(!root.path().join("sources/blog/evicted.json").exists());
+}
+
+#[tokio::test]
+async fn source_limits_skip_article_and_media_requests_outside_the_selected_items() {
+    crate::http::install_crypto_provider();
+    let server = MockServer::start_async().await;
+    let feed = server.mock_async(|when, then| {
+        when.path("/feed");
+        then.status(200).header("content-type", "application/feed+json").json_body(serde_json::json!({
+            "version": "https://jsonfeed.org/version/1.1",
+            "title": "Bounded feed",
+            "items": (1..=3).map(|day| serde_json::json!({
+                "id": format!("story-{day}"),
+                "title": format!("Story {day}"),
+                "url": server.url(format!("/story-{day}")),
+                "date_published": format!("2026-09-0{day}T12:00:00Z"),
+                "content_html": format!("<p>Article body.</p><img src='{}'>", server.url(format!("/picture-{day}.png"))),
+            })).collect::<Vec<_>>()
+        }));
+    }).await;
+    let skipped = server
+        .mock_async(|when, then| {
+            when.path_matches(regex::Regex::new("^/(story-[12]|picture-[12]\\.png)$").unwrap());
+            then.status(500);
+        })
+        .await;
+    let article = server.mock_async(|when, then| {
+        when.path("/story-3");
+        then.status(200).header("content-type", "text/html").body(format!(
+            "<article><h1>Story 3</h1><p>{}</p><img src='{}'></article>",
+            "A substantial article explains the details and preserves enough context to read independently. ".repeat(8),
+            server.url("/picture-3.png")
+        ));
+    }).await;
+    let mut image = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(640, 400)
+        .write_to(&mut image, image::ImageFormat::Png)
+        .unwrap();
+    let image = server
+        .mock_async(|when, then| {
+            when.path("/picture-3.png");
+            then.status(200)
+                .header("content-type", "image/png")
+                .body(image.into_inner());
+        })
+        .await;
+    let client = http::Client::new(&crate::config::FetchConfig {
+        retries: 0,
+        ..Default::default()
+    })
+    .unwrap();
+    for limits in [
+        crate::config::Limits {
+            max_items: 1,
+            ..Default::default()
+        },
+        crate::config::Limits {
+            max_items: 0,
+            since: Some("2026-09-03".parse().unwrap()),
+            ..Default::default()
+        },
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(root.path()));
+        let configured = Source {
+            limits,
+            engine: Engine::Feed {
+                url: Url::parse(&server.url("/feed")).unwrap(),
+            },
+            ..source()
+        };
+        let options = options();
+        fetch_one(
+            &configured,
+            FetchOneContext {
+                store: &store,
+                store_root: root.path(),
+                client: &client,
+                cache_dir: cache.path(),
+                options: &options,
+                article_failures: &ArticleFailures::default(),
+                state_policy: StatePolicy::PersistentBranch,
+            },
+        )
+        .await
+        .unwrap();
+        let items = store.items().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].front.title, "Story 3");
+        assert_eq!(items[0].front.images.len(), 1);
+    }
+    feed.assert_calls_async(2).await;
+    article.assert_calls_async(2).await;
+    image.assert_calls_async(2).await;
+    skipped.assert_calls_async(0).await;
+}
+
+#[tokio::test]
+async fn light_remote_defaults_fetch_only_the_feed_and_keep_preview_urls() {
+    crate::http::install_crypto_provider();
+    let server = MockServer::start_async().await;
+    let feed = server.mock_async(|when, then| {
+        when.path("/feed");
+        then.status(200).header("content-type", "application/rss+xml").body(format!(
+            "<rss version='2.0'><channel><title>Test</title><link>{0}</link><description>Test</description><item><guid>episode</guid><title>Episode</title><link>{0}/episode</link><enclosure url='{0}/audio.mp3' type='audio/mpeg' length='1'/><description><![CDATA[<p>Show notes.</p><img src='{0}/cover.png' alt='Cover'>]]></description></item><item><guid>paper</guid><title>Paper</title><link>{0}/paper.pdf</link><description>Paper summary.</description></item></channel></rss>", server.base_url()));
+    }).await;
+    let unused = server
+        .mock_async(|when, then| {
+            when.path_matches(
+                regex::Regex::new("^/(episode|audio.mp3|cover.png|paper.pdf)$").unwrap(),
+            );
+            then.status(500);
+        })
+        .await;
+    let config = crate::config::Config::parse(&format!(
+        "[[sources]]\nurl={:?}\nslug='blog'\n",
+        server.url("/feed")
+    ))
+    .unwrap();
+    let configured = config.sources().unwrap().remove(0);
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(root.path()));
+    let client = http::Client::new(&config.fetch).unwrap();
+    let failures = ArticleFailures::default();
+    for _ in 0..2 {
+        let (_, archive) = index_archive(store.items().unwrap());
+        let opts = Options {
+            existing_paths: Arc::new(OnceCell::new_with(Some(archive))),
+            ..options()
+        };
+        fetch_one(
+            &configured,
+            FetchOneContext {
+                store: &store,
+                store_root: root.path(),
+                client: &client,
+                cache_dir: cache.path(),
+                options: &opts,
+                article_failures: &failures,
+                state_policy: StatePolicy::PersistentBranch,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let items = store.items().unwrap();
+    assert_eq!(items.len(), 2);
+    let episode = items
+        .iter()
+        .find(|item| item.front.title == "Episode")
+        .unwrap();
+    assert_eq!(
+        episode.front.remote_preview.as_ref().unwrap().url,
+        server.url("/cover.png")
+    );
+    assert!(episode.front.preview.is_none());
+    assert!(
+        items
+            .iter()
+            .all(|item| item.front.images.is_empty() && item.front.document.is_none())
+    );
+    feed.assert_calls_async(2).await;
+    unused.assert_calls_async(0).await;
 }

@@ -29,7 +29,7 @@ use tokio::task::JoinSet;
 use self::index::{ExistingPaths, index_archive};
 use self::links::{LinkTransaction, SharedLinks};
 use self::plan::{
-    apply_first_import_limit, apply_validators, merge_image_metadata, persist_item, prepare_item,
+    apply_source_limits, apply_validators, merge_image_metadata, persist_item, prepare_item,
     redact_source_secrets, should_persist_state, source_metadata_changed, source_request_state,
     use_existing_path,
 };
@@ -40,7 +40,7 @@ use self::repair::{
 use self::transaction::SourceTransaction;
 use super::Project;
 use crate::cli::FetchArgs;
-use crate::config::{ContentMode, Engine, Source, StoreConfig};
+use crate::config::{ContentMode, Engine, Source};
 use crate::content;
 use crate::git::Worktree;
 use crate::http;
@@ -50,12 +50,12 @@ use crate::model::{
 };
 use crate::preview;
 use crate::sources::{self, Fetch};
-use crate::store::{Outcome, Store, retention};
+use crate::store::{Outcome, Store};
 
 pub struct Report {
     pub sources: Vec<SourceReport>,
     pub status_changed: bool,
-    /// Items deleted by `[store]` retention.
+    /// Items deleted by per-feed retention.
     pub removed: usize,
     /// Retained bodies re-derived locally, independently of configured source outcomes.
     pub reprocessed: usize,
@@ -118,7 +118,7 @@ struct Options {
     existing_paths: Arc<OnceCell<ExistingPaths>>,
     dry_run: bool,
     refresh: bool,
-    html: bool,
+    backfill_media: bool,
     html_max_bytes: usize,
     article_concurrency: usize,
     /// CPU slots for turning a fetched article into its stored form, off the runtime workers.
@@ -128,7 +128,6 @@ struct Options {
     /// Concurrent recording-metadata probes. Each may sit in an 8 s HTTP request, so they never
     /// borrow a CPU slot from article preparation.
     recording_limit: Arc<Semaphore>,
-    max_items_per_source: usize,
     preview_fetcher: Arc<preview::Fetcher>,
     media_fetcher: Arc<media::Fetcher>,
     now: DateTime<Utc>,
@@ -153,19 +152,28 @@ pub async fn run_with_cache(
     cache_dir: &Path,
     state_policy: StatePolicy,
 ) -> Result<Report> {
+    let now = Utc::now();
     let selected: Vec<Source> = project.sources.clone();
     let store = Arc::new(Store::open(worktree.dir()).with_image_cache(cache_dir));
     let client = Arc::new(http::Client::new(&project.config.fetch)?);
     let index_store = store.clone();
     let reprocess_args = args.clone();
     let store_root = worktree.dir().to_path_buf();
-    let (known_links, existing_paths, reprocessed) = tokio::task::spawn_blocking(move || {
-        let reprocessed = reprocess_stored_bodies(&index_store, &reprocess_args, &store_root)?;
-        let (links, paths) = index_archive(index_store.items()?);
-        Ok::<_, anyhow::Error>((links, paths, reprocessed))
-    })
-    .await
-    .context("preparing archived article bodies and index")??;
+    let retention_sources = project.sources.clone();
+    let defaults = project.config.defaults;
+    let (known_links, existing_paths, reprocessed, initially_removed) =
+        tokio::task::spawn_blocking(move || {
+            let removed = if reprocess_args.dry_run {
+                0
+            } else {
+                apply_retention(&index_store, &defaults, &retention_sources, now)?
+            };
+            let reprocessed = reprocess_stored_bodies(&index_store, &reprocess_args, &store_root)?;
+            let (links, paths) = index_archive(index_store.items()?);
+            Ok::<_, anyhow::Error>((links, paths, reprocessed, removed))
+        })
+        .await
+        .context("preparing archived article bodies and index")??;
     if reprocessed > 0 {
         println!("reprocess: {reprocessed} stored article body(ies)");
     }
@@ -174,19 +182,18 @@ pub async fn run_with_cache(
         existing_paths: Arc::new(OnceCell::new_with(Some(existing_paths))),
         dry_run: args.dry_run,
         refresh: args.refresh,
-        html: project.config.store.html,
+        backfill_media: args.backfill_media,
         html_max_bytes: project.config.store.html_max_bytes,
         article_concurrency: project.config.fetch.article_concurrency,
         preparation_limit: Arc::new(Semaphore::new(preparation_slots(state_policy))),
         persist_limit: Arc::new(Semaphore::new(preparation_slots(state_policy))),
         recording_limit: Arc::new(Semaphore::new(RECORDING_PROBE_SLOTS)),
-        max_items_per_source: project.config.fetch.max_items_per_source,
         preview_fetcher: Arc::new(preview::Fetcher::new()?),
         media_fetcher: Arc::new(
             media::Fetcher::new(&project.config.fetch, media::MediaLimits::default())?
                 .with_cache(cache_dir),
         ),
-        now: Utc::now(),
+        now,
     };
     let limit = Arc::new(Semaphore::new(project.config.fetch.concurrency));
 
@@ -257,7 +264,7 @@ pub async fn run_with_cache(
         .collect();
     let known: BTreeSet<String> = project.sources.iter().map(|s| s.slug.clone()).collect();
     let mut status = store.status()?;
-    let status_changed = status.apply(&outcomes, &known, options.now);
+    let status_changed = !args.backfill_media && status.apply(&outcomes, &known, options.now);
     if status_changed && !args.dry_run {
         store.write_status(&status)?;
     }
@@ -265,7 +272,13 @@ pub async fn run_with_cache(
     let removed = if args.dry_run {
         0
     } else {
-        apply_retention(&store, &project.config.store, options.now)?
+        initially_removed
+            + apply_retention(
+                &store,
+                &project.config.defaults,
+                &project.sources,
+                options.now,
+            )?
     };
     if removed > 0 {
         println!("retention: -{removed}");
@@ -300,19 +313,17 @@ fn sanitized_source_error(source: &Source, err: &anyhow::Error) -> anyhow::Error
     anyhow::anyhow!(redact_source_secrets(source, &format!("{err:#}")))
 }
 
-/// Drop what `[store] max_age_days` / `max_items` exclude. A no-op unless one of them is set.
-fn apply_retention(store: &Store, config: &StoreConfig, now: DateTime<Utc>) -> Result<usize> {
-    let limits = retention::Limits {
-        max_age_days: config.max_age_days,
-        max_items: config.max_items,
-    };
-    if limits.is_unbounded() {
-        return Ok(0);
-    }
-    let drop = retention::plan(&store.items()?, limits, now);
-    for path in &drop {
-        store.remove_item(path)?;
-    }
+/// Drop expired and excess article families independently for each feed.
+fn apply_retention(
+    store: &Store,
+    defaults: &crate::config::Defaults,
+    sources: &[Source],
+    now: DateTime<Utc>,
+) -> Result<usize> {
+    let items = store.items()?;
+    let drop = store.retention_plan(&items, defaults.limits, sources, now)?;
+    store.record_evictions(&items, &drop, sources, defaults)?;
+    store.remove_items(&drop)?;
     Ok(drop.len())
 }
 
@@ -371,6 +382,15 @@ async fn fetch_one_inner(
         ..
     } = context;
     let slug = &source.slug;
+    if options.backfill_media {
+        let repaired = repair::backfill_media(source, &context, transaction.as_deref_mut()).await?;
+        return Ok(SourceReport {
+            slug: slug.clone(),
+            outcome: Outcome::Ok,
+            added: repaired,
+            unchanged: repaired == 0,
+        });
+    }
     let state = store.source_state(slug)?;
     let mut request_state = source_request_state(&state, options.refresh);
     let parser_receipt = duration::prepare(source, &mut request_state, cache_dir)?;
@@ -379,7 +399,7 @@ async fn fetch_one_inner(
         state: &request_state,
         cache_dir,
     };
-    let fetched = sources::fetch(source, &ctx).await?;
+    let fetched = sources::fetch_at(source, &ctx, options.now).await?;
 
     let mut next_state = state.clone();
     next_state.identity = source.identity.clone();
@@ -412,6 +432,11 @@ async fn fetch_one_inner(
             let metadata_changed = source_metadata_changed(&state, &next_state);
 
             let seen = store.seen(slug)?;
+            let mut evictions = store.evictions(slug)?;
+            let eviction_policy = crate::store::evictions::source_policy(source)?;
+            let eligible_evicted_keys = evictions.eligible_first_seen(&eviction_policy);
+            let mut readmitted_keys = HashSet::new();
+            let mut restored_keys = Vec::new();
             let archive = options
                 .existing_paths
                 .get_or_try_init(|| async {
@@ -430,7 +455,23 @@ async fn fetch_one_inner(
             let mut prospective = seen.clone();
             let mut taken: HashSet<(String, String)> = HashSet::new();
             let mut added = 0;
-            apply_first_import_limit(&mut items, &source.engine, options.max_items_per_source);
+            for raw in &mut items {
+                let keys = dedupe_keys(raw);
+                if !existing_paths
+                    .is_some_and(|paths| keys.iter().any(|key| paths.contains_key(key)))
+                    && let Some(first_seen) = keys
+                        .iter()
+                        .filter_map(|key| eligible_evicted_keys.get(key))
+                        .min()
+                        .copied()
+                {
+                    raw.first_seen = Some(
+                        raw.first_seen
+                            .map_or(first_seen, |date| date.min(first_seen)),
+                    );
+                }
+            }
+            apply_source_limits(&mut items, source.limits, options.now);
             if podcast::is_source(source) {
                 let mut counts = BTreeMap::new();
                 for raw in &items {
@@ -476,7 +517,19 @@ async fn fetch_one_inner(
                 let archived = options.archived_links.state();
                 for raw in items.into_iter().rev() {
                     let keys = dedupe_keys(&raw);
-                    let known = keys.iter().any(|key| prospective.contains(key));
+                    let mut known = keys.iter().any(|key| prospective.contains(key));
+                    let retained = existing_paths
+                        .is_some_and(|paths| keys.iter().any(|key| paths.contains_key(key)));
+                    if known
+                        && !retained
+                        && !keys.iter().any(|key| readmitted_keys.contains(key))
+                        && keys
+                            .iter()
+                            .any(|key| eligible_evicted_keys.contains_key(key))
+                    {
+                        known = false;
+                        readmitted_keys.extend(keys.iter().cloned());
+                    }
                     if known && !options.refresh {
                         if let Some(path) = existing_paths
                             .and_then(|paths| keys.iter().find_map(|key| paths.get(key)))
@@ -583,11 +636,12 @@ async fn fetch_one_inner(
                         raw,
                         known,
                         options.dry_run,
-                        source.previews,
+                        source.previews.archives(),
                         source.images.archives(),
+                        source.documents.archives(),
                     )
                     .await;
-                    if source.previews
+                    if source.previews.enabled()
                         && let Ok(url) = url::Url::parse(&raw.link)
                         && let Some(thumbnail) = sources::youtube::thumbnail(&url)
                         && !raw
@@ -602,14 +656,6 @@ async fn fetch_one_inner(
                     }
                     let (mut raw, kind) =
                         heavy_content(&raw, source, client, cache_dir, article_failures).await;
-                    if source.content == ContentMode::Light
-                        && !matches!(source.engine, Engine::Aggr { .. })
-                        && let Some(seconds) =
-                            recording::infer(&raw, source, client, cache_dir, article_failures)
-                                .await?
-                    {
-                        raw.extra.insert("duration_seconds".into(), seconds.into());
-                    }
                     if known {
                         raw.preview = None;
                         raw.images.clear();
@@ -619,7 +665,8 @@ async fn fetch_one_inner(
                             .as_deref()
                             .map(|path| store.read_item(path))
                             .transpose()?;
-                        if !options.dry_run
+                        if source.documents.archives()
+                            && !options.dry_run
                             && stored
                                 .as_ref()
                                 .map(|item| {
@@ -715,16 +762,21 @@ async fn fetch_one_inner(
                         } else {
                             false
                         };
-                        if source.previews
+                        if source.previews.archives()
                             && (!known || options.refresh && !has_stored_preview)
                             && raw.preview.is_none()
                             && let Ok(base) = url::Url::parse(&raw.link)
                         {
-                            let candidates = preview::candidates(
+                            let mut candidates = preview::candidates(
                                 &raw.preview_candidates,
                                 raw.content_html.as_deref(),
                                 &base,
                             );
+                            candidates.retain(|candidate| {
+                                !options
+                                    .media_fetcher
+                                    .failed_this_run(&candidate.url, source)
+                            });
                             raw.preview = options
                                 .preview_fetcher
                                 .fetch_with_assets(&candidates, source, &raw.images)
@@ -743,6 +795,18 @@ async fn fetch_one_inner(
                                     .await;
                             }
                         }
+                    }
+                    if source.previews.enabled() {
+                        if let Ok(base) = url::Url::parse(&raw.link) {
+                            raw.remote_preview = preview::remote(
+                                &raw.preview_candidates,
+                                raw.content_html.as_deref(),
+                                &base,
+                            )
+                            .or(raw.remote_preview);
+                        }
+                    } else {
+                        raw.remote_preview = None;
                     }
                     let (raw, mut planned) = prepare_item(raw, source, options, kind).await?;
                     planned.stem = stem;
@@ -788,9 +852,10 @@ async fn fetch_one_inner(
                         transaction.track_item(&planned, &raw)?;
                     }
                     persist_item(store, options, planned, raw).await?;
+                    restored_keys.extend(keys.iter().cloned());
                 }
                 if !known {
-                    new_keys.extend(keys);
+                    new_keys.extend(keys.into_iter().filter(|key| !seen.contains(key)));
                 }
                 added += 1;
             }
@@ -799,6 +864,12 @@ async fn fetch_one_inner(
                     transaction.track_seen(slug)?;
                 }
                 store.append_seen(slug, &new_keys, options.now)?;
+            }
+            if !options.dry_run && evictions.clear(&restored_keys) {
+                if let Some(transaction) = transaction.as_mut() {
+                    transaction.track_evictions(slug)?;
+                }
+                store.save_evictions(slug, &evictions)?;
             }
             (
                 SourceReport {
@@ -1085,7 +1156,7 @@ async fn heavy_content(
             Ok(Some(post)) => {
                 let mut enriched = raw.clone();
                 enriched.content_html = post.content_html;
-                if source.previews || source.images.archives() {
+                if source.previews.enabled() || source.images.archives() {
                     enriched.preview_candidates = post.preview_candidates;
                 }
                 return (enriched, ContentKind::Extracted);
@@ -1154,7 +1225,7 @@ async fn heavy_content(
         }
         // Decoding and parsing the page is CPU work: do it once, off the runtime, and take every
         // page-derived fact from that single document.
-        let wants_candidates = source.previews || source.images.archives();
+        let wants_candidates = source.previews.enabled() || source.images.archives();
         let audio = raw
             .extra
             .get("audio_url")
@@ -1312,7 +1383,7 @@ async fn heavy_content(
                     .extra
                     .insert(crate::site::interactive::METADATA_KEY.into(), true.into());
             }
-            if source.previews || source.images.archives() {
+            if source.previews.enabled() || source.images.archives() {
                 enriched.preview_candidates =
                     preview::ordered_article_candidates(&preview_candidates, page_candidates, None);
             }
@@ -1357,7 +1428,7 @@ async fn heavy_content(
             enriched.labels =
                 crate::model::normalize_labels(enriched.labels.iter().chain(&extracted.labels));
             enriched.content_html = Some(extracted.html);
-            if source.previews || source.images.archives() {
+            if source.previews.enabled() || source.images.archives() {
                 enriched.preview_candidates = preview::ordered_article_candidates(
                     &preview_candidates,
                     page_candidates,
@@ -1413,9 +1484,10 @@ async fn hydrate_new_mirror_companions(
     dry_run: bool,
     previews: bool,
     images: bool,
+    documents: bool,
 ) -> RawItem {
-    hydrate_new_mirror_companions_with(raw, known, dry_run, previews, images, |raw| {
-        crate::sources::aggr::hydrate_companions(raw)
+    hydrate_new_mirror_companions_with(raw, known, dry_run, previews, images, documents, |raw| {
+        crate::sources::aggr::hydrate_companions_with_policy(raw, previews, images, documents)
     })
     .await
 }
@@ -1426,14 +1498,14 @@ async fn hydrate_new_mirror_companions_with<F, Fut>(
     dry_run: bool,
     previews: bool,
     images: bool,
+    documents: bool,
     hydrate: F,
 ) -> RawItem
 where
     F: FnOnce(RawItem) -> Fut,
     Fut: std::future::Future<Output = RawItem>,
 {
-    if known || dry_run || (!previews && !images && documents::url(&raw.link, &raw.extra).is_none())
-    {
+    if known || dry_run || (!previews && !images && !documents) {
         crate::sources::aggr::discard_companion_locator(&mut raw);
         raw
     } else {
@@ -1443,6 +1515,9 @@ where
         }
         if !images {
             raw.images.clear();
+        }
+        if !documents {
+            raw.document = None;
         }
         raw
     }

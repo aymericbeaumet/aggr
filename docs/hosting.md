@@ -185,9 +185,8 @@ url = "https://example.com/about"
 same_as = ["https://github.com/you"]
 ```
 
-Retention changes what remains searchable on the live site. With the default unlimited store
-retention, all published captured items stay in its archives and, when enabled, sitemap. If `[store] max_age_days`
-or `max_items` removes one, its old git object remains reachable through append-only history but
+Retention changes what remains searchable on the live site. The default per-feed limits retain 250 items,
+730 days, and 1 GB; each source can override the flat `[defaults]` fields. If a limit removes an item, its old git object remains reachable through append-only history but
 its static article page is no longer published.
 
 See [interoperability](interoperability.md) for the exact discovery and provenance contract.

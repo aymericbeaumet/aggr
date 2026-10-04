@@ -5,6 +5,95 @@ snapshot of the public demo shows the cost of preserving full image masters and 
 copies. The current [build budget](build-budget.md) limits the published site while preserving
 article text and the Git archive. Measure repository storage separately from deployment size.
 
+## Current defaults: October 4, 2026
+
+The [two-source starter](../examples/starter.toml) was measured in an isolated fresh repository,
+using the optimized development binary, release-mode HTML, and live feed requests on an Apple
+M4 Pro with 48 GiB RAM (macOS 26.6.2 arm64). Other verification tasks ran concurrently.
+The policies were `content = "light"`, `media = "remote"`, 250 items, 730 days, and 1 GB per feed.
+
+| Measurement | Result |
+| --- | ---: |
+| Initial full build, including sync | 1.72 s |
+| Sync | 1.05 s |
+| Initial render pass | 0.20 s |
+| Warm offline build, rendered-tree reuse disabled | 0.63 s |
+| Retained / rendered articles | 10 / 10 |
+| Current archive files | 163,368 bytes |
+| Git loose-object storage | 180,224 bytes |
+| Generated site | 4,419,284 bytes |
+| Archived images, renditions, PDFs | 0 |
+
+Both sources succeeded; Rust supplied ten retained entries and the other source had none inside
+the selected window. This is a small local import, with no remote Git push, binary installation,
+runner queue, or deployment time. It does not establish a speedup ratio for a larger workload.
+The warm build reused search/derived caches but actually rendered the site; it was not a cached
+output copy. Small output differences between runs come from search serialization.
+[Exact reports and hashes](measurements/defaults-2026-10-04.json) preserve the measured inputs.
+
+The controlled browser fixture transferred 595,352 uncompressed HTTP response bytes including
+worker installation when versioned assets were cacheable, without duplicate asset requests.
+The same fixture with `no-store` responses transferred 833,136 bytes. These are separate cache
+conditions, not hosted mobile performance results; see [client measurements](client.md#first-visit-budget).
+
+## Earlier lightweight measurements: October 4, 2026
+
+These measurements predate the flat per-feed limits and current starter. They used the earlier
+10-item starter and separate media policy fields; they are retained as historical observations.
+
+The implementation was measured locally on an Apple M4 Pro with 48 GiB RAM, macOS 26.6.2 arm64,
+using the optimized development profile and release-mode HTML. Other verification tasks ran
+concurrently. [Machine-readable measurements](measurements/lightweight-2026-10-04.json) record the
+binary/configuration hashes, stage timings, cache counters and storage categories.
+
+### Fresh starter
+
+A fresh local repository using the earlier two-source starter (ten entries per source) fetched 17
+articles and completed `aggr build` in **3.98 seconds**. Sync took 2.20 seconds and the render pass
+0.54 seconds. The current archive held **279,933 bytes**, Git reported 319,488 loose-object bytes,
+and the generated site held **6,185,350 bytes**. No image masters, generated renditions or PDFs
+were archived. This is one local initial import with live source requests, not a measured first
+GitHub deployment; binary installation, cloning, runner queues and publication are excluded.
+
+### Existing archive, remote media
+
+An isolated clone shared local objects from data commit
+[`76a5f2b`](https://github.com/aymericbeaumet/aggr-instance/tree/76a5f2ba581940085d55209be31590aba2559d6c).
+Its configuration came from `fafc27d49a253eee2bcafd9ff37a0ab12f7c8573`, with the four lightweight
+fetch policies set explicitly. There were 1,060 stored entries and 803 distinct rendered articles.
+The clone had no remote; the original repository's refs and working tree stayed unchanged.
+
+Three cold/warm pairs used `GITHUB_ACTIONS=true` to disable full rendered-tree reuse. Cold runs
+cleared only the disposable benchmark cache. Warm runs retained derived/search caches and still
+rendered every page. Every run used one render pass, no budget retry, and zero image encodes.
+
+| Measurement | Cold: median (range) | Warm: median (range) |
+| --- | ---: | ---: |
+| Complete local command | 22.68 s (19.74–22.85) | 12.02 s (9.74–14.70) |
+| Render pass | 16.22 s (15.26–17.00) | 8.60 s (4.44–8.78) |
+
+Generated output was 155,705,705–155,705,718 bytes. Small cold-run differences come from search
+serialization. The historical archive was unchanged: choosing remote media skips its image IO
+and publication but does not reclaim previously committed Git objects. This is a smaller archive
+and a different media policy from the live demo, so these results do not establish a speedup ratio
+against its reported full job time.
+
+For the comparable current configuration, use `content = "light"`, `media = "remote"`, and
+`max_items = 0`, `max_age_days = 0`, `max_bytes = 0` under `[defaults]`; migrate any explicit
+source media fields too. In a disposable checkout containing the selected data objects, run:
+
+```sh
+GITHUB_ACTIONS=true aggr build --clean --data-ref 76a5f2ba581940085d55209be31590aba2559d6c \
+  --release --base-url https://aggr.example/ --report /tmp/aggr-cold.json
+GITHUB_ACTIONS=true aggr build --data-ref 76a5f2ba581940085d55209be31590aba2559d6c \
+  --release --base-url https://aggr.example/ --report /tmp/aggr-warm.json
+```
+
+The controlled browser fixture transferred **832,826 uncompressed HTTP response bytes**, including
+headers and service-worker installation. It made no automatic article, collection, search-index or
+offline-catalogue downloads. See the [first-visit measurement](client.md#first-visit-budget) for its
+scope and reproduction. Public-demo mobile Web Vitals and complete GitHub job time have not been measured for these changes.
+
 ## Public demo: September 20, 2026
 
 These are read-only observations of
@@ -176,8 +265,9 @@ metadata, not a historical value.
 ## Plan storage and hosting separately
 
 Start with a few sources and measure an initial import, then ordinary daily growth separately.
-The defaults keep retained article text in the site, prefer recent media at full quality, and
-compress media belonging to older articles. If necessary, the build omits lower-priority local
+The defaults keep retained article text in the site and use publisher-hosted media. When local
+preservation is enabled, publication prefers recent media at full quality and compresses media
+belonging to older articles. If necessary, the build omits lower-priority local
 media to fit the publication budget. The masters remain in Git. Adjust the output policy with:
 
 ```toml
@@ -190,32 +280,32 @@ Omitted media falls back to publisher URLs and is not guaranteed offline. Compre
 publication omission do not reduce Git storage; both settings above shape the published site, not
 the archive behind it.
 
-Git storage is decided by `[fetch] images`, because images are nearly all of an archive's bytes.
+The media policy has the largest effect on the measured archive, where images account for nearly all bytes.
 In the archive measured above, lossless WebP renditions alone outweighed every master combined.
 
 ```toml
-[fetch]
-images = { mode = "compact", quality = 72, max_axis = 1600 }
+[defaults]
+media = { mode = "compressed", quality = 72, max_axis = 1600 }
 ```
 
-`"compact"` archives one bounded copy per image and no renditions, which removes both the
+`"compressed"` archives one bounded copy per image and no renditions, which removes both the
 rendition bytes and most of each master. Measured on the twelve largest masters in this archive,
 the six stills went from 90,710,039 bytes with their renditions to 7,555,854 (-91.7%). The six
 animated GIFs did not move: all were already inside the 1600-pixel bound, and re-encoding a
 frame-differenced animation is larger, so each kept its exact bytes. Animations are therefore the
-part of an archive `"compact"` does least for. `"remote"` stores no images at all. Neither applies
+part of an archive `"compressed"` does least for. `"remote"` stores no images at all. Neither applies
 retroactively: they change what later runs archive, and previously stored images are untouched.
 Compaction also discards the publisher's exact bytes for good, so choose it for sources you want
-to read rather than preserve. See [source preservation](sources.md#article-images).
+to read rather than preserve. See [source preservation](sources.md).
 
 Record current-tree bytes, Git object storage, generated-site bytes and deployment duration as
 separate series, with source count, imported item count, version and cache conditions. Do not
 estimate monthly growth from initial backfill. Include image-heavy sources in capacity planning.
 
 `[site] max_items` and `max_age_days` limit the home feed, not the complete published archive.
-Leave `[store]` retention unset to preserve all captured articles in the current archive. It is
-independent of the build budget: deliberately enabling retention removes articles from the current
-tree, while normal deletion commits cannot reclaim append-only Git history. Avoid rewriting that
+The flat `[defaults]` limits cap each feed at 250 items, 730 days, and 1 GB. Set all three numeric
+limits to zero for an unbounded corpus. These limits are independent of the build budget:
+retention removes complete article families from the current tree, while normal deletion commits cannot reclaim append-only Git history. Avoid rewriting that
 history to meet a storage budget: existing blob permalinks depend on it. For larger archives,
 choose appropriate repository and static hosting capacity; see [hosting](hosting.md) and
 [the Git model](git-model.md).

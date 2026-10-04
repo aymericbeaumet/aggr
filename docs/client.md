@@ -121,6 +121,30 @@ Set `AGGR_CHROME_BINARY` if Chrome is outside its usual location and `AGGR_BROWS
 (default 45) when a loaded machine needs longer waits. CI installs matching browser and driver
 versions; failure screenshots and logs are saved under `target/browser-artifacts/`.
 
+### First-visit budget
+
+The `default_visit` contract uses a fresh browser profile, 45 fixture articles, the default
+25-entry feed, remote media policies and zero selected offline downloads. On 2026-10-04,
+Chrome 154 on macOS produced these measurements over local HTTP without compression:
+
+| Measurement | Bytes |
+|---|---:|
+| Server response headers and bodies with `Cache-Control: no-store`, including service-worker installation | 833,136 |
+| Same fixture with `public, max-age=31536000, immutable` on versioned assets | 595,352 |
+| Browser navigation/resource `transferSize` with `no-store`, which omits worker requests | 390,218 |
+| Regression budget for the `no-store` server total | 1,048,576 |
+| Regression budget with cacheable versioned assets | 786,432 |
+
+The sample ends 750 ms after worker control, before typing or navigation. It also verifies zero
+external HTTP requests and zero automatic article, collection, search-index or offline-catalogue
+downloads. With cacheable assets, each asset is requested at most once: worker installation reuses
+the browser's HTTP cache. Search works afterward. These are controlled fixture bytes, not
+deployed-site timings; compression and hosting cache headers change the transfer size.
+
+```sh
+AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser default_visit -- --ignored --test-threads=1 --nocapture
+```
+
 ## Query syntax
 
 ```text
@@ -185,7 +209,7 @@ values with contextual counts and date shortcuts. Articles appear exclusively in
 completing or submitting free text never opens an article suggestion. Value lists
 are scrollable without an arbitrary cutoff; completed values stop suggesting themselves. Keyboard
 and touch selection are supported; Escape closes open suggestions, and a further Escape blurs the
-search field, never clearing the query. Composition input does not launch partial searches. Enter and Tab accept the
+search field, never clearing the query. Composition input does not run partial searches. Enter and Tab accept the
 highlighted stable option identity, even when labels coincide or asynchronous counts reorder values.
 Accepting a qualifier leaves the menu open on the values it accepts, so `sour` and Enter reach the
 sources in two keystrokes. The arrows walk open suggestions and the results the rest of the time,

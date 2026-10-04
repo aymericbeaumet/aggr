@@ -25,6 +25,8 @@ use sha1::{Digest as _, Sha1};
 use support::aggr_command;
 pub(crate) use support::git;
 
+pub(crate) const ARCHIVED_MEDIA_SETTINGS: &str = "[defaults]\ncontent='heavy'\nmedia='local'\n";
+
 pub(crate) struct Fixture {
     pub(crate) directory: tempfile::TempDir,
     pub(crate) out: PathBuf,
@@ -32,11 +34,14 @@ pub(crate) struct Fixture {
     pub(crate) offline: Arc<AtomicBool>,
     pub(crate) scripts_blocked: Arc<AtomicBool>,
     pub(crate) media: Arc<MediaResponses>,
+    pub(crate) served_bytes: Arc<AtomicUsize>,
     stopped: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
 pub(crate) struct MediaResponses {
+    pub(crate) cache_assets: AtomicBool,
+    pub(crate) asset_requests: std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
     pub(crate) blocked: AtomicBool,
     pub(crate) app_blocked: AtomicBool,
     pub(crate) failed: AtomicBool,
@@ -66,6 +71,7 @@ impl Fixture {
 
     pub(crate) fn build(&self) -> Result<()> {
         let root = self.directory.path();
+        git(root, &["fetch", "-q", ".aggr/data", "aggr:aggr"])?;
         let output = aggr_command(root)
             .args([
                 "build",
@@ -102,7 +108,7 @@ impl Fixture {
         std::fs::write(
             root.join("aggr.toml"),
             format!(
-                "[site]\ntitle='Reading room'\npwa={pwa}\nitems_per_page=3\nmax_age_days=10000\npreferences.offline_items=4\n[[sources]]\nurl='https://publisher.invalid/feed'\nslug='example'\nname='Example'\ncategory='Engineering'\n[[networks]]\nprovider='hackernews'\n[[networks]]\nprovider='reddit'\n"
+                "[site]\ntitle='Reading room'\npwa={pwa}\nitems_per_page=3\nmax_age_days=10000\npreferences.offline_items=4\n{ARCHIVED_MEDIA_SETTINGS}[[sources]]\nurl='https://publisher.invalid/feed'\nslug='example'\nname='Example'\ncategory='Engineering'\n[[networks]]\nprovider='hackernews'\n[[networks]]\nprovider='reddit'\n"
             ),
         )?;
         git(root, &["add", "aggr.toml"])?;
@@ -186,6 +192,21 @@ impl Fixture {
         git(root, &["add", "items"])?;
         git(root, &["commit", "-qm", "fixture articles"])?;
         git(root, &["switch", "main"])?;
+        // Pinned builds read a snapshot without creating an editable data worktree. Keep a
+        // separate local clone for tests that publish new archive commits between visits.
+        git(
+            root,
+            &[
+                "clone",
+                "-q",
+                "--shared",
+                "--single-branch",
+                "--branch",
+                "aggr",
+                ".",
+                ".aggr/data",
+            ],
+        )?;
         let out = root.join("_site");
         let output = aggr_command(root)
             .args([
@@ -205,11 +226,13 @@ impl Fixture {
         let offline = Arc::new(AtomicBool::new(false));
         let scripts_blocked = Arc::new(AtomicBool::new(false));
         let media = Arc::new(MediaResponses::default());
+        let served_bytes = Arc::new(AtomicUsize::new(0));
         let stopped = Arc::new(AtomicBool::new(false));
         let serving = out.clone();
         let is_offline = offline.clone();
         let block_scripts = scripts_blocked.clone();
         let media_responses = media.clone();
+        let response_bytes = served_bytes.clone();
         let is_stopped = stopped.clone();
         listener.set_nonblocking(true)?;
         std::thread::spawn(move || {
@@ -222,11 +245,18 @@ impl Fixture {
                         let offline = is_offline.clone();
                         let scripts_blocked = block_scripts.clone();
                         let media = media_responses.clone();
+                        let served_bytes = response_bytes.clone();
                         let stopped = is_stopped.clone();
                         std::thread::spawn(move || {
-                            if let Err(error) =
-                                serve(stream, &root, &offline, &scripts_blocked, &media, &stopped)
-                                && !is_expected_socket_error(&error)
+                            if let Err(error) = serve(
+                                stream,
+                                &root,
+                                &offline,
+                                &scripts_blocked,
+                                &media,
+                                &stopped,
+                                &served_bytes,
+                            ) && !is_expected_socket_error(&error)
                             {
                                 eprintln!("fixture server: {error:#}");
                             }
@@ -251,6 +281,7 @@ impl Fixture {
             offline,
             scripts_blocked,
             media,
+            served_bytes,
             stopped,
         })
     }
@@ -347,6 +378,7 @@ fn serve(
     scripts_blocked: &AtomicBool,
     media: &MediaResponses,
     stopped: &AtomicBool,
+    served_bytes: &AtomicUsize,
 ) -> Result<()> {
     // BSD sockets (macOS) inherit the listener's non-blocking mode: without this the first read
     // can return WouldBlock before the request bytes arrive and the connection is dropped
@@ -445,12 +477,27 @@ fn serve(
     } else {
         ""
     };
-    write!(
-        stream,
-        "HTTP/1.1 {status} OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\n{script_policy}Connection: close\r\n\r\n",
+    let is_asset = path.contains("/assets/");
+    let cache_control = if is_asset && media.cache_assets.load(Ordering::Relaxed) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-store"
+    };
+    let headers = format!(
+        "HTTP/1.1 {status} OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: {cache_control}\r\n{script_policy}Connection: close\r\n\r\n",
         body.len()
-    )?;
+    );
+    stream.write_all(headers.as_bytes())?;
     stream.write_all(&body)?;
+    served_bytes.fetch_add(headers.len() + body.len(), Ordering::Relaxed);
+    if is_asset {
+        *media
+            .asset_requests
+            .lock()
+            .expect("fixture asset requests")
+            .entry(path.to_owned())
+            .or_default() += 1;
+    }
     if media_request {
         media.completed.fetch_add(1, Ordering::Relaxed);
     }

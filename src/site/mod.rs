@@ -10,6 +10,7 @@ pub(crate) mod dev;
 mod directory;
 mod display;
 mod document;
+pub(crate) mod hermetic;
 pub(crate) mod interactive;
 pub(crate) mod item_type;
 mod native_media;
@@ -19,6 +20,7 @@ pub mod outputs;
 mod page;
 mod pagefind;
 pub(crate) mod parallel;
+mod precache;
 mod related;
 pub mod render;
 mod source_index;
@@ -46,6 +48,7 @@ use directory::{
 };
 use output_dir::MARKER;
 pub(crate) use output_dir::prepare_out_dir;
+pub(crate) use output_dir::promote as promote_output;
 use page::{ListPage, Pages, SharedCtx, SimplePage, archive_modified_at, default_site_description};
 use render::{Renderer, Theme};
 
@@ -110,6 +113,8 @@ fn visible_archive(items: Vec<Item>, sources: &[Source]) -> (Vec<Item>, Vec<(Str
 
 /// Facts about the build that do not come from the data tree.
 pub struct BuildInfo {
+    pub hermetic: bool,
+    pub metrics: std::sync::Arc<std::sync::Mutex<BuildMetrics>>,
     pub out: PathBuf,
     pub base_url: Option<String>,
     pub config_sha: Option<String>,
@@ -446,11 +451,15 @@ pub fn build(
     // usual two complete builds into one; the retry below still decides whether it was right.
     let cache = info.pagefind_cache.as_deref();
     let mut attempt = cache
-        .filter(|_| limit != u64::MAX)
+        .filter(|_| limit != u64::MAX && !info.hermetic)
         .and_then(|cache| crate::cache::budget_allowance(cache, limit))
         .map_or_else(|| budget::Attempt::new(limit), budget::Attempt::resuming);
     loop {
-        let mut media_budget = budget::MediaBudget::new(attempt.allowance());
+        let mut media_budget = budget::MediaBudget::new(if info.hermetic {
+            u64::MAX
+        } else {
+            attempt.allowance()
+        });
         let summary = build_once(
             config,
             sources,
@@ -481,6 +490,11 @@ pub fn build(
                 }
             }
             return Ok(summary);
+        }
+        if info.hermetic {
+            bail!(
+                "hermetic site requires {bytes} bytes, exceeding build_max_bytes = {limit}; increase the limit instead of omitting local assets"
+            );
         }
         let Some(next) = attempt.next(bytes - limit, media_budget.used) else {
             bail!(
@@ -571,6 +585,7 @@ fn prepare_site(
         .unwrap_or_else(|| default_site_description(&config.site.title));
     let discussion_shortcuts = context::discussion_shortcuts(&config.networks);
     let mut site = SiteCtx {
+        hermetic: info.hermetic,
         preferences: config.site.preferences.browser_defaults()?,
         preference_schema: config.site.preferences.schema(),
         title: config.site.title.clone(),
@@ -648,7 +663,11 @@ fn prepare_site(
 
     // Sources: config order, enriched with stored state and counts.
     let status = store.status()?;
-    let stored_items: Vec<_> = store.items()?.into_iter().filter(is_visible_item).collect();
+    let stored_items: Vec<_> = store
+        .retained_items(config.defaults.limits, sources, info.now)?
+        .into_iter()
+        .filter(is_visible_item)
+        .collect();
     let mut source_ctxs = source_contexts(sources, store, &status, &stored_items)?;
     let prepared_key = preparation_cache.map(|_| {
         crate::model::sha1_hex(
@@ -699,7 +718,7 @@ fn prepare_site(
     );
 
     // The bounded window controls only the river. Source/category/tag pages, search, and clean
-    // article pages are archives over the retained database; `[store]` retention is the explicit
+    // article pages are archives over the retained database; `[defaults]` retention is the explicit
     // knob for bounding those. This keeps old sources browsable without making the home feed stale.
     let prepared_bodies = parallel::map(&all_items, |item| {
         Ok(dev::prepare_markdown(&item.body, preparation_cache))
@@ -724,12 +743,7 @@ fn prepare_site(
             })
             .sum();
     }
-    let derive_preview = |item: &Item| {
-        sources
-            .iter()
-            .find(|source| source.slug == item.front.source)
-            .map_or(config.fetch.previews, |source| source.previews)
-    };
+    let media_policy = assets::MediaPolicy::defaults(&config.defaults);
     // Reading, validating and decoding archived media dominates this phase, so it runs on worker
     // threads one window at a time, which bounds the assets held in memory. Publishing stays on
     // this thread in item order: the dedupe map, memo state and archive order never depend on
@@ -746,7 +760,7 @@ fn prepare_site(
             assets::ItemMedia::gather(
                 store,
                 item,
-                derive_preview(item),
+                media_policy.for_item(sources, item),
                 &media_memo,
                 !budget::full_quality(
                     item.created_at(),
@@ -789,6 +803,11 @@ fn prepare_site(
             let (preview, local_images, local_document) =
                 media.publish(out, &mut written_assets, media_budget)?;
             ctx.preview = preview;
+            if info.hermetic {
+                ctx.video = None;
+                ctx.native_media = None;
+                ctx.interactive = None;
+            }
             ctx.document = document::DocumentCtx::from_item(item).map(|mut document| {
                 document.local_url = local_document.map(|mut local| {
                     if let Some(fragment) = url::Url::parse(&document.url)
@@ -1323,6 +1342,19 @@ fn build_once(
     };
     let total = started.elapsed();
     log::debug!("build complete: {:.3}s", total.as_secs_f64());
+    info.metrics
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .passes
+        .push(BuildPass {
+            phases: phases
+                .iter()
+                .map(|(name, duration)| (name.to_string(), duration.as_secs_f64()))
+                .collect(),
+            total_seconds: total.as_secs_f64(),
+            media_bytes: media_budget.used,
+            omitted_media_groups: media_budget.omitted,
+        });
     let report = build_report(&phases, total, summary);
     log::info!("{report}");
     // Debug logs are never enabled in the publish workflow; a notice reaches the run summary.
@@ -2080,10 +2112,17 @@ mod tests {
         use crate::model::{FrontMatter, file_stem, item_dir};
         use crate::store::NewItem;
 
-        let config = Config::parse(&format!(
-            "[site]\ntitle = \"Demo <site>\"\n{extra}\n[[sources]]\nslug = \"blog\"\nurl = \"https://blog.example/feed\"\n"
+        let mut config = Config::parse(&format!(
+            "[site]\ntitle = \"Demo <site>\"\n{extra}\n[defaults]\nmedia = \"local\"\nmax_items = 0\nmax_age_days = 0\nmax_bytes = 0\n[[sources]]\nslug = \"blog\"\nurl = \"https://blog.example/feed\"\n"
         ))
         .unwrap();
+        config.defaults.media = crate::config::MediaPolicy::Local;
+        config.defaults.limits = crate::config::Limits {
+            max_items: 0,
+            max_age_days: 0,
+            max_bytes: 0,
+            since: None,
+        };
         let sources = config.resolve_sources(&|_| None).unwrap();
         let store = Store::open(root.join("data"));
         for i in 0..count {
@@ -2113,6 +2152,8 @@ mod tests {
 
     fn info(out: PathBuf) -> BuildInfo {
         BuildInfo {
+            hermetic: false,
+            metrics: Default::default(),
             out,
             base_url: Some("https://u.github.io/repo/".into()),
             config_sha: Some("c".repeat(40)),

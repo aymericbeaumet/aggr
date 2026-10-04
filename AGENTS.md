@@ -37,13 +37,21 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   rather than each claiming the whole machine. Normal HTTP uses rustls with
   ring, installed via `http::install_crypto_provider()` before any client (tests too). The bounded
   challenge fallback uses wreq/BoringSSL; both transports share request and preservation limits.
+- Defaults optimize the first visit: light feed content, remote images/previews/documents, no
+  automatic offline downloads, and intent-only navigation prefetch. Apply media policy before
+  archived companion IO in eager and lazy rendering; changing media mode alone preserves retained masters.
+- `build --offline`, `--data-ref`, and `--hermetic` read local Git objects without fetching,
+  rebasing, or changing the data checkout. Hermetic publication requires local automatic resources;
+  missing assets fail before output promotion. Persist source metadata without credentials.
+- Derived image renditions belong in bounded disposable caches, not new archive commits. Existing
+  renditions on retained articles are removed only by explicit storage migration; preserve masters and history.
 - `config.default.toml` is the source of truth for defaults and must stay in sync with
   `config.rs` (it is embedded and parsed by a test).
 - `aggr init` embeds `examples/starter.toml`: keep that small, explicit starter distinct from
   the full defaults. Retention bounds the current tree, never accumulated Git history.
 - Search-engine indexing is opt-in with `[site] indexing = true` in release builds; development
   and previews remain noindex. Preserve local search and instance discovery regardless.
-- Build budgets preserve all article text and leave archived media untouched. A build that fits records what it
+- Build budgets preserve all retained article text and leave archived media untouched. A build that fits records what it
   needed for everything but media, so the next one starts there instead of measuring the overflow
   with a whole extra build; the exact retry still decides whether that guess was right. The budget
   is a publishing limit: only a release build measures it, because measuring an over-budget archive
@@ -143,8 +151,12 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   `git.rs`. Add the unit test next to the function; add a `tests/cli.rs` scenario when git or
   the CLI surface is involved.
 - `anyhow` with `.context()`; no `unwrap` outside tests.
+- Image-quality fixtures with fixed publication dates must pin `SOURCE_DATE_EPOCH` so crossing
+  the publication compression window cannot change their assertions.
 - Browser fixtures expecting next/discovery cards need distinct substantial article bodies; changing
   only URLs or titles does not bypass content-identity deduplication.
+- Archive-media fixtures must opt into preservation. Pinned builds never create `.aggr/data`;
+  browser fixtures edit their separate local archive clone before rebuilding.
 - httpmock serves the first registered matching mock: `delete()` the old one before adding a
   new mock for the same path.
 - minijinja: `trim_blocks`/`lstrip_blocks` are on, autoescape follows the `.html` extension, and
@@ -161,7 +173,7 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   A listing URL names a section, so probe conventional endpoints relative to it with or without a
   trailing slash, never at the root, and only on first resolution. A discovered feed with no
   entries loses to the listing that does have them.
-- Article ingestion must not launch a browser or embed Python. Detect challenges by the
+- Article ingestion must not start a browser or embed Python. Detect challenges by the
   `cf-mitigated: challenge` response header, never by scripts also present in real articles.
   Preserve aggr's identity and configured headers when changing HTTP transports; see
   [interoperability](docs/interoperability.md) for native build requirements.
@@ -215,7 +227,7 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   names its own target and another link follows it.
 - Preserve explicitly captioned image figures before Readability classifies incidental IDs such as
   `replies.png` as boilerplate, and rename share-named wrappers that hold media but no share links.
-  Script-drawn charts with inline data become tables; feed-only captures are retried with a daily,
+  Script-drawn charts with inline data become tables; heavy-mode feed-only captures retry with a daily,
   bounded backoff and upgraded in place when the original page becomes available. Bump the extraction-cache version when extraction semantics change;
   missing content already absent from stored HTML requires a fresh extraction.
   A formula is a formula wherever a page put it: MathML with a TeX annotation, a `math` class, or
@@ -288,8 +300,9 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - Article suggestions are resolved once, and every one of them is meant to be shown: never filter
   them again downstream. They skip the chronological neighbours the page already links, and avoid
   pointing back at an article that already suggests them so browsing never closes a two-page loop.
-- `[fetch] images` names `remote`, `original` or `compact`, globally or per source; `true`/`false`
-  stay accepted spellings of the last two, and `compact` carries its own `quality`/`max_axis`.
+- Capture policies live in flat `[defaults]` and inherit field by field into sources: `content`
+  is `light` (feed only) or `heavy`; `media` is `remote`, `compressed`, or `local`. Compressed
+  media accepts `quality`/`max_axis`. Do not reintroduce the retired fetch policy aliases.
   Compacting replaces the master and drops renditions; an oversized animated GIF is re-encoded as
   a bounded GIF keeping frames, timing and loop, and the smaller of the two always wins, so an
   already-differenced animation keeps its exact bytes. Colour-managed, high-depth, AVIF, animated
@@ -316,7 +329,7 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   margin note when the notes list is off screen.
 - A source chip navigates to the collection page the build already wrote, not to a query the
   browser has to answer: same list, no index to download. Modules a page can use load with the
-  page, and the search engine warms its index on mount rather than on the first keystroke.
+  page; search downloads its index only after query or focus intent.
 - Keep source names visible below titles in feed, search, and item metadata; tags appear only
   on item pages. The feed toolbar's omission of sources does not apply to individual feed entries.
   Put separators outside links and hover targets. Share metadata typography and spacing; format
@@ -353,7 +366,8 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   across navigation and staged search results. Avoid layout shifts when selection or headers change.
 - Keep mobile navigation fixed to the viewport bottom. Apply the safe-area inset once inside the
   bar and derive content clearance from its measured height; never stack extra safe-area spacers.
-  Skip navigation animations and bound intent/idle prefetch; uncached navigation remains progressive.
+  Skip navigation animations and bound intent-only prefetch; no idle or viewport archive downloads.
+  Uncached navigation remains progressive.
   Keep feed search pinned below the measured header, with results outside the sticky wrapper.
   Touch tabs activate once on release with immediate contact feedback. Article swipes must yield to
   selection, vertical scroll, pinch zoom, controls, horizontal scrollers, and browser edge gestures.
@@ -433,3 +447,14 @@ Source configuration is documented in [sources](docs/sources.md), the reading ex
 See [rendering](docs/rendering.md) for reader behavior and
 [interoperability](docs/interoperability.md) for source and preservation boundaries.
 See [client development](docs/client.md) for frontend commands, ownership, and search contracts.
+
+## Per-feed limits
+
+- Keep `max_items = 250`, `max_age_days = 730`, and `max_bytes = 1_000_000_000` flat in
+  `[defaults]`, individually overridable by each source. Zero disables one numeric limit;
+  `since = false` clears an inherited inclusive UTC date.
+- Apply count/date before enrichment and complete-family retention before and after sync.
+  Offline rendering applies the same selection without mutation; Git blob sizes account for
+  media omitted from lightweight snapshots. Never decode media to calculate retention bytes.
+- Retention removes owned body/HTML/media files in normal commits; keep manual deletion
+  tombstones distinct from policy evictions. See [storage](docs/storage.md).

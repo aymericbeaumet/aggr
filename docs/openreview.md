@@ -17,7 +17,7 @@ avoiding duplicate hidden annotations; the paper's PDF remains linked for origin
 When HTML is unavailable, a successful PDF GET with PDF content type and
 signature can enable the document reader. A challenged or unavailable PDF remains an ordinary
 link instead of covering the readable abstract with a broken embed. Neither path solves challenges,
-launches a browser, runs Python, or uses an extraction service.
+starts a browser, runs Python, or uses an extraction service.
 
 Requests use the shared timeout, byte limit, pacing, and conditional response cache. Source
 credentials stay scoped to their declaring origin. API errors can reuse previously verified cached

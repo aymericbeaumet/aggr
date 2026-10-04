@@ -20,17 +20,7 @@ pub(super) type Published = BTreeMap<String, String>;
 /// Everything the service worker fetches at install, as site paths under `base`: the shell pages
 /// and the assets needed to render them. Articles are cached as the reader opens them.
 pub(super) fn precache_paths(base: &str, assets: &[String]) -> Vec<String> {
-    const SHELLS: [&str; 9] = [
-        "",
-        "browse/",
-        "categories/",
-        "sources/",
-        "tags/",
-        "preferences/",
-        "404.html",
-        "offline.html",
-        "manifest.webmanifest",
-    ];
+    const SHELLS: [&str; 3] = ["", "offline.html", "manifest.webmanifest"];
     let mut seen = BTreeSet::new();
     SHELLS
         .iter()
@@ -39,11 +29,9 @@ pub(super) fn precache_paths(base: &str, assets: &[String]) -> Vec<String> {
             assets
                 .iter()
                 .filter(|name| {
-                    name.ends_with(".css")
-                        || name.ends_with(".js")
+                    (name.ends_with(".css") && !name.starts_with("app/"))
                         || name.starts_with("favicon-")
-                        || name.starts_with("icon-")
-                        || name.starts_with("apple-touch-icon-")
+                        || name.starts_with("icon-192-")
                 })
                 .map(|name| format!("assets/{name}")),
         )
@@ -119,8 +107,60 @@ fn precache_entry(root: &Path, url: String, published: &Published) -> Result<Pre
 #[derive(Default)]
 pub(super) struct ItemMedia {
     preview: Option<PreparedPreview>,
+    remote_preview: Option<PreviewCtx>,
     assets: Vec<crate::media::Asset>,
     document: Option<crate::document::Asset>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct MediaPolicy {
+    pub previews: crate::config::PreviewPolicy,
+    pub images: crate::config::ImagePolicy,
+    pub documents: crate::config::DocumentPolicy,
+}
+
+impl MediaPolicy {
+    pub fn defaults(defaults: &crate::config::Defaults) -> Self {
+        Self {
+            previews: defaults.media.previews(),
+            images: defaults.media.images(),
+            documents: defaults.media.documents(),
+        }
+    }
+
+    pub fn for_item(self, sources: &[crate::config::Source], item: &Item) -> Self {
+        sources
+            .iter()
+            .find(|source| source.slug == item.front.source)
+            .map_or(self, |source| Self {
+                previews: source.previews,
+                images: source.images,
+                documents: source.documents,
+            })
+    }
+
+    fn remote_preview(self, item: &Item) -> Option<PreviewCtx> {
+        if !self.previews.remote() {
+            return None;
+        }
+        let preview = item
+            .front
+            .remote_preview
+            .as_ref()
+            .filter(|preview| preview.is_valid())?;
+        Some(PreviewCtx {
+            url: preview.url.clone(),
+            width: preview.width.unwrap_or(160),
+            height: preview.height.unwrap_or(90),
+            alt: preview.alt.clone(),
+            color: None,
+            // Remote previews have no decoded pixels. Reserve geometry with a transparent PNG.
+            placeholder: crate::media::placeholder::Placeholder {
+                hash: String::new(),
+                data_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".into(),
+            },
+        })
+    }
 }
 
 /// A preview image ready to publish: its content-addressed path, the bytes behind it and the
@@ -138,7 +178,7 @@ impl ItemMedia {
     pub(super) fn gather(
         store: &Store,
         item: &Item,
-        derive_preview: bool,
+        policy: MediaPolicy,
         memo: &MediaMemo,
         compact: bool,
         compact_cache: Option<&Path>,
@@ -246,7 +286,8 @@ impl ItemMedia {
                 )?;
                 Ok::<_, anyhow::Error>(preview.ctx)
             })
-            .transpose()?;
+            .transpose()?
+            .or(self.remote_preview);
         let retained = self.assets.into_iter().filter_map(|mut asset| {
             let master = (
                 format!(
@@ -505,14 +546,30 @@ mod tests {
     fn precache_lists_the_shell_and_the_assets_that_render_it() {
         let paths = precache_paths(
             "/repo/",
-            &["style.css".to_string(), "photo.webp".to_string()],
+            &[
+                "style.css",
+                "photo.webp",
+                "favicon-32-a.png",
+                "icon-192-b.png",
+                "icon-512-c.png",
+                "icon-maskable-512-d.png",
+                "apple-touch-icon-e.png",
+            ]
+            .map(str::to_string),
         );
         assert_eq!(paths[0], "/repo/");
         assert!(paths.contains(&"/repo/offline.html".to_string()));
-        assert!(paths.contains(&"/repo/browse/".to_string()));
-        assert!(paths.contains(&"/repo/preferences/".to_string()));
+        assert!(!paths.contains(&"/repo/browse/".to_string()));
+        assert!(!paths.contains(&"/repo/preferences/".to_string()));
         assert!(paths.contains(&"/repo/manifest.webmanifest".to_string()));
         assert!(paths.contains(&"/repo/assets/style.css".to_string()));
+        assert!(paths.contains(&"/repo/assets/favicon-32-a.png".to_string()));
+        assert!(paths.contains(&"/repo/assets/icon-192-b.png".to_string()));
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.contains("512") || path.contains("apple-touch"))
+        );
         // Articles and their media are cached when the reader opens them, not ahead of time.
         assert!(!paths.iter().any(|path| path.starts_with("/repo/items/")));
         assert!(!paths.contains(&"/repo/assets/photo.webp".to_string()));
@@ -640,7 +697,7 @@ mod tests {
         image::DynamicImage::ImageRgba8(pixels)
             .write_to(&mut encoded, image::ImageFormat::Png)
             .unwrap();
-        let asset = crate::media::prepare_asset(
+        let asset = crate::media::prepare_legacy_asset(
             &crate::media::Candidate {
                 url: url::Url::parse("https://publisher.example/diagram.png").unwrap(),
                 alt: Some("Diagram".into()),
@@ -674,6 +731,7 @@ mod tests {
 
         let small_out = tempfile::tempdir().unwrap();
         let (_, images, _) = ItemMedia {
+            remote_preview: None,
             preview: None,
             document: None,
             assets: vec![asset.clone()],

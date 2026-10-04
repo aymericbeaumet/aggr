@@ -18,7 +18,7 @@ const MAX_ANIMATION_FRAMES: usize = 400;
 const ANIMATION_SPEED: i32 = 10;
 
 /// The longest axis a reduced copy may keep, and the quality its JPEG encodes at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct CompactPolicy {
     pub max_axis: u32,
     pub jpeg_quality: u8,

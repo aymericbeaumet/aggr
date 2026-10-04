@@ -283,6 +283,12 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .key-pair small { margin: 0 0.25rem 0 0.1rem; color: var(--muted); font-size: 0.78em; }
 
 /* content column */
+.reader-intro { width: min(100%, var(--max)); margin: 0 auto; padding: 0.75rem max(0.75rem, env(safe-area-inset-right)) 0.75rem max(0.75rem, env(safe-area-inset-left)); font-size: 0.9rem; }
+body:not([data-kind="river"]) .reader-intro { display: none; }
+.reader-intro summary { min-height: var(--tap-target); display: list-item; align-content: center; cursor: pointer; font-weight: 600; }
+.reader-intro p { max-width: 65ch; margin: 0 0 0.5rem; color: var(--muted); }
+.reader-intro nav, .reading-list-actions { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+.reader-intro nav a, .reading-list-actions a { display: inline-flex; align-items: center; min-height: var(--tap-target); text-decoration: underline; text-underline-offset: 0.15em; }
 .main {
   container: reader / inline-size;
   width: 100%;

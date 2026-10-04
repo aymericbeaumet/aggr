@@ -17,15 +17,17 @@ Open source under the MIT license; see [the license](#license).
 
 - **Own the archive.** Readable Markdown, original links, and capture dates live on a separate
   Git branch. Inspect, back up, or move the files with ordinary Git tools.
-- **Hermetic after a sync.** Fetching is the only step that reaches the network. Once a sync has
-  run, the site is a pure function of your repository and the binary: article text, images and the
-  search index are all built from files you already have, so a rebuild is reproducible, works
-  offline, and cannot be changed by a publisher editing or deleting the original.
+- **Start small.** Defaults reuse feed content and keep media at the publisher. Original-page
+  extraction and local media preservation are explicit choices, so the first import does not
+  need to download every article and image.
+- **Rebuild from stored data.** `aggr build --offline` renders the local archive without
+  synchronizing sources. Use `--hermetic` for a reader that loads only local resources; ordinary
+  output can display publisher-hosted media.
 - **Run your own reader.** A small `aggr.toml` and a scheduled workflow fetch sources and publish
   static files. GitHub Pages is the ready-made path; other Git and static hosts work too.
-- **Keep reading.** Full-text search, mobile installation, keyboard navigation, and every page
-  you have opened still readable with no network. New deployments update open feeds without
-  interrupting an article.
+- **Keep reading.** Full-text search, mobile installation, keyboard navigation, and a cache of
+  recently opened pages. Choose complete offline article downloads in Preferences. New deployments
+  update open feeds without interrupting an article.
 - **Follow other instances.** Copy selected articles from another aggr repository into your own
   independent archive, preserving their original links.
 
@@ -43,10 +45,15 @@ This is automatic updating, not a real-time delivery guarantee.
    deployment link. Without a custom domain, it is `https://<you>.github.io/<repo>/`.
 
 Edit the configuration before enabling Actions so the first run uses your sources.
-The starter considers at most ten recent entries per source per run. Builds default to a 1 GB
-limit: all article text takes priority, recent images keep their archived quality, and images
-older than 30 days are compressed for publication. Media that cannot fit stays linked to its
-publisher. The original Git archive is unchanged. See [build budgets](docs/build-budget.md).
+The starter has two sources, with each feed bounded to 250 retained items, 730 days and 1 GB of
+retained files. It uses feed content and publisher-hosted images, previews and PDFs; no originals
+are downloaded just to populate a reading list. The reader initially shows 25 entries, loads search when needed, and
+starts with automatic offline downloads disabled. First-deployment time depends on the sources,
+runner availability and host; the live demo can be tried immediately without setup.
+
+Builds default to a 1 GB output limit. When you enable local media preservation, article text takes
+priority over media that cannot fit. The original Git archive is unchanged by publication choices.
+See [build budgets](docs/build-budget.md) and [source options](docs/sources.md).
 The default GitHub setup publishes the reader and its archive publicly.
 
 To try it locally instead:
@@ -87,17 +94,19 @@ content: extracted
 ```
 
 [Inspect real stored files](https://github.com/aymericbeaumet/aggr-instance/tree/aggr) or read the
-[Git contract](docs/git-model.md). In a September 2026 snapshot, the 50-source demo held 2,314
-article Markdown files and 4.38 GB of archive files, 99% of those bytes in images. Six incremental
+[Git contract](docs/git-model.md). In a September 2026 snapshot using local image preservation,
+the 50-source demo held 2,314 article Markdown files and 4.38 GB of archive files, 99% of those bytes
+in images. Six incremental
 runs had a median render time of 41 seconds and a total job time of 6 minutes 12 seconds.
 See [the measurements and hosting limits](docs/benchmarks.md) before choosing your configuration.
 
 ## Know the tradeoffs
 
 - Reading state and preferences stay in each browser; there is no cross-device read-state sync.
-- Captures preserve readable content, not complete websites. Failed extraction can leave a feed
-  summary or metadata; reading offline covers the pages you have opened, not the whole archive, and
-  never the video or audio they embed.
+- Captures preserve readable content, not complete websites. Feed content can be a summary;
+  original-page extraction is optional and can fail. Offline reading covers cached pages and
+  explicitly downloaded articles with their retained images. Publisher-hosted media, embedded
+  video and audio still need a connection.
 - Public hosting republishes captured content. Search-engine indexing is opt-in, but `noindex`
   is not access control or permission to republish. Original links and attribution remain visible.
   See [publication and privacy](docs/hosting.md#publication-and-search-indexing).

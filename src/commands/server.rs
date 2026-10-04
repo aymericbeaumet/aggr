@@ -536,7 +536,11 @@ fn render_refresh(
     preparation: &crate::site::dev::PreparationCache,
 ) -> Result<RenderedSnapshot> {
     let store = crate::store::Store::open(data);
-    let generation = crate::site::render_generation(&store.items()?, &project.config.site, now);
+    let generation = crate::site::render_generation(
+        &store.retained_items(project.config.defaults.limits, &project.sources, now)?,
+        &project.config.site,
+        now,
+    );
     let discussions_fingerprint = discussions.fingerprint();
     let config_sha = project.config_sha();
     let fingerprint = crate::cache::render_fingerprint(crate::cache::RenderFingerprint {

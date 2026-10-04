@@ -97,6 +97,9 @@ jobs:
       # Reading them would hash the whole cache twice on every run.
       - name: Fingerprint restored media cache
         id: media-cache-before
+        env:
+          AGGR_STATE_CACHE_KEY: ${{ steps.state-cache-restore.outputs.cache-matched-key }}
+          AGGR_MEDIA_CACHE_KEY: ${{ steps.media-cache-restore.outputs.cache-matched-key }}
         run: |
           cat > "$RUNNER_TEMP/aggr-media-cache-fingerprint.py" <<'PY'
           import hashlib
@@ -106,18 +109,47 @@ jobs:
           root = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
           digest = hashlib.sha256()
           directory = root / ".aggr/cache/build-v1/deployment-media-v1"
-          files = sorted(path for path in directory.rglob("*") if path.is_file())
+          paths = list(directory.rglob("*"))
+          if directory.is_symlink() or any(path.is_symlink() for path in paths):
+              raise SystemExit("::error::Restored media cache contains a symlink.")
+          files = sorted(path for path in paths if path.is_file())
+          size = 0
           for path in files:
               name = path.relative_to(root).as_posix().encode()
               digest.update(len(name).to_bytes(8, "big"))
               digest.update(name)
-              digest.update(path.stat().st_size.to_bytes(8, "big"))
+              length = path.stat().st_size
+              digest.update(length.to_bytes(8, "big"))
+              size += length
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"fingerprint={digest.hexdigest()}\n")
               output.write(f"files={len(files)}\n")
-          print(f"Media cache: {len(files)} files, fingerprint {digest.hexdigest()}")
+              output.write(f"bytes={size}\n")
+          print(f"Media cache: {len(files)} files, {size:,} bytes, fingerprint {digest.hexdigest()}")
           PY
           python3 "$RUNNER_TEMP/aggr-media-cache-fingerprint.py"
+          python3 - <<'PY'
+          import os
+          import pathlib
+
+          root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / ".aggr/cache/build-v1"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("## Restored build caches\n\n")
+              for label, variable in [("State", "AGGR_STATE_CACHE_KEY"), ("Media", "AGGR_MEDIA_CACHE_KEY")]:
+                  key = os.environ.get(variable) or "cold cache"
+                  summary.write(f"{label}: `{key}`\n\n")
+              summary.write("| Namespace | Files | Bytes |\n| --- | ---: | ---: |\n")
+              for directory in sorted(root.iterdir()) if root.is_dir() else []:
+                  if directory.is_symlink():
+                      raise SystemExit("::error::Restored cache namespace is a symlink.")
+                  if not directory.is_dir():
+                      continue
+                  paths = list(directory.rglob("*"))
+                  if any(path.is_symlink() for path in paths):
+                      raise SystemExit("::error::Restored cache contains a symlink.")
+                  files = [path for path in paths if path.is_file()]
+                  summary.write(f"| {directory.name} | {len(files)} | {sum(path.stat().st_size for path in files)} |\n")
+          PY
 
       # Set Settings > Pages > Source to "GitHub Actions" before the first run. GITHUB_TOKEN
       # cannot enable Pages; this step reads the configured URL (including a custom domain).
@@ -127,7 +159,7 @@ jobs:
 
       # Build starts with a sync. The Pages URL wins over `[site] url`; without Pages the config
       # must name the host.
-      - run: aggr build --release --out "$GITHUB_WORKSPACE/_site"
+      - run: aggr build --release --out "$GITHUB_WORKSPACE/_site" --report "$RUNNER_TEMP/aggr-build.json"
         env:
           AGGR_BASE_URL: ${{ steps.pages.outputs.base_url }}
 
@@ -159,6 +191,43 @@ jobs:
       - name: Fingerprint completed media cache
         id: media-cache-after
         run: python3 "$RUNNER_TEMP/aggr-media-cache-fingerprint.py"
+
+      - name: Report local storage
+        run: |
+          aggr storage inspect --json > "$RUNNER_TEMP/aggr-storage.json"
+          python3 - "$RUNNER_TEMP/aggr-storage.json" "$RUNNER_TEMP/aggr-build.json" <<'PY'
+          import json
+          import os
+          import sys
+
+          with open(sys.argv[1]) as source:
+              report = json.load(source)
+          with open(sys.argv[2]) as source:
+              build = json.load(source)
+          report["output"]["bytes"] = build["output_bytes"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("\n## Build measurements\n\n")
+              summary.write(f"aggr {build['version']}, archive `{build['archive_sha']}`.\n\n")
+              summary.write(f"Render cache hit: {build['render_cache_hit']}; budget retries: {build['retry_count']}.\n\n")
+              summary.write("| Phase | Seconds |\n| --- | ---: |\n")
+              for name in ["sync_seconds", "archive_seconds", "render_seconds", "total_seconds"]:
+                  summary.write(f"| {name.replace('_seconds', '')} | {build[name]:.3f} |\n")
+              for number, render in enumerate(build["render_passes"], 1):
+                  for phase, seconds in render["phases"].items():
+                      summary.write(f"| render {number}: {phase} | {seconds:.3f} |\n")
+              summary.write("\n| Media cache measurement | Count or bytes |\n| --- | ---: |\n")
+              for name, value in build["media_cache"].items():
+                  summary.write(f"| {name.replace('_', ' ')} | {value} |\n")
+              summary.write("\n## Storage after build\n\n")
+              summary.write("| Measurement | Bytes |\n| --- | ---: |\n")
+              for name in ["current_tree", "originals", "renditions", "output"]:
+                  summary.write(f"| {name.replace('_', ' ')} | {report[name]['bytes']} |\n")
+              for name, usage in report["caches"].items():
+                  summary.write(f"| cache: {name} | {usage['bytes']} |\n")
+              summary.write(f"| Git packed objects | {report['git']['packed_bytes']} |\n")
+              summary.write(f"| Git loose objects | {report['git']['loose_bytes']} |\n\n")
+              summary.write(report["history"] + "\n")
+          PY
 
       # Small derived state is saved only after a successful build.
       - uses: actions/cache/save@v6

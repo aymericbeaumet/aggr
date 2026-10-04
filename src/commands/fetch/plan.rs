@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, bail};
 
 use super::{Options, StatePolicy};
-use crate::config::{Engine, Source};
+use crate::config::Source;
 use crate::content;
 use crate::media;
 use crate::model::{
@@ -126,7 +126,7 @@ pub(super) fn plan(
     let (body, boundary_labels) =
         content::normalize_article_body(&body, &raw.title, published, &source.slug);
     let (html, truncated) = match &raw.content_html {
-        Some(html) if options.html && source.html => {
+        Some(html) if source.html => {
             let (stored, truncated) = content::storage_html(html, options.html_max_bytes);
             (Some(stored), truncated)
         }
@@ -152,6 +152,7 @@ pub(super) fn plan(
         content: content_kind,
         html: None,
         preview: None,
+        remote_preview: raw.remote_preview.clone(),
         images: Vec::new(),
         document: None,
         html_truncated: truncated,
@@ -212,20 +213,17 @@ pub(super) fn use_existing_path(planned: &mut Planned, existing_path: &str) -> R
     Ok(())
 }
 
-fn keep_newest(items: &mut Vec<RawItem>, limit: usize) {
-    items.sort_by_key(|item| std::cmp::Reverse(item.created_at()));
-    items.truncate(limit);
-}
-
-pub(super) fn apply_first_import_limit(
+pub(super) fn apply_source_limits(
     items: &mut Vec<RawItem>,
-    engine: &Engine,
-    feed_limit: usize,
+    limits: crate::config::Limits,
+    now: chrono::DateTime<chrono::Utc>,
 ) {
-    // Aggr sources already apply their own optional limit. With no limit, importing the full
-    // retained tree is what makes one instance a useful replica of another.
-    if matches!(engine, Engine::Feed { .. }) {
-        keep_newest(items, feed_limit);
+    if let Some(cutoff) = limits.cutoff(now) {
+        items.retain(|item| item.created_at().unwrap_or(now) >= cutoff);
+    }
+    items.sort_by_key(|item| std::cmp::Reverse(item.created_at().unwrap_or(now)));
+    if limits.max_items > 0 {
+        items.truncate(limits.max_items);
     }
 }
 
@@ -318,6 +316,7 @@ mod tests {
     use super::super::sanitized_source_error;
     use super::super::tests::{options, source};
     use super::*;
+    use crate::config::Engine;
     use crate::http;
     use chrono::{TimeZone, Utc};
     use httpmock::prelude::*;
@@ -363,7 +362,7 @@ mod tests {
         }))
         .write_to(&mut bytes, image::ImageFormat::Png)
         .unwrap();
-        let asset = media::prepare_asset(
+        let asset = media::prepare_legacy_asset(
             &media::Candidate {
                 url: Url::parse(&server.url("/large.png")).unwrap(),
                 alt: None,
@@ -576,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn first_import_keeps_only_the_newest_bounded_entries() {
+    fn source_limits_keep_only_the_newest_bounded_entries() {
         let mut items = (1..=5)
             .map(|day| RawItem {
                 title: day.to_string(),
@@ -584,7 +583,14 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        keep_newest(&mut items, 2);
+        apply_source_limits(
+            &mut items,
+            crate::config::Limits {
+                max_items: 2,
+                ..Default::default()
+            },
+            Utc.with_ymd_and_hms(2026, 9, 5, 0, 0, 0).unwrap(),
+        );
         assert_eq!(
             items
                 .iter()
@@ -595,36 +601,54 @@ mod tests {
     }
 
     #[test]
-    fn aggr_imports_are_not_capped_by_the_feed_safety_limit() {
-        let items = (1..=5)
+    fn source_limits_filter_dates_before_counting_and_zero_keeps_all_entries() {
+        let mut items = (1..=5)
             .map(|day| RawItem {
                 title: day.to_string(),
                 published: Some(Utc.with_ymd_and_hms(2026, 9, day, 0, 0, 0).unwrap()),
                 ..Default::default()
             })
             .collect::<Vec<_>>();
-        let mut feed_items = items.clone();
-        apply_first_import_limit(
-            &mut feed_items,
-            &Engine::Feed {
-                url: Url::parse("https://example.com/feed.xml").unwrap(),
+        let now = Utc.with_ymd_and_hms(2026, 9, 5, 0, 0, 0).unwrap();
+        let unbounded = crate::config::Limits {
+            max_items: 0,
+            max_age_days: 0,
+            max_bytes: 0,
+            since: None,
+        };
+        apply_source_limits(&mut items, unbounded, now);
+        assert_eq!(items.len(), 5);
+        items.extend([
+            RawItem {
+                title: "updated".into(),
+                updated: Some(now),
+                ..Default::default()
             },
-            2,
-        );
-        assert_eq!(feed_items.len(), 2);
-
-        let mut aggr_items = items;
-        apply_first_import_limit(
-            &mut aggr_items,
-            &Engine::Aggr {
-                url: Url::parse("https://git.example/friend/reads.git").unwrap(),
-                branch: "aggr".into(),
-                sources: vec![],
-                limit: None,
+            RawItem {
+                title: "seen".into(),
+                first_seen: Some(now),
+                ..Default::default()
             },
-            2,
+            RawItem {
+                title: "undated".into(),
+                ..Default::default()
+            },
+        ]);
+        apply_source_limits(
+            &mut items,
+            crate::config::Limits {
+                since: Some("2026-09-04".parse().unwrap()),
+                ..unbounded
+            },
+            now,
         );
-        assert_eq!(aggr_items.len(), 5);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.title.as_str())
+                .collect::<Vec<_>>(),
+            ["5", "updated", "seen", "undated", "4"]
+        );
     }
 
     #[test]

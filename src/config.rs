@@ -3,10 +3,12 @@
 mod import_formats;
 mod import_graph;
 pub(crate) mod language;
+mod policy;
 pub mod preferences;
 pub(crate) mod repository_url;
 mod source_entries;
 
+pub use policy::{Defaults, LimitOverrides, Limits, MediaPolicy};
 pub use preferences::ReaderPreferences;
 use source_entries::deserialize_sources;
 
@@ -14,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 pub const DEFAULT_FILE: &str = "aggr.toml";
@@ -26,9 +28,11 @@ pub const DEFAULTS: &str = include_str!("../config.default.toml");
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub defaults: Defaults,
     pub site: SiteConfig,
     pub store: StoreConfig,
     pub fetch: FetchConfig,
+    pub cache: CacheConfig,
     /// Optional networks searched at build time for conversations about each item.
     pub networks: Vec<NetworkConfig>,
     #[serde(deserialize_with = "deserialize_sources")]
@@ -207,9 +211,6 @@ pub struct StoreConfig {
     /// Write the raw `.html` sibling next to each `.md` (per-source override).
     pub html: bool,
     pub html_max_bytes: usize,
-    /// Optional tree retention; history stays in git either way.
-    pub max_age_days: Option<u32>,
-    pub max_items: Option<usize>,
 }
 
 impl Default for StoreConfig {
@@ -219,8 +220,6 @@ impl Default for StoreConfig {
             dir: PathBuf::from(".aggr/data"),
             html: true,
             html_max_bytes: 262_144,
-            max_age_days: None,
-            max_items: None,
         }
     }
 }
@@ -231,19 +230,11 @@ pub struct FetchConfig {
     pub concurrency: usize,
     /// Concurrent original-article downloads within each source in `heavy` mode.
     pub article_concurrency: usize,
-    /// Newest entries considered from one feed per sync; avoids an unbounded first import.
-    pub max_items_per_source: usize,
     pub timeout_secs: u64,
     pub max_body_bytes: usize,
     pub retries: u32,
     /// Allow a remote collection to expand collections outside its own origin or repository.
     pub allow_remote_source_chains: bool,
-    /// `heavy` downloads and extracts original article pages; `light` trusts feed content.
-    pub content: ContentMode,
-    /// Download a small local preview; explicit refresh fills missing previews on old items.
-    pub previews: bool,
-    /// How safe article-body raster images are archived, if at all.
-    pub images: ImagePolicy,
 }
 
 impl Default for FetchConfig {
@@ -251,24 +242,117 @@ impl Default for FetchConfig {
         Self {
             concurrency: 16,
             article_concurrency: 4,
-            max_items_per_source: 100,
             timeout_secs: 20,
             max_body_bytes: 10_000_000,
             retries: 2,
             allow_remote_source_chains: false,
-            content: ContentMode::Heavy,
-            previews: true,
-            images: ImagePolicy::Original,
         }
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ContentMode {
-    #[default]
     Heavy,
+    #[default]
     Light,
+}
+
+/// Limits for disposable local state, independent of archive retention and site size.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CacheConfig {
+    pub media_max_bytes: u64,
+    pub response_max_bytes: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            media_max_bytes: 2 * 1024 * 1024 * 1024,
+            response_max_bytes: 256 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PreviewPolicy {
+    #[default]
+    Remote,
+    Local,
+    Disabled,
+}
+
+impl PreviewPolicy {
+    pub fn archives(self) -> bool {
+        self == Self::Local
+    }
+    pub fn remote(self) -> bool {
+        self == Self::Remote
+    }
+    pub fn enabled(self) -> bool {
+        self != Self::Disabled
+    }
+}
+
+impl<'de> Deserialize<'de> for PreviewPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Value {
+            Boolean(bool),
+            Name(String),
+        }
+        match Value::deserialize(deserializer)? {
+            Value::Boolean(true) => Ok(Self::Local),
+            Value::Boolean(false) => Ok(Self::Disabled),
+            Value::Name(name) => match name.as_str() {
+                "remote" => Ok(Self::Remote),
+                "local" => Ok(Self::Local),
+                "disabled" => Ok(Self::Disabled),
+                _ => Err(serde::de::Error::custom(
+                    "previews must be remote, local, disabled, or a boolean",
+                )),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DocumentPolicy {
+    #[default]
+    Remote,
+    Original,
+}
+
+impl DocumentPolicy {
+    pub fn archives(self) -> bool {
+        self == Self::Original
+    }
+}
+
+impl<'de> Deserialize<'de> for DocumentPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Value {
+            Boolean(bool),
+            Name(String),
+        }
+        match Value::deserialize(deserializer)? {
+            Value::Boolean(true) => Ok(Self::Original),
+            Value::Boolean(false) => Ok(Self::Remote),
+            Value::Name(name) => match name.as_str() {
+                "remote" => Ok(Self::Remote),
+                "original" => Ok(Self::Original),
+                _ => Err(serde::de::Error::custom(
+                    "documents must be remote, original, or a boolean",
+                )),
+            },
+        }
+    }
 }
 
 /// What aggr does with an article's images: leave them at the publisher, archive exactly what the
@@ -277,9 +361,9 @@ pub enum ContentMode {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ImagePolicy {
     /// `"remote"` (or `false`): nothing is downloaded and the reader loads the publisher's URL.
-    Remote,
-    /// `"original"` (or `true`): the publisher's exact bytes, plus lossless responsive renditions.
     #[default]
+    Remote,
+    /// `"original"` (or `true`): the publisher's exact bytes.
     Original,
     /// `"compact"`: one bounded JPEG master and no renditions. Images dominate an archive's size,
     /// so this is the difference between gigabytes and hundreds of megabytes; what it gives up is
@@ -298,6 +382,23 @@ impl ImagePolicy {
         match self {
             Self::Compact(policy) => Some(policy),
             Self::Remote | Self::Original => None,
+        }
+    }
+}
+
+impl Serialize for ImagePolicy {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Remote => serializer.serialize_str("remote"),
+            Self::Original => serializer.serialize_str("original"),
+            Self::Compact(policy) => {
+                use serde::ser::SerializeStruct;
+                let mut value = serializer.serialize_struct("ImagePolicy", 3)?;
+                value.serialize_field("mode", "compact")?;
+                value.serialize_field("quality", &policy.jpeg_quality)?;
+                value.serialize_field("max_axis", &policy.max_axis)?;
+                value.end()
+            }
         }
     }
 }
@@ -395,7 +496,7 @@ const MAX_COMPACT_AXIS: u32 = 8_192;
 
 /// One normalized source candidate, expanded from a `[[sources]]` group.
 /// Engine-specific options are validated when it resolves to a Source.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SourceConfig {
     /// Internal dispatch hint after URL and environment resolution.
@@ -417,18 +518,15 @@ pub struct SourceConfig {
     /// Extra request headers; values support `${ENV}` expansion.
     pub headers: BTreeMap<String, String>,
     pub html: Option<bool>,
-    /// Override `[fetch] content` for this source.
+    /// Override `[defaults] content` for this source.
     pub content: Option<ContentMode>,
-    /// Override `[fetch] previews` for new items from this source.
-    pub previews: Option<bool>,
-    /// Override `[fetch] images` for new items from this source.
-    pub images: Option<ImagePolicy>,
+    pub media: Option<MediaPolicy>,
+    #[serde(flatten)]
+    pub limits: LimitOverrides,
     /// Repository source: data branch of that repository.
     pub branch: Option<String>,
     /// Repository source: only take items from these of its sources (all when empty).
     pub sources: Vec<String>,
-    /// Repository source: optional newest-item limit; omitted imports every retained item.
-    pub limit: Option<usize>,
 }
 
 /// A source after defaults, presets, and `${ENV}` expansion have been applied.
@@ -447,8 +545,10 @@ pub struct Source {
     pub headers: Vec<(String, String)>,
     pub html: bool,
     pub content: ContentMode,
-    pub previews: bool,
+    pub previews: PreviewPolicy,
     pub images: ImagePolicy,
+    pub documents: DocumentPolicy,
+    pub limits: Limits,
     pub engine: Engine,
 }
 
@@ -463,8 +563,6 @@ pub enum Engine {
         url: Url,
         branch: String,
         sources: Vec<String>,
-        /// None imports every item retained by the upstream aggr.
-        limit: Option<usize>,
     },
 }
 
@@ -536,6 +634,9 @@ impl Config {
 
     fn validate(&self) -> Result<()> {
         self.site.preferences.validate()?;
+        if self.cache.media_max_bytes == 0 || self.cache.response_max_bytes == 0 {
+            bail!("[cache] byte limits must be positive");
+        }
         if self
             .site
             .description
@@ -575,9 +676,6 @@ impl Config {
         if self.fetch.article_concurrency == 0 {
             bail!("[fetch] article_concurrency must be at least 1");
         }
-        if self.fetch.max_items_per_source == 0 {
-            bail!("[fetch] max_items_per_source must be at least 1");
-        }
         if self.fetch.max_body_bytes == 0 {
             bail!("[fetch] max_body_bytes must be at least 1");
         }
@@ -613,19 +711,19 @@ impl Config {
         self.resolve_sources(&|name| std::env::var(name).ok())
     }
 
+    pub(crate) fn resolve_source(&self, raw: &SourceConfig) -> Result<Source> {
+        resolve_source(raw, self.defaults, self.store.html, &|name| {
+            std::env::var(name).ok()
+        })
+    }
+
     pub fn resolve_sources(&self, env: &dyn Fn(&str) -> Option<String>) -> Result<Vec<Source>> {
         let mut seen_slugs = BTreeSet::new();
         let mut seen_identities = BTreeMap::<String, (usize, String)>::new();
         let mut sources = Vec::with_capacity(self.sources.len());
         for (index, raw) in self.sources.iter().enumerate() {
-            let mut source = resolve_source(
-                raw,
-                self.fetch.content,
-                self.fetch.previews,
-                self.fetch.images,
-                env,
-            )
-            .with_context(|| format!("[[sources]] #{}: {}", index + 1, describe(raw)))?;
+            let mut source = resolve_source(raw, self.defaults, self.store.html, env)
+                .with_context(|| format!("[[sources]] #{}: {}", index + 1, describe(raw)))?;
             if let Some((first, slug)) = seen_identities.get(&source.identity) {
                 log::warn!(
                     "ignoring duplicate source [[sources]] #{} ({:?}); first declared as #{} ({:?})",
@@ -677,7 +775,6 @@ fn validate_source_options(raw: &SourceConfig) -> Result<()> {
     let aggr_keys = [
         ("branch", raw.branch.is_some()),
         ("sources", !raw.sources.is_empty()),
-        ("limit", raw.limit.is_some()),
     ];
     let only = |owner: &str, keys: &[(&str, bool)]| -> Result<()> {
         for (key, set) in keys {
@@ -690,9 +787,6 @@ fn validate_source_options(raw: &SourceConfig) -> Result<()> {
     match source_kind(raw) {
         "feed" => only("aggr", &aggr_keys)?,
         "aggr" => {
-            if raw.limit == Some(0) {
-                bail!("`limit` must be at least 1; omit it to import all retained items");
-            }
             for slug in &raw.sources {
                 validate_slug(slug).context("in `sources`")?;
             }
@@ -717,9 +811,8 @@ fn source_kind(raw: &SourceConfig) -> &str {
 
 fn resolve_source(
     raw: &SourceConfig,
-    default_content: ContentMode,
-    default_previews: bool,
-    default_images: ImagePolicy,
+    defaults: Defaults,
+    default_html: bool,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Source> {
     let inferred;
@@ -755,7 +848,6 @@ fn resolve_source(
                 url,
                 branch: raw.branch.clone().unwrap_or_else(|| "aggr".into()),
                 sources: raw.sources.clone(),
-                limit: raw.limit,
             }
         }
         other => bail!("unknown source type {other:?}; known types: feed, aggr"),
@@ -820,10 +912,12 @@ fn resolve_source(
         }),
         persist_endpoint,
         headers,
-        html: raw.html.unwrap_or(true),
-        content: raw.content.unwrap_or(default_content),
-        previews: raw.previews.unwrap_or(default_previews),
-        images: raw.images.unwrap_or(default_images),
+        html: raw.html.unwrap_or(default_html),
+        content: raw.content.unwrap_or(defaults.content),
+        previews: raw.media.unwrap_or(defaults.media).previews(),
+        images: raw.media.unwrap_or(defaults.media).images(),
+        documents: raw.media.unwrap_or(defaults.media).documents(),
+        limits: raw.limits.resolve(defaults.limits),
         engine,
     })
 }
@@ -1119,7 +1213,7 @@ title = "Mixed"
 [[sources]]
 url = "https://one.example/"
 category = "first"
-[fetch]
+[defaults]
 content = "light"
 [[sources]]
 url = ["https://two.example/", "https://three.example/"]
@@ -1132,7 +1226,7 @@ name = "Duplicate"
 [[sources]]
 url = "https://${HOST}/"
 headers = { Authorization = "Bearer ${TOKEN}" }
-images = false
+media = "remote"
 "#,
         )
         .unwrap();
@@ -1507,7 +1601,7 @@ images = false
         assert_eq!(config.site.description, compiled.site.description);
         assert_eq!(config.site.language, compiled.site.language);
         assert_eq!(config.site.items_per_page, compiled.site.items_per_page);
-        assert_eq!(compiled.site.items_per_page, 50);
+        assert_eq!(compiled.site.items_per_page, 25);
         assert_eq!(config.site.max_items, compiled.site.max_items);
         assert_eq!(config.site.max_age_days, compiled.site.max_age_days);
         assert_eq!(config.site.repository, compiled.site.repository);
@@ -1526,16 +1620,10 @@ images = false
         assert_eq!(config.store.dir, compiled.store.dir);
         assert_eq!(config.store.html, compiled.store.html);
         assert_eq!(config.store.html_max_bytes, compiled.store.html_max_bytes);
-        assert_eq!(config.store.max_age_days, compiled.store.max_age_days);
-        assert_eq!(config.store.max_items, compiled.store.max_items);
         assert_eq!(config.fetch.concurrency, compiled.fetch.concurrency);
         assert_eq!(
             config.fetch.article_concurrency,
             compiled.fetch.article_concurrency
-        );
-        assert_eq!(
-            config.fetch.max_items_per_source,
-            compiled.fetch.max_items_per_source
         );
         assert_eq!(config.fetch.timeout_secs, compiled.fetch.timeout_secs);
         assert_eq!(config.fetch.max_body_bytes, compiled.fetch.max_body_bytes);
@@ -1544,9 +1632,7 @@ images = false
             config.fetch.allow_remote_source_chains,
             compiled.fetch.allow_remote_source_chains
         );
-        assert_eq!(config.fetch.content, compiled.fetch.content);
-        assert_eq!(config.fetch.previews, compiled.fetch.previews);
-        assert_eq!(config.fetch.images, compiled.fetch.images);
+        assert_eq!(config.defaults, compiled.defaults);
         assert_eq!(config.networks, compiled.networks);
         assert!(compiled.networks.is_empty());
         assert!(config.sources.is_empty());
@@ -1615,104 +1701,31 @@ images = false
     }
 
     #[test]
-    fn previews_are_enabled_and_sources_can_override_the_default() {
-        let config = Config::parse("[[sources]]\nurl = 'https://example.com/feed'\n").unwrap();
-        assert!(config.fetch.previews);
-        assert!(config.sources().unwrap()[0].previews);
-        let config = Config::parse("[fetch]\npreviews = true\n[[sources]]\nurl = 'https://a.example/feed'\n[[sources]]\nurl = 'https://b.example/feed'\npreviews = false\n").unwrap();
-        let sources = config.sources().unwrap();
-        assert!(sources[0].previews);
-        assert!(!sources[1].previews);
-        assert!(Config::parse("[[sources]]\nurl = './other.toml'\npreviews = true\n").is_ok());
-    }
-
-    #[test]
-    fn article_images_are_local_by_default_and_sources_can_opt_out() {
-        let config = Config::parse("[[sources]]\nurl = 'https://example.com/feed'\n").unwrap();
-        assert_eq!(config.fetch.images, ImagePolicy::Original);
-        assert_eq!(config.sources().unwrap()[0].images, ImagePolicy::Original);
-        let config = Config::parse("[fetch]\nimages = false\n[[sources]]\nurl = 'https://a.example/feed'\n[[sources]]\nurl = 'https://b.example/feed'\nimages = true\n").unwrap();
-        let sources = config.sources().unwrap();
-        assert_eq!(sources[0].images, ImagePolicy::Remote);
-        assert_eq!(sources[1].images, ImagePolicy::Original);
-        assert!(Config::parse("[[sources]]\nurl = './other.toml'\nimages = true\n").is_ok());
-    }
-
-    #[test]
-    fn images_name_a_mode_and_a_compact_archive_carries_its_level() {
-        let config = Config::parse(
-            "[fetch]\nimages = \"compact\"\n[[sources]]\nurl = 'https://a.example/feed'\n[[sources]]\nurl = 'https://b.example/feed'\nimages = \"original\"\n[[sources]]\nurl = 'https://c.example/feed'\nimages = \"remote\"\n",
-        )
-        .unwrap();
-        let default = crate::media::CompactPolicy::archive();
-        assert_eq!(config.fetch.images, ImagePolicy::Compact(default));
-        let sources = config.sources().unwrap();
-        assert_eq!(sources[0].images, ImagePolicy::Compact(default));
-        assert_eq!(sources[1].images, ImagePolicy::Original);
-        assert_eq!(sources[2].images, ImagePolicy::Remote);
-        assert_eq!(sources[0].images.compaction(), Some(default));
-        assert_eq!(ImagePolicy::Original.compaction(), None);
-        assert!(!ImagePolicy::Remote.archives() && ImagePolicy::Original.archives());
-
-        // The booleans that existing configurations carry keep meaning what they meant.
-        let config = Config::parse(
-            "[fetch]\nimages = false\n[[sources]]\nurl = 'https://a.example/feed'\nimages = true\n",
-        )
-        .unwrap();
-        assert_eq!(config.fetch.images, ImagePolicy::Remote);
-        assert_eq!(config.sources().unwrap()[0].images, ImagePolicy::Original);
-    }
-
-    #[test]
-    fn a_compact_level_is_tunable_per_source_and_refuses_what_it_cannot_honor() {
-        let config = Config::parse(
-            "[fetch]\nimages = { mode = \"compact\", quality = 55 }\n[[sources]]\nurl = 'https://a.example/feed'\n[[sources]]\nurl = 'https://b.example/feed'\nimages = { mode = \"compact\", quality = 90, max_axis = 2400 }\n",
-        )
-        .unwrap();
-        assert_eq!(
-            config.fetch.images.compaction(),
-            Some(crate::media::CompactPolicy {
-                max_axis: crate::media::CompactPolicy::archive().max_axis,
-                jpeg_quality: 55,
-            })
-        );
-        let sources = config.sources().unwrap();
-        assert_eq!(
-            sources[1].images.compaction(),
-            Some(crate::media::CompactPolicy {
-                max_axis: 2400,
-                jpeg_quality: 90,
-            })
-        );
-
-        // Each rejection names the key it is talking about.
-        for (toml, expected) in [
-            ("images = \"tiny\"", "unknown images mode"),
-            ("images = { mode = \"compact\", quality = 0 }", "1-100"),
-            ("images = { mode = \"compact\", quality = 200 }", "1-100"),
-            ("images = { mode = \"compact\", max_axis = 16 }", "max_axis"),
-            (
-                "images = { mode = \"compact\", max_axis = 90000 }",
-                "max_axis",
-            ),
-            (
-                "images = { mode = \"original\", quality = 60 }",
-                "nothing to tune",
-            ),
-            (
-                "images = { mode = \"compact\", qualty = 60 }",
-                "unknown field",
-            ),
+    fn source_policy_roundtrip_preserves_inheritance_and_explicit_clear() {
+        let config = Config::parse("[defaults]\ncontent='heavy'\nmedia='local'\n[[sources]]\nurl='https://example.com/feed'\nmedia={mode='compressed',quality=65}\nsince=false\nmax_items=0\n").unwrap();
+        let encoded = serde_json::to_string(&config.sources[0]).unwrap();
+        let decoded: SourceConfig = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.media, config.sources[0].media);
+        assert_eq!(decoded.limits, config.sources[0].limits);
+        let source = config.sources().unwrap().remove(0);
+        assert_eq!(source.content, ContentMode::Heavy);
+        assert_eq!(source.previews, PreviewPolicy::Local);
+        assert_eq!(source.documents, DocumentPolicy::Original);
+        assert_eq!(source.images.compaction().unwrap().jpeg_quality, 65);
+        for invalid in [
+            "[cache]\nmedia_max_bytes=0",
+            "[cache]\nresponse_max_bytes=0",
         ] {
-            let error = Config::parse(&format!("[fetch]\n{toml}\n"))
-                .unwrap_err()
-                .to_string();
-            assert!(
-                error.contains(expected),
-                "{toml} reported {error:?}, which does not mention {expected:?}"
-            );
+            assert!(Config::parse(invalid).is_err());
         }
-        assert!(Config::parse("[fetch]\nimages = 3\n").is_err());
+    }
+
+    #[test]
+    fn source_html_inherits_store_default_and_can_override_it() {
+        let config = Config::parse("[store]\nhtml=false\n[[sources]]\nurl='https://a.example/feed'\n[[sources]]\nurl='https://b.example/feed'\nhtml=true\n").unwrap();
+        let sources = config.sources().unwrap();
+        assert!(!sources[0].html);
+        assert!(sources[1].html);
     }
 
     #[test]
@@ -1794,16 +1807,16 @@ url = "https://lobste.rs/search?q={url}"
     }
 
     #[test]
-    fn heavy_content_is_default_and_sources_can_choose_light() {
+    fn light_content_is_default_and_sources_can_choose_heavy() {
         let config = Config::parse(
             "[[sources]]\nurl = \"https://heavy.example/feed\"\n\
-             [[sources]]\nurl = \"https://light.example/feed\"\ncontent = \"light\"\n",
+             [[sources]]\nurl = \"https://light.example/feed\"\ncontent = \"heavy\"\n",
         )
         .unwrap();
         let sources = config.sources().unwrap();
-        assert_eq!(sources[0].content, ContentMode::Heavy);
-        assert_eq!(sources[1].content, ContentMode::Light);
-        assert!(Config::parse("[fetch]\ncontent = \"medium\"\n").is_err());
+        assert_eq!(sources[0].content, ContentMode::Light);
+        assert_eq!(sources[1].content, ContentMode::Heavy);
+        assert!(Config::parse("[defaults]\ncontent = \"medium\"\n").is_err());
     }
 
     #[tokio::test]
@@ -2138,7 +2151,7 @@ url = "{}/forbidden.toml"
     fn resolves_aggr_sources() {
         let config = Config::parse(
             "[[sources]]\nurl = \"https://github.com/friend/reads\"\ncategory = \"friends\"\n\n\
-             [[sources]]\nurl = \"https://git.example.com/x/reads.git\"\nbranch = \"data\"\nsources = [\"hn\"]\nlimit = 5\n",
+             [[sources]]\nurl = \"https://git.example.com/x/reads.git\"\nbranch = \"data\"\nsources = [\"hn\"]\nmax_items = 5\n",
         )
         .unwrap();
         let sources = config.resolve_sources(&no_env).unwrap();
@@ -2149,7 +2162,6 @@ url = "{}/forbidden.toml"
                 url: Url::parse("https://github.com/friend/reads").unwrap(),
                 branch: "aggr".into(),
                 sources: vec![],
-                limit: None,
             }
         );
         assert_eq!(sources[1].slug, "x-reads");
@@ -2159,9 +2171,9 @@ url = "{}/forbidden.toml"
                 url: Url::parse("https://git.example.com/x/reads.git").unwrap(),
                 branch: "data".into(),
                 sources: vec!["hn".into()],
-                limit: Some(5),
             }
         );
+        assert_eq!(sources[1].limits.max_items, 5);
 
         for text in [
             "[[sources]]\nurl='https://github.com/friend/reads'\nlimit=0",
@@ -2187,7 +2199,7 @@ url = "{}/forbidden.toml"
         ];
         let mut identities = BTreeSet::new();
         for url in urls {
-            let config = Config::parse(&format!("[[sources]]\nurl={url:?}\ncategory=' Friends '\nbranch='archive'\nsources=['news']\nlimit=5")).unwrap();
+            let config = Config::parse(&format!("[[sources]]\nurl={url:?}\ncategory=' Friends '\nbranch='archive'\nsources=['news']\nmax_items=5")).unwrap();
             let sources = config.resolve_sources(&no_env).unwrap();
             assert_eq!(sources[0].slug, "friend-reads");
             assert_eq!(sources[0].category.as_deref(), Some("friends"));
@@ -2196,8 +2208,9 @@ url = "{}/forbidden.toml"
                 Some("https://github.com/friend/reads")
             );
             assert!(
-                matches!(&sources[0].engine, Engine::Aggr { branch, sources, limit: Some(5), .. } if branch == "archive" && sources == &["news"])
+                matches!(&sources[0].engine, Engine::Aggr { branch, sources, .. } if branch == "archive" && sources == &["news"])
             );
+            assert_eq!(sources[0].limits.max_items, 5);
             identities.insert(sources[0].identity.clone());
         }
         assert_eq!(identities.len(), 1);

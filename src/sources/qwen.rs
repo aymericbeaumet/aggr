@@ -38,6 +38,7 @@ pub async fn article(
     source: &Source,
     client: &crate::http::Client,
 ) -> Result<Option<RawItem>> {
+    super::require_heavy(source, "Qwen")?;
     let endpoint = url.join("/api/v2/article/retrieval?type=qwen_ai&language=en-US")?;
     let response = client
         .get(Request {
@@ -60,6 +61,7 @@ pub async fn article(
 }
 
 pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetch> {
+    super::require_heavy(source, "Qwen")?;
     let endpoint = url.join("/api/v2/article/retrieval?type=qwen_ai&language=en-US")?;
     let previous = if ctx.state.identity == source.identity {
         Validators::from_state(ctx.state)

@@ -29,6 +29,28 @@ pub struct Worktree {
 }
 
 impl Worktree {
+    /// Open an existing clean archive without fetching, creating refs, or changing its checkout.
+    pub fn open_existing(dir: &Path, branch: &str) -> Result<Self> {
+        let worktree = Self {
+            dir: dir.to_path_buf(),
+            branch: branch.to_string(),
+        };
+        if !worktree.is_on_branch()? {
+            bail!(
+                "{} is not an existing checkout of {branch:?}; run sync first",
+                dir.display()
+            );
+        }
+        let status = git(dir, &["status", "--porcelain=v1", "--untracked-files=all"])?;
+        if !stdout(&status).is_empty() {
+            bail!(
+                "archive checkout {} has pending changes; save them before pruning renditions",
+                dir.display()
+            );
+        }
+        Ok(worktree)
+    }
+
     /// A non-git store used by `aggr dev`; its owner controls the temporary directory lifetime.
     pub fn ephemeral(dir: PathBuf) -> Self {
         Self {
@@ -88,14 +110,161 @@ impl Repo {
         &self.root
     }
 
-    pub fn head_sha(&self) -> Result<Option<String>> {
-        rev_parse(&self.root, "HEAD")
+    /// Resolve only objects already present, without contacting a promisor remote.
+    pub fn local_commit(&self, reference: &str) -> Result<String> {
+        let spec = format!("{reference}^{{commit}}");
+        let out = command(
+            &self.root,
+            &["rev-parse", "--verify", "--end-of-options", &spec],
+        )
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .output()?;
+        if !out.status.success() {
+            bail!("archive ref {reference:?} is not available locally; sync or fetch it first");
+        }
+        Ok(stdout(&out))
+    }
+
+    pub fn local_file(&self, sha: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let object = format!("{sha}:{path}");
+        let out = command(&self.root, &["cat-file", "blob", &object])
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .output()?;
+        if out.status.success() {
+            Ok(Some(out.stdout))
+        } else {
+            let exists = command(&self.root, &["ls-tree", sha, "--", path])
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .output()?;
+            if !exists.status.success() || !exists.stdout.is_empty() {
+                bail!("archive object {object} is not available locally; sync or fetch it first");
+            }
+            Ok(None)
+        }
+    }
+
+    pub fn local_commit_time(&self, sha: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+        let out = command(&self.root, &["show", "-s", "--format=%ct", sha])
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .output()?;
+        let seconds = stdout(&check(out, &["show"])?).parse::<i64>()?;
+        chrono::DateTime::from_timestamp(seconds, 0)
+            .context("archive commit has an invalid timestamp")
+    }
+
+    /// Materialize raw blobs without checkout hooks, filters, worktrees, or changes to refs.
+    pub fn local_snapshot(&self, sha: &str, include_media: bool) -> Result<LocalSnapshot> {
+        use std::io::{BufRead as _, Read as _};
+        let tree = command(
+            &self.root,
+            &["ls-tree", "-r", "-z", "-l", "--full-tree", sha],
+        )
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .output()?;
+        let tree = check(tree, &["ls-tree"])?;
+        let tmp = tempfile::Builder::new().prefix("aggr-offline-").tempdir()?;
+        let mut child = command(&self.root, &["cat-file", "--batch"])
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+        let mut sizes = std::collections::BTreeMap::new();
+        let result = (|| -> Result<()> {
+            let mut input = child.stdin.take().context("Git object input")?;
+            let mut output =
+                std::io::BufReader::new(child.stdout.take().context("Git object output")?);
+            for entry in tree
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|entry| !entry.is_empty())
+            {
+                let entry = std::str::from_utf8(entry).context("archive paths must be UTF-8")?;
+                let (metadata, name) = entry
+                    .split_once('\t')
+                    .context("invalid archive tree entry")?;
+                let mut metadata = metadata.split_whitespace();
+                let mode = metadata.next().context("archive mode")?;
+                let kind = metadata.next().context("archive object kind")?;
+                let oid = metadata.next().context("archive object id")?;
+                let size = metadata.next().context("archive object size")?.parse::<u64>()
+                    .with_context(|| format!("archive object for {name} is not available locally; sync or fetch it first"))?;
+                sizes.insert(name.to_owned(), size);
+                let path = Path::new(name);
+                if kind != "blob"
+                    || !matches!(mode, "100644" | "100755")
+                    || name.contains('\\')
+                    || path.components().any(|part| {
+                        !matches!(part, std::path::Component::Normal(_))
+                            || part
+                                .as_os_str()
+                                .to_string_lossy()
+                                .eq_ignore_ascii_case(".git")
+                    })
+                {
+                    bail!(
+                        "unsafe archive entry {name:?}; only ordinary relative files are supported"
+                    );
+                }
+                if !include_media
+                    && path
+                        .extension()
+                        .and_then(|v| v.to_str())
+                        .is_some_and(|ext| {
+                            matches!(
+                                ext.to_ascii_lowercase().as_str(),
+                                "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" | "avif" | "pdf"
+                            )
+                        })
+                {
+                    continue;
+                }
+                writeln!(input, "{oid}")?;
+                input.flush()?;
+                let mut header = String::new();
+                output.read_line(&mut header)?;
+                let fields: Vec<_> = header.split_whitespace().collect();
+                if fields.len() != 3 || fields[1] != "blob" || fields[0] != oid {
+                    bail!(
+                        "archive object for {name} is not available locally; sync or fetch it first"
+                    );
+                }
+                let size = fields[2].parse::<u64>().context("invalid Git blob size")?;
+                let destination = tmp.path().join(path);
+                fs::create_dir_all(destination.parent().context("archive file parent")?)?;
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&destination)
+                    .with_context(|| format!("creating unique archive path {name:?}"))?;
+                let copied = std::io::copy(&mut (&mut output).take(size), &mut file)?;
+                let mut delimiter = [0];
+                output.read_exact(&mut delimiter)?;
+                if copied != size || delimiter != *b"\n" {
+                    bail!("truncated archive object {name}");
+                }
+            }
+            drop(input);
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = child.kill();
+        }
+        let status = child.wait()?;
+        result?;
+        if !status.success() {
+            bail!("reading local archive objects failed");
+        }
+        Ok(LocalSnapshot {
+            tmp,
+            sizes: std::sync::Arc::new(sizes),
+        })
     }
 
     /// Whether every file is tracked at `HEAD` with exactly the bytes aggr loaded. This prevents
     /// dirty or untracked config from being attributed to an unrelated commit permalink.
     pub fn head_matches_files(&self, files: &[PathBuf]) -> Result<bool> {
-        if self.head_sha()?.is_none() {
+        if self.local_commit("HEAD").is_err() {
             return Ok(false);
         }
         for file in files {
@@ -104,9 +273,12 @@ impl Repo {
             };
             let relative = relative.to_string_lossy().replace('\\', "/");
             let object = format!("HEAD:{relative}");
-            let Some(committed) = git_ok(&self.root, &["cat-file", "blob", &object])? else {
+            let committed = command(&self.root, &["cat-file", "blob", &object])
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .output()?;
+            if !committed.status.success() {
                 return Ok(false);
-            };
+            }
             let loaded = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
             if committed.stdout != loaded {
                 return Ok(false);
@@ -409,62 +581,24 @@ impl Worktree {
         Ok(())
     }
 
-    /// A detached checkout of `rev` in a temporary directory, removed on drop. For rendering the
-    /// site from an older data commit (`aggr build --data-ref`).
-    pub fn temp_checkout(&self, rev: &str) -> Result<TempCheckout> {
-        let sha =
-            rev_parse(&self.dir, rev)?.with_context(|| format!("unknown revision {rev:?}"))?;
-        let tmp = tempfile::Builder::new()
-            .prefix("aggr-")
-            .tempdir()
-            .context("creating a temporary directory")?;
-        let dir = tmp.path().join("data");
-        git(
-            &self.dir,
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                "-q",
-                &dir.to_string_lossy(),
-                &sha,
-            ],
-        )?;
-        Ok(TempCheckout {
-            owner: self.dir.clone(),
-            dir,
-            sha,
-            _tmp: tmp,
-        })
-    }
-
     fn has_origin(&self) -> Result<bool> {
         let remotes = git(&self.dir, &["remote"])?;
         Ok(stdout(&remotes).lines().any(|line| line == "origin"))
     }
 }
 
-pub struct TempCheckout {
-    owner: PathBuf,
-    dir: PathBuf,
-    sha: String,
-    _tmp: tempfile::TempDir,
+pub struct LocalSnapshot {
+    tmp: tempfile::TempDir,
+    sizes: std::sync::Arc<std::collections::BTreeMap<String, u64>>,
 }
 
-impl TempCheckout {
+impl LocalSnapshot {
+    pub fn sizes(&self) -> std::sync::Arc<std::collections::BTreeMap<String, u64>> {
+        self.sizes.clone()
+    }
+
     pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    pub fn sha(&self) -> &str {
-        &self.sha
-    }
-}
-
-impl Drop for TempCheckout {
-    fn drop(&mut self) {
-        let dir = self.dir.to_string_lossy().into_owned();
-        let _ = git_ok(&self.owner, &["worktree", "remove", "--force", &dir]);
+        self.tmp.path()
     }
 }
 
@@ -782,7 +916,7 @@ mod tests {
     fn discovers_root_and_head() {
         let (_tmp, repo) = fixture();
         assert!(repo.root().join("aggr.toml").exists());
-        assert!(repo.head_sha().unwrap().is_some());
+        assert!(repo.local_commit("HEAD").is_ok());
         assert!(repo.has_remote("origin").unwrap());
         assert!(!repo.has_remote("upstream").unwrap());
         let sub = repo.root().join("sub");
@@ -820,6 +954,74 @@ mod tests {
             Some(PathBuf::from("nested/aggr.toml"))
         );
         assert_eq!(repo.relative_path(&_tmp.path().join("outside.toml")), None);
+    }
+
+    #[test]
+    fn config_provenance_never_fetches_missing_promisor_blobs() {
+        let (tmp, repo) = fixture();
+        git(
+            &tmp.path().join("origin.git"),
+            &["config", "uploadpack.allowFilter", "true"],
+        )
+        .unwrap();
+        git(repo.root(), &["config", "remote.origin.promisor", "true"]).unwrap();
+        git(
+            repo.root(),
+            &["config", "remote.origin.partialclonefilter", "blob:none"],
+        )
+        .unwrap();
+        let oid = sh(repo.root(), &["rev-parse", "HEAD:aggr.toml"]);
+        let object = repo
+            .root()
+            .join(".git/objects")
+            .join(&oid[..2])
+            .join(&oid[2..]);
+        fs::remove_file(object).unwrap();
+        assert!(
+            !repo
+                .head_matches_files(&[repo.root().join("aggr.toml")])
+                .unwrap()
+        );
+        let missing = command(repo.root(), &["cat-file", "-e", &oid])
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .output()
+            .unwrap();
+        assert!(
+            !missing.status.success(),
+            "provenance must leave the missing object absent"
+        );
+    }
+
+    #[test]
+    fn local_snapshot_rejects_paths_that_alias_on_the_host_filesystem() {
+        let (_tmp, repo) = fixture();
+        let oid = sh(repo.root(), &["rev-parse", "HEAD:aggr.toml"]);
+        for name in ["Case", "case"] {
+            git(
+                repo.root(),
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100644,{oid},{name}"),
+                ],
+            )
+            .unwrap();
+        }
+        let tree = sh(repo.root(), &["write-tree"]);
+        let probe = tempfile::tempdir().unwrap();
+        fs::write(probe.path().join("Case"), "probe").unwrap();
+        let snapshot = repo.local_snapshot(&tree, true);
+        if probe.path().join("case").exists() {
+            assert!(
+                snapshot.is_err(),
+                "an archive file must not overwrite a case alias"
+            );
+        } else {
+            let snapshot = snapshot.unwrap();
+            assert!(snapshot.dir().join("Case").is_file());
+            assert!(snapshot.dir().join("case").is_file());
+        }
     }
 
     #[test]
@@ -1286,7 +1488,7 @@ mod tests {
     #[test]
     fn unborn_main_still_gets_a_worktree() {
         let (_tmp, repo) = local_fixture(false);
-        assert_eq!(repo.head_sha().unwrap(), None);
+        assert!(repo.local_commit("HEAD").is_err());
         let wt = repo
             .ensure_worktree("aggr", Path::new(".aggr/data"))
             .unwrap();

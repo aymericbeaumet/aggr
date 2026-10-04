@@ -1,0 +1,366 @@
+{
+  "date": "2026-10-04",
+  "profile": "optimized development profile; release-mode HTML",
+  "machine": {
+    "cpu": "Apple M4 Pro",
+    "memory_bytes": 51539607552,
+    "os": "macOS 26.6.2",
+    "architecture": "arm64"
+  },
+  "limitations": [
+    "Other verification tasks ran concurrently.",
+    "Local object sharing excludes clone transfer, sync, and deployment from pinned archive timings.",
+    "A different archive and media policy from the live instance; no measured speedup ratio against its full job.",
+    "Cold Pagefind serialization can change output bytes."
+  ],
+  "binary_sha256": "8acde7a071ba32aa7601997852b9c63275d0186b16c24000a4785fc5909261cd",
+  "archive": {
+    "repository": "https://github.com/aymericbeaumet/aggr-instance",
+    "data_sha": "76a5f2ba581940085d55209be31590aba2559d6c",
+    "config_sha": "fafc27d49a253eee2bcafd9ff37a0ab12f7c8573",
+    "effective_config_sha256": "669deaf0bc1e024e6f89aba047c8f590b87e95440500faf3f693ddf834bac7c8",
+    "stored_items": 1060,
+    "rendered_articles": 803,
+    "fetch": {
+      "content": "light",
+      "images": "remote",
+      "previews": "remote",
+      "documents": "remote"
+    },
+    "full_render_cache": false,
+    "measurements": [
+      {
+        "case": "cold-1",
+        "wall_seconds": 19.735380417,
+        "report": {
+          "archive_seconds": 1.643692375,
+          "archive_sha": "76a5f2ba581940085d55209be31590aba2559d6c",
+          "hermetic": false,
+          "media_cache": {
+            "compressed_hits": 0,
+            "compressed_misses": 0,
+            "encoded_bytes": 0,
+            "responsive_hits": 0,
+            "responsive_misses": 0
+          },
+          "offline": true,
+          "output_bytes": 155705711,
+          "render_cache_hit": false,
+          "render_passes": [
+            {
+              "media_bytes": 0,
+              "omitted_media_groups": 0,
+              "phases": {
+                "archive preparation and media": 2.286897208,
+                "article pages and representations": 2.53364525,
+                "feed and directory pages": 2.931244167,
+                "feeds and static assets": 0.197680958,
+                "offline catalog and worker": 0.261885375,
+                "search index": 7.051474125
+              },
+              "total_seconds": 15.262827833
+            }
+          ],
+          "render_seconds": 16.550282417,
+          "report_kind": "aggr-build",
+          "retry_count": 0,
+          "schema_version": 1,
+          "sync_seconds": 2.5e-07,
+          "total_seconds": 18.193975041999998,
+          "version": "1.11.0"
+        }
+      },
+      {
+        "case": "warm-1",
+        "wall_seconds": 14.697357208000003,
+        "report": {
+          "archive_seconds": 2.9365145,
+          "archive_sha": "76a5f2ba581940085d55209be31590aba2559d6c",
+          "hermetic": false,
+          "media_cache": {
+            "compressed_hits": 0,
+            "compressed_misses": 0,
+            "encoded_bytes": 0,
+            "responsive_hits": 0,
+            "responsive_misses": 0
+          },
+          "offline": true,
+          "output_bytes": 155705711,
+          "render_cache_hit": false,
+          "render_passes": [
+            {
+              "media_bytes": 0,
+              "omitted_media_groups": 0,
+              "phases": {
+                "archive preparation and media": 4.201313833,
+                "article pages and representations": 1.8823507080000002,
+                "feed and directory pages": 1.623837792,
+                "feeds and static assets": 0.153292167,
+                "offline catalog and worker": 0.191260292,
+                "search index": 0.547095625
+              },
+              "total_seconds": 8.599150999999999
+            }
+          ],
+          "render_seconds": 10.765955375,
+          "report_kind": "aggr-build",
+          "retry_count": 0,
+          "schema_version": 1,
+          "sync_seconds": 8.3e-08,
+          "total_seconds": 13.702469958,
+          "version": "1.11.0"
+        }
+      },
+      {
+        "case": "cold-2",
+        "wall_seconds": 22.675649833,
+        "report": {
+          "archive_seconds": 3.639509292,
+          "archive_sha": "76a5f2ba581940085d55209be31590aba2559d6c",
+          "hermetic": false,
+          "media_cache": {
+            "compressed_hits": 0,
+            "compressed_misses": 0,
+            "encoded_bytes": 0,
+            "responsive_hits": 0,
+            "responsive_misses": 0
+          },
+          "offline": true,
+          "output_bytes": 155705705,
+          "render_cache_hit": false,
+          "render_passes": [
+            {
+              "media_bytes": 0,
+              "omitted_media_groups": 0,
+              "phases": {
+                "archive preparation and media": 3.068931,
+                "article pages and representations": 1.418444042,
+                "feed and directory pages": 1.378106667,
+                "feeds and static assets": 0.137884791,
+                "offline catalog and worker": 0.323482209,
+                "search index": 9.89316025
+              },
+              "total_seconds": 16.220009417
+            }
+          ],
+          "render_seconds": 17.766802667,
+          "report_kind": "aggr-build",
+          "retry_count": 0,
+          "schema_version": 1,
+          "sync_seconds": 1.67e-07,
+          "total_seconds": 21.406312126,
+          "version": "1.11.0"
+        }
+      },
+      {
+        "case": "warm-2",
+        "wall_seconds": 12.021869125000002,
+        "report": {
+          "archive_seconds": 0.99429825,
+          "archive_sha": "76a5f2ba581940085d55209be31590aba2559d6c",
+          "hermetic": false,
+          "media_cache": {
+            "compressed_hits": 0,
+            "compressed_misses": 0,
+            "encoded_bytes": 0,
+            "responsive_hits": 0,
+            "responsive_misses": 0
+          },
+          "offline": true,
+          "output_bytes": 155705705,
+          "render_cache_hit": false,
+          "render_passes": [
+            {
+              "media_bytes": 0,
+              "omitted_media_groups": 0,
+              "phases": {
+                "archive preparation and media": 3.235002083,
+                "article pages and representations": 1.335333958,
+                "feed and directory pages": 3.337852459,
+                "feeds and static assets": 0.132548208,
+                "offline catalog and worker": 0.117792708,
+                "search index": 0.616784459
+              },
+              "total_seconds": 8.775314542
+            }
+          ],
+          "render_seconds": 10.3194145,
+          "report_kind": "aggr-build",
+          "retry_count": 0,
+          "schema_version": 1,
+          "sync_seconds": 1.25e-07,
+          "total_seconds": 11.313712875,
+          "version": "1.11.0"
+        }
+      },
+      {
+        "case": "cold-3",
+        "wall_seconds": 22.8534825,
+        "report": {
+          "archive_seconds": 1.25651175,
+          "archive_sha": "76a5f2ba581940085d55209be31590aba2559d6c",
+          "hermetic": false,
+          "media_cache": {
+            "compressed_hits": 0,
+            "compressed_misses": 0,
+            "encoded_bytes": 0,
+            "responsive_hits": 0,
+            "responsive_misses": 0
+          },
+          "offline": true,
+          "output_bytes": 155705718,
+          "render_cache_hit": false,
+          "render_passes": [
+            {
+              "media_bytes": 0,
+              "omitted_media_groups": 0,
+              "phases": {
+                "archive preparation and media": 2.320377166,
+                "article pages and representations": 1.699116666,
+                "feed and directory pages": 4.998630084,
+                "feeds and static assets": 0.119017125,
+                "offline catalog and worker": 0.842783292,
+                "search index": 7.021005542
+              },
+              "total_seconds": 17.000930291
+            }
+          ],
+          "render_seconds": 20.662959792,
+          "report_kind": "aggr-build",
+          "retry_count": 0,
+          "schema_version": 1,
+          "sync_seconds": 4.16e-07,
+          "total_seconds": 21.919471958,
+          "version": "1.11.0"
+        }
+      },
+      {
+        "case": "warm-3",
+        "wall_seconds": 9.743126750000002,
+        "report": {
+          "archive_seconds": 0.5666685,
+          "archive_sha": "76a5f2ba581940085d55209be31590aba2559d6c",
+          "hermetic": false,
+          "media_cache": {
+            "compressed_hits": 0,
+            "compressed_misses": 0,
+            "encoded_bytes": 0,
+            "responsive_hits": 0,
+            "responsive_misses": 0
+          },
+          "offline": true,
+          "output_bytes": 155705718,
+          "render_cache_hit": false,
+          "render_passes": [
+            {
+              "media_bytes": 0,
+              "omitted_media_groups": 0,
+              "phases": {
+                "archive preparation and media": 2.063437208,
+                "article pages and representations": 0.707353416,
+                "feed and directory pages": 1.156899709,
+                "feeds and static assets": 0.103775959,
+                "offline catalog and worker": 0.079088125,
+                "search index": 0.330294958
+              },
+              "total_seconds": 4.440849625
+            }
+          ],
+          "render_seconds": 7.757839333,
+          "report_kind": "aggr-build",
+          "retry_count": 0,
+          "schema_version": 1,
+          "sync_seconds": 1.25e-07,
+          "total_seconds": 8.324507958,
+          "version": "1.11.0"
+        }
+      }
+    ]
+  },
+  "starter": {
+    "configuration": "examples/starter.toml",
+    "sources": 2,
+    "imported_items": 17,
+    "wall_seconds": 3.9771485,
+    "sync_seconds": 2.20238575,
+    "render_pass_seconds": 0.541010625,
+    "storage": {
+      "current_tree": {
+        "files": 42,
+        "bytes": 279933
+      },
+      "originals": {
+        "files": 0,
+        "bytes": 0
+      },
+      "renditions": {
+        "files": 0,
+        "bytes": 0
+      },
+      "output": {
+        "files": 175,
+        "bytes": 6185350
+      },
+      "caches": {
+        "articles-v1": {
+          "files": 0,
+          "bytes": 0
+        },
+        "budget-v1": {
+          "files": 1,
+          "bytes": 39
+        },
+        "capture-retries-v1": {
+          "files": 0,
+          "bytes": 0
+        },
+        "deployment-media-v1": {
+          "files": 0,
+          "bytes": 0
+        },
+        "discussions-v1": {
+          "files": 0,
+          "bytes": 0
+        },
+        "feed-parsing": {
+          "files": 2,
+          "bytes": 54
+        },
+        "image-failures-v1": {
+          "files": 0,
+          "bytes": 0
+        },
+        "pagefind-v1": {
+          "files": 37,
+          "bytes": 750641
+        },
+        "recording-duration-v1": {
+          "files": 0,
+          "bytes": 0
+        },
+        "render-v1": {
+          "files": 176,
+          "bytes": 6185439
+        },
+        "validated-images-v2": {
+          "files": 0,
+          "bytes": 0
+        }
+      },
+      "git": {
+        "loose_objects": 68,
+        "packed_objects": 0,
+        "loose_bytes": 319488,
+        "packed_bytes": 0,
+        "garbage_bytes": 0
+      },
+      "history": "Deleting current-tree renditions does not reclaim append-only Git history or invalidate old blob URLs."
+    }
+  },
+  "first_visit": {
+    "fixture": "tests/browser/default_visit.rs",
+    "server_http_response_bytes": 832826,
+    "browser_transfer_size_bytes": 390218,
+    "scope": "Uncompressed response headers and bodies, including service-worker installation; controlled local fixture."
+  }
+}
