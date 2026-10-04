@@ -80,7 +80,7 @@ motion = "auto" # auto, off
 single_key_shortcuts = true
 scroll_amount = 10 # 1–100 lines for d/u, capped at half the available viewport
 # Recent complete articles and their archived images to download (0–1000); 0 disables downloads.
-offline_items = 30
+offline_items = 0
 
 # Optional public identity for Schema.org metadata. `type` is "person" or "organization".
 # [site.identity]

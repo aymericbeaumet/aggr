@@ -71,10 +71,10 @@ class Preferences {
     return String(this.values?.motion ?? 'auto');
   }
 
-  /** How many recent articles the worker keeps offline (`offline-items`); the build's 30 until loaded. */
+  /** How many recent articles the worker keeps offline (`offline-items`); none until the reader asks. */
   get offlineItems(): number {
     const value = this.values?.['offline-items'];
-    return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 30;
+    return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0;
   }
 
   /** Read the rules from the page and the stored values from `storage`. */

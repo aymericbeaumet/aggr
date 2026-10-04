@@ -134,10 +134,15 @@ class SearchState {
     this.error = '';
     this.invalidate();
     this.attached = true;
-    const at = this.href;
-    this.drive((driver) => {
-      if (this.attached && this.href === at) driver.arrive();
-    });
+    if (this.driver) this.driver.arrive();
+    else if (query?.trim()) {
+      const at = this.href;
+      void this.load()
+        .then((driver) => {
+          if (this.attached && this.href === at) driver.arrive();
+        })
+        .catch(() => {});
+    }
   }
 
   leave(): void {

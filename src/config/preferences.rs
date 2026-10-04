@@ -129,7 +129,7 @@ impl Default for ReaderPreferences {
             motion: Motion::Auto,
             single_key_shortcuts: true,
             scroll_amount: 10,
-            offline_items: 30,
+            offline_items: 0,
         }
     }
 }
