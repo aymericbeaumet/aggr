@@ -213,11 +213,14 @@ Search completion uses `search-catalog.json` (version, base, document count, and
 runtime and its filter files wait until an actual query needs them, so a reader who never searches
 downloads none of it. See [client development](client.md) for the search contract.
 
-Prefetching is bounded. A press, or a mouse resting on a link for 60 ms, fetches that page.
-Once a page settles, the reader also fetches the tabs, the neighbouring articles and the rows
-that stay on screen for half a second. That is at most ten guesses per page, and none at all
-under Save-Data or on a 2G connection. Fetched pages stay in memory for five minutes, 24 at most,
-and are parsed while the browser is idle, so following a link only has to swap the content.
+Prefetching is bounded. A press or a hover fetches that page at once, and a page already in memory
+is parsed ahead of the tap and swapped in the same turn. The first feed screen and an article's
+neighbours also carry `rel="prefetch"` in the document, so the browser can start before the reader
+boots. Once a page has painted, the reader fetches the tabs, the neighbouring articles and the rows
+already on screen; a row that scrolls into view waits 80 ms, so a fling does not spend the allowance.
+That is at most sixteen guesses per page, and none at all under Save-Data or on a 2G connection.
+Intent is not counted. Fetched pages stay in memory for five minutes, 24 at most. Guesses are parsed
+one per frame; a page the reader means to open is parsed as soon as it arrives.
 
 ## Measuring changes
 

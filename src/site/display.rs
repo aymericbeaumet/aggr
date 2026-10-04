@@ -172,8 +172,30 @@ fn count(value: Option<&serde_yaml_ng::Value>) -> Option<u64> {
     value.and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
 }
 
+/// A Hacker News thread. Its points and comment count are submission chatter; the discussion
+/// link is how the reader gets there.
+fn hacker_news_thread(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|url| {
+        url.host_str() == Some("news.ycombinator.com")
+            && url.path() == "/item"
+            && url.query_pairs().any(|(key, value)| {
+                key == "id" && !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
+            })
+    })
+}
+
 impl From<&super::context::ItemCtx> for Metadata {
     fn from(item: &super::context::ItemCtx) -> Self {
+        let comments_url = item
+            .extra
+            .get("comments_url")
+            .and_then(serde_yaml_ng::Value::as_str)
+            .filter(|url| public_url(url))
+            .map(str::to_string);
+        let hacker_news = comments_url.as_deref().is_some_and(hacker_news_thread);
+        let hacker_news_discussion = item.discussions.iter().any(|discussion| {
+            discussion.name == "hackernews" && discussion.found && public_url(&discussion.url)
+        });
         Self {
             original: item.link.clone(),
             date: item.date.to_rfc3339(),
@@ -217,18 +239,21 @@ impl From<&super::context::ItemCtx> for Metadata {
                 .map(|discussion| Discussion {
                     name: discussion.name.clone(),
                     url: discussion.url.clone(),
-                    score: discussion.score,
+                    // The Hacker News score restates the points count. The link is enough.
+                    score: (discussion.name != "hackernews")
+                        .then_some(discussion.score)
+                        .flatten(),
                 })
                 .collect(),
-            points: count(item.extra.get("points")),
-            comments: item
-                .extra
-                .get("comments_url")
-                .and_then(serde_yaml_ng::Value::as_str)
-                .filter(|url| public_url(url))
+            points: count(item.extra.get("points"))
+                .filter(|_| !(hacker_news || hacker_news_discussion)),
+            comments: comments_url
+                .filter(|_| !(hacker_news && hacker_news_discussion))
                 .map(|url| Comments {
-                    url: url.to_owned(),
-                    count: count(item.extra.get("num_comments")),
+                    url,
+                    count: (!hacker_news)
+                        .then_some(count(item.extra.get("num_comments")))
+                        .flatten(),
                 }),
         }
     }

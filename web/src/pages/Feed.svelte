@@ -61,8 +61,9 @@
     untrack(() => badges.reveal(onScreen));
   });
 
-  // The list arrived at this address: the search field follows its `?q=`, and the search module
-  // warms its catalogue (Pagefind itself waits for a valid query). Leaving ends the page's work.
+  // The list arrived at this address: the search field follows its `?q=`. The catalogue waits
+  // for an idle slice (Pagefind itself waits for a valid query) and loads at once on focus.
+  // Leaving ends the page's work.
   $effect(() => {
     const href = shown.href;
     const root = shown.root;

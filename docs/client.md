@@ -29,10 +29,13 @@ the client. If `#aggr-page` is missing or malformed the page stays static.
 
 Navigation fetches the target page, extracts its model, its content element and its `<head>`
 metadata with `DOMParser`, and re-renders `<main>` from state while the header and tab bar
-persist. A link inside the archive is fetched as soon as it is pressed or hovered (60 ms), and
-once a page settles the tabs, the neighbouring articles and the visible rows are fetched too,
-bounded to 16 speculative requests and a 24-page, five-minute cache, and off on Save-Data or slow
-connections. Scroll positions are kept per history entry, so Back returns to the same place and
+persist. A link inside the archive is fetched as soon as it is pressed or hovered, and a page
+already in memory is swapped in that same turn. Once a page has painted, the tabs, the neighbouring
+articles and the rows on screen are fetched too; a row that scrolls into view waits 80 ms. Guesses
+are bounded to 16 requests and a 24-page, five-minute cache, and off on Save-Data or slow
+connections. The first feed screen and an article's neighbours also carry `rel="prefetch"`, so the
+browser can start before the reader boots. The search catalogue waits for an idle slice, and loads
+at once when the field is focused. Scroll positions are kept per history entry, so Back returns to the same place and
 list cursor. A non-HTML response, a page without a model or one built by another app version
 falls back to ordinary navigation, and without JavaScript every link is an ordinary link.
 
@@ -217,6 +220,7 @@ fragments are loaded. Completion uses Pagefind's filtered counts for a single se
 filter-membership intersections for mixed phrases/exclusions, without loading article bodies.
 Display metadata remains opaque to Pagefind's text tokenizer. Archived points and comment counts
 are shared by static and search metadata, including explicit zero values; missing counts stay absent.
+Hacker News points, comment counts, and the discussion score are omitted from that shared view.
 
 Completion caches normalized aliases and ranking by immutable catalogue identity; detecting a
 finished facet token does not build or sort a suggestion list. A persistent search session coalesces

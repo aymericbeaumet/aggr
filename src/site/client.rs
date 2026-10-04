@@ -181,8 +181,12 @@ pub struct ClientArticle {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClientAccess {
     Normal,
-    SubscriptionRequired { archive_lookup_url: Option<String> },
+    SubscriptionRequired {
+        archive_lookup_url: Option<String>,
+    },
     TitlesOnly,
+    /// A feed kept no article text and no media. The original link is the way to read it.
+    Missing,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -388,9 +392,20 @@ impl ClientAccess {
         let has_media = item.video.is_some()
             || item.document.is_some()
             || item.native_media.is_some()
-            || item.interactive.is_some();
-        if item.content == ContentKind::None && item.body_html.is_none() && !has_media {
-            return Self::TitlesOnly;
+            || item.interactive.is_some()
+            || item.article_preview.is_some();
+        let blank = item
+            .body_html
+            .as_deref()
+            .is_none_or(|html| html.trim().is_empty());
+        if blank && !has_media {
+            // Titles-only sources announce themselves. An empty feed body is an article the
+            // capture did not keep — aggregator bookkeeping that was stripped, or a page that
+            // yielded nothing — and the original link is what a reader can open.
+            if item.content == ContentKind::None {
+                return Self::TitlesOnly;
+            }
+            return Self::Missing;
         }
         Self::Normal
     }

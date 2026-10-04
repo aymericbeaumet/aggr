@@ -79,26 +79,56 @@ function replaceAddress(href: string): void {
   if (installed) current = address(location.href);
 }
 
+/** Addresses the reader has asked for. Their fetch outranks a guess still in flight. */
+const intent = new Set<string>();
+
+/** Parses waiting to happen, one per frame, so a burst of guesses cannot stall a tap. */
+const parseQueue: Array<() => void> = [];
+let draining = false;
+
+function drainParses(): void {
+  const next = parseQueue.shift();
+  if (!next) {
+    draining = false;
+    return;
+  }
+  next();
+  requestAnimationFrame(drainParses);
+}
+
+function enqueueParse(run: () => void): void {
+  parseQueue.push(run);
+  if (draining) return;
+  draining = true;
+  requestAnimationFrame(drainParses);
+}
+
 async function request(key: string): Promise<Fetched> {
-  const response = await fetch(key, { headers: { accept: 'text/html' }, credentials: 'same-origin' });
+  const response = await fetch(key, {
+    headers: { accept: 'text/html' },
+    credentials: 'same-origin',
+    priority: intent.has(key) ? 'high' : 'low',
+  });
   const type = response.headers.get('content-type') || '';
   if (!response.ok || !type.includes('text/html')) throw new Error('not a page');
   return { url: response.url || key, html: await response.text() };
 }
 
 function pages(): PageCache {
-  cache ??= new PageCache(request, {
-    lifetime: PAGE_LIFETIME,
-    // Parsing is the one step left between the tap and the swap; do it while nothing waits.
-    onReady: (key, record, fetched) =>
-      idle(() => {
-        if (cache?.peek(key) === record && !record.parsed) record.parsed = parseDocument(fetched.html);
-      }),
-  });
+  cache ??= new PageCache(request, { lifetime: PAGE_LIFETIME });
   return cache;
 }
 
-/** Fetch a page the reader is about to open. Guesses are counted and bounded; intent is not. */
+/** Parse `record` now. A page that is already parsed is left alone. */
+function parseNow(key: string, record: ReturnType<PageCache['peek']>): void {
+  if (!record?.fetched || record.parsed || cache?.peek(key) !== record) return;
+  record.parsed = parseDocument(record.fetched.html);
+}
+
+/**
+ * Fetch a page the reader is about to open, and parse it before the tap. Guesses are counted
+ * and bounded, and their parse waits a frame; intent is not, and is parsed the moment it arrives.
+ */
 function prefetch(href: string, guess = false): void {
   if (!installed) return;
   let url: URL;
@@ -111,7 +141,15 @@ function prefetch(href: string, guess = false): void {
   if (!routable(url, root()) || key === current) return;
   const store = pages();
   if (guess && (frugal(navigator.connection) || !speculation.admit(store.has(key)))) return;
-  store.load(url.href).page.catch(() => {});
+  if (!guess) intent.add(key);
+  const record = store.load(url.href);
+  const parse = () => parseNow(key, record);
+  if (record.fetched) {
+    if (guess) enqueueParse(parse);
+    else parse();
+    return;
+  }
+  record.page.then(() => (guess ? enqueueParse(parse) : parse())).catch(() => {});
 }
 
 /** Leave the page on screen: keep its place and its cursor, and end what it set up. */
@@ -211,46 +249,62 @@ async function go(href: string, { replace = false, traverse = false, from = null
   const mine = ++token;
   pending = true;
   phase = 'fetching';
-  waiting(true);
   acknowledge(from);
+  intent.add(address(url.href));
   const record = pages().load(url.href);
+  // A page already in memory is on screen before the click handler returns. Waiting would
+  // cost a frame, which is the whole of the delay a reader can feel.
+  const show = (fetched: Fetched): void => {
+    if (mine !== token) return;
+    pending = false;
+    waiting(false);
+    const doc = record.parsed ?? parseDocument(fetched.html);
+    // The parsed page is taken apart by the swap; the next visit parses its own copy.
+    record.parsed = null;
+    const extracted = extract(doc, document);
+    if (!extracted || extracted.model.build.app !== page.model?.build.app) {
+      fallback(url.href, traverse);
+      return;
+    }
+    phase = 'rendering';
+    if (!traverse) {
+      leave();
+      const destination = new URL(fetched.url);
+      destination.hash = url.hash;
+      entry = newKey();
+      if (replace) history.replaceState({ aggr: { key: entry } }, '', destination.href);
+      else history.pushState({ aggr: { key: entry } }, '', destination.href);
+    }
+    current = address(location.href);
+    patchHead(document, doc);
+    syncBody(extracted.body);
+    page.show({ model: extracted.model, content: extracted.content, href: location.href });
+    flushSync();
+    opening = null;
+    const saved = traverse
+      ? (memory.recall(entry) ?? (history.state?.aggr?.scroll as number | undefined))
+      : extracted.model.kind !== 'item' && !url.hash
+        ? memory.place(current)
+        : undefined;
+    arrive(saved, url.hash);
+    mountPage();
+    phase = 'settled';
+  };
+  if (record.fetched) {
+    show(record.fetched);
+    return;
+  }
+  waiting(true);
   const fetched = await record.page.catch(() => null);
   // An older response never wins: the reader has moved on, or chosen to stay.
   if (mine !== token) return;
-  pending = false;
-  waiting(false);
-  if (!fetched) return fallback(url.href, traverse);
-  const doc = record.parsed ?? parseDocument(fetched.html);
-  // The parsed page is taken apart by the swap; the next visit parses its own copy.
-  record.parsed = null;
-  const extracted = extract(doc, document);
-  if (!extracted) return fallback(url.href, traverse);
-  // A page from another release needs that release's styles and scripts: load it whole.
-  if (extracted.model.build.app !== page.model?.build.app) return fallback(url.href, traverse);
-
-  phase = 'rendering';
-  if (!traverse) {
-    leave();
-    const destination = new URL(fetched.url);
-    destination.hash = url.hash;
-    entry = newKey();
-    if (replace) history.replaceState({ aggr: { key: entry } }, '', destination.href);
-    else history.pushState({ aggr: { key: entry } }, '', destination.href);
+  if (!fetched) {
+    pending = false;
+    waiting(false);
+    fallback(url.href, traverse);
+    return;
   }
-  current = address(location.href);
-  patchHead(document, doc);
-  syncBody(extracted.body);
-  page.show({ model: extracted.model, content: extracted.content, href: location.href });
-  flushSync();
-  opening = null;
-  const saved = traverse
-    ? (memory.recall(entry) ?? (history.state?.aggr?.scroll as number | undefined))
-    : extracted.model.kind !== 'item' && !url.hash
-      ? memory.place(current)
-      : undefined;
-  arrive(saved, url.hash);
-  mountPage();
-  phase = 'settled';
+  show(fetched);
 }
 
 /** Record a new entry for a place in this page, as following a fragment link would. */
@@ -284,16 +338,21 @@ function speculate(signal: AbortSignal): void {
   const timer = setInterval(refresh, PAGE_LIFETIME / 2);
   document.addEventListener('visibilitychange', refresh, { signal });
   signal.addEventListener('abort', () => clearInterval(timer));
-  // The tabs and neighbours are fetched as soon as this page has painted: they are what a reader
-  // reaches for first, and a tap must find them ready.
-  requestAnimationFrame(() =>
-    setTimeout(() => {
-      if (!signal.aborted && !frugal(navigator.connection)) for (const href of nearest()) prefetch(href, true);
-    }, 0),
-  );
+  // Tabs, neighbours and the rows already on screen, as soon as this page has painted: a tap
+  // must find them parsed. Rows that scroll into view later wait a moment, so a fling does not
+  // spend the allowance on pages that have already gone by.
+  requestAnimationFrame(() => {
+    if (signal.aborted || frugal(navigator.connection)) return;
+    for (const href of nearest()) prefetch(href, true);
+    const height = window.innerHeight || document.documentElement.clientHeight;
+    for (const link of document.querySelectorAll('.rows .row [data-row-open], .article-more-link')) {
+      if (!(link instanceof HTMLAnchorElement)) continue;
+      const rect = link.getBoundingClientRect();
+      if (rect.bottom > 0 && rect.top < height) prefetch(link.href, true);
+    }
+  });
   idle(() => {
     if (signal.aborted || frugal(navigator.connection) || !('IntersectionObserver' in window)) return;
-    // A row the reader lingers over, rather than every row that scrolls past.
     const timers = new Map<Element, ReturnType<typeof setTimeout>>();
     const observer = new IntersectionObserver((entries) => {
       for (const seen of entries) {
@@ -306,7 +365,7 @@ function speculate(signal: AbortSignal): void {
           setTimeout(() => {
             observer.unobserve(link);
             prefetch(link.href, true);
-          }, 250),
+          }, 80),
         );
       }
     });
@@ -440,18 +499,15 @@ function install(mount: PageMount[]): void {
     },
     { capture: true, passive: true },
   );
-  let hover: ReturnType<typeof setTimeout> | undefined;
   document.addEventListener(
     'pointerover',
     (event) => {
-      clearTimeout(hover);
       if (event.pointerType !== 'mouse') return;
       const hit = linkIn(event, root());
-      if (hit) hover = setTimeout(() => prefetch(hit.url.href), 60);
+      if (hit) prefetch(hit.url.href);
     },
     { passive: true },
   );
-  document.addEventListener('pointerout', () => clearTimeout(hover), { passive: true });
   // Keyboard activation of a link is a click as well; Enter on a focused link fires one.
 
   window.addEventListener('popstate', (event) => {
