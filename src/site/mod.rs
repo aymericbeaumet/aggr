@@ -4,7 +4,7 @@
 mod assets;
 mod budget;
 pub mod client;
-mod compressed_media;
+pub(crate) mod compressed_media;
 pub mod context;
 pub(crate) mod dev;
 mod directory;
@@ -422,6 +422,19 @@ fn worker_source(config: &SwConfig, worker_url: &str) -> Result<String> {
         serde_json::to_string(config)?,
         serde_json::to_string(worker_url)?
     ))
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct BuildMetrics {
+    pub passes: Vec<BuildPass>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BuildPass {
+    pub phases: BTreeMap<String, f64>,
+    pub total_seconds: f64,
+    pub media_bytes: u64,
+    pub omitted_media_groups: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1298,7 +1311,9 @@ fn build_once(
                 .as_bytes(),
         )?;
         // The shell installs first; complete article downloads run separately.
-        let mut paths = assets::precache_paths("", &assets);
+        // Eager reader chunks come from the module graph. A bounded set of collection
+        // roots stays in the shell so an offline browse still has somewhere to land.
+        let mut paths = precache::paths(&theme(), &renderer, &assets)?;
         paths.extend(
             source_ctxs
                 .iter()
@@ -1307,6 +1322,8 @@ fn build_once(
                 .chain(tags.iter().map(|tag| tag.page.clone()))
                 .take(config.site.preferences.offline_items.clamp(32, 256)),
         );
+        let mut seen = std::collections::BTreeSet::new();
+        paths.retain(|path| seen.insert(path.clone()));
         let mut sw_config = SwConfig {
             version: cache_version(&build_ctx),
             app_version: build_ctx.app_version.clone(),
@@ -1445,7 +1462,16 @@ fn write_article(
             ),
             local_images,
         )));
-    ctx.body_html = Some(body_html);
+    if site.hermetic {
+        ctx.video = None;
+        ctx.native_media = None;
+        ctx.interactive = None;
+    }
+    ctx.body_html = Some(if site.hermetic {
+        hermetic::reader_body(&body_html)?
+    } else {
+        body_html
+    });
     ctx.has_margin_notes = has_margin_notes;
     let dir = out.join(&ctx.url);
     let representation = out.join(ctx.url.trim_end_matches('/'));

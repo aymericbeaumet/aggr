@@ -1349,6 +1349,74 @@ mod avif_tests {
     }
 }
 
+/// Disposable responsive copies for publication; acquisition only archives the master.
+pub(crate) fn derive_renditions(asset: &Asset) -> Result<Vec<Rendition>> {
+    if !asset.renditions.is_empty() {
+        return Ok(asset.renditions.clone());
+    }
+    let limits = MediaLimits::default();
+    let format = image::guess_format(&asset.master_bytes)?;
+    if format == ImageFormat::Avif || is_animated(&asset.master_bytes, format, &limits)? {
+        return Ok(Vec::new());
+    }
+    let mut reader = ImageReader::with_format(Cursor::new(asset.master_bytes.as_slice()), format);
+    reader.limits(decoder_limits(&limits));
+    let mut decoder = reader.into_decoder()?;
+    if decoder
+        .icc_profile()
+        .map_or(true, |profile| profile.is_some())
+        || !safe_for_renditions(decoder.original_color_type())
+    {
+        return Ok(Vec::new());
+    }
+    let orientation = decoder.orientation()?;
+    let mut image = DynamicImage::from_decoder(decoder)?;
+    image.apply_orientation(orientation);
+    validate_dimensions(image.width(), image.height(), &limits)?;
+    let large = u64::from(image.width()) * u64::from(image.height()) > MAX_FULL_WIDTH_PIXELS;
+    let full_width = (format != ImageFormat::WebP && !large)
+        .then(|| {
+            prepare_rendition(
+                &image,
+                image.width(),
+                limits.max_file_bytes,
+                asset.master_bytes.len(),
+            )
+        })
+        .flatten();
+    if !large && format != ImageFormat::WebP && full_width.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut renditions = limits
+        .rendition_widths
+        .iter()
+        .copied()
+        .filter(|width| *width > 0 && *width < image.width())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|width| {
+            prepare_rendition(
+                &image,
+                width,
+                limits.max_file_bytes,
+                asset.master_bytes.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    renditions.extend(full_width);
+    let mut remaining = limits
+        .max_article_bytes
+        .saturating_sub(asset.master_bytes.len());
+    renditions.retain(|rendition| {
+        if rendition.bytes.len() > remaining {
+            return false;
+        }
+        remaining -= rendition.bytes.len();
+        true
+    });
+    Ok(renditions)
+}
+
 fn prepare_rendition(
     image: &DynamicImage,
     width: u32,

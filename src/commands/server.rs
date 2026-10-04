@@ -569,6 +569,8 @@ fn render_refresh(
             .context("creating isolated dev snapshot")?;
         let out = directory.path().join("site");
         let info = crate::site::BuildInfo {
+            hermetic: false,
+            metrics: Default::default(),
             out: out.clone(),
             base_url,
             config_sha,

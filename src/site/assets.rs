@@ -20,7 +20,17 @@ pub(super) type Published = BTreeMap<String, String>;
 /// Everything the service worker fetches at install, as site paths under `base`: the shell pages
 /// and the assets needed to render them. Articles are cached as the reader opens them.
 pub(super) fn precache_paths(base: &str, assets: &[String]) -> Vec<String> {
-    const SHELLS: [&str; 3] = ["", "offline.html", "manifest.webmanifest"];
+    const SHELLS: [&str; 9] = [
+        "",
+        "browse/",
+        "categories/",
+        "sources/",
+        "tags/",
+        "preferences/",
+        "404.html",
+        "offline.html",
+        "manifest.webmanifest",
+    ];
     let mut seen = BTreeSet::new();
     SHELLS
         .iter()
@@ -29,9 +39,11 @@ pub(super) fn precache_paths(base: &str, assets: &[String]) -> Vec<String> {
             assets
                 .iter()
                 .filter(|name| {
-                    (name.ends_with(".css") && !name.starts_with("app/"))
+                    name.ends_with(".css")
+                        || name.ends_with(".js")
                         || name.starts_with("favicon-")
-                        || name.starts_with("icon-192-")
+                        || name.starts_with("icon-")
+                        || name.starts_with("apple-touch-icon-")
                 })
                 .map(|name| format!("assets/{name}")),
         )
@@ -174,7 +186,7 @@ struct PreparedPreview {
 
 impl ItemMedia {
     /// The validated stored preview, the archived article images, and when the item has no
-    /// stored preview and `derive_preview` allows it, a feed thumbnail derived from those images.
+    /// stored preview and the preview policy archives one, a feed thumbnail derived from those images.
     pub(super) fn gather(
         store: &Store,
         item: &Item,
@@ -183,10 +195,24 @@ impl ItemMedia {
         compact: bool,
         compact_cache: Option<&Path>,
     ) -> Result<Self> {
-        let mut preview = Self::stored_preview(store, item, memo)?;
-        let mut assets = store.read_image_assets(item)?;
-        if preview.is_none() && derive_preview {
+        let mut preview = if policy.previews.archives() {
+            Self::stored_preview(store, item, memo)?
+        } else {
+            None
+        };
+        let mut assets = if policy.images.archives() {
+            store.read_image_assets(item)?
+        } else {
+            Vec::new()
+        };
+        if preview.is_none() && policy.previews.archives() {
             preview = derived_preview(&assets, memo)?;
+        }
+        if !compact && policy.images == crate::config::ImagePolicy::Original {
+            assets = assets
+                .into_iter()
+                .map(|asset| super::compressed_media::responsive_cached(asset, compact_cache))
+                .collect::<Result<_>>()?;
         }
         if compact {
             assets = assets
@@ -196,10 +222,15 @@ impl ItemMedia {
         }
         Ok(Self {
             preview,
+            remote_preview: policy.remote_preview(item),
             assets,
-            document: store
-                .read_document(item)?
-                .filter(|asset| crate::document::matches_item(asset, item)),
+            document: if policy.documents.archives() {
+                store
+                    .read_document(item)?
+                    .filter(|asset| crate::document::matches_item(asset, item))
+            } else {
+                None
+            },
         })
     }
 
@@ -239,15 +270,20 @@ impl ItemMedia {
     pub(super) fn gather_preview(
         store: &Store,
         item: &Item,
-        derive: bool,
+        policy: MediaPolicy,
         memo: &MediaMemo,
     ) -> Result<Self> {
-        let mut preview = Self::stored_preview(store, item, memo)?;
-        if preview.is_none() && derive {
+        let mut preview = if policy.previews.archives() {
+            Self::stored_preview(store, item, memo)?
+        } else {
+            None
+        };
+        if preview.is_none() && policy.previews.archives() && policy.images.archives() {
             preview = derived_preview(&store.read_image_assets(item)?, memo)?;
         }
         Ok(Self {
             preview,
+            remote_preview: policy.remote_preview(item),
             ..Self::default()
         })
     }
@@ -559,17 +595,19 @@ mod tests {
         );
         assert_eq!(paths[0], "/repo/");
         assert!(paths.contains(&"/repo/offline.html".to_string()));
-        assert!(!paths.contains(&"/repo/browse/".to_string()));
-        assert!(!paths.contains(&"/repo/preferences/".to_string()));
+        assert!(paths.contains(&"/repo/browse/".to_string()));
+        assert!(paths.contains(&"/repo/preferences/".to_string()));
+        assert!(paths.contains(&"/repo/categories/".to_string()));
+        assert!(paths.contains(&"/repo/sources/".to_string()));
+        assert!(paths.contains(&"/repo/tags/".to_string()));
+        assert!(paths.contains(&"/repo/404.html".to_string()));
         assert!(paths.contains(&"/repo/manifest.webmanifest".to_string()));
         assert!(paths.contains(&"/repo/assets/style.css".to_string()));
         assert!(paths.contains(&"/repo/assets/favicon-32-a.png".to_string()));
         assert!(paths.contains(&"/repo/assets/icon-192-b.png".to_string()));
-        assert!(
-            !paths
-                .iter()
-                .any(|path| path.contains("512") || path.contains("apple-touch"))
-        );
+        assert!(paths.contains(&"/repo/assets/icon-512-c.png".to_string()));
+        assert!(paths.contains(&"/repo/assets/icon-maskable-512-d.png".to_string()));
+        assert!(paths.contains(&"/repo/assets/apple-touch-icon-e.png".to_string()));
         // Articles and their media are cached when the reader opens them, not ahead of time.
         assert!(!paths.iter().any(|path| path.starts_with("/repo/items/")));
         assert!(!paths.contains(&"/repo/assets/photo.webp".to_string()));

@@ -1601,7 +1601,7 @@ media = "remote"
         assert_eq!(config.site.description, compiled.site.description);
         assert_eq!(config.site.language, compiled.site.language);
         assert_eq!(config.site.items_per_page, compiled.site.items_per_page);
-        assert_eq!(compiled.site.items_per_page, 25);
+        assert_eq!(compiled.site.items_per_page, 50);
         assert_eq!(config.site.max_items, compiled.site.max_items);
         assert_eq!(config.site.max_age_days, compiled.site.max_age_days);
         assert_eq!(config.site.repository, compiled.site.repository);

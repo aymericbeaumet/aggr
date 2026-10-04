@@ -35,7 +35,7 @@ language = "en"
 # Number of entries kept in each generated feed, source, category, and tag page. The reader can
 # split these static pages into smaller browser-side feed pages without hiding any entry from
 # no-JavaScript readers or crawlers.
-items_per_page = 25
+items_per_page = 50
 # Recent home-feed window. Source/category/tag archives include every retained article.
 max_items = 5000
 # Entries older than this leave the home feed but remain in archive pages.
@@ -75,7 +75,7 @@ letter_spacing = "normal" # normal, wide
 word_spacing = "normal" # normal, wide
 density = "compact" # compact, comfortable
 thumbnails = "show" # show, hide
-feed_page_size = 25 # 10, 25, 50
+feed_page_size = 50 # 10, 25, 50
 motion = "auto" # auto, off
 single_key_shortcuts = true
 scroll_amount = 10 # 1–100 lines for d/u, capped at half the available viewport

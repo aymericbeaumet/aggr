@@ -288,6 +288,8 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("site-client", "site/client.rs"),
         source!("site-dev", "site/dev.rs"),
         source!("site-offline", "site/offline.rs"),
+        source!("site-hermetic", "site/hermetic.rs"),
+        source!("site-precache", "site/precache.rs"),
         source!("source-index", "site/source_index.rs"),
         source!("assets", "site/assets.rs"),
         source!("budget", "site/budget.rs"),
@@ -328,6 +330,7 @@ const RENDER_INDEPENDENT_SOURCES: &[&str] = &[
     // This module: the fingerprint, the raw-response cache and the cache layout. Changing how a
     // key is computed is deliberately versioned through the `schema` field instead.
     "cache.rs",
+    "cache/",
     // Test-only: writes the parity fixtures the frontend checks itself against.
     "site/client/parity.rs",
     // Git plumbing decides which commit is rendered; the commit itself is the `data-sha` field.

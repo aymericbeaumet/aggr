@@ -125,11 +125,11 @@ impl Default for ReaderPreferences {
             word_spacing: TextSpacing::Normal,
             density: Density::Compact,
             thumbnails: Thumbnails::Show,
-            feed_page_size: 25,
+            feed_page_size: 50,
             motion: Motion::Auto,
             single_key_shortcuts: true,
             scroll_amount: 10,
-            offline_items: 0,
+            offline_items: 30,
         }
     }
 }

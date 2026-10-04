@@ -80,6 +80,13 @@
 </head>
 <body data-kind="{{ page.kind }}">
 <a class="skip-link" href="#content">skip to content</a>
+{% if site.params.introduction == true %}
+<details class="reader-intro" open data-nosnippet>
+  <summary>A feed reader backed by your Git repository</summary>
+  <p>aggr turns a reading list into a searchable static site and saves captured articles as Markdown. Explore this reader's sources or create one from your own reading list.</p>
+  <nav aria-label="About this reader"><a href="https://github.com/aymericbeaumet/aggr#create-your-reader" target="_blank" rel="noopener noreferrer">Make your own</a><a href="{{ 'browse/' | url_for }}">Explore the reading list</a><a href="{{ 'sources.opml' | url_for }}" download>Download subscriptions</a></nav>
+</details>
+{% endif %}
 {% macro key_pair(first, second, separator='+', platform='') %}<span class="key-pair"{% if platform %} data-platform-key="{{ platform }}"{% endif %}><kbd>{{ first }}</kbd><small>{{ separator }}</small><kbd>{{ second }}</kbd></span>{% endmacro %}
 <dialog id="shortcut-help" class="shortcut-help" aria-labelledby="shortcut-help-title" aria-keyshortcuts="?" data-nosnippet>
   <form method="dialog">

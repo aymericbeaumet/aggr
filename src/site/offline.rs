@@ -28,10 +28,15 @@ pub(super) fn catalogue(
         .take(1000)
         .map(|item| {
             let mut paths = BTreeSet::from([item.url.clone()]);
-            if let Some(preview) = &item.preview {
+            // A remote preview URL is a publisher address, not a file this build wrote.
+            if let Some(preview) = &item.preview
+                && published.contains_key(&preview.url)
+            {
                 paths.insert(preview.url.clone());
             }
-            if let Some(preview) = &item.article_preview {
+            if let Some(preview) = &item.article_preview
+                && published.contains_key(&preview.url)
+            {
                 paths.insert(preview.url.clone());
             }
             if let Some(local) = item
@@ -42,8 +47,16 @@ pub(super) fn catalogue(
                 paths.insert(local.split('#').next().unwrap_or(local).to_owned());
             }
             for image in images.get(&item.path).into_iter().flatten() {
-                paths.insert(image.original.clone());
-                paths.extend(image.variants.iter().map(|variant| variant.url.clone()));
+                if published.contains_key(&image.original) {
+                    paths.insert(image.original.clone());
+                }
+                paths.extend(
+                    image
+                        .variants
+                        .iter()
+                        .map(|variant| variant.url.clone())
+                        .filter(|url| published.contains_key(url)),
+                );
             }
             (item, paths)
         })
