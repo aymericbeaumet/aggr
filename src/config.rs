@@ -72,9 +72,6 @@ pub struct SiteConfig {
     pub pwa: bool,
     /// Initial browser preferences; saved reader choices take precedence.
     pub preferences: ReaderPreferences,
-    /// Accepted only as `"default"`: custom themes are gone, and an older config that still
-    /// spells out the default must keep loading.
-    pub theme: Option<String>,
     /// Optional public identity attached to the site's Schema.org metadata.
     pub identity: Option<SiteIdentityConfig>,
     /// Free-form values exposed to templates as `site.params`.
@@ -116,7 +113,6 @@ impl Default for SiteConfig {
             out: PathBuf::from("_site"),
             pwa: true,
             preferences: ReaderPreferences::default(),
-            theme: None,
             identity: None,
             params: toml::Table::new(),
         }
@@ -658,14 +654,6 @@ impl Config {
         }
         if self.site.items_per_page == 0 {
             bail!("[site] items_per_page must be at least 1");
-        }
-        if self
-            .site
-            .theme
-            .as_deref()
-            .is_some_and(|theme| theme != "default")
-        {
-            bail!("[site] theme: custom themes are not supported; remove the setting");
         }
         if self.site.build_max_bytes == 0 {
             bail!("[site] build_max_bytes must be at least 1");
@@ -1426,6 +1414,8 @@ media = "remote"
     fn rejects_unknown_keys() {
         let err = Config::parse("[site]\ntitel = \"x\"\n").unwrap_err();
         assert!(err.to_string().contains("titel"), "{err}");
+        let err = Config::parse("[site]\ntheme = \"default\"\n").unwrap_err();
+        assert!(err.to_string().contains("theme"), "{err}");
         let err = Config::parse("[[sources]]\nurl = \"https://a.b/c\"\nfoo = 1\n").unwrap_err();
         assert!(err.to_string().contains("foo"), "{err}");
     }

@@ -1,5 +1,5 @@
-//! minijinja environment over the default theme: embedded in every binary, and read from its
-//! source tree by a development binary so `aggr dev` renders template, CSS and JavaScript edits
+//! minijinja environment over the reader embedded in every binary. A development binary reads
+//! `src/theme` from the source tree, so `aggr dev` renders template, CSS and JavaScript edits
 //! without recompiling.
 
 use std::borrow::Cow;
@@ -12,7 +12,7 @@ use rust_embed::RustEmbed;
 use serde::Serialize;
 
 #[derive(RustEmbed)]
-#[folder = "themes/default/"]
+#[folder = "src/theme/"]
 struct DefaultTheme;
 
 /// Content hash of the embedded fallback theme. This makes build-cache invalidation exact even
@@ -33,10 +33,10 @@ pub fn default_theme_hash() -> String {
     crate::model::sha1_hex(&bytes)
 }
 
-/// The default theme. A release binary reads only the copy embedded at compile time; a
-/// development binary reads the same theme from its source tree first, so `aggr dev` renders
-/// template, CSS and JavaScript edits without recompiling Rust. A file missing from the source
-/// tree falls back to the embedded copy.
+/// The reader embedded at `src/theme`. A release binary reads only the copy compiled into it; a
+/// development binary reads that same tree from source first, so `aggr dev` renders template,
+/// CSS and JavaScript edits without recompiling Rust. A file missing from the source tree falls
+/// back to the embedded copy.
 #[derive(Debug, Clone, Default)]
 pub struct Theme {
     source: Option<PathBuf>,
@@ -49,7 +49,7 @@ impl Theme {
     pub fn development() -> Self {
         #[cfg(debug_assertions)]
         {
-            let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes/default");
+            let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/theme");
             if source.is_dir() {
                 return Self::from_source_tree(source);
             }
@@ -617,7 +617,7 @@ mod tests {
 
     #[test]
     fn every_theme_template_is_rendered_or_included() {
-        let root = repository_path("themes/default/templates");
+        let root = repository_path("src/theme/templates");
         let templates = read_tree(&root);
         assert!(templates.len() >= RENDERED_TEMPLATES.len());
         let reference =
@@ -649,23 +649,18 @@ mod tests {
 
     #[test]
     fn every_class_the_stylesheet_declares_is_rendered_somewhere() {
-        let css =
-            std::fs::read_to_string(repository_path("themes/default/static/style.css")).unwrap();
+        let css = std::fs::read_to_string(repository_path("src/theme/static/style.css")).unwrap();
         let declared = declared_classes(&css);
         assert!(declared.contains("row") && declared.contains("table-scroll"));
         assert!(!declared.contains("5rem") && !declared.contains("body p"));
         // This file's own assertions must not vouch for a class, and neither may the stylesheet.
-        let corpus = [
-            "themes/default/templates",
-            "themes/default/static",
-            "web/src",
-            "src",
-        ]
-        .iter()
-        .flat_map(|dir| read_tree(&repository_path(dir)))
-        .filter(|(name, _)| name != "site/render.rs" && !name.ends_with(".css"))
-        .map(|(_, text)| text)
-        .collect::<Vec<_>>();
+        // `src` already contains the templates and the non-CSS static files.
+        let corpus = ["web/src", "src"]
+            .iter()
+            .flat_map(|dir| read_tree(&repository_path(dir)))
+            .filter(|(name, _)| name != "site/render.rs" && !name.ends_with(".css"))
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>();
         let unused = declared
             .iter()
             .filter(|name| {
@@ -700,8 +695,7 @@ mod tests {
     #[test]
     fn every_stretched_link_is_contained_by_the_card_it_covers() {
         // From disk: the embedded copy is only as fresh as the last compile.
-        let css =
-            std::fs::read_to_string(repository_path("themes/default/static/style.css")).unwrap();
+        let css = std::fs::read_to_string(repository_path("src/theme/static/style.css")).unwrap();
         let css = css.as_str();
         let class = regex::Regex::new(r"\.([a-z][a-z0-9_-]*)").unwrap();
         // Only the element a rule applies to is positioned, never the ancestors that select it.

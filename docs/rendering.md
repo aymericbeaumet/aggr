@@ -1,8 +1,8 @@
 # Rendering
 
-aggr renders one embedded theme: the MiniJinja templates and static files under `themes/default/`,
-compiled into the binary. There is no theme option and no template override; changing the reader
-means changing this repository. A development binary reads the theme from its source tree, so
+aggr renders its reader from the MiniJinja templates and static files under `src/theme/`,
+compiled into the binary. There is no theme setting and no template override; changing the reader
+means changing this repository. A development binary reads those files from the source tree, so
 `aggr dev` picks up template, CSS and client edits without recompiling.
 
 ## Template data and URLs

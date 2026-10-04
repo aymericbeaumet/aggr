@@ -55,7 +55,6 @@ fn unwrap_emphasis(title: &str) -> &str {
 }
 
 /// The display-only contract shared by static metadata and search result components.
-/// Existing item fields remain available to custom themes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct Metadata {

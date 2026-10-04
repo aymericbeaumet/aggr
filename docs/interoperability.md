@@ -353,7 +353,7 @@ descriptor schema is [`aggr-instance.schema.json`](aggr-instance.schema.json).
 
 The config link identifies the tracked root file used for the build when that identity is known. It
 does not embed the full effective configuration: local collection files, remote collection bodies,
-themes, environment expansion, and the binary version remain separate inputs. Pin or vendor remote
+environment expansion, and the binary version remain separate inputs. Pin or vendor remote
 collections when repeatable rebuilding matters.
 
 An instance can also consume another instance's retained data through its repository URL.

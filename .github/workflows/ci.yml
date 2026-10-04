@@ -146,7 +146,7 @@ jobs:
       - run: cargo build --locked
 
   # The Svelte client: type-check, unit tests, then a rebuild that must reproduce the committed
-  # bundles under themes/default/static/app (Node is a development tool only; the binary embeds
+  # bundles under src/theme/static/app (Node is a development tool only; the binary embeds
   # the committed output).
   client:
     runs-on: ubuntu-latest
@@ -157,8 +157,8 @@ jobs:
       - run: npm --prefix web run verify
       - name: Committed client assets match the sources
         run: |
-          git add --intent-to-add -- themes/default/static/app
-          git diff --exit-code -- themes/default/static/app
+          git add --intent-to-add -- src/theme/static/app
+          git diff --exit-code -- src/theme/static/app
 
   # Licenses, RustSec advisories, duplicate versions and registry sources of the dependency tree,
   # as configured in deny.toml. The action ships cargo-deny; no toolchain or cache is needed.

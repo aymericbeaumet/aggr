@@ -11,7 +11,7 @@ snapshot.
 ## Two branches, one set of refs
 
 ```text
-primary branch    aggr.toml, optional provider CI, themes/, templates/, static/
+primary branch    aggr.toml, optional provider CI
 aggr              orphan, append-only, never force-pushed: the data
 refs/aggr/*        lightweight pointers to data commits
 ```

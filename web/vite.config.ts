@@ -4,7 +4,7 @@ import { defineConfig } from 'vite';
 import { licenses } from './build/licenses.ts';
 
 // Compiled output is committed under the embedded theme; the Rust binary serves it as-is.
-export const outDir = fileURLToPath(new URL('../themes/default/static/app', import.meta.url));
+export const outDir = fileURLToPath(new URL('../src/theme/static/app', import.meta.url));
 
 // Localhost origins only: the dev server is reached from aggr's own `dev` pages.
 export const localhostOrigins = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/;

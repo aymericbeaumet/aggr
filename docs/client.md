@@ -2,7 +2,7 @@
 
 Rust and MiniJinja render the complete static reader. The browser client is a Svelte 5 +
 TypeScript application in `web/`, compiled ahead of time by Vite and committed under
-`themes/default/static/app/`, where the binary embeds it like any other static file. Site
+`src/theme/static/app/`, where the binary embeds it like any other static file. Site
 generation never executes JavaScript or invokes a frontend compiler, so `cargo build`, `aggr sync`,
 `aggr build` and `aggr dev` need no Node. Search is a build-time Pagefind index; there is no
 search service.
@@ -63,7 +63,7 @@ sits behind `@supports` or a feature check and degrades to plain HTML.
 mise install                      # node
 npm ci --prefix web
 make client-check                 # svelte-check + vitest
-make client-build                 # rebuild the committed bundle under themes/default/static/app/
+make client-build                 # rebuild the committed bundle under src/theme/static/app/
 make client-dev                   # Vite dev server with HMR
 AGGR_VITE_URL=http://127.0.0.1:5173 cargo run -- dev --config examples/aggr.toml
 ```
