@@ -124,6 +124,31 @@ to find a feed, but a source without a usable feed reports a failure instead of 
 listing. Some feeds provide only summaries; the reader keeps the original link. Set
 `content = "heavy"` globally or on a source to permit HTML discovery and full article extraction.
 
+## Upgrading to 1.12
+
+Version 1.12 changes the capture schema and enables retention by default. The stable `@v1`
+workflow selects the latest published v1 binary automatically, so review configuration and limits
+before the next scheduled sync.
+
+| Previous setting | New setting |
+| --- | --- |
+| `[fetch] content` | `[defaults] content` |
+| Separate `images`, `previews`, and `documents` settings | One `media` policy under `[defaults]` or on a source |
+| Image `original` / `compact` | Media `local` / `compressed` |
+| `[fetch] max_items_per_source` or source `limit` | `max_items` under `[defaults]` or on a source |
+| `[store] max_items` / `max_age_days` | The same names under `[defaults]` or on a source |
+
+The retired keys are configuration errors. `[fetch]` retains transport settings, and `[store]`
+retains branch/path and HTML-preservation settings. The unified media policy applies to images,
+previews, and PDFs together; independent controls for those media types have been removed.
+
+Omitted limits now mean **250 items, 730 days, and 1 GB of retained article files per feed**.
+Sync removes excess articles and their companions from the current tree in ordinary commits;
+Git history remains. To keep an unbounded current archive, explicitly set `max_items = 0`,
+`max_age_days = 0`, `max_bytes = 0`, and clear any `since` cutoff. To retain full article extraction
+and original media, choose `content = "heavy"` and `media = "local"`. Sources override each field
+independently; see [storage limits](storage.md) for cleanup and recovery behavior.
+
 ## Capture defaults and per-source limits
 
 `[defaults]` selects content, media and retained-corpus limits. The same keys on a `[[sources]]`

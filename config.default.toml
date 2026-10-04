@@ -143,8 +143,8 @@ response_max_bytes = 268435456
 # strings (including multiline strings): split lines, strip trailing " #" comments, trim, discard blanks.
 # Hashes without a preceding space remain part of the URL.
 # Options on the table apply to every expanded source. Place complete [[sources]] tables between
-# any other sections. Use separate tables for groups. Normal website URLs discover feeds and
-# conservatively discover article cards when no feed is available.
+# any other sections. Use separate tables for groups. Normal website URLs discover feeds.
+# In heavy mode, aggr can discover article cards when no usable feed is available.
 # [[sources]]
 # url = "https://blog.rust-lang.org"
 # name = "Rust Blog"          # display name; the feed title when unset
