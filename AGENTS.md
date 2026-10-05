@@ -357,7 +357,10 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   the script sets it elsewhere, and the bar keeps the text column's width while the header's
   surface spans the page.
 - Offline readiness means an article page and all its retained image renditions are cached.
-  Keep selected downloads separate from evictable runtime caches and report partial/quota failures.
+  The install precache is the reader frame (home, browse, preferences, offline, 404, the manifest),
+  the stylesheet, the favicon and eager scripts. Install icons and collection pages are fetched
+  when the reader asks for them. Keep selected downloads separate from evictable runtime caches
+  and report partial/quota failures.
 - Precompute display data during builds. Keep Pagefind display metadata opaque: even zero-weight
   metadata can pollute search results. Bound navigation caches and speculative requests.
   Prepare shared template values once per build.

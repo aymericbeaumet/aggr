@@ -53,9 +53,6 @@ const memory = new ScrollMemory();
 const speculation = new Speculation();
 let cache: PageCache | null = null;
 
-const idle = (run: () => void) =>
-  'requestIdleCallback' in window ? requestIdleCallback(run, { timeout: 1500 }) : setTimeout(run, 250);
-
 const root = (): URL => rootUrl ?? new URL(page.root || document.baseURI);
 
 /** The history state of the entry on screen, with `fields` added to its own record. */
@@ -327,54 +324,19 @@ function nearest(): string[] {
   return links;
 }
 
-/** Fetch what this page makes likely next, once the page itself has settled. */
+/** Keep pages this visit already fetched from going stale. New ones wait for a pointer. */
 function speculate(signal: AbortSignal): void {
   speculation.reset();
-  // A screen left open, or an app brought back, keeps its nearest pages fresh, so following one
-  // of them never waits on a copy that has gone stale.
   const refresh = () => {
-    if (!document.hidden && !frugal(navigator.connection)) for (const href of nearest()) prefetch(href);
+    if (document.hidden || frugal(navigator.connection)) return;
+    const store = pages();
+    for (const href of nearest()) {
+      if (store.has(address(href))) prefetch(href);
+    }
   };
   const timer = setInterval(refresh, PAGE_LIFETIME / 2);
   document.addEventListener('visibilitychange', refresh, { signal });
   signal.addEventListener('abort', () => clearInterval(timer));
-  // Tabs, neighbours and the rows already on screen, as soon as this page has painted: a tap
-  // must find them parsed. Rows that scroll into view later wait a moment, so a fling does not
-  // spend the allowance on pages that have already gone by.
-  requestAnimationFrame(() => {
-    if (signal.aborted || frugal(navigator.connection)) return;
-    for (const href of nearest()) prefetch(href, true);
-    const height = window.innerHeight || document.documentElement.clientHeight;
-    for (const link of document.querySelectorAll('.rows .row [data-row-open], .article-more-link')) {
-      if (!(link instanceof HTMLAnchorElement)) continue;
-      const rect = link.getBoundingClientRect();
-      if (rect.bottom > 0 && rect.top < height) prefetch(link.href, true);
-    }
-  });
-  idle(() => {
-    if (signal.aborted || frugal(navigator.connection) || !('IntersectionObserver' in window)) return;
-    const timers = new Map<Element, ReturnType<typeof setTimeout>>();
-    const observer = new IntersectionObserver((entries) => {
-      for (const seen of entries) {
-        const link = seen.target;
-        clearTimeout(timers.get(link));
-        timers.delete(link);
-        if (!seen.isIntersecting || !(link instanceof HTMLAnchorElement)) continue;
-        timers.set(
-          link,
-          setTimeout(() => {
-            observer.unobserve(link);
-            prefetch(link.href, true);
-          }, 80),
-        );
-      }
-    });
-    for (const link of document.querySelectorAll('.rows .row [data-row-open], .article-more-link')) observer.observe(link);
-    signal.addEventListener('abort', () => {
-      observer.disconnect();
-      timers.forEach((timer) => clearTimeout(timer));
-    });
-  });
 }
 
 /**

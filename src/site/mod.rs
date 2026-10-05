@@ -1310,20 +1310,10 @@ fn build_once(
                 ))?
                 .as_bytes(),
         )?;
-        // The shell installs first; complete article downloads run separately.
-        // Eager reader chunks come from the module graph. A bounded set of collection
-        // roots stays in the shell so an offline browse still has somewhere to land.
-        let mut paths = precache::paths(&theme(), &renderer, &assets)?;
-        paths.extend(
-            source_ctxs
-                .iter()
-                .map(|source| source.page.clone())
-                .chain(categories.iter().map(|category| category.page.clone()))
-                .chain(tags.iter().map(|tag| tag.page.clone()))
-                .take(config.site.preferences.offline_items.clamp(32, 256)),
-        );
-        let mut seen = std::collections::BTreeSet::new();
-        paths.retain(|path| seen.insert(path.clone()));
+        // The shell installs first: the reader frame and the assets that paint it. Collection
+        // pages and article bodies stay out of that download and are cached when opened.
+        // Eager reader chunks come from the module graph.
+        let paths = precache::paths(&theme(), &renderer, &assets)?;
         let mut sw_config = SwConfig {
             version: cache_version(&build_ctx),
             app_version: build_ctx.app_version.clone(),
@@ -3954,12 +3944,12 @@ category = "Science"
     }
 
     #[test]
-    fn offline_shell_includes_bounded_source_category_and_tag_roots() {
+    fn install_shell_omits_collection_pages() {
         let dir = tempfile::tempdir().unwrap();
         let (config, mut sources, store) = fixture(dir.path(), 1, "preferences.offline_items=0\n");
         sources[0].category = Some("Research".into());
         let mut item = store.items().unwrap().remove(0);
-        item.front.labels = (0..300).map(|index| format!("topic-{index:03}")).collect();
+        item.front.labels = vec!["topic-000".into(), "topic-001".into()];
         let (directory, stem) = item.path.rsplit_once('/').unwrap();
         store
             .write_item(crate::store::NewItem {
@@ -3975,37 +3965,27 @@ category = "Science"
         let out = dir.path().join("out");
         build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
         let worker = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        let entries: Vec<serde_json::Value> = worker_config(&worker)["precache"]
+        let precache: Vec<String> = worker_config(&worker)["precache"]
             .as_array()
             .unwrap()
-            .clone();
-        let collection_roots: Vec<_> = entries
             .iter()
-            .filter_map(|entry| entry["url"].as_str())
-            .filter(|url| url.split('/').filter(|part| !part.is_empty()).count() == 2)
-            .filter(|url| {
-                url.starts_with("sources/")
-                    || url.starts_with("categories/")
-                    || url.starts_with("tags/")
-            })
+            .filter_map(|entry| entry["url"].as_str().map(str::to_owned))
             .collect();
-        assert_eq!(
-            collection_roots.len(),
-            32,
-            "zero automatic articles still retains the bounded browse shell"
-        );
         for path in [
+            "sources/",
+            "categories/",
+            "tags/",
             "sources/blog.example/",
             "categories/research/",
             "tags/topic-000/",
+            "tags/topic-001/",
         ] {
-            assert!(
-                collection_roots.contains(&path),
-                "{path}: {collection_roots:?}"
-            );
-            assert!(out.join(path).join("index.html").is_file());
+            assert!(!precache.iter().any(|url| url == path), "{path} is not an install download");
+            assert!(out.join(path).join("index.html").is_file(), "{path}");
         }
-        assert!(!collection_roots.contains(&"tags/topic-299/"));
+        assert!(precache.iter().any(|url| url == "browse/"));
+        assert!(precache.iter().any(|url| url.contains("favicon-")));
+        assert!(precache.iter().all(|url| !url.contains("icon-512-")));
     }
 
     #[test]

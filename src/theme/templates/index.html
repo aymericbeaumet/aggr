@@ -1,8 +1,4 @@
 {% extends "base.html" %}
-{% block head %}
-{# The first screen, fetched before the reader boots, so the first tap is already on its way. #}
-{% for item in items %}{% if loop.index <= 4 %}<link rel="prefetch" href="{{ item.url | url_for }}">{% endif %}{% endfor %}
-{% endblock %}
 {% block content %}
 {% if page.kind == 'river' %}<h1 class="sr-only">{{ site.title }} — independent web feed reader and archive</h1>{% endif %}
 {% if page.kind != 'river' or (source and source.error) %}<div class="listhead">
