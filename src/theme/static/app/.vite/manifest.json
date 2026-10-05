@@ -4,7 +4,7 @@
     "name": "page.svelte"
   },
   "src/main.ts": {
-    "file": "app-D1fW-Bzr.js",
+    "file": "app-CCFsHmNR.js",
     "name": "main",
     "src": "src/main.ts",
     "isEntry": true,
@@ -18,7 +18,7 @@
     ]
   },
   "src/media/index.ts": {
-    "file": "media-CBkwGNFf.js",
+    "file": "media-C4e2ZSXu.js",
     "name": "media",
     "src": "src/media/index.ts",
     "isDynamicEntry": true,
@@ -28,7 +28,7 @@
     ]
   },
   "src/preferences/Form.svelte": {
-    "file": "Form-bH8rrX-4.js",
+    "file": "Form-uv8KPAwp.js",
     "name": "Form",
     "src": "src/preferences/Form.svelte",
     "isDynamicEntry": true,
@@ -38,7 +38,7 @@
     ]
   },
   "src/search/index.ts": {
-    "file": "search-CWmkUDOt.js",
+    "file": "search-D4Gj2Rv5.js",
     "name": "search",
     "src": "src/search/index.ts",
     "isDynamicEntry": true,

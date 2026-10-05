@@ -30,10 +30,10 @@ the client. If `#aggr-page` is missing or malformed the page stays static.
 Navigation fetches the target page, extracts its model, its content element and its `<head>`
 metadata with `DOMParser`, and re-renders `<main>` from state while the header and tab bar
 persist. A link inside the archive is fetched as soon as it is pressed or hovered, and a page
-already in memory is swapped in that same turn. An idle feed does not prefetch articles, tabs or
-collection pages. An article's neighbours carry `rel="prefetch"`, so the browser can start those
-before the reader boots. Guesses are bounded to 16 requests and a 24-page, five-minute cache, and
-off on Save-Data or slow connections. The search catalogue waits for an idle slice, and loads
+already in memory is swapped in that same turn. After paint, the reader warms the other tabs and
+the first three rows already on screen. An article's neighbours carry `rel="prefetch"`. Guesses
+are bounded to 16 requests and a 24-page, five-minute cache, and off on Save-Data or slow
+connections. The search catalogue waits for an idle slice, and loads
 at once when the field is focused. Scroll positions are kept per history entry, so Back returns to the same place and
 list cursor. A non-HTML response, a page without a model or one built by another app version
 falls back to ordinary navigation, and without JavaScript every link is an ordinary link.
@@ -128,8 +128,8 @@ Chrome 154 on macOS produced these measurements over local HTTP without compress
 
 | Measurement | Bytes |
 |---|---:|
-| Server response headers and bodies with `Cache-Control: no-store`, including service-worker installation | 949,660 |
-| Same fixture with `public, max-age=31536000, immutable` on versioned assets | 711,403 |
+| Server response headers and bodies with `Cache-Control: no-store`, including service-worker installation | 937,331 |
+| Same fixture with `public, max-age=31536000, immutable` on versioned assets | 698,712 |
 | Regression budget for the `no-store` server total | 1,048,576 |
 | Regression budget with cacheable versioned assets | 786,432 |
 

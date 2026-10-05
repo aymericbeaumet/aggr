@@ -324,19 +324,32 @@ function nearest(): string[] {
   return links;
 }
 
-/** Keep pages this visit already fetched from going stale. New ones wait for a pointer. */
+/** Warm the tabs and a few rows already on screen. The rest wait until the reader moves. */
+const FIRST_SCREEN = 3;
+
 function speculate(signal: AbortSignal): void {
   speculation.reset();
   const refresh = () => {
     if (document.hidden || frugal(navigator.connection)) return;
-    const store = pages();
-    for (const href of nearest()) {
-      if (store.has(address(href))) prefetch(href);
-    }
+    for (const href of nearest()) prefetch(href);
   };
   const timer = setInterval(refresh, PAGE_LIFETIME / 2);
   document.addEventListener('visibilitychange', refresh, { signal });
   signal.addEventListener('abort', () => clearInterval(timer));
+  requestAnimationFrame(() => {
+    if (signal.aborted || frugal(navigator.connection)) return;
+    for (const href of nearest()) prefetch(href, true);
+    const height = window.innerHeight || document.documentElement.clientHeight;
+    let warmed = 0;
+    for (const link of document.querySelectorAll('.rows .row [data-row-open]')) {
+      if (warmed >= FIRST_SCREEN) return;
+      if (!(link instanceof HTMLAnchorElement)) continue;
+      const rect = link.getBoundingClientRect();
+      if (rect.bottom <= 0 || rect.top >= height) continue;
+      prefetch(link.href, true);
+      warmed += 1;
+    }
+  });
 }
 
 /**

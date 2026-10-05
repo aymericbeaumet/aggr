@@ -21,8 +21,9 @@ pub(super) type Published = BTreeMap<String, String>;
 /// frame and the assets that paint it. Collection pages, install icons and articles wait until
 /// the reader opens them.
 pub(super) fn precache_paths(base: &str, assets: &[String]) -> Vec<String> {
-    const SHELLS: [&str; 6] = [
-        "",
+    // The open document is already the navigation response. Installing it again would download
+    // the feed a second time before the reader has asked for anything else.
+    const SHELLS: [&str; 5] = [
         "browse/",
         "preferences/",
         "404.html",
@@ -589,7 +590,7 @@ mod tests {
             ]
             .map(str::to_string),
         );
-        assert_eq!(paths[0], "/repo/");
+        assert!(!paths.contains(&"/repo/".to_string()));
         assert!(paths.contains(&"/repo/offline.html".to_string()));
         assert!(paths.contains(&"/repo/browse/".to_string()));
         assert!(paths.contains(&"/repo/preferences/".to_string()));

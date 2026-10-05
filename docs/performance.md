@@ -221,12 +221,11 @@ runtime and its filter files wait until an actual query needs them, so a reader 
 downloads none of it. See [client development](client.md) for the search contract.
 
 Prefetching is bounded. A press or a hover fetches that page at once, and a page already in memory
-is parsed ahead of the tap and swapped in the same turn. An idle feed does not download articles,
-tabs or collection pages. An article's neighbours carry `rel="prefetch"` in the document, so the
-browser can start those before the reader boots. Guesses are at most sixteen per page, and none at
-all under Save-Data or on a 2G connection. Intent is not counted. Fetched pages stay in memory for
-five minutes, 24 at most. Guesses are parsed one per frame; a page the reader means to open is
-parsed as soon as it arrives.
+is parsed ahead of the tap and swapped in the same turn. After paint, the reader warms the other
+tabs and the first three rows already on screen. An article's neighbours carry `rel="prefetch"`
+in the document. Guesses are at most sixteen per page, and none at all under Save-Data or on a 2G
+connection. Intent is not counted. Fetched pages stay in memory for five minutes, 24 at most.
+Guesses are parsed one per frame; a page the reader means to open is parsed as soon as it arrives.
 
 ## Measuring changes
 
