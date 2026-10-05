@@ -220,10 +220,12 @@ Search completion uses `search-catalog.json` (version, base, document count, and
 runtime and its filter files wait until an actual query needs them, so a reader who never searches
 downloads none of it. See [client development](client.md) for the search contract.
 
-Navigation prefetch follows hover, focus, or touch intent, with at most two requests in flight.
-Unattended viewport, tab, and periodic destination guesses are disabled. The default service worker
-precaches only the shell and eager module dependencies. The complete offline catalogue is separate
-versioned JSON fetched and verified when downloads are enabled; optional chunks stay lazy.
+Prefetching is bounded. A press or a hover fetches that page at once, and a page already in memory
+is parsed ahead of the tap and swapped in the same turn. After paint, the reader warms the other
+tabs and the first three rows already on screen. An article's neighbours carry `rel="prefetch"`
+in the document. Guesses are at most sixteen per page, and none at all under Save-Data or on a 2G
+connection. Intent is not counted. Fetched pages stay in memory for five minutes, 24 at most.
+Guesses are parsed one per frame; a page the reader means to open is parsed as soon as it arrives.
 
 ## Measuring changes
 

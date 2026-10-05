@@ -17,10 +17,19 @@ use crate::store::Store;
 /// Output paths published by this build and the content hash each file was named after.
 pub(super) type Published = BTreeMap<String, String>;
 
-/// Everything the service worker fetches at install, as site paths under `base`: the shell pages
-/// and the assets needed to render them. Articles are cached as the reader opens them.
+/// Everything the service worker fetches at install, as site paths under `base`: the reader
+/// frame and the assets that paint it. Collection pages, install icons and articles wait until
+/// the reader opens them.
 pub(super) fn precache_paths(base: &str, assets: &[String]) -> Vec<String> {
-    const SHELLS: [&str; 3] = ["", "offline.html", "manifest.webmanifest"];
+    // The open document is already the navigation response. Installing it again would download
+    // the feed a second time before the reader has asked for anything else.
+    const SHELLS: [&str; 5] = [
+        "browse/",
+        "preferences/",
+        "404.html",
+        "offline.html",
+        "manifest.webmanifest",
+    ];
     let mut seen = BTreeSet::new();
     SHELLS
         .iter()
@@ -29,9 +38,9 @@ pub(super) fn precache_paths(base: &str, assets: &[String]) -> Vec<String> {
             assets
                 .iter()
                 .filter(|name| {
-                    (name.ends_with(".css") && !name.starts_with("app/"))
-                        || name.starts_with("favicon-")
-                        || name.starts_with("icon-192-")
+                    // Eager script chunks come from the module graph. Optional chunks stay lazy.
+                    // Install icons are named in the manifest and fetched when the app is installed.
+                    name.ends_with(".css") || name.starts_with("favicon-")
                 })
                 .map(|name| format!("assets/{name}")),
         )
@@ -174,7 +183,7 @@ struct PreparedPreview {
 
 impl ItemMedia {
     /// The validated stored preview, the archived article images, and when the item has no
-    /// stored preview and `derive_preview` allows it, a feed thumbnail derived from those images.
+    /// stored preview and the preview policy archives one, a feed thumbnail derived from those images.
     pub(super) fn gather(
         store: &Store,
         item: &Item,
@@ -581,22 +590,28 @@ mod tests {
             ]
             .map(str::to_string),
         );
-        assert_eq!(paths[0], "/repo/");
+        assert!(!paths.contains(&"/repo/".to_string()));
         assert!(paths.contains(&"/repo/offline.html".to_string()));
-        assert!(!paths.contains(&"/repo/browse/".to_string()));
-        assert!(!paths.contains(&"/repo/preferences/".to_string()));
+        assert!(paths.contains(&"/repo/browse/".to_string()));
+        assert!(paths.contains(&"/repo/preferences/".to_string()));
+        assert!(paths.contains(&"/repo/404.html".to_string()));
         assert!(paths.contains(&"/repo/manifest.webmanifest".to_string()));
         assert!(paths.contains(&"/repo/assets/style.css".to_string()));
         assert!(paths.contains(&"/repo/assets/favicon-32-a.png".to_string()));
-        assert!(paths.contains(&"/repo/assets/icon-192-b.png".to_string()));
-        assert!(
-            !paths
-                .iter()
-                .any(|path| path.contains("512") || path.contains("apple-touch"))
-        );
-        // Articles and their media are cached when the reader opens them, not ahead of time.
+        // Collection indexes and install icons are not part of the first-visit shell.
+        for excluded in [
+            "/repo/categories/",
+            "/repo/sources/",
+            "/repo/tags/",
+            "/repo/assets/icon-192-b.png",
+            "/repo/assets/icon-512-c.png",
+            "/repo/assets/icon-maskable-512-d.png",
+            "/repo/assets/apple-touch-icon-e.png",
+            "/repo/assets/photo.webp",
+        ] {
+            assert!(!paths.contains(&excluded.to_string()), "{excluded}");
+        }
         assert!(!paths.iter().any(|path| path.starts_with("/repo/items/")));
-        assert!(!paths.contains(&"/repo/assets/photo.webp".to_string()));
         assert_eq!(paths.len(), paths.iter().collect::<BTreeSet<_>>().len());
     }
 

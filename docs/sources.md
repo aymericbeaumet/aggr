@@ -427,7 +427,7 @@ entries may use other origins. The trusted root can opt into broader collection 
 
 Remote collections are live configuration dependencies, not part of the append-only data branch.
 Pin their revision, or vendor them into the primary branch, if rebuilding the same site later
-matters. Custom domains, network links, headers/secrets, PWA controls, retention, themes, and all
+matters. Custom domains, network links, headers/secrets, PWA controls, retention, and all
 other options are documented directly in [`config.default.toml`](../config.default.toml).
 
 ## Copying another aggr instance

@@ -31,10 +31,6 @@
             "name": "engineering",
             "slug": "engineering"
           },
-          "comments": {
-            "count": 42,
-            "url": "https://news.ycombinator.com/item?id=1"
-          },
           "consumption": {
             "action": "read",
             "minutes": 1,
@@ -44,7 +40,6 @@
           "discussions": [
             {
               "name": "hackernews",
-              "score": 120,
               "url": "https://news.ycombinator.com/item?id=1"
             }
           ],
@@ -59,7 +54,6 @@
           ],
           "is_aggregated": true,
           "original": "https://blog.example/full",
-          "points": 120,
           "reading_minutes": 1,
           "source_display": "blog.example",
           "source_query": "blog.example",

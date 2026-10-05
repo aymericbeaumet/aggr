@@ -1646,8 +1646,8 @@ mod tests {
     fn ignores_generated_and_internal_changes() {
         let root = Path::new("/project");
         let configs = vec![root.join("aggr.toml")];
-        let themes = vec![root.join("themes/default")];
-        let excluded = vec![root.join("themes/default/generated")];
+        let themes = vec![root.join("src/theme")];
+        let excluded = vec![root.join("src/theme/generated")];
         assert!(watched(
             &root.join("aggr.toml"),
             &configs,
@@ -1655,7 +1655,7 @@ mod tests {
             &excluded
         ));
         assert!(watched(
-            &root.join("themes/default/templates/base.html"),
+            &root.join("src/theme/templates/base.html"),
             &configs,
             &themes,
             &excluded
@@ -1667,7 +1667,7 @@ mod tests {
             &excluded
         ));
         assert!(!watched(
-            &root.join("themes/default/generated/index.html"),
+            &root.join("src/theme/generated/index.html"),
             &configs,
             &themes,
             &excluded
@@ -1694,7 +1694,7 @@ mod tests {
             notify::event::ModifyKind::Any
         )));
         assert!(watched(
-            &root.join("themes/default"),
+            &root.join("src/theme"),
             &configs,
             &themes,
             &excluded

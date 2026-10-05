@@ -664,6 +664,13 @@ fn fixtures() -> Vec<Fixture> {
     refresh(&mut article);
     let mut titles_only = context(&item("titles", "Titles only", 3, ""), None, "");
     refresh(&mut titles_only);
+    let mut missing = context(
+        &item("missing", "Article text not captured", 1, ""),
+        None,
+        "",
+    );
+    missing.content = ContentKind::Feed;
+    refresh(&mut missing);
     let mut subscription = context(&item("wall", "Behind a paywall", 4, BODY), None, "");
     subscription.body_html = Some("<p>Teaser</p>".into());
     subscription
@@ -680,6 +687,7 @@ fn fixtures() -> Vec<Fixture> {
     for (name, item, site) in [
         ("article-full", &article, &site_on),
         ("article-titles-only", &titles_only, &site_on),
+        ("article-missing", &missing, &site_on),
         ("article-subscription", &subscription, &site_on),
         ("article-bare", &bare, &site_off),
     ] {

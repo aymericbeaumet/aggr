@@ -3,8 +3,8 @@
 | Command | Purpose |
 |---|---|
 | `aggr init [--github] [--defaults]` | Write the small starter config, optionally the GitHub workflow; `--defaults` copies the full reference config instead. |
-| `aggr sync [--fetch-only] [--dry-run] [--refresh] [--reprocess] [--backfill-media]` | Fetch new items. Normally commit and push them; `--fetch-only` writes locally without either, while `--dry-run` writes nothing. |
-| `aggr build [--release] [--out DIR] [--data-ref REF] [--offline] [--hermetic] [--report PATH]` | Sync and render, or render local data without network access. Hermetic output additionally keeps automatically loaded resources local. |
+| `aggr sync [--fetch-only] [--dry-run] [--refresh] [--reprocess]` | Fetch new items. Normally commit and push them; `--fetch-only` writes locally without either, while `--dry-run` writes nothing. |
+| `aggr build [--release] [--out DIR] [--data-ref REF]` | Sync and render, or render a pinned data ref without fetches, commits, or pushes. |
 | `aggr dev [--release] [--port 7319]` | Sync into an isolated cache, render requested pages, watch, and live-reload. Never commits or pushes. |
 | `aggr clean [--dry-run] [--out DIR]` | Remove disposable dev state, build cache, and owned output. `--dry-run` lists exact targets. |
 | `aggr storage inspect [--json]` | Report current archive, local media, generated output, cache and Git object bytes without changing them. |
@@ -41,38 +41,6 @@ including renamed or removed sources, and skips truncated HTML. It runs once bef
 configured-source sync; repeating
 it without content changes writes nothing. Hand-edited bodies are replaced. Use it after upgrading
 when you want those extraction changes applied.
-
-`--backfill-media` applies the configured media-preservation policies to already-retained articles.
-Changing a source from remote to local media does not silently download its entire history during
-the next ordinary sync. Missing companions of an existing local capture remain repairable.
-Per-feed limits apply before and after backfill: retained bodies stay unchanged, but whole article
-families may be removed when newly saved media would exceed the configured byte limit.
-
-## Offline and hermetic builds
-
-`aggr build --offline` renders the existing local data-branch head. `--data-ref REF` selects a local
-commit and also implies offline execution. These paths make no fetches, source requests, image
-repairs or live discussion lookups. They do not bootstrap or update the data checkout. Missing Git
-objects or uncaptured remote source-collection metadata fail with a local-input error; sync first
-to capture those inputs. Root configuration and local imports remain explicit build inputs.
-When captured collections are needed, their source declarations must match the snapshot: changing
-subscriptions or per-source options requires another sync. Global media defaults can still change
-locally when the source leaves that policy unspecified.
-
-`aggr build --hermetic` implies offline execution and verifies that automatically loaded reader
-resources are local. External media that cannot be captured is represented by an original link;
-missing required retained images fail with their article locations. Ordinary offline output may
-still reference publisher-hosted images. Both modes can write generated output and disposable
-caches.
-
-Set `SOURCE_DATE_EPOCH` to a nonnegative Unix timestamp to control the render clock. Offline builds
-otherwise use the selected data commit's timestamp. Pin the binary, configuration, data commit and
-public base URL as well; cold search-index ordering is not yet guaranteed byte-identical across
-builds. See [recovery](git-model.md#recovery-and-reproducibility).
-
-`--report PATH` writes JSON timing, render-pass, cache and output-size measurements outside the
-generated site. It refuses to overwrite an unrelated file. Compare cold-cache runs, warmed actual
-renders and complete render-cache hits separately.
 
 ## Local development
 

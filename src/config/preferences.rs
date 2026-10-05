@@ -125,7 +125,7 @@ impl Default for ReaderPreferences {
             word_spacing: TextSpacing::Normal,
             density: Density::Compact,
             thumbnails: Thumbnails::Show,
-            feed_page_size: 25,
+            feed_page_size: 50,
             motion: Motion::Auto,
             single_key_shortcuts: true,
             scroll_amount: 10,
@@ -512,7 +512,7 @@ mod tests {
         let values = config.site.preferences.browser_defaults().unwrap();
         assert_eq!(values["paragraph-indent"], false);
         assert_eq!(values["scroll-amount"], 7);
-        assert_eq!(values["feed-page-size"], "25");
+        assert_eq!(values["feed-page-size"], "50");
         assert_eq!(values.as_object().unwrap().len(), 18);
     }
 

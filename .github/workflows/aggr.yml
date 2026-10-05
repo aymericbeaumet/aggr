@@ -69,8 +69,7 @@ jobs:
       # Small derived state saves under this run's key; the next run restores the newest entry.
       # Compressed media has its own cache below, so changing a backoff cannot re-upload images.
       # The path list is checked against the registry in src/cache.rs by a unit test.
-      - id: state-cache-restore
-        uses: actions/cache/restore@v6
+      - uses: actions/cache/restore@v6
         with:
           path: |
             .aggr/cache/build-v1/discussions-v1

@@ -4,29 +4,11 @@
 import { fetchEntry } from './caches';
 import { broadcastOfflineStatus, disabledSearchStatus, offlineUrl, type WorkerContext } from './context';
 import { isRecord, validOfflineCount, type OfflineStatus, type SavedArticle } from './messages';
-import { configureOfflineSearch, restoreSearch, verifiedSearchResponse } from './search';
+import { configureOfflineSearch, restoreSearch } from './search';
 import type { OfflineItem, ResourceEntry } from './types';
 
 /** How many articles download at once; each slot fetches one resource at a time. */
 const DOWNLOAD_SLOTS = 6;
-
-async function loadCatalogue(ctx: WorkerContext, signal?: AbortSignal): Promise<OfflineItem[]> {
-  const reference = ctx.config.offline_catalog;
-  const url = offlineUrl(ctx, reference.url);
-  if (!url.startsWith(ctx.scope) || !Number.isSafeInteger(reference.count) || reference.count < 0 || reference.count > 1000)
-    throw new Error('Invalid offline catalogue');
-  const cache = await ctx.caches.open(ctx.names.shell);
-  const stored = await cache.match(url);
-  const response = stored ?? await fetchEntry(ctx.fetch, url, ctx.timeouts.precache, signal);
-  const verified = await verifiedSearchResponse(response, reference, ctx.timeouts.precache);
-  const items: unknown = await verified.clone().json();
-  if (!Array.isArray(items) || items.length !== reference.count || !items.every(validOfflineItem)
-    || items.some(item => !offlineUrl(ctx, item.url).startsWith(ctx.scope)
-      || item.resources.some(entry => !offlineUrl(ctx, entry.url).startsWith(ctx.scope))))
-    throw new Error('Invalid offline catalogue');
-  if (!stored && !signal?.aborted) await cache.put(url, verified).catch(() => {});
-  return items;
-}
 
 export function validOfflineItem(value: unknown): value is OfflineItem {
   return (
@@ -94,7 +76,7 @@ export async function readOfflineStatus(ctx: WorkerContext): Promise<OfflineStat
   return {
     type: 'AGGR_OFFLINE_STATUS',
     requested: count,
-    total: Math.min(count, config.offline_catalog.count),
+    total: Math.min(count, config.offline_catalog.length),
     saved: complete,
     failed: 0,
     downloading: state.offlinePendingCount !== null,
@@ -115,22 +97,8 @@ export async function saveOfflineArticles(
 ): Promise<OfflineStatus> {
   const { state, names, config } = ctx;
   const superseded = () => generation !== undefined && generation !== state.offlineGeneration;
-  let catalogue: OfflineItem[];
-  try {
-    catalogue = count ? await loadCatalogue(ctx, signal) : [];
-  } catch {
-    const previous = await readOfflineStatus(ctx);
-    const result: OfflineStatus = {
-      ...previous, requested: count, total: Math.min(count, config.offline_catalog.count),
-      failed: Math.min(count, config.offline_catalog.count), downloading: false,
-    };
-    if (superseded()) return { ...result, cancelled: true };
-    state.offlineStatus = result;
-    void broadcastOfflineStatus(ctx, result);
-    return result;
-  }
-  const selected = catalogue.slice(0, count);
-  const order = new Map(catalogue.map((item, index) => [item.url, index] as const));
+  const selected = config.offline_catalog.slice(0, count);
+  const order = new Map(config.offline_catalog.map((item, index) => [item.url, index] as const));
   const result: OfflineStatus = {
     type: 'AGGR_OFFLINE_STATUS',
     requested: count,

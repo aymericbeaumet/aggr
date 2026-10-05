@@ -19,6 +19,8 @@ exclusions such as `-tag:sponsored`. Completion suggests real archive values and
 the field for syntax help. See [client development](client.md) for the search contract.
 
 Archived points and comment counts appear alongside metadata only when the source recorded them.
+Hacker News points and comment counts stay in the archive and are left off the page; the discussion
+link is the thread. Lobsters and other recorded counts stay visible.
 
 ## Sharing a passage
 

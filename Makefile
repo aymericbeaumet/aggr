@@ -32,7 +32,7 @@ check-rust:
 	$(MAKE) test
 
 # Node is pinned in mise.toml and only needed to develop the reader: its compiled bundles are
-# committed under themes/default/static/app and embedded by the Rust binary.
+# committed under src/theme/static/app and embedded by the Rust binary.
 client-build:
 	mise exec -- npm --prefix web run build
 

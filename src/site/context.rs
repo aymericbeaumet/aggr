@@ -1,5 +1,5 @@
-//! The template contract: everything a theme can see, as plain serializable structs. Documented
-//! for theme authors in `docs/themes.md`; changing a field here is a theme-facing change.
+//! The template contract: everything a rendered page can see, as plain serializable structs.
+//! Documented in `docs/rendering.md`; changing a field here changes every page.
 
 #[cfg(test)]
 use crate::content;
@@ -158,8 +158,7 @@ pub struct PageCtx {
     /// Human-readable name of the advertised feeds; the collection title on list pages and the
     /// site title on pages that advertise the root feeds.
     pub feed_title: Option<String>,
-    /// Present for list pages. The shape follows Zola's paginator template contract so themes
-    /// can use the same first/last/previous/next mental model.
+    /// Present for list pages: first, last, previous and next.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paginator: Option<PaginatorCtx>,
 }

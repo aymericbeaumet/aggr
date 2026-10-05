@@ -1,8 +1,8 @@
 # Rendering
 
-aggr renders one embedded theme: the MiniJinja templates and static files under `themes/default/`,
-compiled into the binary. There is no theme option and no template override; changing the reader
-means changing this repository. A development binary reads the theme from its source tree, so
+aggr renders its reader from the MiniJinja templates and static files under `src/theme/`,
+compiled into the binary. There is no theme setting and no template override; changing the reader
+means changing this repository. A development binary reads those files from the source tree, so
 `aggr dev` picks up template, CSS and client edits without recompiling.
 
 ## Template data and URLs
@@ -23,8 +23,9 @@ regardless of this setting; see [public hosting](hosting.md#publication-and-sear
 
 Items and recommendation links also expose `metadata`, the precomputed display view shared with search:
 source identity, category, publication/update dates, reading statistics, and resolved discussions.
-An aggregator's score and comment count stay in the stored front matter as provenance; the reader
-shows the discussion link instead. The default
+Hacker News points and comment counts stay in the stored front matter as provenance and are not
+shown; the discussion link is the thread. When that link was not found, the comments URL stays,
+without a count. Other recorded counts, including Lobsters, stay visible. The default
 metadata partial uses this shared view; values must still be escaped normally.
 Source filter links use `metadata.source_query`; `metadata.source_slug` remains the stable index
 identifier. Source directory entries and `metadata.feed_sources` expose these as

@@ -136,7 +136,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
         preference_controls["defaults"]["single-key-shortcuts"],
         true
     );
-    assert_eq!(preference_controls["defaults"]["feed-page-size"], "25");
+    assert_eq!(preference_controls["defaults"]["feed-page-size"], "50");
     assert_eq!(preference_controls["install"], false);
     assert_eq!(preference_controls["config"], false);
     // Opening a dialog is a button's job, not a link's: there is no page to go to.

@@ -103,15 +103,17 @@ async fn default_visit_downloads_only_the_reader_shell_until_intent() -> Result<
           const done = arguments[arguments.length - 1];
           (async () => {
             const requested = performance.getEntriesByType('resource').map(entry => new URL(entry.name).pathname);
-            const unwanted = requested.filter(path => /\/(items|sources|categories|tags|pagefind|offline)\//.test(path)
-              || /\/(search|media|Form)-[^/]+\.js$/.test(path));
+            const visible = new Set([...document.querySelectorAll('.rows .row [data-row-open]')].map(link => new URL(link.href).pathname));
+            const lazy = path => /\/(search|media|Form)-[^/]+\.js$/.test(path);
+            const unwanted = requested.filter(path => lazy(path)
+              || (/\/(items|pagefind|offline)\//.test(path) && !visible.has(path))
+              || /\/(sources|categories|tags)\//.test(path));
             const names = await caches.keys();
             const shell = await caches.open(names.find(name => name.includes(':shell-')));
             const stored = (await shell.keys()).map(request => new URL(request.url).pathname);
             done({ unwanted, external: performance.getEntriesByType('resource').filter(entry => /^https?:/.test(entry.name) && new URL(entry.name).origin !== location.origin).map(entry => entry.name),
               transfer: [...performance.getEntriesByType('navigation'), ...performance.getEntriesByType('resource')].reduce((bytes, entry) => bytes + (entry.transferSize || 0), 0),
-              bulk: stored.filter(path => /\/(items|sources|categories|tags|pagefind|offline)\//.test(path)
-              || /\/(search|media|Form)-[^/]+\.js$/.test(path)) });
+              bulk: stored.filter(path => lazy(path) || /\/(items|pagefind|offline)\//.test(path)) });
           })().catch(error => done({error: String(error)}));
         "#, vec![]).await?;
         anyhow::ensure!(idle["unwanted"] == serde_json::json!([]), "unexpected idle requests: {idle}");

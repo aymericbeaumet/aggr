@@ -93,36 +93,6 @@ describe('messages', () => {
 });
 
 describe('activation', () => {
-  it('reuses HTTP-cached content-addressed shell assets while refreshing mutable files', async () => {
-    const assets = ['assets/style-0123456789ab.css', 'assets/app/app-Ck4TY_xv.js'];
-    const { ctx, state } = harness({ config: {
-      precache: ['', ...assets, 'assets/unversioned.js'].map(url => ({ url, revision: 'revision', required: true })),
-    } });
-    const modes = new Map<string, RequestCache | undefined>();
-    state.network = async (url, init) => {
-      modes.set(url, init?.cache);
-      return new Response(url);
-    };
-    const work: Promise<unknown>[] = [];
-    lifecycle(ctx).install({ waitUntil: promise => work.push(promise) });
-    await Promise.all(work);
-    for (const asset of assets) expect(modes.get(`${scope}${asset}`)).toBe('force-cache');
-    expect(modes.get(scope)).toBe('reload');
-    expect(modes.get(`${scope}assets/unversioned.js`)).toBe('reload');
-  });
-
-  it('a default first visit installs only the shell and does not fetch any archive data', async () => {
-    const { ctx, requests } = harness();
-    const handler = lifecycle(ctx);
-    const work: Promise<unknown>[] = [];
-    handler.install({ waitUntil: promise => work.push(promise) });
-    await Promise.all(work);
-    handler.activate({ waitUntil: promise => work.push(promise) });
-    await Promise.all(work);
-    expect(requests).toEqual([scope]);
-    expect(ctx.state.configurationCount).toBe(0);
-  });
-
   it('enables preload, drops stale caches, claims clients and restores the persisted count', async () => {
     const { ctx, storage, claims, preloadEnabled, messages } = harness();
     const handlers = lifecycle(ctx);

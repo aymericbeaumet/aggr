@@ -1102,6 +1102,11 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   html:not([data-motion="off"]) .top { view-transition-name: top-nav; }
   html:not([data-motion="off"]) .mobile-tabs { view-transition-name: mobile-tabs; }
 }
+/* A transition that takes time is a transition the reader waits on. Named elements still
+   snapshot, and the swap itself is immediate. */
+html::view-transition-group(*),
+html::view-transition-old(*),
+html::view-transition-new(*) { animation-duration: 0s; animation-delay: 0s; }
 html[data-motion="off"]::view-transition-group(*),
 html[data-motion="off"]::view-transition-old(*),
 html[data-motion="off"]::view-transition-new(*) { animation: none; }

@@ -187,20 +187,6 @@ fn worker_json(worker: &str, name: &str) -> serde_json::Value {
     config[name].clone()
 }
 
-fn worker_catalogue(out: &std::path::Path, worker: &str) -> serde_json::Value {
-    use sha2::Digest as _;
-    let reference = worker_json(worker, "offline_catalog");
-    let bytes = std::fs::read(out.join(reference["url"].as_str().unwrap())).unwrap();
-    assert_eq!(reference["size"], bytes.len());
-    assert_eq!(
-        reference["digest"],
-        hex::encode(sha2::Sha256::digest(&bytes))
-    );
-    let articles: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(reference["count"], articles.as_array().unwrap().len());
-    articles
-}
-
 #[cfg(unix)]
 fn stop_dev(mut child: std::process::Child) -> std::process::Output {
     let status = Command::new("kill")
@@ -670,7 +656,7 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
             .all(|entry| entry["url"] != master_asset)
     );
     assert!(
-        worker_catalogue(&repo.clone.join("_site"), &worker)
+        worker_json(&worker, "offline_catalog")
             .as_array()
             .unwrap()
             .iter()
@@ -1921,7 +1907,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
             .all(|entry| entry["url"] != article)
     );
     assert!(
-        worker_catalogue(&site, &sw)
+        worker_json(&sw, "offline_catalog")
             .as_array()
             .unwrap()
             .iter()

@@ -496,7 +496,7 @@ mod tests {
             display["metadata"]["discussions"][0]["url"],
             "https://news.ycombinator.com/item?id=42"
         );
-        assert_eq!(display["metadata"]["discussions"][0]["score"], 12);
+        assert!(display["metadata"]["discussions"][0].get("score").is_none());
         assert_eq!(document.filters["type"], ["article"]);
         assert_eq!(document.filters["category"], ["engineering"]);
         assert_eq!(document.filters["tag"], ["rust"]);
@@ -566,6 +566,9 @@ mod tests {
                 name: "The feed".into(),
                 display: "feed.example/news".into(),
             });
+        // This case is a generic count, not a Hacker News thread. Those points stay hidden.
+        item.discussions[0].name = "lobsters".into();
+        item.discussions[0].url = "https://lobste.rs/s/counts".into();
         item.extra.insert("points".into(), 0.into());
         item.extra.insert("num_comments".into(), "12".into());
         item.extra.insert(
@@ -600,6 +603,58 @@ mod tests {
         assert!(rendered.contains("matching discussion found, score 12"));
         assert!(!rendered.contains(" · "));
         assert!(!rendered.contains("rust</a>"));
+    }
+
+    #[test]
+    fn hacker_news_points_and_comment_counts_stay_out_of_the_reader() {
+        let mut item = item();
+        item.extra.insert("points".into(), 119.into());
+        item.extra.insert("num_comments".into(), 59.into());
+        item.extra.insert(
+            "comments_url".into(),
+            "https://news.ycombinator.com/item?id=42".into(),
+        );
+        let metadata = super::super::display::Metadata::from(&item);
+        assert!(metadata.points.is_none());
+        assert!(metadata.comments.is_none());
+        assert_eq!(metadata.discussions.len(), 1);
+        assert!(metadata.discussions[0].score.is_none());
+
+        let renderer =
+            crate::site::render::Renderer::new(crate::site::render::Theme::default()).unwrap();
+        item.metadata = metadata;
+        let rendered = renderer
+            .render("_metadata.html", minijinja::context! { item => item })
+            .unwrap();
+        assert!(rendered.contains("data-discussion=\"hackernews\""));
+        assert!(!rendered.contains("points"), "{rendered}");
+        assert!(!rendered.contains("comments</a>"), "{rendered}");
+        assert!(!rendered.contains("score"), "{rendered}");
+
+        item.discussions.clear();
+        item.extra
+            .insert("comments_url".into(), "https://lobste.rs/s/fixture".into());
+        item.extra.insert("points".into(), 40.into());
+        item.extra.insert("num_comments".into(), 8.into());
+        let metadata = super::super::display::Metadata::from(&item);
+        assert_eq!(metadata.points, Some(40));
+        let comments = metadata.comments.expect("lobsters thread");
+        assert_eq!(comments.url, "https://lobste.rs/s/fixture");
+        assert_eq!(comments.count, Some(8));
+
+        item.extra.insert(
+            "comments_url".into(),
+            "https://news.ycombinator.com/item?id=7".into(),
+        );
+        item.extra.insert("points".into(), 10.into());
+        item.extra.insert("num_comments".into(), 3.into());
+        let metadata = super::super::display::Metadata::from(&item);
+        assert!(metadata.points.is_none());
+        let comments = metadata
+            .comments
+            .expect("thread link when no discussion is shown");
+        assert_eq!(comments.url, "https://news.ycombinator.com/item?id=7");
+        assert!(comments.count.is_none());
     }
 
     #[test]

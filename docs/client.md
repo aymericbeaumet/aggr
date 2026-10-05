@@ -2,7 +2,7 @@
 
 Rust and MiniJinja render the complete static reader. The browser client is a Svelte 5 +
 TypeScript application in `web/`, compiled ahead of time by Vite and committed under
-`themes/default/static/app/`, where the binary embeds it like any other static file. Site
+`src/theme/static/app/`, where the binary embeds it like any other static file. Site
 generation never executes JavaScript or invokes a frontend compiler, so `cargo build`, `aggr sync`,
 `aggr build` and `aggr dev` need no Node. Search is a build-time Pagefind index; there is no
 search service.
@@ -29,12 +29,13 @@ the client. If `#aggr-page` is missing or malformed the page stays static.
 
 Navigation fetches the target page, extracts its model, its content element and its `<head>`
 metadata with `DOMParser`, and re-renders `<main>` from state while the header and tab bar
-persist. A link inside the archive is fetched when it is pressed, focused or hovered (60 ms),
-with at most two intent prefetches in flight and a 24-page, five-minute cache. No pages are fetched
-just because their links are visible, and unvisited destinations are not refreshed periodically.
-Intent prefetch is off on Save-Data, slow connections, offline, or hidden tabs; following a link
-still uses ordinary navigation when necessary. Scroll positions are kept per history entry, so
-Back returns to the same place and list cursor. A non-HTML response, a page without a model or one built by another app version
+persist. A link inside the archive is fetched as soon as it is pressed or hovered, and a page
+already in memory is swapped in that same turn. After paint, the reader warms the other tabs and
+the first three rows already on screen. An article's neighbours carry `rel="prefetch"`. Guesses
+are bounded to 16 requests and a 24-page, five-minute cache, and off on Save-Data or slow
+connections. The search catalogue waits for an idle slice, and loads
+at once when the field is focused. Scroll positions are kept per history entry, so Back returns to the same place and
+list cursor. A non-HTML response, a page without a model or one built by another app version
 falls back to ordinary navigation, and without JavaScript every link is an ordinary link.
 
 ## Components and parity
@@ -61,7 +62,7 @@ sits behind `@supports` or a feature check and degrades to plain HTML.
 mise install                      # node
 npm ci --prefix web
 make client-check                 # svelte-check + vitest
-make client-build                 # rebuild the committed bundle under themes/default/static/app/
+make client-build                 # rebuild the committed bundle under src/theme/static/app/
 make client-dev                   # Vite dev server with HMR
 AGGR_VITE_URL=http://127.0.0.1:5173 cargo run -- dev --config examples/aggr.toml
 ```
@@ -96,27 +97,12 @@ sync, and import and export. Values live in `localStorage` under `aggr:<setting>
 ## Offline
 
 The service worker separates automatically cached pages from selected offline downloads. The
-default offline-download count is zero. Installation caches the home/offline shell, small icons and
-the client's eager dependencies; collection pages and optional search, media and preferences
-chunks load when used. The worker references a versioned offline catalogue instead of embedding
-its article families; only an enabled offline preference downloads it, checking its byte count,
-SHA-256 digest, item count and local URLs before use. Saved user preferences still take precedence.
-Large app-installation icons remain available on demand.
-Content-addressed shell assets reuse the browser's HTTP cache during installation; pages and
-mutable manifests still request fresh responses. This avoids downloading the same client assets
-twice when the host permits caching.
-
-The offline preference saves complete article pages and their retained image renditions; readiness
+offline preference saves complete article pages and their retained image renditions; readiness
 requires every retained file. Partial and quota failures remain visible. Any positive download
 limit also saves the complete archive search manifest, including its versioned catalogue, runtime
 and fragments. Only a fully committed index becomes active, and a previous complete index remains
 available during an update. Online/offline transitions select the matching catalogue and runtime;
 search results mark saved articles and omit previews that are unavailable offline.
-
-The optional `[site.params] introduction = true` introduction uses native `<details>` outside the Svelte
-root, so collapsing it survives navigation within the document. It appears only on the feed and
-adds no script or network dependency. Browse and source directories expose subscription downloads
-and the reading-list configuration; source/category query URLs remain shareable.
 
 ## Browser regression tests
 
@@ -137,14 +123,13 @@ versions; failure screenshots and logs are saved under `target/browser-artifacts
 ### First-visit budget
 
 The `default_visit` contract uses a fresh browser profile, 45 fixture articles, the default
-25-entry feed, remote media policies and zero selected offline downloads. On 2026-10-04,
+feed page, remote media policies and zero selected offline downloads. On 2026-10-05,
 Chrome 154 on macOS produced these measurements over local HTTP without compression:
 
 | Measurement | Bytes |
 |---|---:|
-| Server response headers and bodies with `Cache-Control: no-store`, including service-worker installation | 833,136 |
-| Same fixture with `public, max-age=31536000, immutable` on versioned assets | 595,352 |
-| Browser navigation/resource `transferSize` with `no-store`, which omits worker requests | 390,218 |
+| Server response headers and bodies with `Cache-Control: no-store`, including service-worker installation | 937,331 |
+| Same fixture with `public, max-age=31536000, immutable` on versioned assets | 698,712 |
 | Regression budget for the `no-store` server total | 1,048,576 |
 | Regression budget with cacheable versioned assets | 786,432 |
 
@@ -257,6 +242,7 @@ fragments are loaded. Completion uses Pagefind's filtered counts for a single se
 filter-membership intersections for mixed phrases/exclusions, without loading article bodies.
 Display metadata remains opaque to Pagefind's text tokenizer. Archived points and comment counts
 are shared by static and search metadata, including explicit zero values; missing counts stay absent.
+Hacker News points, comment counts, and the discussion score are omitted from that shared view.
 
 Completion caches normalized aliases and ranking by immutable catalogue identity; detecting a
 finished facet token does not build or sort a suggestion list. A persistent search session coalesces

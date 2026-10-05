@@ -89,6 +89,7 @@ export function boot(): void {
       () => settlePictures(),
       (signal) => installReadingHeader(signal),
       (signal) => installSearchIntent(signal),
+      (signal) => navigation.speculate(signal),
       () => pageArrived(),
     ]),
   );

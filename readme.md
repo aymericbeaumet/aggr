@@ -128,8 +128,6 @@ See [the measurements and hosting limits](docs/benchmarks.md) before choosing yo
 [Hosting](docs/hosting.md) · [Rendering](docs/rendering.md) · [Git model](docs/git-model.md) ·
 [Interoperability](docs/interoperability.md) · [Performance](docs/performance.md)
 
-See [sharing a reader](docs/sharing.md) for useful links, subscription exports and setup expectations.
-
 Rust generates the site; the reader is a Svelte application compiled ahead of time and shipped
 inside the binary, so building a site never needs Node. See [contributing](CONTRIBUTING.md) and
 [client development](docs/client.md).

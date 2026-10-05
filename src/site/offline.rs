@@ -17,33 +17,6 @@ pub(super) struct Article {
     resources: Vec<assets::PrecacheEntry>,
 }
 
-#[derive(Serialize)]
-pub(super) struct Catalogue {
-    url: String,
-    digest: String,
-    size: usize,
-    count: usize,
-}
-
-pub(super) fn publish_catalogue(
-    out: &Path,
-    items: &[ItemCtx],
-    images: &BTreeMap<String, Vec<content::LocalImage>>,
-    published: &assets::Published,
-) -> Result<Catalogue> {
-    let articles = catalogue(out, items, images, published)?;
-    let bytes = serde_json::to_vec(&articles)?;
-    let digest = hex::encode(Sha256::digest(&bytes));
-    let url = format!("offline/{digest}.json");
-    crate::cache::write(&out.join(&url), &bytes)?;
-    Ok(Catalogue {
-        url,
-        digest,
-        size: bytes.len(),
-        count: articles.len(),
-    })
-}
-
 pub(super) fn catalogue(
     out: &Path,
     items: &[ItemCtx],
@@ -55,6 +28,7 @@ pub(super) fn catalogue(
         .take(1000)
         .map(|item| {
             let mut paths = BTreeSet::from([item.url.clone()]);
+            // A remote preview URL is a publisher address, not a file this build wrote.
             if let Some(preview) = &item.preview
                 && published.contains_key(&preview.url)
             {
@@ -73,8 +47,16 @@ pub(super) fn catalogue(
                 paths.insert(local.split('#').next().unwrap_or(local).to_owned());
             }
             for image in images.get(&item.path).into_iter().flatten() {
-                paths.insert(image.original.clone());
-                paths.extend(image.variants.iter().map(|variant| variant.url.clone()));
+                if published.contains_key(&image.original) {
+                    paths.insert(image.original.clone());
+                }
+                paths.extend(
+                    image
+                        .variants
+                        .iter()
+                        .map(|variant| variant.url.clone())
+                        .filter(|url| published.contains_key(url)),
+                );
             }
             (item, paths)
         })
