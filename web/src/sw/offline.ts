@@ -10,6 +10,23 @@ import type { OfflineItem, ResourceEntry } from './types';
 /** How many articles download at once; each slot fetches one resource at a time. */
 const DOWNLOAD_SLOTS = 6;
 
+/** The published article catalogue. A zero download count never asks for it. */
+async function catalog(ctx: WorkerContext): Promise<OfflineItem[]> {
+  const cached = ctx.state.offlineCatalog;
+  if (cached) return cached;
+  const response = await fetchEntry(
+    ctx.fetch,
+    offlineUrl(ctx, ctx.config.offline_catalog_url),
+    ctx.timeouts.precache,
+    undefined,
+    'reload',
+  );
+  const body: unknown = await response.json();
+  const items = Array.isArray(body) ? body.filter(validOfflineItem) : [];
+  ctx.state.offlineCatalog = items;
+  return items;
+}
+
 export function validOfflineItem(value: unknown): value is OfflineItem {
   return (
     isRecord(value) &&
@@ -53,6 +70,7 @@ export async function readOfflineStatus(ctx: WorkerContext): Promise<OfflineStat
     }
   await restoreSearch(ctx);
   if (generation !== state.configurationGeneration) return readOfflineStatus(ctx);
+  const available = count > 0 ? await catalog(ctx).catch(() => []) : [];
   const search = count ? { ...state.searchStatus } : disabledSearchStatus();
   if (count && !state.searchTask) {
     const active = state.activeSearch;
@@ -76,7 +94,7 @@ export async function readOfflineStatus(ctx: WorkerContext): Promise<OfflineStat
   return {
     type: 'AGGR_OFFLINE_STATUS',
     requested: count,
-    total: Math.min(count, config.offline_catalog.length),
+    total: Math.min(count, available.length),
     saved: complete,
     failed: 0,
     downloading: state.offlinePendingCount !== null,
@@ -95,10 +113,10 @@ export async function saveOfflineArticles(
   generation?: number,
   signal?: AbortSignal,
 ): Promise<OfflineStatus> {
-  const { state, names, config } = ctx;
+  const { state, names } = ctx;
   const superseded = () => generation !== undefined && generation !== state.offlineGeneration;
-  const selected = config.offline_catalog.slice(0, count);
-  const order = new Map(config.offline_catalog.map((item, index) => [item.url, index] as const));
+  let selected: OfflineItem[] = [];
+  let order = new Map<string, number>();
   const result: OfflineStatus = {
     type: 'AGGR_OFFLINE_STATUS',
     requested: count,
@@ -111,8 +129,14 @@ export async function saveOfflineArticles(
   const resources = new Map<string, Promise<void>>();
   let next = 0;
   const complete: OfflineItem[] = [];
-  for (const item of selected) for (const entry of item.resources) wanted.add(offlineUrl(ctx, entry.url));
   try {
+    if (count > 0) {
+      const items = await catalog(ctx);
+      selected = items.slice(0, count);
+      order = new Map(items.map((item, index) => [item.url, index] as const));
+      result.total = selected.length;
+    }
+    for (const item of selected) for (const entry of item.resources) wanted.add(offlineUrl(ctx, entry.url));
     const [pages, revisions] = await Promise.all([
       ctx.caches.open(names.offlinePages),
       ctx.caches.open(names.offlineRevisions),
@@ -196,7 +220,9 @@ export async function saveOfflineArticles(
         }),
       );
   } catch {
-    result.failed = Math.max(0, selected.length - result.saved.length);
+    // A catalogue that never arrived is a failed request, and it must not wipe what is already saved.
+    const expected = selected.length > 0 ? selected.length : count;
+    result.failed = Math.max(result.failed, expected - result.saved.length);
   }
   if (!superseded()) {
     // A refreshed protected page must not be shadowed by a visited copy from an older build.

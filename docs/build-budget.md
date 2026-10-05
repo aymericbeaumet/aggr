@@ -105,8 +105,8 @@ This budget controls deployment size, not acquisition or repository growth. Pres
 masters still consumes Git storage, and append-only history retains earlier objects. Measure
 repository bytes separately; [the public-instance baseline](benchmarks.md) illustrates the cost.
 
-Per-feed `[defaults]` limits retain 250 items, 730 days, and 1 GB by default. Set `max_items`,
-`max_age_days`, and `max_bytes` to zero to retain an unbounded current archive. Source fields
+Per-feed `[defaults]` limits retain 250 items, 730 days, and 1 GB by default. Set `count_max`,
+`max_age_days`, and `size_max` to zero to retain an unbounded current archive. Source fields
 override each value independently. Retention removes current article families through ordinary
 commits and cannot reclaim their historical Git objects. The build budget never enables retention
 or removes articles to make room for media.

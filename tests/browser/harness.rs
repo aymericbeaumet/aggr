@@ -25,7 +25,8 @@ use sha1::{Digest as _, Sha1};
 use support::aggr_command;
 pub(crate) use support::git;
 
-pub(crate) const ARCHIVED_MEDIA_SETTINGS: &str = "[defaults]\ncontent='heavy'\nmedia='local'\n";
+pub(crate) const ARCHIVED_MEDIA_SETTINGS: &str =
+    "[defaults]\ncontent_download_strategy='article'\nmedia_download_strategy='original'\n";
 
 pub(crate) struct Fixture {
     pub(crate) directory: tempfile::TempDir,

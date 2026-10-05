@@ -6,6 +6,7 @@ import type {
   CacheStorageLike,
   ClientsLike,
   Fetch,
+  OfflineItem,
   SearchManifest,
   SwConfig,
   Timeouts,
@@ -28,6 +29,8 @@ export interface WorkerState {
   searchAbort: AbortController | null;
   searchGeneration: number;
   searchStatus: SearchStatus;
+  /** The article catalogue for this worker, once a positive download count has loaded it. */
+  offlineCatalog: OfflineItem[] | null;
   /** The count from the latest `AGGR_OFFLINE_CONFIG`, `null` until one arrives. */
   configurationCount: number | null;
   configurationTask: Promise<OfflineStatus | void> | null;
@@ -94,6 +97,7 @@ export function createContext(env: WorkerEnv): WorkerContext {
       searchAbort: null,
       searchGeneration: 0,
       searchStatus: disabledSearchStatus(),
+      offlineCatalog: null,
       configurationCount: null,
       configurationTask: null,
       configurationGeneration: 0,

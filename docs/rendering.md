@@ -191,7 +191,8 @@ The client and the templates share these relationships:
   `browse`, `preferences`, and aggr.toml are visible in the desktop header. Mobile navigation uses
   feed, browse, and preferences in a fixed, inset rounded bar with a selected-tab surface.
   Icon and label rows align across tabs; the wrapper includes the home-indicator inset once.
-  Search stays pinned below the header on feeds; keep its results outside the sticky toolbar.
+  Search stays pinned below the header on every platform and does not move as the feed scrolls;
+  keep its results outside the sticky toolbar.
   Category/source/tag feeds show their scope beside it. The brand returns to the main feed. Facet links use the
   `facet_url` filter to open the main feed with a quoted search qualifier. Static archives remain at
   `sources/<slug>/`, `categories/<slug>/`, and `tags/<slug>/`; `/browse/` combines the directories. See [client development and search](client.md) for syntax and ownership.
@@ -278,7 +279,12 @@ Browser refresh remains native; the installed app also supports pull-to-refresh.
 service workers so a previous deployment cannot mask a local snapshot. Ordinary dev renders pages and media on demand on blocking workers, and retains the current
 generation while a replacement is prepared. See [local development](commands.md#local-development).
 
-The worker keeps visited pages and content-addressed assets in bounded runtime caches. The offline
+The worker keeps visited pages and content-addressed assets in bounded runtime caches. Installing
+it downloads the app shell only: the home, browse, directory, preferences, offline and missing
+pages, plus the stylesheet, icons and reader script. Individual source, category and tag pages
+are cached when opened. Article families are listed in `offline-catalog.json`, which is fetched
+only when a download count is set, so the first visit does not transfer them. A replacement
+worker copies shell responses whose revision is unchanged and fetches the rest. The offline
 preference additionally downloads 0–1000 recent articles into protected caches: each article is
 available only after its page, every retained image rendition, and any local PDF companion are
 saved. Partial downloads and quota failures remain visible in preferences; `offline.html` lists

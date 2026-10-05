@@ -117,6 +117,8 @@ export function harness(over: { config?: Partial<SwConfig>; timeouts?: Partial<T
     const url = key(input);
     requests.push(url);
     if (state.offline) throw new Error('offline');
+    // The catalogue is not part of the install. Tests that replace the network still receive it.
+    if (url.endsWith('offline-catalog.json')) return Response.json(catalog);
     if (state.network) return state.network(url, init);
     if (url.endsWith('search-manifest.json')) return Response.json(manifest);
     const file = files.find((candidate) => key(candidate.url) === url);
@@ -145,7 +147,7 @@ export function harness(over: { config?: Partial<SwConfig>; timeouts?: Partial<T
       content_version: 'content',
       precache: [{ url: '', revision: 'root', required: true }],
       offline_count: 0,
-      offline_catalog: catalog,
+      offline_catalog_url: 'offline-catalog.json',
       search_manifest: { version, base: indexBase },
       ...over.config,
     },

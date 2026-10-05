@@ -30,8 +30,9 @@ the client. If `#aggr-page` is missing or malformed the page stays static.
 Navigation fetches the target page, extracts its model, its content element and its `<head>`
 metadata with `DOMParser`, and re-renders `<main>` from state while the header and tab bar
 persist. A link inside the archive is fetched as soon as it is pressed or hovered, and a page
-already in memory is swapped in that same turn. After paint, the reader warms the other tabs and
-the first three rows already on screen. An article's neighbours carry `rel="prefetch"`. Guesses
+already in memory is swapped in that same turn. The three tabs are fetched as soon as the reader
+starts. After paint, the reader warms the first three rows already on screen. An article's
+neighbours carry `rel="prefetch"`. Guesses
 are bounded to 16 requests and a 24-page, five-minute cache, and off on Save-Data or slow
 connections. The search catalogue waits for an idle slice, and loads
 at once when the field is focused. Scroll positions are kept per history entry, so Back returns to the same place and
@@ -70,6 +71,11 @@ AGGR_VITE_URL=http://127.0.0.1:5173 cargo run -- dev --config examples/aggr.toml
 With `AGGR_VITE_URL` set, the development server replaces the compiled module tag in its HTML
 with Vite's client and the source entry, so component edits hot-swap; static HTML, media and data
 stay served by aggr. The setting accepts a local HTTP origin only and has no effect on builds.
+Hashed assets — `assets/app` bundles, Rust `url_for` names, content-addressed media and Pagefind
+fragments — are served `Cache-Control: public, max-age=31536000, immutable`. HTML stays
+`no-store` and does not send `Clear-Site-Data`: the reload script already drops the reader's own
+caches, and wiping the HTTP cache on every document made the next paint wait on files that had
+not changed.
 `make check` runs the frontend checks alongside the Rust ones; CI also rebuilds the bundle and
 fails if the committed output or the generated types differ.
 The frontend installs TypeScript 6 for `tsc` and an aliased TypeScript 7 for Svelte's `--tsgo`
@@ -96,7 +102,10 @@ sync, and import and export. Values live in `localStorage` under `aggr:<setting>
 
 ## Offline
 
-The service worker separates automatically cached pages from selected offline downloads. The
+The service worker separates automatically cached pages from selected offline downloads. Its
+script carries the app shell, not the article catalogue: `offline-catalog.json` is fetched only
+when a download count is set, and individual collection pages are cached when opened. A new
+worker copies shell files whose revision matches instead of downloading them again. The
 offline preference saves complete article pages and their retained image renditions; readiness
 requires every retained file. Partial and quota failures remain visible. Any positive download
 limit also saves the complete archive search manifest, including its versioned catalogue, runtime
@@ -137,7 +146,9 @@ The sample ends 750 ms after worker control, before typing or navigation. It als
 external HTTP requests and zero automatic article, collection, search-index or offline-catalogue
 downloads. With cacheable assets, each asset is requested at most once: worker installation reuses
 the browser's HTTP cache. Search works afterward. These are controlled fixture bytes, not
-deployed-site timings; compression and hosting cache headers change the transfer size.
+deployed-site timings; compression and hosting cache headers change the transfer size. The
+samples predate the smaller install shell: collection pages and the article catalogue are no
+longer part of service-worker installation.
 
 ```sh
 AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser default_visit -- --ignored --test-threads=1 --nocapture

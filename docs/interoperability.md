@@ -85,13 +85,13 @@ item with its title, `https://qwen.ai/blog?id=<path>` as the link, its RFC 3339 
 tags as labels, the small cover image as the preview candidate, and the article HTML (the first
 of `.post-content`, `article`, `main`, or `body`) as content; the source is titled `Qwen` with
 `https://qwen.ai/` as its site URL. An article without a path, title, or content is a source
-error rather than an empty item. Because the API already carries the whole article, heavy mode
+error rather than an empty item. Because the API already carries the whole article, article capture
 never requests the JavaScript shell for it, and the daily retry that upgrades feed-only captures
-skips the source, as it does for light-mode and mirrored sources.
+skips the source, as it does for feed-strategy and mirrored sources.
 
 ## Public threads
 
-Heavy article extraction joins public posts by the original author. Mastodon/ActivityPub follows
+Article capture joins public posts by the original author. Mastodon/ActivityPub follows
 same-origin ActivityStreams parents and replies. X/Twitter status URLs use public xcancel HTML;
 stored attribution and post links use `x.com`, and images use their original media URLs. X source
 credentials are never forwarded to xcancel. No login, browser cookies, or publisher scripts are used.
@@ -124,7 +124,7 @@ is kept byte for byte as the master and served as-is, its size is read from the 
 box so the space is reserved before it loads, and it carries a flat stand-in preview instead of a
 ThumbHash. It gains no WebP renditions. A CDN that answers `auto=format` with AVIF regardless of
 `Accept` — Linear's, for one — is archived this way rather than skipped. Having no decoder also
-means AVIF cannot be compacted: under `media = "compressed"` it keeps its exact bytes, as
+means AVIF cannot be compacted: under `media_download_strategy = "compressed"` it keeps its exact bytes, as
 colour-managed and high-bit-depth images do.
 
 AVIF support stops there deliberately, and two gaps follow from never decoding it. An animated AVIF
@@ -228,7 +228,7 @@ Windows ARM64 must pass those workflows; upstream's documented build matrix does
 
 ## PDF preservation
 
-In heavy content mode, direct PDF articles and explicitly resolved PDF alternates can retain an
+With `content_download_strategy = "article"`, direct PDF articles and explicitly resolved PDF alternates can retain an
 item-owned document companion. Capture obeys `fetch.max_body_bytes` (10 MB by default) and accepts
 at most 16 MiB. It requires a PDF signature and a compatible response type, and validates the
 stored path and content hash before publication. HTML challenges never
@@ -380,8 +380,8 @@ repository's complete Git history.
 
 Retention removes an item from the current static site and discovery outputs. Append-only Git
 history still contains the old object while its ancestor commits remain reachable, but search
-engines are not a Git-history recovery interface. Set `[defaults] max_items`, `max_age_days`, and
-`max_bytes` to zero, and clear `since`, when the live site should keep the complete captured archive.
+engines are not a Git-history recovery interface. Set `[defaults] count_max`, `max_age_days`, and
+`size_max` to zero, and clear `since`, when the live site should keep the complete captured archive.
 
 ## Preservation boundary
 

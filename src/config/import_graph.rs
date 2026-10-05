@@ -890,9 +890,9 @@ mod tests {
         crate::http::install_crypto_provider();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("aggr.toml");
-        std::fs::write(&root, "[defaults]\nmedia='remote'\nmax_items=100\nmax_age_days=200\nsince='2026-01-01'\n[[sources]]\nurl='./outer.toml'\ncontent='heavy'\nmax_items=20\n").unwrap();
-        std::fs::write(dir.path().join("outer.toml"), "[defaults]\nmedia='local'\nmax_items=90\nmax_age_days=30\nmax_bytes=1000\n[[sources]]\nurl='./inner.toml'\nmax_bytes=2000\n").unwrap();
-        std::fs::write(dir.path().join("inner.toml"), "[defaults]\nmedia='compressed'\nmax_age_days=10\n[[sources]]\nurl='https://a.example/feed'\nmedia='remote'\nmax_items=3\nsince=false\n[[sources]]\nurl='./local.json'\n[[sources]]\nurl='https://c.example/feed'\ncontent='light'\nmax_age_days=0\n").unwrap();
+        std::fs::write(&root, "[defaults]\nmedia_download_strategy='remote'\ncount_max=100\nmax_age_days=200\nsince='2026-01-01'\n[[sources]]\nurl='./outer.toml'\ncontent_download_strategy='article'\ncount_max=20\n").unwrap();
+        std::fs::write(dir.path().join("outer.toml"), "[defaults]\nmedia_download_strategy='original'\ncount_max=90\nmax_age_days=30\nsize_max=1000\n[[sources]]\nurl='./inner.toml'\nsize_max=2000\n").unwrap();
+        std::fs::write(dir.path().join("inner.toml"), "[defaults]\nmedia_download_strategy='compressed'\nmax_age_days=10\n[[sources]]\nurl='https://a.example/feed'\nmedia_download_strategy='remote'\ncount_max=3\nsince=false\n[[sources]]\nurl='./local.json'\n[[sources]]\nurl='https://c.example/feed'\ncontent_download_strategy='feed'\nmax_age_days=0\n").unwrap();
         std::fs::write(
             dir.path().join("local.json"),
             r#"{"version":"https://jsonfeed.org/version/1.1","title":"Local","items":[]}"#,
@@ -1288,7 +1288,7 @@ mod tests {
             r#"{"version":"https://jsonfeed.org/version/1.1","title":"News","items":[]}"#,
         )
         .unwrap();
-        std::fs::write(dir.path().join("nested.toml"), "[[sources]]\nurl = './news.opml'\nlabels = ['child']\nheaders = { authorization = 'child' }\nmedia = 'remote'\n").unwrap();
+        std::fs::write(dir.path().join("nested.toml"), "[[sources]]\nurl = './news.opml'\nlabels = ['child']\nheaders = { authorization = 'child' }\nmedia_download_strategy = 'remote'\n").unwrap();
         let source = SourceConfig {
             url: Some("./nested.toml".into()),
             category: Some("science".into()),

@@ -237,7 +237,7 @@ mod tests {
             );
         });
         let config = crate::config::Config::parse(&format!(
-            "[fetch]\nretries=0\n[defaults]\ncontent=\"heavy\"\n[[sources]]\nurl={:?}\nheaders={{'X-Reader-Test'='configured'}}",
+            "[fetch]\nretries=0\n[defaults]\ncontent_download_strategy=\"article\"\n[[sources]]\nurl={:?}\nheaders={{'X-Reader-Test'='configured'}}",
             server.url("/finntonry/")
         ))
         .unwrap();

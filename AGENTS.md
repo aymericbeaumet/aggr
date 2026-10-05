@@ -37,7 +37,7 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   rather than each claiming the whole machine. Normal HTTP uses rustls with
   ring, installed via `http::install_crypto_provider()` before any client (tests too). The bounded
   challenge fallback uses wreq/BoringSSL; both transports share request and preservation limits.
-- Defaults optimize the first visit: light feed content, remote images/previews/documents, no
+- Defaults optimize the first visit: feed content, remote images/previews/documents, no
   automatic offline downloads, and intent-only navigation prefetch. Apply media policy before
   archived companion IO in eager and lazy rendering; changing media mode alone preserves retained masters.
 - `build --offline`, `--data-ref`, and `--hermetic` read local Git objects without fetching,
@@ -75,7 +75,7 @@ src/commands/mod.rs                       Project = config + sources + repo; the
 src/commands/sync.rs                      fetch, commit with trailers, push, move refs/aggr/last-good
 src/commands/build.rs                     sync then render, or render a pinned --data-ref
 src/commands/dev.rs                       isolated cache, lazy snapshots, watch and live reload
-src/commands/fetch.rs                     shared fetch stage: per-source workers, heavy content, persistence
+src/commands/fetch.rs                     shared fetch stage: per-source workers, article capture, persistence
 src/commands/fetch/index.rs               one archive pass: stored URLs, paths, reconciliation indexes
 src/commands/fetch/links.rs               cross-source URL reservations for overlapping feeds
 src/commands/fetch/plan.rs                what an item becomes on disk, decided before any write
@@ -227,7 +227,7 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   names its own target and another link follows it.
 - Preserve explicitly captioned image figures before Readability classifies incidental IDs such as
   `replies.png` as boilerplate, and rename share-named wrappers that hold media but no share links.
-  Script-drawn charts with inline data become tables; heavy-mode feed-only captures retry with a daily,
+  Script-drawn charts with inline data become tables; article-strategy captures that kept only the feed retry with a daily,
   bounded backoff and upgraded in place when the original page becomes available. Bump the extraction-cache version when extraction semantics change;
   missing content already absent from stored HTML requires a fresh extraction.
   A formula is a formula wherever a page put it: MathML with a TeX annotation, a `math` class, or
@@ -300,9 +300,15 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
 - Article suggestions are resolved once, and every one of them is meant to be shown: never filter
   them again downstream. They skip the chronological neighbours the page already links, and avoid
   pointing back at an article that already suggests them so browsing never closes a two-page loop.
-- Capture policies live in flat `[defaults]` and inherit field by field into sources: `content`
-  is `light` (feed only) or `heavy`; `media` is `remote`, `compressed`, or `local`. Compressed
-  media accepts `quality`/`max_axis`. Do not reintroduce the retired fetch policy aliases.
+- Capture policies live in flat `[defaults]` and inherit field by field into sources:
+  `content_download_strategy` is `feed` (the feed entry) or `article` (also download and extract
+  the original page); `media_download_strategy` is `remote`, `compressed`, or `original`.
+  `compressed` and `original` both store media locally; `original` keeps the publisher's bytes.
+  Do not accept `local` as a media value. Compressed
+  media accepts `quality`/`max_axis`. `count_max` is the retained item count and `size_max` is
+  the retained byte limit, as an integer or a size such as `1GB` (decimal) or `1GiB`. Do not
+  reintroduce the retired fetch policy aliases or the old `content`, `media`, `max_items`, and
+  `max_bytes` capture keys. `[site] max_items` and the `*_max_bytes` budgets are different options.
   Compacting replaces the master and drops renditions; an oversized animated GIF is re-encoded as
   a bounded GIF keeping frames, timing and loop, and the smaller of the two always wins, so an
   already-differenced animation keeps its exact bytes. Colour-managed, high-depth, AVIF, animated
@@ -357,10 +363,12 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   the script sets it elsewhere, and the bar keeps the text column's width while the header's
   surface spans the page.
 - Offline readiness means an article page and all its retained image renditions are cached.
+  Keep selected downloads separate from evictable runtime caches and report partial/quota failures.
   The install precache is browse, preferences, offline, 404, the manifest, the stylesheet, the
   favicon and eager scripts. The open document is the navigation response, so installation does
-  not download it again. Install icons and collection pages are fetched when the reader asks. Keep selected downloads separate from evictable runtime caches
-  and report partial/quota failures.
+  not download it again. Install icons and collection pages are fetched when the reader asks.
+  Article families live in `offline-catalog.json` and download only for a positive offline count.
+  A replacement worker copies shell responses whose revision matches and fetches the rest.
 - Precompute display data during builds. Keep Pagefind display metadata opaque: even zero-weight
   metadata can pollute search results. Bound navigation caches and speculative requests.
   Prepare shared template values once per build.
@@ -371,9 +379,14 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   bar and derive content clearance from its measured height; never stack extra safe-area spacers.
   Skip navigation animations and bound intent-only prefetch; no idle or viewport archive downloads.
   Uncached navigation remains progressive.
-  Keep feed search pinned below the measured header, with results outside the sticky wrapper.
-  Touch tabs activate once on release with immediate contact feedback. Article swipes must yield to
-  selection, vertical scroll, pinch zoom, controls, horizontal scrollers, and browser edge gestures.
+  Keep feed search pinned below the measured header on every platform, so scrolling the feed does
+  not move it, with results outside the sticky wrapper. Measure `.top` into `--top-nav-offset`
+  and a list heading into `--feed-heading` (zero when the page has none).
+  Touch tabs activate once on release with immediate contact feedback. The whole tab bar,
+  including its padding, is the hit target; a tap that stays on it activates the tab under the
+  finger on release, and that tab is marked current before its page has arrived.
+  Article swipes must yield to selection, vertical scroll, pinch zoom, controls, horizontal
+  scrollers, and browser edge gestures.
   Never apply `touch-action: pan-y` to an ancestor containing horizontal scrollers.
   Share keyboard/swipe article destinations; a missing neighbor returns to the main feed.
 - The client is Svelte 5 (runes) + TypeScript under `web/src/`: `main.ts` boots, `app/` is the
@@ -453,7 +466,7 @@ See [client development](docs/client.md) for frontend commands, ownership, and s
 
 ## Per-feed limits
 
-- Keep `max_items = 250`, `max_age_days = 730`, and `max_bytes = 1_000_000_000` flat in
+- Keep `count_max = 250`, `max_age_days = 730`, and `size_max = "1GB"` (1_000_000_000 decimal bytes) flat in
   `[defaults]`, individually overridable by each source. Zero disables one numeric limit;
   `since = false` clears an inherited inclusive UTC date.
 - Apply count/date before enrichment and complete-family retention before and after sync.

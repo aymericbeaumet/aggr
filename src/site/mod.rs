@@ -403,15 +403,17 @@ pub fn relative_root(path: &str) -> String {
 }
 
 /// What the worker reads from `self.AGGR_SW`: its cache version, the application and content
-/// versions, and the revisioned install-time lists. `sw.js` is this object followed by an
-/// `importScripts` of the compiled worker, so the worker's scope stays the site root.
+/// versions, and the revisioned install-time lists. The article catalogue is
+/// `offline-catalog.json`, not part of this script, so installing the worker does not download
+/// it. `sw.js` is this object followed by an `importScripts` of the compiled worker, so the
+/// worker's scope stays the site root.
 #[derive(Serialize)]
 struct SwConfig {
     version: String,
     app_version: String,
     content_version: String,
     precache: Vec<assets::PrecacheEntry>,
-    offline_catalog: Vec<offline::Article>,
+    offline_catalog_url: String,
     offline_count: usize,
     search_manifest: serde_json::Value,
 }
@@ -1312,19 +1314,20 @@ fn build_once(
         )?;
         // The shell installs first: the reader frame and the assets that paint it. Collection
         // pages and article bodies stay out of that download and are cached when opened.
-        // Eager reader chunks come from the module graph.
+        // Eager reader chunks come from the module graph. A positive offline count fetches the
+        // catalogue and then the selected article families.
         let paths = precache::paths(&theme(), &renderer, &assets)?;
+        let catalogue = offline::catalogue(out, &archive_items, &article_images, &written_assets)?;
+        write(
+            &out.join("offline-catalog.json"),
+            &serde_json::to_vec(&catalogue)?,
+        )?;
         let mut sw_config = SwConfig {
             version: cache_version(&build_ctx),
             app_version: build_ctx.app_version.clone(),
             content_version: build_ctx.content_version.clone(),
             precache: assets::precache_entries(out, paths, &written_assets)?,
-            offline_catalog: offline::catalogue(
-                out,
-                &archive_items,
-                &article_images,
-                &written_assets,
-            )?,
+            offline_catalog_url: "offline-catalog.json".into(),
             offline_count: config.site.preferences.offline_items,
             search_manifest: offline::search_manifest(out, &search_catalogue)?,
         };
@@ -2129,7 +2132,7 @@ mod tests {
         use crate::store::NewItem;
 
         let mut config = Config::parse(&format!(
-            "[site]\ntitle = \"Demo <site>\"\n{extra}\n[defaults]\nmedia = \"local\"\nmax_items = 0\nmax_age_days = 0\nmax_bytes = 0\n[[sources]]\nslug = \"blog\"\nurl = \"https://blog.example/feed\"\n"
+            "[site]\ntitle = \"Demo <site>\"\n{extra}\n[defaults]\nmedia_download_strategy = \"original\"\ncount_max = 0\nmax_age_days = 0\nsize_max = 0\n[[sources]]\nslug = \"blog\"\nurl = \"https://blog.example/feed\"\n"
         ))
         .unwrap();
         config.defaults.media = crate::config::MediaPolicy::Local;
@@ -2806,6 +2809,7 @@ category = "Science"
             "sources/blog.example/atom.xml",
             "categories/news/rss.xml",
             "sw.js",
+            "offline-catalog.json",
         ] {
             let text = std::fs::read_to_string(out.join(path)).unwrap();
             for excluded in ["Duplicate headline", "Excluded short", "Hidden headline"] {
@@ -3654,10 +3658,14 @@ category = "Science"
             .unwrap()
             .clone();
         assert!(precache.iter().all(|entry| entry["url"] != path));
-        let catalogue: Vec<serde_json::Value> = worker_config(&worker)["offline_catalog"]
-            .as_array()
-            .unwrap()
-            .clone();
+        let catalogue: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(out.join("offline-catalog.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            worker_config(&worker)["offline_catalog_url"],
+            "offline-catalog.json"
+        );
+        assert!(!worker.contains("\"offline_catalog\":"));
         assert!(
             catalogue[0]["resources"]
                 .as_array()
@@ -3989,6 +3997,15 @@ category = "Science"
         assert!(precache.iter().any(|url| url == "browse/"));
         assert!(precache.iter().any(|url| url.contains("favicon-")));
         assert!(precache.iter().all(|url| !url.contains("icon-512-")));
+        assert!(!worker.contains("\"items/"), "{worker}");
+        let catalogue: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(out.join("offline-catalog.json")).unwrap())
+                .unwrap();
+        assert!(catalogue.iter().any(|entry| {
+            entry["url"]
+                .as_str()
+                .is_some_and(|url| url.contains("items/"))
+        }));
     }
 
     #[test]
@@ -4105,15 +4122,24 @@ category = "Science"
             !sw.contains("assets/logo-"),
             "the multi-megabyte source icon is not precached"
         );
-        // The worker's behaviour lives in its compiled bundle; `sw.js` carries the lists it
-        // needs: the precache, the download catalogue and limit, and the search manifest.
-        assert!(sw.contains("\"offline_catalog\":"));
+        // The worker's behaviour lives in its compiled bundle. `sw.js` carries the install
+        // shell, the catalogue location and limit, and the search manifest. Article families
+        // stay in the catalogue file.
+        assert!(!sw.contains("\"offline_catalog\":"));
+        assert!(sw.contains("\"offline_catalog_url\":\"offline-catalog.json\""));
         assert!(sw.contains("\"offline_count\":"));
         assert!(sw.contains("\"search_manifest\":"));
         assert!(sw.contains("\"offline.html\""));
         assert!(sw.contains("\"browse/\""));
-        // The download catalogue includes article pages, independently of the shell precache.
-        assert!(sw.contains("\"items/"), "{sw}");
+        assert!(!sw.contains("\"items/"), "{sw}");
+        let catalogue: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(out.join("offline-catalog.json")).unwrap())
+                .unwrap();
+        assert!(catalogue.iter().any(|entry| {
+            entry["url"]
+                .as_str()
+                .is_some_and(|url| url.starts_with("items/"))
+        }));
 
         let offline = std::fs::read_to_string(out.join("offline.html")).unwrap();
         assert!(offline.contains("id=\"offline-articles\""));
@@ -4695,7 +4721,12 @@ same_as = ["https://social.example/@ada"]
         let out = dir.path().join("out");
         let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
         assert_eq!(summary.pages, 1 + 1 + 6);
-        for name in ["manifest.webmanifest", "sw.js", "offline.html"] {
+        for name in [
+            "manifest.webmanifest",
+            "sw.js",
+            "offline.html",
+            "offline-catalog.json",
+        ] {
             assert!(!out.join(name).exists(), "{name} was written");
         }
         let river = std::fs::read_to_string(out.join("index.html")).unwrap();
@@ -4807,8 +4838,10 @@ same_as = ["https://social.example/@ada"]
             asset.bytes
         );
         assert_eq!(published_media(&build_info.out).get(&local), Some(&hash));
-        let worker = std::fs::read_to_string(build_info.out.join("sw.js")).unwrap();
-        let catalogue = worker_config(&worker)["offline_catalog"].clone();
+        let catalogue: Vec<serde_json::Value> = serde_json::from_slice(
+            &std::fs::read(build_info.out.join("offline-catalog.json")).unwrap(),
+        )
+        .unwrap();
         let resources = catalogue[0]["resources"].as_array().unwrap();
         assert!(
             resources

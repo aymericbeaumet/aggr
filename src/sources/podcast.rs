@@ -48,7 +48,7 @@ pub async fn fetch(url: &Url, source: &Source, ctx: &Context<'_>) -> Result<Fetc
             result.with_context(|| {
                 let provider = if is_spotify_show(url) { "Spotify" } else { "Deezer" };
                 format!(
-                    "{provider} needs a publisher RSS feed in light mode; use its RSS URL or set content = \"heavy\" to enable HTML episode discovery"
+                    "{provider} needs a publisher RSS feed when content_download_strategy is feed; use its RSS URL or set content_download_strategy = \"article\" to enable HTML episode discovery"
                 )
             })
         } else {

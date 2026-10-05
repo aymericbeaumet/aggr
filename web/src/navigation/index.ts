@@ -3,6 +3,7 @@ import { extract, parseDocument } from '../model/extract';
 import { sitePath } from '../model/urls';
 import { page } from '../state/page.svelte';
 import { selection } from '../state/selection.svelte';
+import { tabIntent } from '../state/tabIntent.svelte';
 import { arrive, settle, trackScrolling } from './arrive';
 import { PageCache, type Fetched } from './cache';
 import { patchHead } from './head';
@@ -10,6 +11,7 @@ import { address, linkIn, routable } from './routable';
 import { pageScope } from './scope';
 import { ScrollMemory, newKey } from './scroll';
 import { Speculation, frugal } from './speculation';
+import { markCurrentTab, markTabForKind, tabUnder } from './tabs';
 
 /**
  * Following a link inside the archive swaps the page in place instead of loading a new document:
@@ -176,8 +178,15 @@ function acknowledge(link: HTMLAnchorElement | null): void {
   opening?.setAttribute('data-opening', '');
 }
 
+/** Drop a tab chosen ahead of its page and show the one the page on screen actually owns. */
+function restoreCurrentTab(): void {
+  tabIntent.route = null;
+  markTabForKind(document, page.kind);
+}
+
 /** The reader chose to stay: a page still on its way must not replace this one when it lands. */
 function cancel(): void {
+  restoreCurrentTab();
   if (pending) {
     opening?.removeAttribute('data-opening');
     opening = null;
@@ -253,6 +262,9 @@ async function go(href: string, { replace = false, traverse = false, from = null
   // cost a frame, which is the whole of the delay a reader can feel.
   const show = (fetched: Fetched): void => {
     if (mine !== token) return;
+    // The page now decides which tab is current. Clearing the press first keeps one flush
+    // from painting the old choice over the page that just arrived.
+    tabIntent.route = null;
     pending = false;
     waiting(false);
     const doc = record.parsed ?? parseDocument(fetched.html);
@@ -336,6 +348,7 @@ function speculate(signal: AbortSignal): void {
   const timer = setInterval(refresh, PAGE_LIFETIME / 2);
   document.addEventListener('visibilitychange', refresh, { signal });
   signal.addEventListener('abort', () => clearInterval(timer));
+  // Tabs were fetched when the reader started. Warm a few rows already on screen.
   requestAnimationFrame(() => {
     if (signal.aborted || frugal(navigator.connection)) return;
     for (const href of nearest()) prefetch(href, true);
@@ -352,48 +365,120 @@ function speculate(signal: AbortSignal): void {
   });
 }
 
+function tabLinks(bar: Element): HTMLAnchorElement[] {
+  return [...bar.querySelectorAll(':scope > a[data-route]')].filter(
+    (node): node is HTMLAnchorElement => node instanceof HTMLAnchorElement,
+  );
+}
+
+/** Light `link` now: the column under the finger, before its page has been fetched. */
+function holdTab(link: HTMLAnchorElement): void {
+  if (link.hasAttribute('data-pressed') && link.getAttribute('aria-current') === 'page') return;
+  const bar = link.closest('.mobile-tabs');
+  if (bar) {
+    for (const pressed of bar.querySelectorAll('[data-pressed]')) {
+      if (pressed !== link) pressed.removeAttribute('data-pressed');
+    }
+    link.setAttribute('data-pressed', '');
+  }
+  const route = link.getAttribute('data-route');
+  if (route === null) return;
+  markCurrentTab(document, route);
+  tabIntent.route = route;
+  prefetch(link.href);
+}
+
+/** The press left the bar. Put back the tab the page on screen owns. */
+function releaseTab(): void {
+  tabGesture = null;
+  for (const pressed of document.querySelectorAll('.mobile-tabs [data-pressed]')) pressed.removeAttribute('data-pressed');
+  restoreCurrentTab();
+}
+
 /**
- * A tab answers the touch that lands on it, including one that lands while the page is still
- * gliding from a fling: the platform spends that touch on stopping the scroll and never sends
- * the click, so the release is the activation, on whichever tab it lifts from.
+ * A tab answers the touch that lands anywhere on the bar, including its padding and a touch
+ * that lands while the page is still gliding: the platform spends that touch on stopping the
+ * scroll and never sends the click. The release is the activation, on whichever column it
+ * lifts from, as long as the finger is still on the bar. Leaving the bar is a scroll instead.
  */
 function installTabActivation(): void {
+  let swallowed = false;
   document.addEventListener(
     'touchstart',
     (event) => {
+      swallowed = false;
       const target = event.target;
       const tabs = target instanceof Element ? target.closest('.mobile-tabs') : null;
-      if (!tabs) return;
       const touch = event.touches.length === 1 ? event.touches[0] : null;
-      pressedTab = touch ? { y: touch.clientY } : null;
-      const link = target instanceof Element ? target.closest('a[href]') : null;
-      if (link instanceof HTMLAnchorElement) prefetch(link.href);
+      if (!tabs || !touch) {
+        if (tabGesture) releaseTab();
+        return;
+      }
+      const rtl = getComputedStyle(tabs).direction === 'rtl';
+      const link = tabUnder(tabLinks(tabs), tabs.getBoundingClientRect(), touch.clientX, touch.clientY, rtl);
+      if (!link) {
+        tabGesture = null;
+        return;
+      }
+      tabGesture = { bar: tabs, rtl };
+      holdTab(link);
     },
     { passive: true },
   );
-  // A finger sliding along the bar still means the tab it lifts from, as on a native tab bar;
-  // one travelling up or down is scrolling the page instead.
   document.addEventListener(
     'touchmove',
     (event) => {
-      const touch = event.touches[0];
-      if (pressedTab && touch && Math.abs(touch.clientY - pressedTab.y) > 24) pressedTab = null;
+      const gesture = tabGesture;
+      const touch = event.touches.length === 1 ? event.touches[0] : null;
+      if (!gesture) return;
+      if (!touch) {
+        swallowed = true;
+        releaseTab();
+        return;
+      }
+      const link = tabUnder(tabLinks(gesture.bar), gesture.bar.getBoundingClientRect(), touch.clientX, touch.clientY, gesture.rtl);
+      if (!link) {
+        swallowed = true;
+        releaseTab();
+        return;
+      }
+      holdTab(link);
     },
     { passive: true },
   );
-  document.addEventListener('touchcancel', () => (pressedTab = null), { passive: true });
+  document.addEventListener(
+    'touchcancel',
+    () => {
+      if (!tabGesture) return;
+      swallowed = true;
+      releaseTab();
+    },
+    { passive: true },
+  );
   document.addEventListener(
     'touchend',
     (event) => {
-      const touched = pressedTab;
-      pressedTab = null;
-      if (!touched || event.touches.length) return;
-      const touch = event.changedTouches[0];
-      const under = touch ? document.elementFromPoint(touch.clientX, touch.clientY) : null;
-      const link = under?.closest('a[href]');
-      if (!(link instanceof HTMLAnchorElement) || !link.closest('.mobile-tabs')) return;
+      const gesture = tabGesture;
+      const cancel = swallowed;
+      tabGesture = null;
+      swallowed = false;
+      if (!gesture && !cancel) return;
       // Cancelling the release cancels the click the platform would have sent after it, so one
-      // tap stays one navigation.
+      // tap stays one navigation and a drag off the bar does not land on whatever is underneath.
+      if (cancel || event.touches.length || !gesture) {
+        if (event.touches.length) releaseTab();
+        event.preventDefault();
+        return;
+      }
+      const touch = event.changedTouches[0];
+      const link = touch
+        ? tabUnder(tabLinks(gesture.bar), gesture.bar.getBoundingClientRect(), touch.clientX, touch.clientY, gesture.rtl)
+        : null;
+      if (!link) {
+        releaseTab();
+        event.preventDefault();
+        return;
+      }
       event.preventDefault();
       link.click();
     },
@@ -401,7 +486,7 @@ function installTabActivation(): void {
   );
 }
 
-let pressedTab: { y: number } | null = null;
+let tabGesture: { bar: Element; rtl: boolean } | null = null;
 
 /** Install once the app owns the page. `mount` runs for the page on screen and every next one. */
 function install(mount: PageMount[]): void {
@@ -469,6 +554,11 @@ function install(mount: PageMount[]): void {
         address(hit.url.href) !== current
       ) {
         pressed = hit.link;
+        const route = hit.link.getAttribute('data-route');
+        if (route !== null) {
+          markCurrentTab(document, route);
+          tabIntent.route = route;
+        }
         void go(hit.url.href, { from: hit.link });
       }
     },
@@ -518,6 +608,12 @@ function install(mount: PageMount[]): void {
   });
   installTabActivation();
   mountPage();
+  // The three tabs are where a reader goes next. Fetch them in this turn, at intent priority,
+  // so the first tap finds them parsed instead of waiting out a guess scheduled after paint.
+  if (!frugal(navigator.connection)) {
+    const base = root();
+    for (const route of ['', 'browse/', 'preferences/']) prefetch(new URL(route, base).href);
+  }
   phase = 'settled';
 }
 

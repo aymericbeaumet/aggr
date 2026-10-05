@@ -180,7 +180,7 @@ pre code { background: none; padding: 0; }
   color: var(--nav-fg);
   position: sticky;
   top: 0;
-  z-index: 2;
+  z-index: 5;
   padding-top: env(safe-area-inset-top);
   box-shadow: 0 1px 0 color-mix(in srgb, var(--nav-fg) 16%, transparent);
 }
@@ -290,7 +290,9 @@ body:not([data-kind="river"]) .reader-intro { display: none; }
 .reader-intro nav, .reading-list-actions { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
 .reader-intro nav a, .reading-list-actions a { display: inline-flex; align-items: center; min-height: var(--tap-target); text-decoration: underline; text-underline-offset: 0.15em; }
 .main {
-  container: reader / inline-size;
+  /* Grow with the page, and keep a content-sized basis. A zero basis makes this flex item
+     the sticky containing block in Safari, so the feed search scrolls away with the list. */
+  flex: 1 0 auto;
   width: 100%;
   max-width: var(--max);
   margin: 0 auto;
@@ -298,7 +300,6 @@ body:not([data-kind="river"]) .reader-intro { display: none; }
   padding-left: max(0.75rem, env(safe-area-inset-left));
   padding-right: max(0.75rem, env(safe-area-inset-right));
   padding-bottom: max(4rem, calc(env(safe-area-inset-bottom) + 3rem));
-  flex: 1;
 }
 .main:focus { outline: none; }
 .main[data-navigation-focus]:focus-visible { outline: none; }
@@ -434,6 +435,9 @@ html:not([data-thumbnails="hide"]) .row-content { min-height: var(--preview-size
    above does; the margins that centred the column become padding and leave the same content box,
    the one every width inside is measured from. */
 body[data-kind="item"] .main {
+  /* Margin notes query the page width. The container stays off list pages: it is a containing
+     block, and a sticky search inside it scrolls away in Safari. */
+  container: reader / inline-size;
   --page-gutter: 1.25rem;
   max-width: none;
   padding-top: 0;
@@ -962,7 +966,14 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
 .nav .menu-link, .nav .config-link { font-weight: 400; opacity: 1; }
 .nav a[aria-current] { text-decoration: underline; text-underline-offset: .18em; }
 .nav-separator { opacity: .5; font-weight: 400; }
-.feed-toolbar { position: sticky; top: var(--top-nav-offset); z-index: 2; min-width: 0; margin: 0 0 1rem; padding: 0.6rem 0; background: var(--bg); }
+/* The search is already against the header, so sticking there does not move it when the feed
+   scrolls. `--feed-heading` is the scoped title's height, measured on the page; without it the
+   bar still sticks under the header once that title has scrolled away. */
+body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data-kind="tag"]) .main { padding-top: 0; }
+body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data-kind="tag"]) .listhead {
+  position: sticky; top: var(--top-nav-offset); z-index: 4; margin: 0; padding: 0.25rem 0 0.5rem; background: var(--bg);
+}
+.feed-toolbar { position: sticky; top: calc(var(--top-nav-offset) + var(--feed-heading, 0px)); z-index: 4; min-width: 0; margin: 0 0 1rem; padding: 0.6rem 0; background: var(--bg); }
 .feed-search { display: flex; align-items: center; margin: 0; width: 100%; min-width: 0; }
 /* One selector list for the server-rendered field and the mounted one, so their geometry cannot drift. */
 .feed-search input[type="search"], .search-input-line #q { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; color: var(--fg); background: var(--search-bg, var(--code)); border: 1px solid var(--faint); border-radius: .35rem; padding: .55rem 2.75rem .55rem .7rem; font: inherit; }
@@ -1005,7 +1016,7 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
     position: fixed; inset: auto 0 0; z-index: 5; isolation: isolate;
     display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
     padding: 4px max(20px, calc(env(safe-area-inset-right) + 4px)) calc(4px + var(--mobile-tab-gap)) max(20px, calc(env(safe-area-inset-left) + 4px));
-    color: var(--muted); pointer-events: none;
+    color: var(--muted); pointer-events: auto; touch-action: manipulation;
   }
   /* The keyboard covers the bottom of the screen; the bar would float on top of it, over the
      results being typed for. It keeps its box so nothing else moves. */
@@ -1014,13 +1025,8 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
     content: ""; position: absolute; z-index: -1;
     inset: 0 max(16px, env(safe-area-inset-right)) var(--mobile-tab-gap) max(16px, env(safe-area-inset-left));
     border: 1px solid color-mix(in srgb, var(--fg) 16%, var(--faint)); border-radius: 999px;
+    /* Opaque on purpose. A blur under a fixed bar resamples the scrolling page on every frame. */
     background: var(--bg); box-shadow: 0 3px 16px #0002;
-  }
-  @supports (backdrop-filter: blur(20px)) {
-    .mobile-tabs::before {
-      background: color-mix(in srgb, var(--bg) 88%, transparent);
-      backdrop-filter: saturate(150%) blur(20px);
-    }
   }
   .mobile-tabs a {
     display: grid; grid-template-rows: 24px 14px; align-content: center; justify-items: center; gap: 2px;
@@ -1054,6 +1060,8 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   .row-heading { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }
   html .row .row-copy > :is(.meta, .excerpt) { padding-left: 0; }
   .row { --mobile-preview-size: 3rem; min-height: var(--tap-target); padding-block: max(var(--row-padding), 0.625rem); }
+  /* The feed keeps every row for the keyboard and for search. Only those near the screen are laid out. */
+  .row { content-visibility: auto; contain-intrinsic-size: auto 8rem; }
   html[data-density="comfortable"] .row { --mobile-preview-size: 3.5rem; }
   html .row .row-content { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 0.25rem 0.625rem; min-height: 0; }
   html:not([data-thumbnails="hide"]) .row .row-content:has(.preview-media) { grid-template-columns: minmax(0, 1fr) var(--mobile-preview-size); }

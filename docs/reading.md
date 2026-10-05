@@ -18,6 +18,9 @@ Combine full text with `source:`, `category:`, `tag:`, `date:`, `sort:`, quoted 
 exclusions such as `-tag:sponsored`. Completion suggests real archive values and dates; hover over
 the field for syntax help. See [client development](client.md) for the search contract.
 
+The search field stays fixed under the header on every platform while the feed scrolls, and its
+results scroll beneath it.
+
 Archived points and comment counts appear alongside metadata only when the source recorded them.
 Hacker News points and comment counts stay in the archive and are left off the page; the discussion
 link is the thread. Lobsters and other recorded counts stay visible.
@@ -35,7 +38,7 @@ resolved in the reader from the article's own text.
 ## Mobile
 
 Feed, browse, and preferences sit in a compact bottom tab bar above the home indicator.
-The feed search field stays pinned below the header while its results scroll.
+The whole bar is the hit target, and the tab lights up as soon as it is pressed.
 The current tab has a rounded selected background. Links read by colour rather than an underline, and taps do
 not flash the platform's default highlight.
 

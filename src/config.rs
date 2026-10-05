@@ -224,7 +224,8 @@ impl Default for StoreConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct FetchConfig {
     pub concurrency: usize,
-    /// Concurrent original-article downloads within each source in `heavy` mode.
+    /// Concurrent original-article downloads within each source whose
+    /// `content_download_strategy` is `article`.
     pub article_concurrency: usize,
     pub timeout_secs: u64,
     pub max_body_bytes: usize,
@@ -246,11 +247,13 @@ impl Default for FetchConfig {
     }
 }
 
+/// `feed` keeps the feed entry. `article` also downloads and extracts the original page.
 #[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
 pub enum ContentMode {
+    #[serde(rename = "article")]
     Heavy,
     #[default]
+    #[serde(rename = "feed")]
     Light,
 }
 
@@ -514,8 +517,10 @@ pub struct SourceConfig {
     /// Extra request headers; values support `${ENV}` expansion.
     pub headers: BTreeMap<String, String>,
     pub html: Option<bool>,
-    /// Override `[defaults] content` for this source.
+    /// Override `[defaults] content_download_strategy` for this source.
+    #[serde(rename = "content_download_strategy")]
     pub content: Option<ContentMode>,
+    #[serde(rename = "media_download_strategy")]
     pub media: Option<MediaPolicy>,
     #[serde(flatten)]
     pub limits: LimitOverrides,
@@ -1202,7 +1207,7 @@ title = "Mixed"
 url = "https://one.example/"
 category = "first"
 [defaults]
-content = "light"
+content_download_strategy = "feed"
 [[sources]]
 url = ["https://two.example/", "https://three.example/"]
 category = "second"
@@ -1214,7 +1219,7 @@ name = "Duplicate"
 [[sources]]
 url = "https://${HOST}/"
 headers = { Authorization = "Bearer ${TOKEN}" }
-media = "remote"
+media_download_strategy = "remote"
 "#,
         )
         .unwrap();
@@ -1692,7 +1697,7 @@ media = "remote"
 
     #[test]
     fn source_policy_roundtrip_preserves_inheritance_and_explicit_clear() {
-        let config = Config::parse("[defaults]\ncontent='heavy'\nmedia='local'\n[[sources]]\nurl='https://example.com/feed'\nmedia={mode='compressed',quality=65}\nsince=false\nmax_items=0\n").unwrap();
+        let config = Config::parse("[defaults]\ncontent_download_strategy='article'\nmedia_download_strategy='original'\n[[sources]]\nurl='https://example.com/feed'\nmedia_download_strategy={mode='compressed',quality=65}\nsince=false\ncount_max=0\n").unwrap();
         let encoded = serde_json::to_string(&config.sources[0]).unwrap();
         let decoded: SourceConfig = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.media, config.sources[0].media);
@@ -1797,16 +1802,16 @@ url = "https://lobste.rs/search?q={url}"
     }
 
     #[test]
-    fn light_content_is_default_and_sources_can_choose_heavy() {
+    fn feed_content_is_default_and_sources_can_choose_article() {
         let config = Config::parse(
             "[[sources]]\nurl = \"https://heavy.example/feed\"\n\
-             [[sources]]\nurl = \"https://light.example/feed\"\ncontent = \"heavy\"\n",
+             [[sources]]\nurl = \"https://light.example/feed\"\ncontent_download_strategy = \"article\"\n",
         )
         .unwrap();
         let sources = config.sources().unwrap();
         assert_eq!(sources[0].content, ContentMode::Light);
         assert_eq!(sources[1].content, ContentMode::Heavy);
-        assert!(Config::parse("[defaults]\ncontent = \"medium\"\n").is_err());
+        assert!(Config::parse("[defaults]\ncontent_download_strategy = \"medium\"\n").is_err());
     }
 
     #[tokio::test]
@@ -2141,7 +2146,7 @@ url = "{}/forbidden.toml"
     fn resolves_aggr_sources() {
         let config = Config::parse(
             "[[sources]]\nurl = \"https://github.com/friend/reads\"\ncategory = \"friends\"\n\n\
-             [[sources]]\nurl = \"https://git.example.com/x/reads.git\"\nbranch = \"data\"\nsources = [\"hn\"]\nmax_items = 5\n",
+             [[sources]]\nurl = \"https://git.example.com/x/reads.git\"\nbranch = \"data\"\nsources = [\"hn\"]\ncount_max = 5\n",
         )
         .unwrap();
         let sources = config.resolve_sources(&no_env).unwrap();
@@ -2189,7 +2194,7 @@ url = "{}/forbidden.toml"
         ];
         let mut identities = BTreeSet::new();
         for url in urls {
-            let config = Config::parse(&format!("[[sources]]\nurl={url:?}\ncategory=' Friends '\nbranch='archive'\nsources=['news']\nmax_items=5")).unwrap();
+            let config = Config::parse(&format!("[[sources]]\nurl={url:?}\ncategory=' Friends '\nbranch='archive'\nsources=['news']\ncount_max=5")).unwrap();
             let sources = config.resolve_sources(&no_env).unwrap();
             assert_eq!(sources[0].slug, "friend-reads");
             assert_eq!(sources[0].category.as_deref(), Some("friends"));

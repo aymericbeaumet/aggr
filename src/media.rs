@@ -1,9 +1,9 @@
 //! Bounded local copies of article-body images.
 //!
-//! Under `media = "local"` the publisher's bytes remain the master, and responsive renditions
+//! Under `media_download_strategy = "original"` the publisher's bytes remain the master, and responsive renditions
 //! are resized once from the oriented decode and encoded as lossless WebP, then decoded again to
-//! prove pixel equality before use. Under `media = "compressed"` one bounded, lossy master replaces
-//! both; see [`compact`]. `media = "remote"` never reaches this module.
+//! prove pixel equality before use. Under `media_download_strategy = "compressed"` one bounded, lossy master replaces
+//! both; see [`compact`]. `media_download_strategy = "remote"` never reaches this module.
 
 pub mod compact;
 pub mod placeholder;
@@ -3015,7 +3015,7 @@ mod tests {
             then.status(200).body(png(&DynamicImage::new_rgba8(80, 48)));
         });
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = [{:?}]",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl = [{:?}]",
             server.url("/feed")
         ))
         .unwrap();
@@ -3127,7 +3127,7 @@ mod tests {
         let base = Url::parse(&publisher.url("/p/story")).unwrap();
         let alias = publisher.url("/p/q_auto:good");
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\" }}\n",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\" }}\n",
             publisher.url("/feed")
         ))
         .unwrap();
@@ -3197,7 +3197,7 @@ mod tests {
             .collect();
         let alias = publisher.url(format!("/p/fl_progressive:steep/{encoded}"));
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\" }}\n",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\" }}\n",
             publisher.url("/feed")
         ))
         .unwrap();
@@ -3248,7 +3248,7 @@ mod tests {
             then.status(200).body(png(&DynamicImage::new_rgba8(96, 64)));
         });
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\" }}\n",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\" }}\n",
             source_server.url("/feed")
         ))
         .unwrap();
@@ -3318,7 +3318,7 @@ mod tests {
                 .await;
         }
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\n",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl = {:?}\n",
             server.url("/feed")
         ))
         .unwrap();
@@ -3388,7 +3388,7 @@ mod tests {
                 .await;
         }
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\n",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl = {:?}\n",
             server.url("/feed")
         ))
         .unwrap();
@@ -3459,7 +3459,7 @@ mod tests {
             })
             .await;
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\n",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl = {:?}\n",
             server.url("/feed")
         ))
         .unwrap();

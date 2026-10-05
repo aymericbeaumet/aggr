@@ -30,8 +30,8 @@ fn local_feed_sources_persist_articles_without_paths_and_repeat_without_a_commit
     std::fs::write(
         repository.join("aggr.toml"),
         r#"[defaults]
-content = "light"
-media = "remote"
+content_download_strategy = "feed"
+media_download_strategy = "remote"
 max_age_days = 0
 
 [[sources]]
@@ -121,8 +121,8 @@ language = "en"
 excerpts = true
 
 [defaults]
-content = "light"
-media = "remote"
+content_download_strategy = "feed"
+media_download_strategy = "remote"
 max_age_days = 0
 
 [[sources]]

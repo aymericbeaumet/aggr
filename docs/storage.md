@@ -20,22 +20,23 @@ Use explicit preservation policies when local media is valuable:
 
 ```toml
 [defaults]
-content = "light"       # feed content; "heavy" also extracts article pages
-media = "remote"        # alternatively "compressed" or "local"
-max_items = 250
+content_download_strategy = "feed"       # feed entry; "article" also extracts the original page
+media_download_strategy = "remote"        # alternatively "compressed" or "original"
+count_max = 250
 max_age_days = 730
-max_bytes = 1_000_000_000
+size_max = "1GB"                           # decimal; an integer is a raw byte count
 # since = 2026-01-01
 
 [[sources]]
 url = "https://example.com/feed.xml"
-content = "heavy"
-media = "compressed"
-max_items = 100
+content_download_strategy = "article"
+media_download_strategy = "compressed"
+count_max = 100
 ```
 
-Each source inherits omitted fields individually. `compressed` keeps a bounded reading copy of
-images; `local` retains original image and PDF bytes. Responsive copies are generated for
+Each source inherits omitted fields individually. `compressed` and `original` both store media
+locally: `compressed` keeps a bounded reading copy of images, and `original` retains the publisher's
+image and PDF bytes. Responsive copies are generated for
 publication in disposable caches; neither adds responsive copies to new archive commits.
 Media settings affect future capture and publication, without rewriting retained masters.
 See [source policies](sources.md).

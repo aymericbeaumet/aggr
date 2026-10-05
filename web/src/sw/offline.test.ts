@@ -7,6 +7,17 @@ import { completeSearch, configureOfflineSearch, verifiedSearchResponse } from '
 import { lifecycle } from './worker';
 
 describe('offline articles', () => {
+  it('fetches the article catalogue only for a positive download count, and only once', async () => {
+    const { ctx, requests } = harness();
+    await saveOfflineArticles(ctx, 0);
+    expect(requests.some((url) => url.endsWith('offline-catalog.json'))).toBe(false);
+    await saveOfflineArticles(ctx, 1);
+    expect(requests.filter((url) => url.endsWith('offline-catalog.json'))).toHaveLength(1);
+    const before = requests.length;
+    await saveOfflineArticles(ctx, 1);
+    expect(requests.slice(before).some((url) => url.endsWith('offline-catalog.json'))).toBe(false);
+  });
+
   it('require the page and every retained rendition, sharing resources across items', async () => {
     const { ctx, requests, storage, state } = harness();
     const result = await saveOfflineArticles(ctx, 2);

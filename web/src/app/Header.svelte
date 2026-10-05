@@ -3,6 +3,7 @@
   // navigation, whose links and `aria-current` follow the page kind.
   import type { ClientSite } from '../generated/ClientSite';
   import { urlFor } from '../model/urls';
+  import { tabIntent } from '../state/tabIntent.svelte';
 
   let {
     kind,
@@ -35,8 +36,13 @@
   ] as const;
   const [feed, browse, preferences] = tabs;
 
-  const current = (tab: (typeof tabs)[number]) =>
-    (tab.kinds as readonly string[]).includes(kind) ? 'page' : undefined;
+  // A press names its tab before the page arrives. Until then that choice wins over the page
+  // still on screen, so the bar does not go blank between contact and the swap.
+  const chosen = $derived(tabIntent.route);
+  const current = (tab: (typeof tabs)[number]) => {
+    if (chosen !== null) return tab.route === chosen ? 'page' : undefined;
+    return (tab.kinds as readonly string[]).includes(kind) ? 'page' : undefined;
+  };
 </script>
 
 <header class="top" data-nosnippet>

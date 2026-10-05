@@ -91,8 +91,26 @@ already-deleted custom-port item without another matching entry-ID or title/date
 rediscovered because its old `seen.txt` hash cannot recover the port.
 
 The original URL and first capture time (`first_seen`) live in each Markdown file's front matter.
+A stored item is that file, a sanitized HTML sibling, and any saved companions beside them:
+
+```text
+items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.md
+items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.html
+items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.preview-202cd0284a4a.webp
+---
+title: Announcing a Maintainer in Residence
+link: https://blog.rust-lang.org/2026/09/22/maintainer-in-residence/
+source: blog-rust-lang-org
+published: 2026-09-22T00:00:00Z
+first_seen: 2026-09-24T00:01:38Z
+content: extracted
+---
+```
+
+`content` records the stored body: `extracted` from the original page, `feed` from the feed
+entry, or `none` when only metadata was kept. It is separate from `content_download_strategy`.
 A copied aggr item also records `replicated_at`, the time it entered the current repository. A
-heavy source attempts to extract the original article; if that request or extraction fails, aggr
+source whose `content_download_strategy` is `article` attempts to extract the original page; if that request or extraction fails, aggr
 keeps the feed body, summary, or metadata it has rather than failing an otherwise healthy source.
 Recoverable article failures appear in debug logs (`-vv`). An HTTP 401 or 403 affects only that
 URL; an HTTP 429 pauses further article requests to that origin for the run. Interrupted response
@@ -229,7 +247,7 @@ editor:
   deduplicate through `seen.txt`.
 
 Do not rebase, squash, delete, or force-push the data branch. Per-feed retention (`[defaults] max_age_days`,
-`max_items`, `max_bytes`, and `since`) deletes files from its current tree in a normal commit, so older reachable commits keep
+`count_max`, `size_max`, and `since`) deletes files from its current tree in a normal commit, so older reachable commits keep
 their contents. The generated site and sitemap contain only visible items in the current retained
 tree; historical Git objects are durable but are no longer public article pages after retention
 removes them.

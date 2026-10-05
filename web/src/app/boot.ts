@@ -12,6 +12,7 @@ import { loadPreferences } from '../state/preferences.svelte';
 import { selection } from '../state/selection.svelte';
 import App from './App.svelte';
 import {
+  installFeedChrome,
   installKeyboardInset,
   installPictureStates,
   installShiftHover,
@@ -87,6 +88,7 @@ export function boot(): void {
   safely('navigation', () =>
     navigation.install([
       () => settlePictures(),
+      (signal) => installFeedChrome(signal),
       (signal) => installReadingHeader(signal),
       (signal) => installSearchIntent(signal),
       (signal) => navigation.speculate(signal),

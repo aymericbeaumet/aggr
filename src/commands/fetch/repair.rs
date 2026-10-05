@@ -586,7 +586,7 @@ pub(super) async fn repair_feed_captures(
     context: &FetchOneContext<'_>,
     mut transaction: Option<&mut SourceTransaction>,
 ) -> Result<usize> {
-    // Sources whose feed content is final by design (light mode, mirrors, Qwen's API-backed blog)
+    // Sources whose feed content is final by design (feed strategy, mirrors, Qwen's API-backed blog)
     // are never retried.
     if matches!(source.engine, Engine::Aggr { .. })
         || source.content == ContentMode::Light

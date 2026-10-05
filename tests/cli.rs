@@ -56,7 +56,7 @@ impl TestRepo {
 
     fn write_config(&self, feed_url: &str, extra: &str) {
         self.write_raw_config(&format!(
-            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n{extra}\n[defaults]\ncontent = \"light\"\nmedia = \"remote\"\nmax_age_days = 0\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\nlabels = [\"example\", \"news\"]\n"
+            "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n{extra}\n[defaults]\ncontent_download_strategy = \"feed\"\nmedia_download_strategy = \"remote\"\nmax_age_days = 0\n[[sources]]\nurl = \"{feed_url}\"\nname = \"Demo\"\ncategory = \"demo\"\nlabels = [\"example\", \"news\"]\n"
         ));
     }
 
@@ -299,7 +299,7 @@ fn media_policy_controls_previews_and_refresh_preserves_existing_captures() {
     let repo = TestRepo::new();
     let config = |media| {
         format!(
-            "[defaults]\ncontent = \"light\"\nmedia = \"{media}\"\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+            "[defaults]\ncontent_download_strategy = \"feed\"\nmedia_download_strategy = \"{media}\"\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
             server.url("/feed.json"),
         )
     };
@@ -309,7 +309,7 @@ fn media_policy_controls_previews_and_refresh_preserves_existing_captures() {
     assert!(item_front(&repo, "aggr", "old").1["preview"].is_null());
     assert!(item_front(&repo, "aggr", "old").1["images"].is_null());
 
-    repo.write_raw_config(&config("local"));
+    repo.write_raw_config(&config("original"));
     feed.delete();
     server.mock(|when, then| {
         when.method(GET).path("/feed.json");
@@ -435,7 +435,7 @@ fn media_backfill_uses_stored_urls_without_refetching_or_replacing_articles() {
     assert_eq!(original_front["remote_preview"]["url"], source);
     assert!(original_front["images"].is_null());
 
-    repo.write_raw_config(&config("media = \"local\""));
+    repo.write_raw_config(&config("media_download_strategy = \"original\""));
     repo.aggr()
         .args(["sync", "--backfill-media"])
         .assert()
@@ -510,7 +510,7 @@ fn one_download_can_supply_the_article_image_and_its_feed_preview() {
     });
     let repo = TestRepo::new();
     repo.write_raw_config(&format!(
-        "[defaults]\ncontent = \"light\"\nmedia = \"local\"\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+        "[defaults]\ncontent_download_strategy = \"feed\"\nmedia_download_strategy = \"original\"\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
         server.url("/feed.json")
     ));
 
@@ -554,7 +554,7 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
     });
     let repo = TestRepo::new();
     repo.write_raw_config(&format!(
-        "[defaults]\ncontent = \"light\"\nmedia = \"local\"\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+        "[defaults]\ncontent_download_strategy = \"feed\"\nmedia_download_strategy = \"original\"\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
         server.url("/feed.json")
     ));
 
@@ -655,8 +655,16 @@ fn article_images_keep_exact_masters_and_publish_lossless_responsive_assets() {
             .iter()
             .all(|entry| entry["url"] != master_asset)
     );
+    let catalogue: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(repo.clone.join("_site/offline-catalog.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        worker_json(&worker, "offline_catalog_url"),
+        "offline-catalog.json"
+    );
     assert!(
-        worker_json(&worker, "offline_catalog")
+        catalogue
             .as_array()
             .unwrap()
             .iter()
@@ -731,7 +739,7 @@ fn a_compact_archive_stores_one_bounded_master_and_no_renditions() {
     });
     let repo = TestRepo::new();
     repo.write_raw_config(&format!(
-        "[defaults]\ncontent = \"light\"\nmedia = {{ mode = \"compressed\", quality = 60, max_axis = 320 }}\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+        "[defaults]\ncontent_download_strategy = \"feed\"\nmedia_download_strategy = {{ mode = \"compressed\", quality = 60, max_axis = 320 }}\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
         server.url("/feed.json")
     ));
 
@@ -805,7 +813,7 @@ fn previews_mirror_local_bytes_and_retention_preserves_historical_blobs() {
     });
     let upstream = TestRepo::new();
     upstream.write_raw_config(&format!(
-        "[defaults]\ncontent = \"light\"\nmedia = \"local\"\nmax_items = 1\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
+        "[defaults]\ncontent_download_strategy = \"feed\"\nmedia_download_strategy = \"original\"\ncount_max = 1\nmax_age_days = 0\n[[sources]]\nname = \"Demo\"\nurl = \"{}\"\n",
         server.url("/feed.json"),
     ));
     upstream.aggr().arg("sync").assert().success();
@@ -820,7 +828,7 @@ fn previews_mirror_local_bytes_and_retention_preserves_historical_blobs() {
 
     let replica = TestRepo::new();
     replica.write_raw_config(
-        "[defaults]\ncontent = \"heavy\"\nmedia = \"local\"\nmax_age_days = 0\n[[sources]]\nname = \"Mirror\"\nurl = \"git@mirror.invalid:source.git # shared archive\"\n",
+        "[defaults]\ncontent_download_strategy = \"article\"\nmedia_download_strategy = \"original\"\nmax_age_days = 0\n[[sources]]\nname = \"Mirror\"\nurl = \"git@mirror.invalid:source.git # shared archive\"\n",
     );
     let local = url::Url::from_file_path(&upstream.origin).unwrap();
     let mirror_sync = || {
@@ -1144,7 +1152,7 @@ fn sync_deduplicates_articles_across_sources_without_extra_commits_or_state() {
     }
     let repo = TestRepo::new();
     repo.write_raw_config(&format!(
-        "[defaults]\ncontent = 'light'\nmedia = 'remote'\nmax_age_days = 0\n[[sources]]\nname = 'Publisher'\nurl = '{}'\n[[sources]]\nname = 'Frontpage'\nurl = '{}'\n",
+        "[defaults]\ncontent_download_strategy = 'feed'\nmedia_download_strategy = 'remote'\nmax_age_days = 0\n[[sources]]\nname = 'Publisher'\nurl = '{}'\n[[sources]]\nname = 'Frontpage'\nurl = '{}'\n",
         server.url("/publisher"), server.url("/frontpage")
     ));
     repo.aggr().arg("sync").assert().success();
@@ -1567,7 +1575,7 @@ fn feed_only_captures_are_upgraded_in_place_and_keep_hand_edits() {
     });
     let repo = TestRepo::new();
     repo.write_raw_config(&format!(
-        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\n[defaults]\ncontent = \"heavy\"\nmedia = \"remote\"\nmax_age_days = 0\n[[sources]]\nurl = \"{}\"\nname = \"Demo\"\n",
+        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\n[defaults]\ncontent_download_strategy = \"article\"\nmedia_download_strategy = \"remote\"\nmax_age_days = 0\n[[sources]]\nurl = \"{}\"\nname = \"Demo\"\n",
         server.url("/feed.xml")
     ));
 
@@ -1679,7 +1687,7 @@ fn source_errors_are_recorded_on_transition_only_and_all_failed_is_fatal() {
     });
     let repo = TestRepo::new();
     let config = format!(
-        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\n[defaults]\ncontent = \"light\"\nmax_age_days = 0\n[[sources]]\nurl = \"{}\"\nname = \"ok\"\n[[sources]]\nurl = \"{}\"\nname = \"broken\"\n",
+        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\n[defaults]\ncontent_download_strategy = \"feed\"\nmax_age_days = 0\n[[sources]]\nurl = \"{}\"\nname = \"ok\"\n[[sources]]\nurl = \"{}\"\nname = \"broken\"\n",
         server.url("/ok.xml"),
         server.url("/broken.xml")
     );
@@ -1710,7 +1718,7 @@ fn source_errors_are_recorded_on_transition_only_and_all_failed_is_fatal() {
 
     // Every source failing is the one fetch condition that fails the run.
     let config = format!(
-        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\n[defaults]\ncontent = \"light\"\nmax_age_days = 0\n[[sources]]\nurl = \"{}\"\nname = \"broken\"\n",
+        "[site]\ntitle = \"T\"\n[fetch]\nretries = 0\n[defaults]\ncontent_download_strategy = \"feed\"\nmax_age_days = 0\n[[sources]]\nurl = \"{}\"\nname = \"broken\"\n",
         server.url("/broken.xml")
     );
     std::fs::write(repo.clone.join("aggr.toml"), config).unwrap();
@@ -1906,8 +1914,10 @@ fn build_renders_the_site_and_release_needs_a_url() {
             .iter()
             .all(|entry| entry["url"] != article)
     );
+    let catalogue: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("offline-catalog.json")).unwrap()).unwrap();
     assert!(
-        worker_json(&sw, "offline_catalog")
+        catalogue
             .as_array()
             .unwrap()
             .iter()
@@ -1990,7 +2000,7 @@ fn build_data_ref_is_offline_and_side_effect_free() {
     let repo = TestRepo::new();
     repo.write_raw_config(&format!(
         "[site]\ntitle = \"Test reads\"\nrepository = \"o/r\"\n\
-         [fetch]\nretries = 0\n[defaults]\ncontent = \"light\"\nmax_age_days = 0\n\
+         [fetch]\nretries = 0\n[defaults]\ncontent_download_strategy = \"feed\"\nmax_age_days = 0\n\
          [[sources]]\nurl = \"{}\"\nname = \"Demo\"\n",
         server.url("/feed.xml")
     ));
@@ -2110,7 +2120,7 @@ fn feed_retention_prunes_the_tree_but_keeps_seen_keys() {
         .success()
         .stdout(predicate::str::contains("demo: +2"));
     let config = std::fs::read_to_string(repo.clone.join("aggr.toml")).unwrap();
-    repo.write_raw_config(&config.replace("[defaults]\n", "[defaults]\nmax_items = 1\n"));
+    repo.write_raw_config(&config.replace("[defaults]\n", "[defaults]\ncount_max = 1\n"));
     repo.aggr()
         .arg("sync")
         .assert()
@@ -2191,8 +2201,8 @@ url = [" ./subscriptions.opml\n{origin}/collection.toml ", "./feeds.txt", "{orig
 category = "reading"
 labels = ["shared"]
 [defaults]
-content = "light"
-media = "remote"
+content_download_strategy = "feed"
+media_download_strategy = "remote"
 max_age_days = 0
 "#,
         origin = server.url("")
@@ -2248,8 +2258,8 @@ fn source_group_options_apply_to_fetches_and_category_pages_without_leaking() {
 title = "Test reads"
 repository = "o/r"
 [defaults]
-content = "light"
-media = "remote"
+content_download_strategy = "feed"
+media_download_strategy = "remote"
 max_age_days = 0
 [[sources]]
 url = """
@@ -2312,7 +2322,7 @@ fn included_topic_files_and_automatic_html_fallback_work_end_to_end() {
     std::fs::write(
         repo.clone.join("aggr-ai.toml"),
         format!(
-            "[[sources]]\nname = \"Scraped\"\nurl = \"{}\"\ncontent = \"heavy\"\nmax_age_days = 0\n",
+            "[[sources]]\nname = \"Scraped\"\nurl = \"{}\"\ncontent_download_strategy = \"article\"\nmax_age_days = 0\n",
             server.url("/blog")
         ),
     )

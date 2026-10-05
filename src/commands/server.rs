@@ -907,7 +907,7 @@ async fn handle(
         }
         return Ok(());
     }
-    let (status, file, mut body) = match site.resolve_response(base, path).await {
+    let (status, key, mut body) = match site.resolve_response(base, path).await {
         Ok(Some((file, body))) => ("200 OK", file, body),
         Ok(None) => {
             let (file, body) = site.not_found().await;
@@ -922,21 +922,14 @@ async fn handle(
             )
         }
     };
-    let file = Path::new(&file);
+    let file = Path::new(&key);
     if file
         .extension()
         .is_some_and(|extension| extension == "html")
     {
         body = Arc::new(inject_reload(&body, base, run));
     }
-    let cache_headers = if file
-        .extension()
-        .is_some_and(|extension| extension == "html")
-    {
-        "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\nPragma: no-cache\r\nExpires: 0\r\nClear-Site-Data: \"cache\"\r\n"
-    } else {
-        "Cache-Control: no-store\r\n"
-    };
+    let cache_headers = cache_control(&key);
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{cache_headers}Connection: close\r\n\r\n",
         content_type(file),
@@ -1006,6 +999,74 @@ fn percent_decode(path: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+const PAGE_CACHE: &str = "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\nPragma: no-cache\r\nExpires: 0\r\n";
+const ASSET_CACHE: &str = "Cache-Control: public, max-age=31536000, immutable\r\n";
+const FRESH_CACHE: &str = "Cache-Control: no-store\r\n";
+
+/// How one development response may be stored. HTML stays uncached so a reload shows the
+/// snapshot just written, without `Clear-Site-Data`: that header dumps the HTTP cache on every
+/// document, and the reload script already drops the reader's own caches. A content-addressed
+/// name keeps its bytes for a year. The shapes match `immutable` in `web/src/sw/routing.ts`.
+fn cache_control(key: &str) -> &'static str {
+    if Path::new(key)
+        .extension()
+        .is_some_and(|extension| extension == "html")
+    {
+        return PAGE_CACHE;
+    }
+    if immutable_asset(key) {
+        ASSET_CACHE
+    } else {
+        FRESH_CACHE
+    }
+}
+
+fn immutable_asset(key: &str) -> bool {
+    if let Some(rest) = key.strip_prefix("pagefind/") {
+        let id = rest.split('/').next().unwrap_or("");
+        return rest.contains('/') && is_lower_hex(id, 64);
+    }
+    let Some(asset) = key.strip_prefix("assets/") else {
+        return false;
+    };
+    let name = asset.rsplit('/').next().unwrap_or("");
+    let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
+    if (asset.starts_with("images/")
+        || asset.starts_with("previews/")
+        || asset.starts_with("documents/"))
+        && is_lower_hex(stem, 40)
+    {
+        return true;
+    }
+    if asset.starts_with("app/")
+        && (name.ends_with(".js") || name.ends_with(".css"))
+        && ends_with_vite_hash(stem)
+    {
+        return true;
+    }
+    hashed_suffix(stem, 12, |byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn hashed_suffix(stem: &str, len: usize, accept: impl Fn(u8) -> bool) -> bool {
+    let bytes = stem.as_bytes();
+    bytes.len() > len
+        && bytes[bytes.len() - len - 1] == b'-'
+        && bytes[bytes.len() - len..].iter().copied().all(accept)
+}
+
+fn ends_with_vite_hash(stem: &str) -> bool {
+    hashed_suffix(stem, 8, |byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+    })
 }
 
 pub fn content_type(path: &Path) -> &'static str {
@@ -1136,6 +1197,50 @@ mod tests {
     }
 
     #[test]
+    fn development_cache_keeps_hashed_assets_and_refuses_pages() {
+        let sha1 = "0123456789abcdef0123456789abcdef01234567";
+        let sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(cache_control("index.html"), PAGE_CACHE);
+        assert_eq!(cache_control("browse/index.html"), PAGE_CACHE);
+        assert!(!PAGE_CACHE.contains("Clear-Site-Data"));
+        assert_eq!(
+            cache_control(&format!("assets/images/{sha1}.webp")),
+            ASSET_CACHE
+        );
+        assert_eq!(cache_control(&format!("assets/images/{sha1}")), ASSET_CACHE);
+        assert_eq!(
+            cache_control(&format!("assets/images/{}.webp", &sha1[1..])),
+            FRESH_CACHE
+        );
+        assert_eq!(
+            cache_control("assets/icons/icon-0123456789ab.svg"),
+            ASSET_CACHE
+        );
+        assert_eq!(
+            cache_control("assets/icons/icon-0123456789.svg"),
+            FRESH_CACHE
+        );
+        assert_eq!(
+            cache_control("assets/app/page.svelte-Ck4TY_xv.js"),
+            ASSET_CACHE
+        );
+        assert_eq!(cache_control("assets/app/main.js"), FRESH_CACHE);
+        assert_eq!(cache_control("assets/app/bootstrap.js"), FRESH_CACHE);
+        assert_eq!(cache_control("assets/icons/icon-Ck4TY_xv.svg"), FRESH_CACHE);
+        assert_eq!(
+            cache_control(&format!("pagefind/{sha256}/x.pf_fragment")),
+            ASSET_CACHE
+        );
+        assert_eq!(
+            cache_control(&format!("pagefind/{}/x.pf_fragment", &sha256[1..])),
+            FRESH_CACHE
+        );
+        assert_eq!(cache_control(&format!("items/{sha1}/")), FRESH_CACHE);
+        assert_eq!(cache_control("feed.json"), FRESH_CACHE);
+        assert_eq!(cache_control("error.txt"), FRESH_CACHE);
+    }
+
+    #[test]
     fn snapshots_reuse_only_immutable_bodies_and_remove_absent_files() {
         let tmp = tempfile::tempdir().unwrap();
         let write = |path: &str, body: &[u8]| {
@@ -1150,6 +1255,7 @@ mod tests {
         let mutable = [
             "index.html",
             "search-manifest.json",
+            "offline-catalog.json",
             "sw.js",
             "pagefind/pagefind.js",
             "assets/custom.css",
