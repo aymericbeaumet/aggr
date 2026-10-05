@@ -3980,7 +3980,10 @@ category = "Science"
             "tags/topic-000/",
             "tags/topic-001/",
         ] {
-            assert!(!precache.iter().any(|url| url == path), "{path} is not an install download");
+            assert!(
+                !precache.iter().any(|url| url == path),
+                "{path} is not an install download"
+            );
             assert!(out.join(path).join("index.html").is_file(), "{path}");
         }
         assert!(precache.iter().any(|url| url == "browse/"));
