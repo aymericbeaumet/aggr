@@ -536,7 +536,7 @@ fn render_refresh(
 ) -> Result<RenderedSnapshot> {
     let store = crate::store::Store::open(data);
     let generation = crate::site::render_generation(
-        &store.retained_items(project.config.defaults.limits, &project.sources, now)?,
+        &store.retained_items(&project.sources, now)?,
         &project.config.site,
         now,
     );

@@ -502,7 +502,10 @@ See [client development](docs/client.md) for frontend commands, ownership, and s
   `[defaults]`, individually overridable by each source. Zero disables one numeric limit;
   `since = false` clears an inherited inclusive UTC date.
 - Apply count/date before enrichment and complete-family retention before and after sync.
-  Offline rendering applies the same selection without mutation; Git blob sizes account for
+  A source removed from the config leaves that selection entirely: offline rendering omits its
+  articles, and sync deletes those families plus that source's state, seen list, and eviction
+  record so a later subscription fetches it again. Offline rendering applies the same selection
+  without mutation; Git blob sizes account for
   media omitted from lightweight snapshots. Never decode media to calculate retention bytes.
 - Retention removes owned body/HTML/media files in normal commits; keep manual deletion
   tombstones distinct from policy evictions. See [storage](docs/storage.md).

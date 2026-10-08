@@ -49,6 +49,11 @@ UTC date; if both date limits are set, the later cutoff wins. Dates use publicat
 updated time, then first capture. Set a numeric limit to `0` to disable it; `since = false` clears
 an inherited date.
 
+A source removed from the config is not retained. Offline builds omit its articles without
+rewriting the archive. The next sync deletes those article families from the current tree and
+clears that source's state, seen list, and eviction record, so subscribing again fetches it as
+a new source. Historical commits keep the old files.
+
 Expired items are removed first, then the oldest excess items until both count and size fit.
 Bytes include Markdown, saved HTML, PDFs, image masters, and obsolete owned companions, even
 under a remote-media policy. Cleanup removes entire article families only from the feed that
@@ -59,8 +64,8 @@ entries before article or media requests. Offline builds select the same retaine
 changing the archive.
 
 These are current article-file limits, not Git repository quotas. Normal deletion commits preserve
-historical blobs and permalinks. Source state and compact deduplication/eviction records remain;
-manual deletions stay suppressed. Widening a policy permits previously policy-evicted items to be
+historical blobs and permalinks. For a feed that stays configured, source state and compact
+deduplication and eviction records remain, and manual deletions stay suppressed. Widening a policy permits previously policy-evicted items to be
 captured again if the upstream still supplies them. Repeating the same policy does not repeatedly
 download and discard oversized articles. Old deletions without eviction records remain suppressed.
 Disposable caches have separate bounds below.

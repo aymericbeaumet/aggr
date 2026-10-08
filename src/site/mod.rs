@@ -675,7 +675,7 @@ fn prepare_site(
     // Sources: config order, enriched with stored state and counts.
     let status = store.status()?;
     let stored_items: Vec<_> = store
-        .retained_items(config.defaults.limits, sources, info.now)?
+        .retained_items(sources, info.now)?
         .into_iter()
         .filter(is_visible_item)
         .collect();
@@ -1585,9 +1585,9 @@ mod tests {
     }
 
     #[test]
-    fn retained_sources_keep_metadata_and_archive_pages_after_config_removal() {
+    fn stored_state_names_items_the_caller_still_selected() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, _, store) = fixture(dir.path(), 2, "max_age_days = 30\npwa = false\n");
+        let (_, _, store) = fixture(dir.path(), 2, "max_age_days = 30\npwa = false\n");
         store
             .write_source_state(
                 "blog",
@@ -1613,55 +1613,37 @@ mod tests {
         assert_eq!(source.count, 2);
         assert_eq!(source.latest, Some(day(2)));
         assert_eq!(source.page, "sources/blog/");
+    }
 
+    #[test]
+    fn a_feed_absent_from_the_config_stays_out_of_the_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _, store) = fixture(dir.path(), 2, "max_age_days = 30\npwa = false\n");
+        store
+            .write_source_state(
+                "blog",
+                &crate::store::SourceState {
+                    title: Some("Hacker News: Best".into()),
+                    site_url: Some("https://news.ycombinator.com/".into()),
+                    resolved_url: Some("https://hnrss.org/best".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let out = dir.path().join("out");
-        build(&config, &[], &store, dir.path(), &info(out.clone())).unwrap();
-        let archive = std::fs::read_to_string(out.join("sources/hnrss.org/index.html")).unwrap();
-        assert!(archive.contains("Post 0"));
-        assert!(archive.contains("Post 1"));
-        assert!(archive.contains("Hacker News: Best"));
-        let article =
-            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
-        assert!(
-            article.contains("href=\"../../../sources/hnrss.org/\""),
-            "{article}"
+        let summary = build(&config, &[], &store, dir.path(), &info(out.clone())).unwrap();
+        assert_eq!(summary.items, 0);
+        let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(!feed.contains("Post 0"), "{feed}");
+        assert!(!feed.contains("Post 1"), "{feed}");
+        assert!(!feed.contains("Hacker News: Best"), "{feed}");
+        assert!(!out.join("sources/hnrss.org").exists());
+        assert!(!out.join("items/blog/2026-09-01-post-0/index.html").exists());
+        assert_eq!(
+            store.items().unwrap().len(),
+            2,
+            "rendering omits the feed without deleting the archive"
         );
-        assert!(article.contains("title=\"Hacker News: Best\">hnrss.org</a>"));
-        let archive_document = scraper::Html::parse_document(&archive);
-        assert!(
-            archive_document
-                .select(&scraper::Selector::parse(".row .tags").unwrap())
-                .next()
-                .is_none()
-        );
-        for (html, root) in [(&archive, "../../"), (&article, "../../../")] {
-            let document = scraper::Html::parse_document(html);
-            let selector = scraper::Selector::parse(".meta .domain").unwrap();
-            let source_link = document.select(&selector).next().unwrap();
-            assert_eq!(
-                source_link
-                    .select(&scraper::Selector::parse("a.source-feed").unwrap())
-                    .next()
-                    .unwrap()
-                    .value()
-                    .attr("href"),
-                Some(format!("{root}sources/hnrss.org/").as_str())
-            );
-            assert_eq!(
-                source_link.text().collect::<String>().trim(),
-                "blog.example via hnrss.org"
-            );
-            let emphasis = scraper::Selector::parse("em").unwrap();
-            assert_eq!(
-                source_link
-                    .select(&emphasis)
-                    .next()
-                    .unwrap()
-                    .text()
-                    .collect::<String>(),
-                "via hnrss.org"
-            );
-        }
     }
 
     /// Page-relative links reduced to their site-relative form, so pages at different depths
@@ -2850,6 +2832,46 @@ category = "Science"
         assert!(
             out.join("items/blog/2026-09-01-post-0/index.html")
                 .is_file()
+        );
+    }
+
+    #[test]
+    fn a_source_removed_from_the_config_leaves_the_build() {
+        use crate::model::{FrontMatter, file_stem, item_dir};
+        use crate::store::NewItem;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let date = day(19);
+        let front = FrontMatter {
+            title: "Gone post".into(),
+            link: "https://gone.example/post".into(),
+            source: "gone".into(),
+            published: Some(date),
+            first_seen: date,
+            ..Default::default()
+        };
+        store
+            .write_item(NewItem {
+                dir: &item_dir("gone", date),
+                stem: &file_stem(date, &front.title),
+                front: &front,
+                body: "Removed subscription",
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        assert_eq!(summary.items, 1);
+        let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(!feed.contains("Gone post"), "{feed}");
+        assert!(!out.join("sources/gone.example").exists());
+        assert_eq!(
+            store.items().unwrap().len(),
+            2,
+            "rendering omits the feed without deleting the archive"
         );
     }
 

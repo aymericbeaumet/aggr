@@ -277,7 +277,6 @@ impl Store {
     pub fn retention_plan(
         &self,
         items: &[Item],
-        defaults: crate::config::Limits,
         sources: &[crate::config::Source],
         now: DateTime<Utc>,
     ) -> Result<Vec<String>> {
@@ -292,23 +291,23 @@ impl Store {
             .into_iter()
             .map(|(path, family)| (path, family.bytes))
             .collect();
+        // A feed that is not in the config has no allowance left. Default limits must not keep it.
         Ok(retention::plan(
             items,
             &sizes,
-            |source| limits.get(source).copied().unwrap_or(defaults),
+            |source| limits.get(source).copied(),
             now,
         ))
     }
 
     pub fn retained_items(
         &self,
-        defaults: crate::config::Limits,
         sources: &[crate::config::Source],
         now: DateTime<Utc>,
     ) -> Result<Vec<Item>> {
         let items = self.items()?;
         let removed: BTreeSet<_> = self
-            .retention_plan(&items, defaults, sources, now)?
+            .retention_plan(&items, sources, now)?
             .into_iter()
             .collect();
         Ok(items
@@ -660,6 +659,42 @@ impl Store {
         let path = self.checked_path(&md)?;
         if !fs::read(&path).is_ok_and(|bytes| bytes == markdown.as_bytes()) {
             self.write_text(&md, &markdown)?;
+        }
+        Ok(())
+    }
+
+    /// Delete fetch bookkeeping for feeds that are no longer configured. Article families are a
+    /// separate retention decision. Clearing the seen list and eviction record lets a later
+    /// subscription fetch the feed again instead of treating the old capture as already kept.
+    pub fn remove_unconfigured_sources(&self, configured: &BTreeSet<&str>) -> Result<()> {
+        let directory = self.root.join("sources");
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", directory.display()));
+            }
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading {}", directory.display()))?;
+            let name = entry.file_name();
+            let Some(slug) = name.to_str() else {
+                continue;
+            };
+            if configured.contains(slug) || slug.is_empty() {
+                continue;
+            }
+            for file in ["seen.txt", "state.toml", "evicted.json"] {
+                let relative = Path::new("sources").join(slug).join(file);
+                let path = self.checked_path(&relative)?;
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| format!("removing {}", path.display()));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -2359,6 +2394,66 @@ mod tests {
         assert_eq!(store.status().unwrap(), status);
         store.write_status(&Status::default()).unwrap();
         assert!(!dir.path().join("status.toml").exists());
+    }
+
+    #[test]
+    fn a_removed_source_leaves_the_retained_set_and_its_bookkeeping() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path());
+        let write = |source: &str, stem: &str| {
+            let front = FrontMatter {
+                title: stem.into(),
+                link: format!("https://{source}.example/{stem}"),
+                source: source.into(),
+                published: Some(now()),
+                first_seen: now(),
+                ..Default::default()
+            };
+            store
+                .write_item(NewItem {
+                    dir: &format!("items/{source}/2026/10"),
+                    stem,
+                    front: &front,
+                    body: "Body\n",
+                    html: None,
+                    preview: None,
+                    images: &[],
+                })
+                .unwrap();
+        };
+        write("kept", "stay");
+        write("gone", "leave");
+        store
+            .append_seen("kept", &["kept-key".into()], now())
+            .unwrap();
+        store
+            .append_seen("gone", &["gone-key".into()], now())
+            .unwrap();
+        store
+            .write_source_state("gone", &SourceState::default())
+            .unwrap();
+
+        let config = crate::config::Config::parse(
+            "[[sources]]\nslug = \"kept\"\nurl = \"https://kept.example/feed\"\n",
+        )
+        .unwrap();
+        let sources = config.resolve_sources(&|_| None).unwrap();
+        let retained = store.retained_items(&sources, now()).unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].front.source, "kept");
+
+        let drop = store
+            .retention_plan(&store.items().unwrap(), &sources, now())
+            .unwrap();
+        let configured: BTreeSet<&str> =
+            sources.iter().map(|source| source.slug.as_str()).collect();
+        store.remove_items(&drop).unwrap();
+        store.remove_unconfigured_sources(&configured).unwrap();
+        assert!(dir.path().join("items/kept/2026/10/stay.md").is_file());
+        assert!(!dir.path().join("items/gone/2026/10/leave.md").exists());
+        assert!(dir.path().join("sources/kept/seen.txt").is_file());
+        assert!(!dir.path().join("sources/gone/seen.txt").exists());
+        assert!(!dir.path().join("sources/gone/state.toml").exists());
     }
 
     #[test]

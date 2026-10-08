@@ -83,7 +83,7 @@ async fn run_prevalidated(
     }
     let now = super::offline::clock(&project.repo, local_sha.as_deref())?;
     let generation = site::render_generation(
-        &store.retained_items(project.config.defaults.limits, &project.sources, now)?,
+        &store.retained_items(&project.sources, now)?,
         &project.config.site,
         now,
     );
@@ -325,7 +325,7 @@ pub fn run_ephemeral(
     let store = Store::open(data_dir).with_image_cache(cache_dir);
     let now = Utc::now();
     let generation = site::render_generation(
-        &store.retained_items(project.config.defaults.limits, &project.sources, now)?,
+        &store.retained_items(&project.sources, now)?,
         &project.config.site,
         now,
     );

@@ -478,7 +478,8 @@ line breaks remain intact; action-link layout rules must not split citations or 
 `--reprocess` can recover these semantics when the retained HTML still contains them. Language
 metadata discarded by an older extraction needs an original-page extraction; it cannot be reliably
 reconstructed from the stored code alone. Extraction cache versions change with these rules.
-Reprocessing includes articles from renamed or removed sources and runs before source fetching.
+Reprocessing covers articles the current config still retains and runs before source fetching.
+A source removed from the config is dropped by retention first.
 
 Explicit `--refresh` may fill missing previews or article media while preserving existing
 companions and historical blob URLs. To refresh existing dev items, run `dev --refresh` once and

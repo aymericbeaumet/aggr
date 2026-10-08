@@ -36,8 +36,9 @@ and fills missing media companions. It can replace stored bodies and discard han
 `--backfill-media` when only media should change.
 
 `--reprocess` re-derives stored bodies from the HTML retained beside them, so content cleanup added
-since capture reaches the archive without refetching. This pass covers all retained articles,
-including renamed or removed sources, and skips truncated HTML. It runs once before the normal
+since capture reaches the archive without refetching. This pass covers every article the current
+config still retains, and skips truncated HTML. A source removed from the config is dropped by
+retention before this pass. It runs once before the normal
 configured-source sync; repeating
 it without content changes writes nothing. Hand-edited bodies are replaced. Use it after upgrading
 when you want those extraction changes applied.
