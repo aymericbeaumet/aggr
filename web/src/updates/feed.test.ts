@@ -17,7 +17,7 @@ const list = (content: string, rows: typeof row[], entries: string[]): ClientPag
   path: '',
   kind: 'river',
   title: 'reader',
-  site: { title: 'reader', language: 'en', pwa: true, excerpts: true, discussions: [], entries, config_url: null, assets: { app: null, css: null, imports: [] } },
+  site: { title: 'reader', language: 'en', pwa: true, discussions: [], entries, config_url: null, assets: { app: null, css: null, imports: [] } },
   build: { version: '1.0.0', app: 'app-1', content },
   page: { view: 'list', data: { rows, paginator: { offset: 0, first: '', last: '', previous: null, next: null, page: 1, pages: 1 } as never, scope: null, error: null } },
 });

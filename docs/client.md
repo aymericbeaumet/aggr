@@ -20,7 +20,11 @@ they are stale). The article body is not in the model: it stays in the HTML as
 
 ## Boot and navigation
 
-The static page is the first paint. The deferred module reads the model, captures the article
+The static page is the first paint. The stylesheet and the entry's modulepreloads are linked
+before the blocking bootstrap script, so that first paint does not wait to discover them;
+`#aggr-preferences` stays immediately above the script, which still applies stored settings
+before paint. Feed rows use `content-visibility` at every width, so off-screen entries skip
+layout and stay addressable; printing lays them out. The deferred module reads the model, captures the article
 content (or a static page's `<main>`), mounts `App` into a detached `<div id="app">`, swaps it
 over the rendered one in the same task and flushes effects, so nothing paints in between; the
 captured element is moved into the new tree, never re-parsed. Lists and articles are rendered by
@@ -38,6 +42,15 @@ connections. The search catalogue waits for an idle slice, and loads
 at once when the field is focused. Scroll positions are kept per history entry, so Back returns to the same place and
 list cursor. A non-HTML response, a page without a model or one built by another app version
 falls back to ordinary navigation, and without JavaScript every link is an ordinary link.
+A podcast, native video, or YouTube, Vimeo, or Twitch player that has started keeps playing across
+those page changes. Audio is parked outside the page. A picture is seated once, at the size it
+started, and that seat scales between the article and the now-playing bar (persistent chrome, beside
+the status bar). The provider frame keeps its parent and layout size, so the elapsed time and the
+bar's transport continue. Starting it does not move keyboard focus into the frame, and YouTube and
+Vimeo give focus back to the page, so shortcuts keep working without a reload. System media keys play, pause, and seek a recording the bar can drive,
+and previous and next skip 15 and 30 seconds. Parked audio can be muted from the bar. Twitch keeps
+the keys it draws itself. Dismissing the bar or leaving the site stops it. Media that never
+started is released with the page.
 
 ## Components and parity
 
@@ -95,6 +108,8 @@ before writing session state, history or a worker registration.
 `src/config/preferences.rs` holds one typed table. It produces the validation rules embedded as
 JSON in `#aggr-preferences` and the form schema the client renders on `/preferences/`. Nothing
 redeclares a setting: adding one there adds its control, its validation and its default everywhere.
+The form is a static import of the preferences page, in the eager bundle with the shell. Opening
+the tab paints the controls with the page; it does not fetch a chunk.
 
 The pre-paint `bootstrap` script reads the rules and applies stored values to
 `documentElement.dataset` before paint; the app's preferences state handles changes, cross-tab
@@ -272,7 +287,7 @@ reusing highlights from a previous query.
 
 ## Current contracts
 
-Custom templates must keep the documented markers and the preference bootstrap. Preference imports
+The page keeps the preference bootstrap. Preference imports
 require `{ "version": 1, "preferences": { ... } }`; shared links carry this envelope in
 `#aggr-state=`. Versionless payloads, prefixed import keys, and query-string preference imports are
 rejected. Stored Markdown is authoritative; builds do not replay historical renderers to repair it.

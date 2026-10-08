@@ -27,6 +27,32 @@ size_max = "1GB"
 # Compressed raster copies preserve transparency and animation where supported. Formats that
 # cannot be safely reduced retain their originals. Later policy changes do not re-download
 # existing masters; sync --backfill-media fills missing media without rewriting article bodies.
+# Every [[sources]] option can also be set here. A source table overrides the same key.
+# Labels combine. The source wins on a repeated header name.
+# `discussions` replaces the whole list. An empty list turns discussion links off for that source.
+# `collection` applies only to entries that omit it and is not copied onto the feeds it expands.
+# `branch` and `sources` apply only to aggr repositories. `sources = []` on an aggr source keeps
+# every upstream source and clears a list set here. An explicit `slug` is copied onto every source
+# that omits one, so those sources then share a slug and validation fails.
+# url = "https://example.com/feed"
+# collection = false
+# name = "Example"
+# slug = "example"
+# category = "news"
+# labels = ["news"]
+# headers = { Accept = "application/feed+json" }
+# html = true                 # override [store] html when a source omits it
+# branch = "aggr"             # aggr repositories only
+# sources = []                # aggr repositories only; empty means no filter
+# Places searched for a conversation about each article. No matching is done by default.
+# Built-ins are "hackernews", "reddit", and "x". They add per-item links, find the
+# highest-engagement exact match when possible, and otherwise fall back to search.
+# `{url}` and `{title}` in a custom template are URL-encoded.
+# discussions = ["hackernews", "reddit"]
+# discussions = [
+#   "hackernews",
+#   { name = "Lobsters", url = "https://lobste.rs/search?q={url}" },
+# ]
 
 [site]
 # Name shown in the navigation bar and feed metadata.
@@ -64,7 +90,7 @@ pwa = true
 
 # Initial reader settings. Every preference and its default is documented here.
 # Each visitor's saved preferences override these defaults; Reset restores these site values.
-[site.preferences]
+[preferences]
 theme = "auto" # auto, light, dark, sepia
 date_format = "relative" # relative, iso, local, local-time
 text_size = "default" # default, large, largest
@@ -86,28 +112,11 @@ scroll_amount = 10 # 1–100 lines for d/u, capped at half the available viewpor
 offline_items = 0
 
 # Optional public identity for Schema.org metadata. `type` is "person" or "organization".
-# [site.identity]
+# [identity]
 # type = "person"
 # name = "Ada Example"
 # url = "https://example.com/ada"
 # same_as = ["https://social.example/@ada"]
-
-# Optional networks searched for conversations about each article. No matching is done by default.
-# They add per-item links, find the highest-engagement exact match when possible, and otherwise
-# fall back to search. `{url}` and `{title}` are URL-encoded.
-# [[networks]]
-# provider = "hackernews"
-# [[networks]]
-# provider = "reddit"
-# [[networks]]
-# provider = "x"
-# A custom search needs a label and URL template instead:
-# [[networks]]
-# name = "Lobsters"
-# url = "https://lobste.rs/search?q={url}"
-
-# Free-form values available to templates as `site.params`.
-[site.params]
 
 [store]
 # Orphan, append-only branch holding every item. Never force-push it.
@@ -206,6 +215,7 @@ response_max_bytes = 268435456
 # url = "https://github.com/friend/reads" # git@github.com:friend/reads.git and SSH also work
 # Alternative URL: git@github.com:friend/reads.git or https://host/x/reads.git
 # branch = "aggr"             # its data branch
-# sources = []                # only these of its source slugs; all when empty
+# sources = []                # only these of its source slugs; empty keeps every source.
+#                             # omitted inherits [defaults] sources
 # count_max = 200             # per-feed count, including repository imports
 # category = "friends"

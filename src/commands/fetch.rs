@@ -160,7 +160,7 @@ pub async fn run_with_cache(
     let reprocess_args = args.clone();
     let store_root = worktree.dir().to_path_buf();
     let retention_sources = project.sources.clone();
-    let defaults = project.config.defaults;
+    let defaults = project.config.defaults.clone();
     let (known_links, existing_paths, reprocessed, initially_removed) =
         tokio::task::spawn_blocking(move || {
             let removed = if reprocess_args.dry_run {

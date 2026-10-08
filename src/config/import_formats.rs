@@ -95,6 +95,13 @@ fn parse_document(text: &str, document_url: Option<&Url>) -> Result<Document> {
         #[serde(default)]
         struct ImportedConfig {
             defaults: super::policy::DocumentDefaults,
+            #[serde(
+                default,
+                rename = "networks",
+                deserialize_with = "super::network_config::reject_legacy_networks"
+            )]
+            #[allow(dead_code)]
+            networks: (),
             #[serde(deserialize_with = "deserialize_sources")]
             sources: Vec<SourceConfig>,
         }

@@ -109,7 +109,7 @@ impl Fixture {
         std::fs::write(
             root.join("aggr.toml"),
             format!(
-                "[site]\ntitle='Reading room'\npwa={pwa}\nitems_per_page=3\nmax_age_days=10000\npreferences.offline_items=4\n{ARCHIVED_MEDIA_SETTINGS}[[sources]]\nurl='https://publisher.invalid/feed'\nslug='example'\nname='Example'\ncategory='Engineering'\n[[networks]]\nprovider='hackernews'\n[[networks]]\nprovider='reddit'\n"
+                "[defaults]\ndiscussions=['hackernews','reddit']\n[site]\ntitle='Reading room'\npwa={pwa}\nitems_per_page=3\nmax_age_days=10000\npreferences.offline_items=4\n{ARCHIVED_MEDIA_SETTINGS}[[sources]]\nurl='https://publisher.invalid/feed'\nslug='example'\nname='Example'\ncategory='Engineering'\n"
             ),
         )?;
         git(root, &["add", "aggr.toml"])?;

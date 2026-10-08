@@ -55,7 +55,10 @@ as `extra.audio_url`, with the enclosure's declared media type as `extra.audio_t
 byte size, when the feed states a positive one, as `extra.audio_length`; the site's Atom, RSS,
 and JSON Feed outputs republish the three as enclosure metadata. An enclosure is also the item
 link when the feed supplies no episode page. Audio/video files are not downloaded by these adapters. Offline article storage therefore
-does not promise offline podcast playback or private media access.
+does not promise offline podcast playback or private media access. A started episode keeps playing
+while you move through the reader, in the same bar as a video you have started. The elapsed time
+keeps moving while it plays. System media keys play, pause, and seek it, and the bar can mute it
+after the episode card has left the screen. Closing that player or leaving the site stops it.
 
 For example, the Underscore_ Spotify show resolves to
 [Micode's Acast feed](https://feeds.acast.com/public/shows/43160adc-fadd-4764-b93f-aa1ca93f22bf).

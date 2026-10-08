@@ -54,7 +54,7 @@ dates, page size, motion, keyboard shortcuts, and d/u scroll distance. Paragraph
 off by default. Settings stay on the device; all initial values can be set in `aggr.toml`:
 
 ```toml
-[site.preferences]
+[preferences]
 paragraph_indent = false
 font_family = "serif"
 line_spacing = "relaxed"
@@ -89,7 +89,7 @@ separately.
 | `o` / `Enter` in article lists | Open the selected item. |
 | `j` / `k` in articles | Open the older / newer article. Moving past either end returns to the feed. |
 | `O` | Open the original for the selected feed item or current article. |
-| Uppercase network key | Open the selected/current item's matched discussion, or search that enabled network for its original URL. Built-ins use `H`, `R`, and `X`. |
+| Uppercase discussion key | Open the selected/current item's matched discussion, or search that enabled discussion for its original URL. Built-ins use `H`, `R`, and `X`. |
 | `u` / `d` in articles | Scroll up / down. |
 | `g f` (or `g i`), `g b` (or `g l`), `g p` | Feed, browse, preferences. |
 | `g 1` … `g 9` | Open one of the first nine feed entries. |

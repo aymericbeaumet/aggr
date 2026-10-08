@@ -3,11 +3,13 @@
 mod import_formats;
 mod import_graph;
 pub(crate) mod language;
+mod network_config;
 mod policy;
 pub mod preferences;
 pub(crate) mod repository_url;
 mod source_entries;
 
+pub use network_config::NetworkConfig;
 pub use policy::{Defaults, LimitOverrides, Limits, MediaPolicy};
 pub use preferences::ReaderPreferences;
 use source_entries::deserialize_sources;
@@ -30,11 +32,20 @@ pub const DEFAULTS: &str = include_str!("../config.default.toml");
 pub struct Config {
     pub defaults: Defaults,
     pub site: SiteConfig,
+    /// Initial reader settings. A visitor's saved preferences override these; Reset restores them.
+    pub preferences: ReaderPreferences,
+    /// Optional public identity attached to the site's Schema.org metadata.
+    pub identity: Option<SiteIdentityConfig>,
     pub store: StoreConfig,
     pub fetch: FetchConfig,
     pub cache: CacheConfig,
-    /// Optional networks searched at build time for conversations about each item.
-    pub networks: Vec<NetworkConfig>,
+    #[serde(
+        default,
+        rename = "networks",
+        deserialize_with = "network_config::reject_legacy_networks"
+    )]
+    #[allow(dead_code)]
+    networks: (),
     #[serde(deserialize_with = "deserialize_sources")]
     pub sources: Vec<SourceConfig>,
     /// Local source documents that produced this config; used for build-cache keys and watching.
@@ -70,12 +81,41 @@ pub struct SiteConfig {
     pub out: PathBuf,
     /// Emit install metadata and cache a bounded offline set in a secure context.
     pub pwa: bool,
-    /// Initial browser preferences; saved reader choices take precedence.
-    pub preferences: ReaderPreferences,
-    /// Optional public identity attached to the site's Schema.org metadata.
-    pub identity: Option<SiteIdentityConfig>,
-    /// Free-form values exposed to templates as `site.params`.
-    pub params: toml::Table,
+    #[serde(
+        default,
+        rename = "preferences",
+        deserialize_with = "preferences::reject_legacy_site_preferences"
+    )]
+    #[allow(dead_code)]
+    pub(crate) legacy_preferences: (),
+    #[serde(
+        default,
+        rename = "identity",
+        deserialize_with = "reject_legacy_site_identity"
+    )]
+    #[allow(dead_code)]
+    pub(crate) legacy_identity: (),
+    #[serde(default, rename = "params", deserialize_with = "reject_site_params")]
+    #[allow(dead_code)]
+    pub(crate) legacy_params: (),
+}
+
+fn reject_legacy_site_identity<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::de::IgnoredAny::deserialize(deserializer)?;
+    Err(serde::de::Error::custom(
+        "`[site.identity]` has moved to `[identity]`",
+    ))
+}
+
+fn reject_site_params<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::de::IgnoredAny::deserialize(deserializer)?;
+    Err(serde::de::Error::custom("`[site.params]` has been removed"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -112,62 +152,14 @@ impl Default for SiteConfig {
             media_full_quality_days: 30,
             out: PathBuf::from("_site"),
             pwa: true,
-            preferences: ReaderPreferences::default(),
-            identity: None,
-            params: toml::Table::new(),
+            legacy_preferences: (),
+            legacy_identity: (),
+            legacy_params: (),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NetworkConfig {
-    pub name: String,
-    pub url: String,
-    /// Optional build-time lookup. Item contexts expose only exact matches.
-    pub provider: Option<NetworkProvider>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawNetworkConfig {
-    #[serde(default)]
-    provider: Option<NetworkProvider>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    url: Option<String>,
-}
-
-impl<'de> Deserialize<'de> for NetworkConfig {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw = RawNetworkConfig::deserialize(deserializer)?;
-        if let Some(provider) = raw.provider {
-            if raw.name.is_some() || raw.url.is_some() {
-                return Err(serde::de::Error::custom(
-                    "a built-in network accepts only `provider`; use `name` + `url` for a custom one",
-                ));
-            }
-            return Ok(provider.network());
-        }
-        match (raw.name, raw.url) {
-            (Some(name), Some(url)) if !name.trim().is_empty() && !url.trim().is_empty() => {
-                Ok(Self {
-                    name,
-                    url,
-                    provider: None,
-                })
-            }
-            _ => Err(serde::de::Error::custom(
-                "set `provider` for a built-in network, or both `name` and `url` for a custom one",
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkProvider {
     HackerNews,
@@ -176,7 +168,16 @@ pub enum NetworkProvider {
 }
 
 impl NetworkProvider {
-    fn network(self) -> NetworkConfig {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "hackernews" => Some(Self::HackerNews),
+            "reddit" => Some(Self::Reddit),
+            "x" => Some(Self::X),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn network(self) -> NetworkConfig {
         let (name, url) = match self {
             Self::HackerNews => ("Hacker News", "https://hn.algolia.com/?q={url}"),
             Self::Reddit => ("Reddit", "https://www.reddit.com/search/?q=url%3A{url}"),
@@ -502,8 +503,10 @@ pub struct SourceConfig {
     #[serde(skip)]
     pub(crate) kind: Option<String>,
     pub url: Option<String>,
-    /// Inspect an opaque URL as a subscription collection; applies to this entry only.
-    pub collection: bool,
+    /// Inspect an opaque URL as a subscription collection. Omitted inherits `[defaults]`.
+    /// The flag applies to this entry only and is not copied onto expanded feeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<bool>,
     /// Local feed documents are produced only by imports, never by deserializing a URL.
     #[serde(skip)]
     pub(crate) local_feed: Option<PathBuf>,
@@ -513,6 +516,7 @@ pub struct SourceConfig {
     pub slug: Option<String>,
     pub category: Option<String>,
     /// Labels applied to every item from this source. Feed-provided labels are appended.
+    /// Default labels are added in front; a source cannot remove them.
     pub labels: Vec<String>,
     /// Extra request headers; values support `${ENV}` expansion.
     pub headers: BTreeMap<String, String>,
@@ -526,8 +530,25 @@ pub struct SourceConfig {
     pub limits: LimitOverrides,
     /// Repository source: data branch of that repository.
     pub branch: Option<String>,
-    /// Repository source: only take items from these of its sources (all when empty).
-    pub sources: Vec<String>,
+    /// Repository source: only these of its sources. Omitted inherits `[defaults]`;
+    /// an empty list keeps every source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<Vec<String>>,
+    /// Replaces `[defaults] discussions` for items from this source. An empty list disables them.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "network_config::deserialize_optional_discussions"
+    )]
+    pub discussions: Option<Vec<NetworkConfig>>,
+    #[serde(
+        default,
+        skip_serializing,
+        rename = "networks",
+        deserialize_with = "network_config::reject_legacy_networks"
+    )]
+    #[allow(dead_code)]
+    pub(crate) networks: (),
 }
 
 /// A source after defaults, presets, and `${ENV}` expansion have been applied.
@@ -550,6 +571,8 @@ pub struct Source {
     pub images: ImagePolicy,
     pub documents: DocumentPolicy,
     pub limits: Limits,
+    /// Discussion searches for items from this source, after defaults and overrides.
+    pub discussions: Vec<NetworkConfig>,
     pub engine: Engine,
 }
 
@@ -610,6 +633,11 @@ impl Config {
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut config =
             Self::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
+        for source in &mut config.sources {
+            if source.collection.is_none() {
+                source.collection = config.defaults.collection;
+            }
+        }
         let root = path
             .canonicalize()
             .with_context(|| format!("resolving {}", path.display()))?;
@@ -634,7 +662,7 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
-        self.site.preferences.validate()?;
+        self.preferences.validate()?;
         if self.cache.media_max_bytes == 0 || self.cache.response_max_bytes == 0 {
             bail!("[cache] byte limits must be positive");
         }
@@ -647,12 +675,11 @@ impl Config {
             bail!("[site] description must not be empty");
         }
         if self
-            .site
             .identity
             .as_ref()
             .is_some_and(|identity| identity.name.trim().is_empty())
         {
-            bail!("[site.identity] name must not be empty");
+            bail!("[identity] name must not be empty");
         }
         if !language::is_well_formed(&self.site.language) {
             bail!("[site] language must be a BCP 47 tag such as `en` or `fr-FR`");
@@ -695,6 +722,12 @@ impl Config {
         {
             bail!("[site] repository must be `owner/repo`, got {repo:?}");
         }
+        if let Some(slug) = &self.defaults.slug {
+            validate_slug(slug).context("[defaults] slug")?;
+        }
+        for slug in &self.defaults.sources {
+            validate_slug(slug).context("[defaults] sources")?;
+        }
         Ok(())
     }
 
@@ -705,7 +738,7 @@ impl Config {
     }
 
     pub(crate) fn resolve_source(&self, raw: &SourceConfig) -> Result<Source> {
-        resolve_source(raw, self.defaults, self.store.html, &|name| {
+        resolve_source(raw, &self.defaults, self.store.html, &|name| {
             std::env::var(name).ok()
         })
     }
@@ -715,7 +748,7 @@ impl Config {
         let mut seen_identities = BTreeMap::<String, (usize, String)>::new();
         let mut sources = Vec::with_capacity(self.sources.len());
         for (index, raw) in self.sources.iter().enumerate() {
-            let mut source = resolve_source(raw, self.defaults, self.store.html, env)
+            let mut source = resolve_source(raw, &self.defaults, self.store.html, env)
                 .with_context(|| format!("[[sources]] #{}: {}", index + 1, describe(raw)))?;
             if let Some((first, slug)) = seen_identities.get(&source.identity) {
                 log::warn!(
@@ -730,7 +763,9 @@ impl Config {
             // A derived slug names the publisher, so several feeds from one host arrive at the
             // same name. Tell them apart with the path that differs rather than making the reader
             // name each one by hand. An explicit duplicate is still a mistake worth reporting.
-            if raw.slug.is_none() {
+            // A slug inherited from `[defaults]` is explicit: every source that omitted one
+            // shares it, and that collision is reported. Derived slugs are still disambiguated.
+            if raw.slug.is_none() && self.defaults.slug.is_none() {
                 source.slug = distinct_slug(&source.slug, source.engine.url(), &seen_slugs);
             }
             if !seen_slugs.insert(source.slug.clone()) {
@@ -765,9 +800,10 @@ fn describe(raw: &SourceConfig) -> String {
 }
 
 fn validate_source_options(raw: &SourceConfig) -> Result<()> {
+    let filter = raw.sources.as_deref().unwrap_or_default();
     let aggr_keys = [
         ("branch", raw.branch.is_some()),
-        ("sources", !raw.sources.is_empty()),
+        ("sources", !filter.is_empty()),
     ];
     let only = |owner: &str, keys: &[(&str, bool)]| -> Result<()> {
         for (key, set) in keys {
@@ -780,7 +816,7 @@ fn validate_source_options(raw: &SourceConfig) -> Result<()> {
     match source_kind(raw) {
         "feed" => only("aggr", &aggr_keys)?,
         "aggr" => {
-            for slug in &raw.sources {
+            for slug in filter {
                 validate_slug(slug).context("in `sources`")?;
             }
         }
@@ -802,34 +838,174 @@ fn source_kind(raw: &SourceConfig) -> &str {
     })
 }
 
+fn present(value: Option<String>) -> Option<String> {
+    value.filter(|text| !text.is_empty())
+}
+
+struct Inherited<'a> {
+    url: &'a Option<String>,
+    name: &'a Option<String>,
+    slug: &'a Option<String>,
+    category: &'a Option<String>,
+    labels: &'a [String],
+    headers: &'a BTreeMap<String, String>,
+    html: Option<bool>,
+    discussions: Option<&'a [NetworkConfig]>,
+}
+
+impl<'a> Inherited<'a> {
+    fn from_defaults(defaults: &'a Defaults) -> Self {
+        Self {
+            url: &defaults.url,
+            name: &defaults.name,
+            slug: &defaults.slug,
+            category: &defaults.category,
+            labels: &defaults.labels,
+            headers: &defaults.headers,
+            html: defaults.html,
+            discussions: Some(defaults.discussions.as_slice()),
+        }
+    }
+
+    fn from_source(source: &'a SourceConfig) -> Self {
+        Self {
+            url: &source.url,
+            name: &source.name,
+            slug: &source.slug,
+            category: &source.category,
+            labels: &source.labels,
+            headers: &source.headers,
+            html: source.html,
+            discussions: source.discussions.as_deref(),
+        }
+    }
+
+    fn from_document(defaults: &'a policy::DocumentDefaults) -> Self {
+        Self {
+            url: &defaults.url,
+            name: &defaults.name,
+            slug: &defaults.slug,
+            category: &defaults.category,
+            labels: &defaults.labels,
+            headers: &defaults.headers,
+            html: defaults.html,
+            discussions: defaults.discussions.as_deref(),
+        }
+    }
+}
+
+impl SourceConfig {
+    pub(crate) fn is_collection(&self) -> bool {
+        self.collection == Some(true)
+    }
+
+    /// Root `[defaults]` presentation. Repository fields wait until the URL has been expanded
+    /// and the source kind is known.
+    fn inherit_defaults(&mut self, defaults: &Defaults) {
+        self.fill_presentation(Inherited::from_defaults(defaults));
+    }
+
+    fn inherit_repository(&mut self, defaults: &Defaults) {
+        let sources = (!defaults.sources.is_empty()).then(|| defaults.sources.clone());
+        self.inherit_repository_from(defaults.branch.clone(), sources);
+    }
+
+    /// Parent `[[sources]]` table. `collection` stays on the entry that declared it.
+    fn inherit_source(&mut self, parent: &Self) {
+        self.fill_presentation(Inherited::from_source(parent));
+        self.inherit_repository_from(parent.branch.clone(), parent.sources.clone());
+    }
+
+    fn inherit_document(&mut self, defaults: &policy::DocumentDefaults) {
+        let sources = (!defaults.sources.is_empty()).then(|| defaults.sources.clone());
+        self.fill_presentation(Inherited::from_document(defaults));
+        self.inherit_repository_from(defaults.branch.clone(), sources);
+    }
+
+    fn fill_presentation(&mut self, inherited: Inherited<'_>) {
+        self.url = present(self.url.take()).or_else(|| present(inherited.url.clone()));
+        self.name = present(self.name.take()).or_else(|| present(inherited.name.clone()));
+        self.slug = present(self.slug.take()).or_else(|| present(inherited.slug.clone()));
+        self.category =
+            present(self.category.take()).or_else(|| present(inherited.category.clone()));
+        if !inherited.labels.is_empty() {
+            let mut merged = inherited.labels.to_vec();
+            merged.append(&mut self.labels);
+            self.labels = merged;
+        }
+        if !inherited.headers.is_empty() {
+            self.headers = policy::merge_headers(inherited.headers, &self.headers);
+        }
+        self.html = self.html.or(inherited.html);
+        if self.discussions.is_none()
+            && let Some(discussions) = inherited.discussions
+        {
+            self.discussions = Some(discussions.to_vec());
+        }
+    }
+
+    /// `branch` and `sources` are aggr repository options. An omitted filter inherits; an empty
+    /// list is an explicit "keep every source" and is left alone.
+    fn inherit_repository_from(&mut self, branch: Option<String>, sources: Option<Vec<String>>) {
+        if source_kind(self) != "aggr" {
+            return;
+        }
+        self.branch = self.branch.take().or(branch);
+        if self.sources.is_none() {
+            self.sources = sources;
+        }
+    }
+}
+
+/// Shortcut help lists each enabled discussion once. With no sources yet, the root list is the
+/// only one a reader could turn on.
+pub(crate) fn enabled_discussions(
+    defaults: &[NetworkConfig],
+    sources: &[Source],
+) -> Vec<NetworkConfig> {
+    if sources.is_empty() {
+        return defaults.to_vec();
+    }
+    let mut seen = BTreeSet::new();
+    let mut enabled = Vec::new();
+    for source in sources {
+        for discussion in &source.discussions {
+            let key = format!(
+                "{:?}\0{}\0{}",
+                discussion.provider, discussion.name, discussion.url
+            );
+            if seen.insert(key) {
+                enabled.push(discussion.clone());
+            }
+        }
+    }
+    enabled
+}
+
 fn resolve_source(
     raw: &SourceConfig,
-    defaults: Defaults,
+    defaults: &Defaults,
     default_html: bool,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Source> {
-    let inferred;
-    let raw = if raw.kind.is_none()
+    let mut raw = raw.clone();
+    raw.inherit_defaults(defaults);
+    if raw.kind.is_none()
         && let Some(url) = raw.url.as_deref()
         && repository_url::inferred(&expand_env(url, env)?)
     {
-        inferred = SourceConfig {
-            kind: Some("aggr".into()),
-            ..raw.clone()
-        };
-        &inferred
-    } else {
-        raw
-    };
-    let kind = source_kind(raw);
-    let identity = source_identity(raw, kind);
-    validate_source_options(raw)?;
+        raw.kind = Some("aggr".into());
+    }
+    raw.inherit_repository(defaults);
+    let kind = source_kind(&raw);
+    let identity = source_identity(&raw, kind);
+    validate_source_options(&raw)?;
     let engine = match kind {
         "feed" => Engine::Feed {
             url: match &raw.local_feed {
                 Some(path) => Url::from_file_path(path)
                     .map_err(|_| anyhow::anyhow!("invalid local feed path"))?,
-                None => http_url(raw, env)?,
+                None => http_url(&raw, env)?,
             },
         },
         "aggr" => {
@@ -840,7 +1016,7 @@ fn resolve_source(
             Engine::Aggr {
                 url,
                 branch: raw.branch.clone().unwrap_or_else(|| "aggr".into()),
-                sources: raw.sources.clone(),
+                sources: raw.sources.clone().unwrap_or_default(),
             }
         }
         other => bail!("unknown source type {other:?}; known types: feed, aggr"),
@@ -911,6 +1087,7 @@ fn resolve_source(
         images: raw.media.unwrap_or(defaults.media).images(),
         documents: raw.media.unwrap_or(defaults.media).documents(),
         limits: raw.limits.resolve(defaults.limits),
+        discussions: raw.discussions.clone().unwrap_or_default(),
         engine,
     })
 }
@@ -937,7 +1114,7 @@ fn source_identity(raw: &SourceConfig, kind: &str) -> String {
         raw.branch
             .as_deref()
             .unwrap_or(if kind == "aggr" { "aggr" } else { "" }),
-        raw.sources.join(",")
+        raw.sources.as_deref().unwrap_or_default().join(",")
     ))
 }
 
@@ -1208,11 +1385,10 @@ url = "https://one.example/"
 category = "first"
 [defaults]
 content_download_strategy = "feed"
+discussions = ["reddit"]
 [[sources]]
 url = ["https://two.example/", "https://three.example/"]
 category = "second"
-[[networks]]
-provider = "reddit"
 [[sources]]
 url = "https://one.example/"
 name = "Duplicate"
@@ -1359,7 +1535,7 @@ media_download_strategy = "remote"
         assert_eq!(config.sources.len(), 2);
         assert_eq!(config.loaded_remote.len(), 1);
         for source in &config.sources {
-            assert!(!source.collection);
+            assert!(!source.is_collection());
             assert_eq!(source.category.as_deref(), Some("news"));
             assert_eq!(source.labels, ["leaf"]);
         }
@@ -1609,8 +1785,7 @@ media_download_strategy = "remote"
         );
         assert_eq!(config.site.out, compiled.site.out);
         assert_eq!(config.site.pwa, compiled.site.pwa);
-        assert_eq!(config.site.identity, compiled.site.identity);
-        assert_eq!(config.site.params, compiled.site.params);
+        assert_eq!(config.identity, compiled.identity);
         assert_eq!(config.store.branch, compiled.store.branch);
         assert_eq!(config.store.dir, compiled.store.dir);
         assert_eq!(config.store.html, compiled.store.html);
@@ -1628,8 +1803,7 @@ media_download_strategy = "remote"
             compiled.fetch.allow_remote_source_chains
         );
         assert_eq!(config.defaults, compiled.defaults);
-        assert_eq!(config.networks, compiled.networks);
-        assert!(compiled.networks.is_empty());
+        assert!(compiled.defaults.discussions.is_empty());
         assert!(config.sources.is_empty());
     }
 
@@ -1730,7 +1904,7 @@ media_download_strategy = "remote"
 [site]
 description = "Independent reading notes and useful links."
 
-[site.identity]
+[identity]
 type = "person"
 name = "Ada Example"
 url = "https://example.com/ada"
@@ -1742,7 +1916,7 @@ same_as = ["https://social.example/@ada"]
             config.site.description.as_deref(),
             Some("Independent reading notes and useful links.")
         );
-        let identity = config.site.identity.unwrap();
+        let identity = config.identity.unwrap();
         assert_eq!(identity.kind, SiteIdentityKind::Person);
         assert_eq!(identity.name, "Ada Example");
         assert_eq!(identity.url.unwrap().as_str(), "https://example.com/ada");
@@ -1754,10 +1928,27 @@ same_as = ["https://social.example/@ada"]
             "{empty_description}"
         );
         let empty_identity =
-            Config::parse("[site.identity]\ntype = \"organization\"\nname = \" \"\n").unwrap_err();
+            Config::parse("[identity]\ntype = \"organization\"\nname = \" \"\n").unwrap_err();
         assert!(
-            empty_identity.to_string().contains("identity"),
+            empty_identity
+                .to_string()
+                .contains("[identity] name must not be empty"),
             "{empty_identity}"
+        );
+        let moved =
+            Config::parse("[site.identity]\ntype = \"person\"\nname = \"Ada\"\n").unwrap_err();
+        assert!(
+            moved
+                .to_string()
+                .contains("`[site.identity]` has moved to `[identity]`"),
+            "{moved}"
+        );
+        let removed = Config::parse("[site.params]\nintroduction = true\n").unwrap_err();
+        assert!(
+            removed
+                .to_string()
+                .contains("`[site.params]` has been removed"),
+            "{removed}"
         );
     }
 
@@ -1770,35 +1961,233 @@ same_as = ["https://social.example/@ada"]
     }
 
     #[test]
-    fn network_matching_is_opt_in_with_provider_shorthand() {
+    fn discussions_accept_provider_names_and_custom_tables() {
         let config = Config::parse(
             r#"
-[[networks]]
-provider = "hackernews"
-
-[[networks]]
-provider = "reddit"
-
-[[networks]]
-name = "Lobsters"
-url = "https://lobste.rs/search?q={url}"
+[defaults]
+discussions = [
+  "hackernews",
+  { provider = "reddit" },
+  { name = "Lobsters", url = "https://lobste.rs/search?q={url}" },
+]
 "#,
         )
         .unwrap();
-        assert_eq!(config.networks.len(), 3);
-        assert_eq!(config.networks[0], NetworkProvider::HackerNews.network());
-        assert_eq!(config.networks[1], NetworkProvider::Reddit.network());
-        assert_eq!(config.networks[2].name, "Lobsters");
-        assert_eq!(config.networks[2].provider, None);
+        assert_eq!(config.defaults.discussions.len(), 3);
+        assert_eq!(
+            config.defaults.discussions[0],
+            NetworkProvider::HackerNews.network()
+        );
+        assert_eq!(
+            config.defaults.discussions[1],
+            NetworkProvider::Reddit.network()
+        );
+        assert_eq!(config.defaults.discussions[2].name, "Lobsters");
+        assert_eq!(config.defaults.discussions[2].provider, None);
 
         for invalid in [
-            "[[networks]]\nprovider = \"hackernews\"\nname = \"HN\"\n",
-            "[[networks]]\nname = \"Lobsters\"\n",
-            "[[networks]]\nurl = \"https://example.com/{url}\"\n",
+            "[defaults]\ndiscussions = [{ provider = \"hackernews\", name = \"HN\" }]\n",
+            "[defaults]\ndiscussions = [{ name = \"Lobsters\" }]\n",
+            "[defaults]\ndiscussions = [{ url = \"https://example.com/{url}\" }]\n",
+            "[defaults]\ndiscussions = [\"hn\"]\n",
+            "[defaults]\ndiscussions = [\"hackernews\", \"hackernews\"]\n",
             "[[site.discussions]]\nprovider = \"hackernews\"\n",
         ] {
             assert!(Config::parse(invalid).is_err(), "accepted {invalid:?}");
         }
+    }
+
+    #[test]
+    fn legacy_networks_key_points_at_discussions() {
+        for text in [
+            "[[networks]]\nprovider = \"hackernews\"\n",
+            "[defaults]\nnetworks = [\"hackernews\"]\n",
+            "[[sources]]\nurl = \"https://example.com/feed\"\nnetworks = [\"reddit\"]\n",
+        ] {
+            let error = Config::parse(text).unwrap_err();
+            assert!(error.to_string().contains("discussions"), "{error}");
+        }
+        let Err(error) = import_formats::parse_bytes(
+            b"[[networks]]\nprovider = \"reddit\"\n[[sources]]\nurl = \"https://example.com/feed\"\n",
+            &Url::parse("https://example.com/feeds.toml").unwrap(),
+        ) else {
+            panic!("imported networks were accepted");
+        };
+        assert!(format!("{error:#}").contains("discussions"), "{error:#}");
+    }
+
+    #[test]
+    fn source_options_inherit_from_defaults_and_sources_can_override_them() {
+        let config = Config::parse(
+            r#"
+[store]
+html = true
+
+[defaults]
+url = "https://default.example/feed"
+name = "Default"
+category = "news"
+labels = ["root"]
+headers = { Accept = "root", X-Root = "1" }
+html = false
+discussions = ["hackernews", "reddit"]
+
+[[sources]]
+labels = ["leaf"]
+headers = { Accept = "leaf" }
+
+[[sources]]
+url = "https://other.example/feed"
+name = "Other"
+discussions = []
+
+[[sources]]
+url = "https://reddit.example/feed"
+name = "Reddit only"
+discussions = ["reddit"]
+labels = ["only"]
+"#,
+        )
+        .unwrap();
+        let sources = config.resolve_sources(&no_env).unwrap();
+        assert_eq!(
+            sources[0].public_url.as_deref(),
+            Some("https://default.example/feed")
+        );
+        assert_eq!(sources[0].name.as_deref(), Some("Default"));
+        assert_eq!(sources[0].category.as_deref(), Some("news"));
+        assert_eq!(sources[0].labels, ["leaf", "root"]);
+        assert_eq!(
+            sources[0].headers,
+            vec![
+                ("Accept".into(), "leaf".into()),
+                ("X-Root".into(), "1".into()),
+            ]
+        );
+        assert!(!sources[0].html);
+        assert_eq!(
+            sources[0].discussions,
+            vec![
+                NetworkProvider::HackerNews.network(),
+                NetworkProvider::Reddit.network(),
+            ]
+        );
+        assert_eq!(sources[1].labels, ["root"]);
+        assert!(sources[1].discussions.is_empty());
+        assert!(!sources[1].html);
+        assert_eq!(
+            sources[2].discussions,
+            vec![NetworkProvider::Reddit.network()]
+        );
+        assert_eq!(sources[2].labels, ["only", "root"]);
+    }
+
+    #[test]
+    fn repository_defaults_apply_only_to_aggr_sources() {
+        let config = Config::parse(
+            r#"
+[defaults]
+branch = "notes"
+sources = ["kept"]
+
+[[sources]]
+url = "https://github.com/example/reads"
+
+[[sources]]
+url = "https://example.com/feed"
+
+[[sources]]
+url = "https://github.com/example/other"
+sources = []
+"#,
+        )
+        .unwrap();
+        let sources = config.resolve_sources(&no_env).unwrap();
+        assert!(
+            matches!(&sources[0].engine, Engine::Aggr { branch, sources, .. } if branch == "notes" && sources == &["kept".to_string()])
+        );
+        assert!(matches!(sources[1].engine, Engine::Feed { .. }));
+        assert!(
+            matches!(&sources[2].engine, Engine::Aggr { branch, sources, .. } if branch == "notes" && sources.is_empty())
+        );
+        let cleared: SourceConfig = serde_json::from_str(r#"{"sources":[]}"#).unwrap();
+        assert_eq!(cleared.sources, Some(Vec::new()));
+    }
+
+    #[test]
+    fn explicit_default_slug_must_be_unique_per_source() {
+        let error = Config::parse(
+            "[defaults]\nslug = \"same\"\n[[sources]]\nurl = \"https://a.example/feed\"\n[[sources]]\nurl = \"https://b.example/feed\"\n",
+        )
+        .unwrap()
+        .resolve_sources(&no_env)
+        .unwrap_err();
+        assert!(error.to_string().contains("slug"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn document_defaults_follow_source_and_root_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("outer.toml"),
+            "[defaults]\ncategory = \"document\"\nlabels = [\"document\"]\ndiscussions = [\"reddit\"]\n[[sources]]\nurl = \"https://leaf.example/feed\"\nlabels = [\"leaf\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("aggr.toml"),
+            "[defaults]\ncategory = \"root\"\nlabels = [\"root\"]\ndiscussions = [\"hackernews\"]\n[[sources]]\nurl = \"./outer.toml\"\ncategory = \"wrapper\"\nlabels = [\"wrapper\"]\n",
+        )
+        .unwrap();
+        let config = Config::load_offline(&root.join("aggr.toml")).await.unwrap();
+        let sources = config.sources().unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].category.as_deref(), Some("wrapper"));
+        assert_eq!(sources[0].labels, ["document", "leaf", "root", "wrapper"]);
+        assert_eq!(
+            sources[0].discussions,
+            vec![NetworkProvider::Reddit.network()]
+        );
+    }
+
+    #[tokio::test]
+    async fn default_collection_expands_only_entries_that_omit_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("feeds.toml"),
+            "[[sources]]\nurl = \"https://leaf.example/feed\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("aggr.toml"),
+            "[defaults]\ncollection = true\n[[sources]]\nurl = \"./feeds.toml\"\n[[sources]]\nurl = \"https://remote.example/feed\"\ncollection = false\n",
+        )
+        .unwrap();
+        let config = Config::load_offline(&dir.path().join("aggr.toml"))
+            .await
+            .unwrap();
+        let leaf = config
+            .sources
+            .iter()
+            .find(|source| source.url.as_deref() == Some("https://leaf.example/feed"))
+            .unwrap();
+        assert_eq!(leaf.collection, None);
+        let remote = config
+            .sources
+            .iter()
+            .find(|source| source.url.as_deref() == Some("https://remote.example/feed"))
+            .unwrap();
+        assert_eq!(remote.collection, Some(false));
+        let sources = config.sources().unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(
+            sources[0].public_url.as_deref(),
+            Some("https://leaf.example/feed")
+        );
+        assert_eq!(
+            sources[1].public_url.as_deref(),
+            Some("https://remote.example/feed")
+        );
     }
 
     #[test]

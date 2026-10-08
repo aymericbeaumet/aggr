@@ -16,25 +16,13 @@ Reading state and preferences belong to each browser. Sharing a URL does not sha
 or synchronize another person's reading progress. Check attribution and permissions before
 republishing captured content; see [hosting](hosting.md#publication-and-search-indexing).
 
-## An optional introduction
-
-A reader intended for visitors can explain itself with a collapsible introduction:
-
-```toml
-[site.params]
-introduction = true
-```
-
-It links to the setup instructions, reading list and subscription download. It uses native HTML,
-adds no external service, and stays collapsed during navigation after a visitor closes it.
+## Set accurate expectations
 
 The [starter](../examples/starter.toml) is a small first configuration. The maintainer's full
 instance is a separate example: replace its configuration before enabling Actions, as the
 [README](../readme.md#create-your-reader) explains. Confirm that the binary and reusable workflow
 versions support the options in use. Measure complete instance job time separately from local
 rendering time.
-
-## Set accurate expectations
 
 Defaults reuse feed content and keep media at the publisher. A feed can contain only summaries;
 original-page extraction and local media capture are optional. Publisher-hosted media still needs

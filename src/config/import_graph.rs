@@ -86,15 +86,18 @@ impl Loader {
                 if let Some(defaults) = &defaults {
                     apply_defaults(&mut source, defaults);
                 }
-                if (!source.collection && super::source_kind(&source) == "aggr")
+                if source.collection.is_none() {
+                    source.collection = document_defaults.collection;
+                }
+                if (!source.is_collection() && super::source_kind(&source) == "aggr")
                     || source.local_feed.is_some()
                 {
-                    apply_document_defaults(&mut source, document_defaults);
+                    apply_document_defaults(&mut source, &document_defaults);
                     expanded.push(source);
                     continue;
                 }
                 let Some(pattern) = source.url.clone() else {
-                    apply_document_defaults(&mut source, document_defaults);
+                    apply_document_defaults(&mut source, &document_defaults);
                     expanded.push(source);
                     continue;
                 };
@@ -102,26 +105,29 @@ impl Loader {
                 let resolved = match super::expand_env(&pattern, &env) {
                     Ok(value) => value,
                     Err(_) => {
-                        apply_document_defaults(&mut source, document_defaults);
+                        apply_document_defaults(&mut source, &document_defaults);
                         expanded.push(source);
                         continue;
                     }
                 };
-                if !source.collection
+                if !source.is_collection()
                     && source.kind.is_none()
                     && super::repository_url::inferred(&resolved)
                 {
                     source.kind = Some("aggr".into());
-                    apply_document_defaults(&mut source, document_defaults);
+                    apply_document_defaults(&mut source, &document_defaults);
                     expanded.push(source);
                     continue;
                 }
                 if !self.load_remote && remote_url(&resolved).ok().flatten().is_some() {
-                    apply_document_defaults(&mut source, document_defaults);
+                    apply_document_defaults(&mut source, &document_defaults);
                     expanded.push(source);
                     continue;
                 }
-                let targets = match self.targets(&declaring, &resolved, source.collection).await {
+                let targets = match self
+                    .targets(&declaring, &resolved, source.is_collection())
+                    .await
+                {
                     Ok(targets) => targets,
                     Err(err) => {
                         warn(
@@ -137,7 +143,7 @@ impl Loader {
                         source.headers = explicit_headers.clone();
                     }
                     if let Location::Generic(url) = &target
-                        && !source.collection
+                        && !source.is_collection()
                         && !collection_path(url.path())
                     {
                         source.url = if remote_url(&resolved).ok().flatten().is_some() {
@@ -145,7 +151,7 @@ impl Loader {
                         } else {
                             Some(url.to_string())
                         };
-                        apply_document_defaults(&mut source, document_defaults);
+                        apply_document_defaults(&mut source, &document_defaults);
                         expanded.push(source);
                         continue;
                     }
@@ -159,7 +165,7 @@ impl Loader {
                     let headers = match headers {
                         Ok(headers) => headers,
                         Err(_) => {
-                            apply_document_defaults(&mut source, document_defaults);
+                            apply_document_defaults(&mut source, &document_defaults);
                             expanded.push(source);
                             continue;
                         }
@@ -196,11 +202,11 @@ impl Loader {
                             continue;
                         }
                     };
-                    if source.collection && !document.collection {
+                    if source.is_collection() && !document.collection {
                         log::warn!("ignoring {actual}: expected a subscription collection");
                         continue;
                     }
-                    source.collection = false;
+                    source.collection = Some(false);
                     if document.collection {
                         if !requested.same_origin(&actual) && requested.is_remote() {
                             source.headers.clear();
@@ -235,7 +241,7 @@ impl Loader {
                                 document.sources,
                                 actual,
                                 Some(source.clone()),
-                                document.defaults.inherit(document_defaults),
+                                document.defaults.inherit(&document_defaults),
                                 depth + 1,
                             )
                             .await;
@@ -243,7 +249,7 @@ impl Loader {
                     } else {
                         for mut leaf in document.sources {
                             apply_defaults(&mut leaf, &source);
-                            apply_document_defaults(&mut leaf, document_defaults);
+                            apply_document_defaults(&mut leaf, &document_defaults);
                             // Keep unresolved credentials in the configured URL for stable identity.
                             if generic {
                                 leaf.url = original_url.clone();
@@ -849,36 +855,17 @@ fn warn(context: &str, error: &anyhow::Error) {
 
 fn apply_defaults(source: &mut SourceConfig, defaults: &SourceConfig) {
     source.kind = source.kind.take().or_else(|| defaults.kind.clone());
-    source.name = source.name.take().or_else(|| defaults.name.clone());
-    source.slug = source.slug.take().or_else(|| defaults.slug.clone());
-    source.category = source
-        .category
-        .take()
-        .filter(|value| !value.is_empty())
-        .or_else(|| defaults.category.clone());
-    let mut labels = defaults.labels.clone();
-    labels.append(&mut source.labels);
-    source.labels = labels;
-    let mut headers = defaults.headers.clone();
-    for (name, value) in std::mem::take(&mut source.headers) {
-        headers.retain(|default, _| !default.eq_ignore_ascii_case(&name));
-        headers.insert(name, value);
-    }
-    source.headers = headers;
-    source.html = source.html.or(defaults.html);
     source.content = source.content.or(defaults.content);
     source.media = source.media.or(defaults.media);
     source.limits = source.limits.inherit(defaults.limits);
-    source.branch = source.branch.take().or_else(|| defaults.branch.clone());
-    if source.sources.is_empty() {
-        source.sources = defaults.sources.clone();
-    }
+    source.inherit_source(defaults);
 }
 
-fn apply_document_defaults(source: &mut SourceConfig, defaults: DocumentDefaults) {
+fn apply_document_defaults(source: &mut SourceConfig, defaults: &DocumentDefaults) {
     source.content = source.content.or(defaults.content);
     source.media = source.media.or(defaults.media);
     source.limits = source.limits.inherit(defaults.limits);
+    source.inherit_document(defaults);
 }
 
 #[cfg(test)]
@@ -1005,7 +992,7 @@ mod tests {
         let expansion = expand(
             vec![SourceConfig {
                 url: Some(trusted.url("/collection")),
-                collection: true,
+                collection: Some(true),
                 headers: BTreeMap::from([("Authorization".into(), "Bearer secret".into())]),
                 category: Some("science".into()),
                 ..Default::default()
@@ -1060,7 +1047,7 @@ mod tests {
         let expansion = expand(
             vec![SourceConfig {
                 url: Some(trusted.url("/collection")),
-                collection: true,
+                collection: Some(true),
                 headers: BTreeMap::from([("Authorization".into(), "Bearer secret".into())]),
                 ..Default::default()
             }],
@@ -1204,7 +1191,7 @@ mod tests {
         let expansion = expand(
             vec![SourceConfig {
                 url: Some(server.url("/collection")),
-                collection: true,
+                collection: Some(true),
                 ..Default::default()
             }],
             root,
@@ -1353,7 +1340,7 @@ mod tests {
         let expansion = expand(
             vec![SourceConfig {
                 url: Some(server.url("/subscriptions")),
-                collection: true,
+                collection: Some(true),
                 headers: BTreeMap::from([("x-test".into(), "secret".into())]),
                 category: Some("group".into()),
                 ..Default::default()
@@ -1399,7 +1386,7 @@ mod tests {
         let expansion = expand(
             vec![SourceConfig {
                 url: Some(server.url("/collections/news")),
-                collection: true,
+                collection: Some(true),
                 ..Default::default()
             }],
             root,

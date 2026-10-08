@@ -1,4 +1,6 @@
-import { duration, timingHost, type Phase, type TimingState } from './timing';
+import { SPEEDS, type Playback, type PlaybackState } from './audio';
+import { claimVisual, connectVisual, visualPlaying, type Episode } from './now-playing';
+import { duration, endsAt, timingHost, type Phase, type TimingState } from './timing';
 
 /**
  * Provider players are facades: nothing reaches YouTube, Vimeo or Twitch until the reader
@@ -8,6 +10,9 @@ import { duration, timingHost, type Phase, type TimingState } from './timing';
  */
 
 export type Provider = 'youtube' | 'vimeo';
+
+/** One widget id for listening and commands. A second id makes YouTube ignore the transport. */
+const WIDGET_ID = 'aggr';
 
 const VIMEO_EVENTS = [
   'play',
@@ -93,9 +98,9 @@ export function followProvider(
 
   function subscribe(): void {
     if (provider === 'youtube') {
-      post(JSON.stringify({ event: 'listening', id: 'aggr-timing', channel: 'widget' }));
+      post(JSON.stringify({ event: 'listening', id: WIDGET_ID, channel: 'widget' }));
       for (const event of ['onStateChange', 'onPlaybackRateChange', 'onError']) {
-        post(JSON.stringify({ event: 'command', func: 'addEventListener', args: [event], id: 'aggr-timing', channel: 'widget' }));
+        post(JSON.stringify({ event: 'command', func: 'addEventListener', args: [event], id: WIDGET_ID, channel: 'widget' }));
       }
     } else {
       for (const event of VIMEO_EVENTS) post({ method: 'addEventListener', value: event });
@@ -118,7 +123,11 @@ export function followProvider(
         recorded = !live;
       }
       if (live) state.duration = undefined;
-      else if (recorded && info.duration !== undefined) state.duration = duration(info.duration);
+      else if (recorded) {
+        if (info.duration !== undefined) state.duration = duration(info.duration);
+        const progress = asRecord(info.progressState);
+        if (state.duration === undefined && progress?.duration !== undefined) state.duration = duration(progress.duration);
+      }
       if (finite(info.currentTime) && info.currentTime >= 0) {
         state.position = info.currentTime;
         if (stale) state.phase = 'playing';
@@ -200,6 +209,151 @@ export function followProvider(
 
 const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
 
+/** Identity of an embed, before the autoplay and origin parameters activation adds. */
+function embedIdentity(raw: string): string {
+  try {
+    const url = new URL(raw, location.href);
+    for (const key of ['autoplay', 'enablejsapi', 'origin', 'parent']) url.searchParams.delete(key);
+    url.hash = '';
+    return url.href;
+  } catch {
+    return '';
+  }
+}
+
+function episodeOf(player: HTMLElement, preview: HTMLAnchorElement, src: string): Episode {
+  const raw =
+    preview.dataset.aggrExternalLabel ||
+    preview.getAttribute('aria-label')?.replace(/, (?:opens in a new tab|external site)$/, '') ||
+    '';
+  const named = raw.match(/^Play (.+) on (YouTube|Vimeo|Twitch)$/);
+  const provider = player.dataset.videoProvider ?? '';
+  const fallback = provider === 'youtube' ? 'YouTube' : provider === 'vimeo' ? 'Vimeo' : provider === 'twitch' ? 'Twitch' : '';
+  const image = preview.querySelector('img');
+  return {
+    src,
+    title: named?.[1] || raw.replace(/^Play\s+/, '') || 'Video',
+    show: named?.[2] || fallback,
+    artwork: image instanceof HTMLImageElement && image.getAttribute('src') ? image.src : '',
+    page: typeof location === 'undefined' ? '' : location.href.split('#')[0],
+  };
+}
+
+function toPlayback(state: TimingState): PlaybackState {
+  const total = duration(state.duration);
+  const position = Number.isFinite(state.position) ? Math.max(0, state.position) : 0;
+  const timing = { ...state, position };
+  return {
+    ...timing,
+    progress: total ? Math.min(1, position / total) : 0,
+    seekable: Boolean(total),
+    volume: 1,
+    muted: false,
+    volumeAdjustable: false,
+    ...endsAt(timing),
+  };
+}
+
+/**
+ * Drive a YouTube or Vimeo frame over postMessage. Twitch has no such API here: the frame is
+ * only moved, and its own controls stay the ones that play and seek it. The listener lives as
+ * long as the playback does, which is the session, not the page.
+ */
+function createEmbedPlayback(
+  frame: HTMLIFrameElement,
+  provider: Provider | 'twitch',
+  origin: string,
+  known: number | undefined,
+  update: (state: PlaybackState) => void,
+): {
+  playback: Playback;
+  subscribe: () => void;
+  signal: AbortSignal;
+  resumable: () => boolean;
+  assume: (phase: Phase) => void;
+} {
+  const listeners = new AbortController();
+  let state: TimingState = { phase: 'idle', position: NaN, duration: duration(known), speed: NaN };
+  const emit = (next: TimingState) => {
+    state = next;
+    update(toPlayback(state));
+  };
+  const post = (message: unknown) => {
+    try {
+      frame.contentWindow?.postMessage(message, origin);
+    } catch {
+      /* the frame may already be gone */
+    }
+  };
+  const subscribe =
+    provider === 'youtube' || provider === 'vimeo'
+      ? followProvider(
+          frame,
+          provider,
+          origin,
+          (timing) => {
+            // Unstarted and cued arrive after the reader has already asked the player to start.
+            const phase = timing.phase === 'idle' && state.phase !== 'idle' ? state.phase : timing.phase;
+            emit({ ...timing, phase });
+          },
+          known ?? 0,
+          listeners.signal,
+        )
+      : () => {};
+
+  const command = (func: string, args: unknown[] = []) =>
+    post(JSON.stringify({ event: 'command', func, args, id: WIDGET_ID, channel: 'widget' }));
+  const vimeo = (method: string, value?: number) => post(value === undefined ? { method } : { method, value });
+
+  function seek(fraction: number): void {
+    const total = duration(state.duration);
+    if (!Number.isFinite(fraction) || !total) return;
+    const seconds = Math.max(0, Math.min(1, fraction)) * total;
+    if (provider === 'youtube') command('seekTo', [seconds, true]);
+    else if (provider === 'vimeo') vimeo('setCurrentTime', seconds);
+    else return;
+    emit({ ...state, position: seconds });
+  }
+
+  const playback: Playback = {
+    toggle() {
+      if (provider !== 'youtube' && provider !== 'vimeo') return;
+      const pausing = state.phase === 'playing' || state.phase === 'loading';
+      if (provider === 'youtube') command(pausing ? 'pauseVideo' : 'playVideo');
+      else vimeo(pausing ? 'pause' : 'play');
+      emit({ ...state, phase: pausing ? 'paused' : 'loading' });
+    },
+    seek,
+    skip(seconds) {
+      const total = duration(state.duration);
+      const position = Number.isFinite(state.position) ? state.position : 0;
+      if (total && Number.isFinite(seconds)) seek((position + seconds) / total);
+    },
+    speed(value) {
+      if (!SPEEDS.includes(value) || (provider !== 'youtube' && provider !== 'vimeo')) return;
+      if (provider === 'youtube') command('setPlaybackRate', [value]);
+      else vimeo('setPlaybackRate', value);
+      emit({ ...state, speed: value });
+    },
+    volume() {},
+    mute() {},
+    dispose() {
+      listeners.abort();
+    },
+  };
+
+  return {
+    playback,
+    subscribe,
+    signal: listeners.signal,
+    /** A paused or finished recording must not be started again by a later load. */
+    resumable: () => state.phase === 'loading' || state.phase === 'playing',
+    assume(phase) {
+      emit({ ...state, phase });
+    },
+  };
+}
+
 /** Turn a poster into the player it stands for, on the reader's activation and never before. */
 export function enhanceVideoFacade(preview: HTMLAnchorElement, signal: AbortSignal): void {
   const player = preview.closest('.video-player');
@@ -212,17 +366,32 @@ export function enhanceVideoFacade(preview: HTMLAnchorElement, signal: AbortSign
     preview.dataset.aggrExternalLabel ||
     preview.getAttribute('aria-label')?.replace(/, (?:opens in a new tab|external site)$/, '') ||
     'Video';
+  const identity = embedIdentity(preview.dataset.videoEmbed || '');
+  const episode = episodeOf(player, preview, identity);
+  const report = (state: PlaybackState) => {
+    if (!signal.aborted) timingHost(player)(state);
+  };
+  // Coming back to this recording reuses the frame already playing. The frame stays in its seat,
+  // so it is not a child of this card.
+  if (identity && claimVisual(player, episode, report, signal)) {
+    preview.hidden = true;
+    player.classList.add('is-loaded');
+    player.classList.remove('is-loading');
+    player.dataset.videoMounted = 'true';
+  }
 
   function activate(event: MouseEvent | KeyboardEvent): void {
     if (event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) return;
     if (event instanceof KeyboardEvent && event.key !== ' ' && event.key !== 'Enter') return;
     event.preventDefault();
-    if (!(player instanceof HTMLElement) || player.dataset.videoMounted === 'true') return;
+    if (!(player instanceof HTMLElement) || player.dataset.videoMounted === 'true' || !identity) return;
+    if (visualPlaying(identity)) return;
     player.dataset.videoMounted = 'true';
+    player.dataset.playingSrc = identity;
 
     let url: URL;
     try {
-      url = new URL(preview.dataset.videoEmbed || '');
+      url = new URL(identity);
     } catch {
       return;
     }
@@ -240,47 +409,80 @@ export function enhanceVideoFacade(preview: HTMLAnchorElement, signal: AbortSign
     frame.allow = 'autoplay; encrypted-media; fullscreen; picture-in-picture';
     frame.allowFullscreen = true;
     frame.referrerPolicy = 'strict-origin-when-cross-origin';
+    // YouTube delivers commands only to the widget id registered by `listening`.
+    if (provider === 'youtube') frame.id = WIDGET_ID;
     frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-presentation');
 
-    const report = timingHost(player);
-    const subscribe =
-      provider === 'youtube' || provider === 'vimeo'
-        ? followProvider(frame, provider, url.origin, report, Number(player.dataset.durationSeconds), signal)
-        : null;
+    const bridge: { push: (state: PlaybackState) => void } = { push() {} };
+    const opened = createEmbedPlayback(
+      frame,
+      provider === 'youtube' || provider === 'vimeo' ? provider : 'twitch',
+      url.origin,
+      duration(Number(player.dataset.durationSeconds)),
+      (state) => bridge.push(state),
+    );
+    bridge.push = connectVisual(frame, episode, opened.playback, report, signal, {
+      controls: provider === 'youtube' || provider === 'vimeo',
+    }).push;
 
     player.classList.add('is-loading');
     player.setAttribute('aria-busy', 'true');
+    // Append before the loading state promotes, so the card is where the picture returns.
+    player.appendChild(frame);
+    opened.assume('loading');
     frame.addEventListener(
       'load',
       () => {
         player.classList.add('is-loaded');
         player.removeAttribute('aria-busy');
         preview.hidden = true;
-        subscribe?.();
+        // Every load, including one the provider starts itself, has to be told we are listening.
+        // A frame that reloaded otherwise stops reporting time and ignores the bar.
+        opened.subscribe();
+        if (provider === 'twitch') {
+          opened.assume('playing');
+          return;
+        }
+        if (!opened.resumable()) return;
         // `autoplay` alone leaves YouTube and Vimeo showing their own play button when the
         // browser declines; the activating click already authorized this, so ask the player too.
         const target = frame.contentWindow;
         if (!target) return;
         if (provider === 'youtube') {
-          target.postMessage(JSON.stringify({ event: 'listening', id: 'aggr-play', channel: 'widget' }), url.origin);
           target.postMessage(
-            JSON.stringify({ event: 'command', func: 'playVideo', args: [], id: 'aggr-play', channel: 'widget' }),
+            JSON.stringify({ event: 'command', func: 'playVideo', args: [], id: WIDGET_ID, channel: 'widget' }),
             url.origin,
           );
         } else if (provider === 'vimeo') target.postMessage({ method: 'play' }, url.origin);
       },
-      { once: true, signal },
+      { signal: opened.signal },
     );
-    player.appendChild(frame);
-    frame.focus({ preventScroll: true });
-    signal.addEventListener(
-      'abort',
-      () => {
-        frame.removeAttribute('src');
-        frame.remove();
-      },
-      { once: true },
-    );
+    // A cross-origin frame that holds focus swallows every keydown, and the reader's shortcuts
+    // stay dead until the document reloads. The poster click already authorized playback.
+    // Clicking the player focuses it without a focus event on the element: the window blur is
+    // the signal, and the frame is already the active element. Give the keyboard back on the
+    // next frame, once that click has landed, except while the reader has fullscreened it.
+    // Twitch draws the keys itself, so a later click may keep them.
+    if (provider !== 'twitch') {
+      let restoring = false;
+      const keepKeys = () => {
+        if (restoring || document.fullscreenElement === frame || document.activeElement !== frame) return;
+        const page = document.getElementById('content');
+        restoring = true;
+        if (page instanceof HTMLElement) page.focus({ preventScroll: true });
+        else frame.blur();
+        restoring = false;
+      };
+      frame.addEventListener('focus', keepKeys, { signal: opened.signal });
+      window.addEventListener('blur', () => requestAnimationFrame(keepKeys), { signal: opened.signal });
+      document.addEventListener(
+        'fullscreenchange',
+        () => {
+          if (!document.fullscreenElement) requestAnimationFrame(keepKeys);
+        },
+        { signal: opened.signal },
+      );
+    }
 
     // Twitch refuses to render below 400×300. A narrow column gets a player laid out at that
     // size and scaled down to fit, rather than a player that widens the article or a refusal.

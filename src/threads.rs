@@ -1161,6 +1161,7 @@ mod tests {
             images: crate::config::ImagePolicy::Original,
             documents: crate::config::DocumentPolicy::Original,
             limits: crate::config::Limits::default(),
+            discussions: Vec::new(),
             engine: crate::config::Engine::Feed {
                 url: Url::parse(url).unwrap(),
             },

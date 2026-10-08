@@ -1085,6 +1085,7 @@ mod tests {
             documents: crate::config::DocumentPolicy::Original,
             limits: crate::config::Limits::default(),
             content: crate::config::ContentMode::Light,
+            discussions: Vec::new(),
             engine: crate::config::Engine::Feed { url },
         }
     }

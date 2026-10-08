@@ -178,7 +178,7 @@ For a public personal or organizational archive, add truthful ownership metadata
 making aggr guess an identity:
 
 ```toml
-[site.identity]
+[identity]
 type = "person" # or "organization"
 name = "Your Name"
 url = "https://example.com/about"

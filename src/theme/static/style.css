@@ -20,6 +20,7 @@
   --max: 56rem;
   --tap-target: 44px;
   --bottom-nav-offset: 0px;
+  --now-playing-offset: 0px;
   --mobile-safe-area: env(safe-area-inset-bottom, 0px);
   --top-nav-offset: calc(var(--tap-target) + env(safe-area-inset-top));
   --row-padding: 0.5rem;
@@ -212,6 +213,12 @@ pre code { background: none; padding: 0; }
   opacity: 1;
 }
 .brand-title { text-transform: lowercase; }
+/* The name is a home link, not a tab: it never picks up the current-page underline. */
+.nav .brand,
+.nav .brand:hover,
+.nav .brand:focus,
+.nav .brand:focus-visible,
+.nav .brand[aria-current] { text-decoration: none; }
 .brand-icon { display: block; width: 1em; height: 1em; object-fit: contain; object-position: center; align-self: center; flex: 0 0 auto; }
 .nav .config-link { padding-right: 0; }
 /* The arrow glyph has almost no left bearing, so a plain space between it and the label reads as
@@ -220,7 +227,7 @@ pre code { background: none; padding: 0; }
 .article-resources a > span[aria-hidden="true"],
 .interactive-reader figcaption a > span[aria-hidden="true"] { margin-inline-start: 0.2em; }
 .nav a:focus-visible { background: color-mix(in srgb, var(--nav-fg) 16%, var(--nav-bg)); text-decoration: underline; }
-html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
+html.is-shift-held a[href]:not(.brand):hover { text-decoration-line: underline !important; }
 .browse-intro { max-width: 65ch; margin: 0.45rem 0 0; line-height: 1.5; }
 .browse-groups { display: grid; gap: 2rem; }
 .browse-group { min-width: 0; scroll-margin-top: 1rem; }
@@ -283,12 +290,8 @@ html.is-shift-held a[href]:hover { text-decoration-line: underline !important; }
 .key-pair small { margin: 0 0.25rem 0 0.1rem; color: var(--muted); font-size: 0.78em; }
 
 /* content column */
-.reader-intro { width: min(100%, var(--max)); margin: 0 auto; padding: 0.75rem max(0.75rem, env(safe-area-inset-right)) 0.75rem max(0.75rem, env(safe-area-inset-left)); font-size: 0.9rem; }
-body:not([data-kind="river"]) .reader-intro { display: none; }
-.reader-intro summary { min-height: var(--tap-target); display: list-item; align-content: center; cursor: pointer; font-weight: 600; }
-.reader-intro p { max-width: 65ch; margin: 0 0 0.5rem; color: var(--muted); }
-.reader-intro nav, .reading-list-actions { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
-.reader-intro nav a, .reading-list-actions a { display: inline-flex; align-items: center; min-height: var(--tap-target); text-decoration: underline; text-underline-offset: 0.15em; }
+.reading-list-actions { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+.reading-list-actions a { display: inline-flex; align-items: center; min-height: var(--tap-target); text-decoration: underline; text-underline-offset: 0.15em; }
 .main {
   /* Grow with the page, and keep a content-sized basis. A zero basis makes this flex item
      the sticky containing block in Safari, so the feed search scrolls away with the list. */
@@ -299,11 +302,12 @@ body:not([data-kind="river"]) .reader-intro { display: none; }
   padding: 0.75rem 0.75rem 2rem;
   padding-left: max(0.75rem, env(safe-area-inset-left));
   padding-right: max(0.75rem, env(safe-area-inset-right));
-  padding-bottom: max(4rem, calc(env(safe-area-inset-bottom) + 3rem));
+  padding-bottom: max(4rem, calc(env(safe-area-inset-bottom) + 3rem + var(--now-playing-offset)));
 }
 .main:focus { outline: none; }
 .main[data-navigation-focus]:focus-visible { outline: none; }
 .footer { position: fixed; right: max(0.75rem, env(safe-area-inset-right)); bottom: max(0.5rem, env(safe-area-inset-bottom)); z-index: 1; padding: 0.2rem 0.35rem; color: var(--muted); font-size: 0.72rem; background: var(--bg); }
+html[data-now-playing] .footer { bottom: calc(var(--now-playing-offset) + 0.5rem); }
 .footer a { color: inherit; }
 .page { min-width: 0; }
 .page-header { margin: 0.25rem 0 0.75rem; }
@@ -333,6 +337,11 @@ body:not([data-kind="river"]) .reader-intro { display: none; }
   margin-inline: calc(-1 * var(--row-bleed));
   padding: var(--row-padding) var(--row-inset);
   scroll-margin-block: 4rem 6rem;
+  /* Off-screen rows stay in the document for the keyboard and for search, and skip layout.
+     `auto` remembers a row once it has been seen; 4.5rem is the desktop estimate. The phone
+     query raises the estimate, and print lays every row out. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 4.5rem;
 }
 /* The selection bar sits just outside the column, meeting the start of the rule. */
 .row::before {
@@ -403,7 +412,6 @@ html:not([data-thumbnails="hide"]) .row-content { min-height: var(--preview-size
 .title { grid-area: title; display: block; color: var(--link); font-size: var(--row-title-size); font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
 .domain { overflow-wrap: anywhere; }
 .domain, .meta a { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
-.excerpt { margin: 0.15rem 0 0.1rem; color: var(--muted); font-size: 0.9375rem; }
 .meta { min-width: 0; color: var(--muted); font-size: 0.875rem; line-height: 1.2; display: flex; align-items: center; flex-wrap: wrap; gap: 0; }
 .meta > * { display: inline-flex; align-items: center; min-width: 0; min-height: var(--row-meta-height); overflow-wrap: anywhere; }
 .meta-field { gap: 0; flex-wrap: nowrap; max-width: 100%; }
@@ -412,7 +420,7 @@ html:not([data-thumbnails="hide"]) .row-content { min-height: var(--preview-size
 .meta a { color: inherit; }
 .meta-field > .domain { display: block; align-content: center; }
 .meta > .meta-field + .meta-field::before { content: "·"; flex-shrink: 0; margin-inline: 0.35em; color: var(--muted); }
-.row .meta, .row .excerpt { padding-left: calc(1.25rem + 0.5rem); }
+.row .meta { padding-left: calc(1.25rem + 0.5rem); }
 /* pager */
 .pager { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 1rem; padding: 0.75rem 0; color: var(--muted); font-size: 0.9rem; }
 .pager[hidden], .pager a[hidden] { display: none; }
@@ -712,8 +720,7 @@ body[data-kind="item"] .main {
     gap: 0.05rem 0.45rem;
   }
   html:not([data-density="comfortable"]) .row-heading .title { line-height: 1.25; }
-  html:not([data-density="comfortable"]) .row .meta,
-  html:not([data-density="comfortable"]) .row .excerpt { padding-left: calc(1.25rem + 0.45rem); }
+  html:not([data-density="comfortable"]) .row .meta { padding-left: calc(1.25rem + 0.45rem); }
   html:not([data-density="comfortable"]) .meta, html:not([data-density="comfortable"]) .item-tags { font-size: 0.8rem; }
 }
 
@@ -737,8 +744,8 @@ body[data-kind="item"] .main {
   :root { --rank-width: 3ch; }
   .row::before { display: none; }
   .row.is-selected .title:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; }
-  html { scroll-padding-bottom: calc(var(--bottom-nav-offset) + 1rem); }
-  .main { padding-bottom: calc(var(--bottom-nav-offset) + 0.75rem); }
+  html { scroll-padding-bottom: calc(var(--bottom-nav-offset) + var(--now-playing-offset) + 1rem); }
+  .main { padding-bottom: calc(var(--bottom-nav-offset) + var(--now-playing-offset) + 0.75rem); }
   html:not([data-density="comfortable"]) { --row-padding: 0.3rem; }
   html[data-density="comfortable"] { --row-padding: 0.65rem; }
   .meta > span { min-width: 0; overflow-wrap: anywhere; }
@@ -871,8 +878,121 @@ body[data-kind="item"] .main {
   .audio-toggle { width: 2.75rem; height: 2.75rem; }
 }
 
+/* Parked audio stays in the document so it keeps playing. Clipped rather than display:none,
+   which some browsers treat as a reason to suspend media. */
+#now-playing-audio { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+#now-playing-audio audio { width: 1px; height: 1px; }
+/* Former holding area. The live picture is `#now-playing-picture`. */
+#now-playing-park { position: fixed; left: 0; bottom: 0; z-index: 4; width: 12.5rem; aspect-ratio: 16 / 9; overflow: hidden; opacity: 0; pointer-events: none; }
+#now-playing-park iframe, #now-playing-park video { width: 100%; height: 100%; border: 0; }
+/* The picture stays in this seat for the whole session. The seat scales between the article and
+   the bar; the player inside keeps the size it started at, because resizing or reparenting a
+   provider frame reloads it and the elapsed time stops. Under the header while it covers the
+   article, above the bar while it is docked. */
+#now-playing-picture { position: fixed; z-index: 3; margin: 0; box-sizing: border-box; overflow: hidden; border-radius: 0.5rem; background: #000; }
+#now-playing-picture[data-at="dock"], #now-playing-picture[data-glide] { z-index: 6; border-radius: 0.45rem; }
+.now-playing-fit { transform-origin: top left; }
+#now-playing-picture iframe, #now-playing-picture video { display: block; width: 100%; height: 100%; border: 0; object-fit: contain; background: #000; }
+
+.now-playing {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+  grid-template-areas: "seek seek seek seek seek seek" "episode transport transport time speed close";
+  align-items: center;
+  column-gap: 0.65rem;
+  row-gap: 0.1rem;
+  box-sizing: border-box;
+  padding: 0.15rem max(0.75rem, env(safe-area-inset-right)) calc(0.4rem + env(safe-area-inset-bottom)) max(0.75rem, env(safe-area-inset-left));
+  border-top: 1px solid color-mix(in srgb, var(--warm) 28%, var(--faint));
+  background: var(--panel);
+  color: var(--fg);
+  box-shadow: 0 -8px 24px #00000014;
+}
+/* The picture takes a fixed 16:9 beside the controls, about 200px wide, so a video does not become a second page. */
+.now-playing[data-visual] {
+  grid-template-columns: 12.5rem minmax(0, 1fr) auto auto auto auto;
+  grid-template-areas: "stage seek seek seek seek seek" "stage episode transport time speed close";
+}
+.now-playing-stage { grid-area: stage; position: relative; width: 12.5rem; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 0.45rem; background: #000; }
+.now-playing-stage iframe, .now-playing-stage video {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  transform: none !important;
+  opacity: 1 !important;
+  border: 0;
+  object-fit: contain;
+  background: #000;
+}
+.now-playing-seek { grid-area: seek; width: 100%; height: 1.25rem; margin: 0; accent-color: var(--warm); cursor: pointer; }
+.now-playing-episode { grid-area: episode; display: flex; align-items: center; gap: 0.65rem; min-width: 0; color: inherit; text-decoration: none; }
+.now-playing-art, .now-playing-mark { display: block; width: var(--tap-target); height: var(--tap-target); flex: none; border-radius: 0.45rem; object-fit: cover; background: color-mix(in srgb, var(--warm) 14%, var(--panel)); }
+.now-playing-titles { display: grid; gap: 0.1rem; min-width: 0; }
+.now-playing-show, .now-playing-title, .now-playing-status { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.now-playing-show { color: var(--muted); font-size: 0.68rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.now-playing-title { font-size: 0.92rem; font-weight: 650; line-height: 1.2; }
+.now-playing-status { color: var(--danger); font-size: 0.75rem; }
+.now-playing-episode:hover .now-playing-title, .now-playing-episode:focus-visible .now-playing-title { text-decoration: underline; text-underline-offset: 0.15em; }
+.now-playing-transport { grid-area: transport; display: flex; align-items: center; justify-content: center; gap: 0.1rem; }
+.now-playing-volume { display: flex; align-items: center; gap: 0.1rem; }
+.now-playing-mute { display: grid; place-items: center; width: var(--tap-target); height: var(--tap-target); padding: 0; border: 0; border-radius: 0.5rem; color: var(--fg); background: transparent; cursor: pointer; }
+.now-playing-mute svg { width: 1.15rem; height: 1.15rem; fill: currentColor; }
+.now-playing-mute[aria-pressed="true"] .audio-volume-wave { display: none; }
+.now-playing-level { width: 4.5rem; height: var(--tap-target); margin: 0; accent-color: var(--warm); cursor: pointer; }
+.now-playing .audio-toggle, .now-playing .audio-skip { width: var(--tap-target); height: var(--tap-target); color: var(--fg); }
+.now-playing[data-audio-state="playing"] .audio-pause-icon, .now-playing[data-audio-state="loading"] .audio-pause-icon { display: block; }
+.now-playing[data-audio-state="playing"] .audio-play-icon, .now-playing[data-audio-state="loading"] .audio-play-icon { display: none; }
+.now-playing-time { grid-area: time; color: var(--muted); font: 0.75rem/1 var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.now-playing-speed, .now-playing-close {
+  display: grid;
+  place-items: center;
+  min-width: var(--tap-target);
+  min-height: var(--tap-target);
+  padding: 0 0.45rem;
+  border: 0;
+  border-radius: 0.5rem;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font: 600 0.8rem/1 var(--font);
+  font-variant-numeric: tabular-nums;
+}
+.now-playing-speed { grid-area: speed; }
+.now-playing-close { grid-area: close; color: var(--fg); font-size: 1.35rem; font-weight: 400; }
+.now-playing button:disabled, .now-playing input:disabled { opacity: 0.45; cursor: default; }
+.now-playing a:focus-visible, .now-playing button:focus-visible, .now-playing input:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; }
+@media (hover: hover) {
+  .now-playing-speed:hover, .now-playing-close:hover, .now-playing-mute:hover { background: color-mix(in srgb, var(--warm) 10%, transparent); color: var(--fg); }
+}
+/* The tab bar already includes the home indicator, so the bar sits on it without a second inset. */
+@media (max-width: 40rem) {
+  .now-playing {
+    bottom: var(--bottom-nav-offset);
+    padding-bottom: 0.35rem;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: "seek seek seek seek" "episode episode time close" "transport transport transport speed";
+  }
+  .now-playing-transport { justify-content: start; }
+  .now-playing[data-visual] {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: "stage stage stage stage" "seek seek seek seek" "episode episode time close" "transport transport transport speed";
+  }
+  .now-playing[data-visual] .now-playing-stage { width: 100%; max-height: 30vh; }
+}
+html.is-keyboard-open .now-playing,
+html.is-keyboard-open #now-playing-picture[data-at="dock"],
+html.is-keyboard-open #now-playing-picture[data-glide] { visibility: hidden; }
+
 @media (prefers-reduced-motion: no-preference) {
   a, button { transition: opacity 80ms ease, background-color 120ms ease, color 120ms ease; }
+  html:not([data-motion="off"]) .now-playing:not([data-visual]) { animation: now-playing-in 220ms ease-out; }
+  html:not([data-motion="off"]) .now-playing[data-visual] { animation: now-playing-fade 220ms ease-out; }
   html:not([data-motion="off"]) .preview-media.is-loading .preview-image { opacity: 0; }
   html:not([data-motion="off"]) .preview-media.is-loading.is-loaded .preview-image { opacity: 1; transition: opacity 180ms ease-out; }
   html:not([data-motion="off"]) .article-picture.is-loading .progressive-image { opacity: 0; }
@@ -885,6 +1005,8 @@ body[data-kind="item"] .main {
 }
 .body .article-picture.is-loaded::before { opacity: 0; }
 
+@keyframes now-playing-in { from { opacity: 0; transform: translateY(0.35rem); } }
+@keyframes now-playing-fade { from { opacity: 0; } }
 html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="off"] *::after {
   scroll-behavior: auto !important;
   animation-duration: 0.01ms !important;
@@ -902,6 +1024,7 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
 }
 
 @media print {
+  .now-playing, #now-playing-picture { display: none; }
   .itemhead { --header-progress: 0 !important; position: static; padding-top: 0; }
   .itemhead::before { display: none; }
   .itemhead h1 { height: auto; font-size: 2rem; }
@@ -971,9 +1094,34 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
    bar still sticks under the header once that title has scrolled away. */
 body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data-kind="tag"]) .main { padding-top: 0; }
 body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data-kind="tag"]) .listhead {
+  --row-bleed: 0.75rem;
   position: sticky; top: var(--top-nav-offset); z-index: 4; margin: 0; padding: 0.25rem 0 0.5rem; background: var(--bg);
 }
-.feed-toolbar { position: sticky; top: calc(var(--top-nav-offset) + var(--feed-heading, 0px)); z-index: 4; min-width: 0; margin: 0 0 1rem; padding: 0.6rem 0; background: var(--bg); }
+/* The current-item bar is 3px into the row bleed, outside these sticky boxes. */
+body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data-kind="tag"]) .listhead::before,
+.feed-toolbar::before {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  background: var(--bg);
+  inset-block: 0;
+  inset-inline-start: calc(-1 * var(--row-bleed));
+  width: var(--row-bleed);
+}
+.feed-toolbar {
+  --feed-toolbar-pad: 0.6rem;
+  --row-bleed: 0.75rem;
+  position: sticky;
+  top: calc(var(--top-nav-offset) + var(--feed-heading, 0px));
+  z-index: 4;
+  min-width: 0;
+  margin: 0 0 1rem;
+  padding: var(--feed-toolbar-pad) 0;
+  background: var(--bg);
+}
+/* Stop the cover on the search field's bottom border. The padding under the field stays clear,
+   so the bar remains visible until it reaches that line. */
+.feed-toolbar::before { inset-block-end: var(--feed-toolbar-pad); }
 .feed-search { display: flex; align-items: center; margin: 0; width: 100%; min-width: 0; }
 /* One selector list for the server-rendered field and the mounted one, so their geometry cannot drift. */
 .feed-search input[type="search"], .search-input-line #q { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; color: var(--fg); background: var(--search-bg, var(--code)); border: 1px solid var(--faint); border-radius: .35rem; padding: .55rem 2.75rem .55rem .7rem; font: inherit; }
@@ -1058,7 +1206,7 @@ body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data
   .row .rank { display: none; }
   .row-content::before { display: none; }
   .row-heading { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }
-  html .row .row-copy > :is(.meta, .excerpt) { padding-left: 0; }
+  html .row .row-copy > .meta { padding-left: 0; }
   .row { --mobile-preview-size: 3rem; min-height: var(--tap-target); padding-block: max(var(--row-padding), 0.625rem); }
   /* The feed keeps every row for the keyboard and for search. Only those near the screen are laid out. */
   .row { content-visibility: auto; contain-intrinsic-size: auto 8rem; }
@@ -1069,7 +1217,7 @@ body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data
   .row .row-heading { grid-column: 1; grid-row: 1; }
   .row .row-heading .title { min-height: 0; padding: 0; line-height: 1.35; }
   .row .preview-media { grid-column: 2; grid-row: 1; width: var(--mobile-preview-size); height: var(--mobile-preview-size); }
-  .row .row-copy > :is(.meta, .excerpt) { grid-column: 1 / -1; }
+  .row .row-copy > .meta { grid-column: 1 / -1; }
   .row .meta { grid-row: 2; gap: 0 0.65em; font-size: 0.8125rem; line-height: 1.35; }
   .row .meta > *, .row .meta .domain, .row .meta .domain a { min-height: 1.5rem; }
   .row .meta > .meta-field:has(> .domain) { flex-basis: 100%; font-size: 0.875rem; }
@@ -1077,7 +1225,6 @@ body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data
   /* A wrapped metadata line would start with its separator; spacing alone keeps the fields apart. */
   .itemhead .meta { column-gap: 0.8em; }
   .itemhead .meta > .meta-field + .meta-field::before { content: none; }
-  .row .excerpt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 }
 
 .media-timing { min-block-size: 1.5em; margin: 0.4rem 0 1rem; color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
@@ -1100,7 +1247,10 @@ body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data
   .mobile-tabs a[aria-current] { color: LinkText; outline: 1px solid LinkText; outline-offset: -2px; }
   .mobile-tabs a:active, .mobile-tabs a[data-pressed] { background: Highlight; color: HighlightText; }
 }
-@media print { .mobile-tabs { display: none; } }
+@media print {
+  .mobile-tabs { display: none; }
+  .row, .browse-entry { content-visibility: visible; }
+}
 
 /* ---------------------------------------------------------------- platform behaviour */
 
@@ -1210,13 +1360,13 @@ body[data-searching] [data-static-feed] { display: none; }
 
 /* The preference controls are grouped only so they can be disabled until the script that saves
    them is running; the grouping itself should be invisible. */
-.preferences-controls { min-width: 0; margin: 0; padding: 0; border: 0; }
+.preferences-controls { display: flex; flex-direction: column; gap: 0.85rem; min-width: 0; margin: 0; padding: 0; border: 0; }
 .preferences-controls:disabled { opacity: 0.6; }
 
 /* Persistent status and passage sharing stay outside the replaced article. */
 .selection-share { position: absolute; z-index: 20; padding: .25rem; border: 1px solid var(--faint); border-radius: .4rem; background: var(--bg); box-shadow: 0 2px 8px #0002; }
 .selection-share button { color: var(--fg); background: var(--bg); border: 0; padding: .35rem .7rem; cursor: pointer; }
-.connection-status { position: fixed; right: 1rem; bottom: calc(var(--bottom-nav-offset, 0px) + 1rem); z-index: 25; max-width: min(30rem, calc(100vw - 2rem)); padding: .55rem .8rem; border: 1px solid var(--faint); border-radius: .5rem; background: var(--bg); color: var(--fg); box-shadow: 0 2px 8px #0002; }
+.connection-status { position: fixed; right: 1rem; bottom: calc(var(--bottom-nav-offset, 0px) + var(--now-playing-offset, 0px) + 1rem); z-index: 25; max-width: min(30rem, calc(100vw - 2rem)); padding: .55rem .8rem; border: 1px solid var(--faint); border-radius: .5rem; background: var(--bg); color: var(--fg); box-shadow: 0 2px 8px #0002; }
 .connection-status button { color: inherit; font: inherit; background: transparent; border: 0; cursor: pointer; }
 .pull-refresh { position: fixed; top: 0; left: 50%; transform: translate(-50%, var(--pull-distance, 0px)); z-index: 30; padding: .5rem .8rem; border-radius: .4rem; background: var(--bg); color: var(--fg); box-shadow: 0 2px 8px #0002; }
 html[data-pull-state="pulling"], html[data-pull-state="armed"] { overscroll-behavior-y: contain; }

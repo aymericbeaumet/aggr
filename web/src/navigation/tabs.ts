@@ -28,7 +28,7 @@ export function tabAt(bar: Element, x: number, y: number): HTMLAnchorElement | n
   return tabUnder(links, bar.getBoundingClientRect(), x, y, getComputedStyle(bar).direction === 'rtl');
 }
 
-const TAB_LINK = '[data-site-navigation] a[data-route]';
+const TAB_LINK = '[data-site-navigation] a[data-route]:not(.brand)';
 
 /** Mark `route` current on every site tab, desktop and mobile, and clear the others. */
 export function markCurrentTab(root: ParentNode, route: string): void {

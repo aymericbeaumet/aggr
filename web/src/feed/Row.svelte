@@ -11,7 +11,6 @@
     row,
     rank,
     base,
-    excerpts,
     language,
     hidden = false,
     selected = false,
@@ -21,7 +20,6 @@
     row: ClientRow;
     rank: number;
     base: string;
-    excerpts: boolean;
     language: string;
     /** Outside the slice on screen (`?feed-page=`); the row stays in the document. */
     hidden?: boolean;
@@ -55,7 +53,6 @@
           <span class="rank" aria-hidden="true">{rank}.</span>
           <a class="title p-name u-url" data-row-open {href} {lang}>{row.title}</a>
         </div>
-        {#if excerpts && row.excerpt}<p class="excerpt" {lang}>{row.excerpt}</p>{/if}
         <Metadata metadata={row.metadata} {base} />
         {#if saved}<div class="search-saved-status" data-saved-offline="true">Saved offline</div>{/if}
       </div>

@@ -47,6 +47,31 @@ All forms reduce to the same source model before validation and discovery, using
 global defaults, `${ENV}` expansion, collection expansion, and deduplication. Sources are expanded
 in declaration order, with the first declaration of an equivalent endpoint winning.
 
+## Defaults
+
+`[defaults]` accepts every `[[sources]]` option. A source table overrides the same key.
+Labels combine. A source replaces a request header that uses the same name. `discussions` replaces the whole list. `discussions = []` turns
+discussion links off for that source. `collection` applies only to the entry that omits it
+and is not copied onto the feeds it expands.
+
+`branch` and `sources` apply only to aggr repositories. `sources = []` on an aggr source
+keeps every upstream source and clears a default filter. An explicit `[defaults] slug` is
+copied onto every source that does not set one, so those sources then share a slug and
+validation fails.
+
+```toml
+[defaults]
+discussions = ["hackernews", "reddit"]
+labels = ["reading"]
+
+[[sources]]
+url = "https://example.com/feed"
+discussions = ["reddit"]
+```
+
+Built-in discussions are `hackernews`, `reddit`, and `x`. A custom search is a `{ name, url }`
+table; `{url}` and `{title}` are URL-encoded. The old `[[networks]]` tables are rejected.
+
 ## Source names in URLs
 
 Each source gets a directory under `sources/`, named after its `slug`. Set `slug` to choose it;
@@ -213,7 +238,9 @@ Public show URLs work for Apple Podcasts, Spotify, Deezer, YouTube, SoundCloud, 
 Buzzsprout, Spreaker, Acast, Libsyn, and Simplecast. They resolve to publisher RSS where available.
 Spotify and Deezer can discover a full publisher feed through Apple's public catalog, verifying
 show identity and matching episodes before using it. Article capture can use public episode listings
-when no feed is available. Podcast enclosures play inside articles. See [podcast sources](podcasts.md) for accepted
+when no feed is available. Podcast enclosures play inside articles and keep playing while you move
+through the reader, as does a native video or a YouTube, Vimeo, or Twitch player once it has
+started. See [podcast sources](podcasts.md) for accepted
 URLs and provider limits. Episode text and artwork are archived; audio/video playback is not
 available offline through these adapters.
 

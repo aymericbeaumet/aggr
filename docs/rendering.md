@@ -1,9 +1,11 @@
 # Rendering
 
 aggr renders its reader from the MiniJinja templates and static files under `src/theme/`,
-compiled into the binary. There is no theme setting and no template override; changing the reader
-means changing this repository. A development binary reads those files from the source tree, so
-`aggr dev` picks up template, CSS and client edits without recompiling.
+compiled into the binary. There is one design: no theme setting, no template override, and no
+`[site.params]` (that table is rejected). Changing the reader means changing this repository.
+A development binary reads those files from the source tree, so `aggr dev` picks up template,
+CSS and client edits without recompiling. Feed rows show the title and its metadata. An item's
+excerpt still feeds descriptions, collection feeds, and search documents.
 
 ## Template data and URLs
 
@@ -67,9 +69,9 @@ at the root) and `page.feed_title` the title to label its Atom, RSS and JSON Fee
 base template writes to `<html lang>`, and `site.og_locale` is the same value in Open Graph form
 (`en_GB`). `sources[].language` is the BCP 47 tag a publisher declares for its whole feed (RSS
 `<language>`, Atom `xml:lang`, JSON Feed `language`), canonicalised and recorded in the source
-state, and `item.language` inherits it; both are absent when the feed declares none. The default
-theme adds `lang` to the article element, the feed-row title, and the excerpt only when that tag
-differs from `site.language`, so a single-language instance renders exactly as before.
+state, and `item.language` inherits it; both are absent when the feed declares none. The reader
+adds `lang` to the article element and the feed-row title only when that tag differs from
+`site.language`, so a single-language instance renders exactly as before.
 `sources[].feed_url` is the resolved feed endpoint when one is known, which the build
 also publishes as `sources.opml` for other readers alongside `llms.txt` and `aggr.json`.
 
@@ -197,8 +199,9 @@ The client and the templates share these relationships:
   `facet_url` filter to open the main feed with a quoted search qualifier. Static archives remain at
   `sources/<slug>/`, `categories/<slug>/`, and `tags/<slug>/`; `/browse/` combines the directories. See [client development and search](client.md) for syntax and ownership.
 - Article lists use `.rows .row`, with a `[data-row-open]` title link. `.is-selected` identifies the
-  remembered keyboard cursor. `_item.html` and `Row.svelte` render the same row; search results
-  reuse the component.
+  remembered keyboard cursor. Its bar is the 3px mark in the row bleed, beside the column. The sticky
+  search field paints that gutter through its bottom border, so the mark disappears at that line.
+  `_item.html` and `Row.svelte` render the same row; search results reuse the component.
 - The client may divide one generated page into smaller `?feed-page=N` views; every row must
   remain in the HTML so no-JavaScript readers and crawlers see the complete static page. Article
   chronology and the pager come from the page model.
@@ -211,7 +214,7 @@ validation, sharing, and import/export. The base template
 must retain that bootstrap. Controls identify their setting with `data-preference`; changing one
 persists only the allowlisted `aggr:<setting>` local-storage key.
 
-Site owners define initial values for every setting in `[site.preferences]`; the typed Rust schema
+Site owners define initial values for every setting in `[preferences]`; the typed Rust schema
 in `src/config/preferences.rs` supplies `site.preferences` as browser JSON. Device values take
 precedence, and resetting preferences returns to the site's defaults. See
 [`config.default.toml`](../config.default.toml) for all choices.
@@ -351,14 +354,14 @@ width. Each card fits its text and any actual preview; cards without thumbnails 
 empty thumbnail height. Background clicks open their articles; hover underlines titles without recoloring cards.
 They reuse feed metadata and preview geometry
 through `_metadata.html` and `_related_item.html`, including source, category, date, reading time,
-original link, and discussions. Thumbnail and excerpt preferences apply to these cards too.
+original link, and discussions. The thumbnail preference applies to these cards too.
 Navigation and discovery exclude aliases of the current article and repeated full content.
 Identity combines normalized original URLs, retained page paths, and exact whitespace-normalized
 body matches of at least 64 words. Similar titles, shared topics, and short teasers do not establish
 identity; a product page and its announcement can remain separate suggestions.
 `item.recommended_articles` is already complete: it holds up to three suggestions that are neither
 the previous nor the next article, and that do not point back at an article suggesting this one, so
-a theme renders the list as it comes instead of filtering it again.
+the reader shows the list as it comes instead of filtering it again.
 
 Canvas applications with interactive controls can offer the live original inside a reserved
 viewer, alongside safely retained prose. The original loads automatically when the article opens and
@@ -454,7 +457,25 @@ stay compact within the right column and offer play/pause, seeking, symmetric 30
 skips either side of play, speed, and mute/volume; muting lowers the volume control to zero and
 unmuting restores the previous level. Native controls remain
 usable without JavaScript and appear automatically if enhanced playback fails; there is no separate
-browser-controls toggle. Navigation pauses audio and releases its resource, timers, and listeners.
+browser-controls toggle. Starting playback parks that audio element outside the page, so moving
+to another page in the reader does not interrupt it. The same bar carries a native video or a
+YouTube, Vimeo, or Twitch player once it has started. The picture is seated once, at the size it
+started, and that seat scales between the article and the bar, so the provider frame keeps its
+parent and layout size and playback continues. The elapsed time keeps moving while it plays, and
+the bar's transport drives YouTube and Vimeo. On a wide screen the bar sits along the bottom
+and the picture is a small 16:9 beside the controls. On a phone the picture spans the bar, at most
+about a third of the screen tall, and the bar sits just above the tab bar. The rest of the bar is
+the episode (a link back),
+15-second back, play/pause, 30-second forward, mute and volume for audio, seek, elapsed time, a
+speed cycle, and close. The volume slider hides when the device owns the level.
+Twitch draws its own controls, so those transport buttons stay disabled and it keeps the keys it
+draws itself. Starting a player does not move keyboard focus into its frame. YouTube and Vimeo
+give a taken focus back to the page, fullscreen aside, and focus returns to the page before a
+frame is removed, so the reader's shortcuts do not depend on a reload. The bar hides while that player is on screen, and the two stay in step. The phone's lock screen and headset controls play,
+pause, and seek a recording the bar can drive, and previous and next skip 15 and 30 seconds.
+Closing the bar, or leaving the site, stops it. A position from this
+visit is offered the next time that recording is played. Media that never started is still released
+with its page.
 The initial card reserves the enhanced height, including wrapped touch controls.
 
 Shared metadata uses `consumption` to distinguish reading, listening, and watching. A reliable

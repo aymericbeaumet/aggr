@@ -212,7 +212,8 @@ and warm versus cold caches determine the result.
 ## Reader startup and search
 
 The reader is a Svelte application compiled ahead of time and embedded in the Rust binary. Only the
-small pre-paint bootstrap blocks rendering; the module bundle is deferred, mounts from the page's
+small pre-paint bootstrap blocks rendering. The stylesheet and modulepreloads are discovered
+before that script, and feed rows skip layout until they near the screen. The module bundle is deferred, mounts from the page's
 embedded model, and loads search and media chunks on demand. The complete static HTML remains the
 first paint and the no-JavaScript fallback.
 

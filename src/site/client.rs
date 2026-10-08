@@ -42,8 +42,6 @@ pub struct ClientSite {
     pub language: String,
     /// Whether a manifest and service worker were built.
     pub pwa: bool,
-    /// Whether rows show excerpts (`[site.params] excerpts`).
-    pub excerpts: bool,
     pub discussions: Vec<DiscussionLinkCtx>,
     /// The first nine feed entries, for the `g 1` … `g 9` shortcuts.
     pub entries: Vec<String>,
@@ -211,11 +209,6 @@ impl Shared {
                 title: site.title.clone(),
                 language: site.language.clone(),
                 pwa: site.pwa,
-                excerpts: site
-                    .params
-                    .get("excerpts")
-                    .and_then(toml::Value::as_bool)
-                    .unwrap_or(false),
                 discussions: site.discussions.clone(),
                 entries: site.entry_shortcuts.clone(),
                 config_url: site

@@ -1,11 +1,17 @@
 //! Independent capture policies and the per-feed retained corpus.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::network_config::{
+    NetworkConfig, deserialize_discussions, deserialize_optional_discussions,
+    reject_legacy_networks,
+};
 use super::{ContentMode, DocumentPolicy, ImagePolicy, PreviewPolicy};
 
-#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Defaults {
     #[serde(rename = "content_download_strategy")]
@@ -14,6 +20,32 @@ pub struct Defaults {
     pub media: MediaPolicy,
     #[serde(flatten)]
     pub limits: Limits,
+    /// Fills a source that omits `url`. Collection expansion still uses the entry's own URL.
+    pub url: Option<String>,
+    /// Applies to entries that omit `collection`. It is not copied onto expanded feeds.
+    pub collection: Option<bool>,
+    pub name: Option<String>,
+    pub slug: Option<String>,
+    pub category: Option<String>,
+    pub labels: Vec<String>,
+    pub headers: BTreeMap<String, String>,
+    /// Overrides `[store] html` for sources that omit `html`.
+    pub html: Option<bool>,
+    /// Aggr repositories only.
+    pub branch: Option<String>,
+    /// Aggr repositories only. Empty means no filter.
+    pub sources: Vec<String>,
+    /// Places searched for a conversation about each article. A source list replaces this one.
+    #[serde(deserialize_with = "deserialize_discussions")]
+    pub discussions: Vec<NetworkConfig>,
+    #[serde(
+        default,
+        skip_serializing,
+        rename = "networks",
+        deserialize_with = "reject_legacy_networks"
+    )]
+    #[allow(dead_code)]
+    networks: (),
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -404,7 +436,7 @@ impl<'de> Deserialize<'de> for MediaPolicy {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct DocumentDefaults {
     #[serde(rename = "content_download_strategy")]
@@ -413,16 +445,75 @@ pub(super) struct DocumentDefaults {
     pub media: Option<MediaPolicy>,
     #[serde(flatten)]
     pub limits: LimitOverrides,
+    pub url: Option<String>,
+    pub collection: Option<bool>,
+    pub name: Option<String>,
+    pub slug: Option<String>,
+    pub category: Option<String>,
+    pub labels: Vec<String>,
+    pub headers: BTreeMap<String, String>,
+    pub html: Option<bool>,
+    pub branch: Option<String>,
+    pub sources: Vec<String>,
+    #[serde(deserialize_with = "deserialize_optional_discussions")]
+    pub discussions: Option<Vec<NetworkConfig>>,
+    #[serde(
+        default,
+        skip_serializing,
+        rename = "networks",
+        deserialize_with = "reject_legacy_networks"
+    )]
+    #[allow(dead_code)]
+    networks: (),
 }
 
 impl DocumentDefaults {
-    pub fn inherit(self, parent: Self) -> Self {
+    pub fn inherit(&self, parent: &Self) -> Self {
         Self {
             content: self.content.or(parent.content),
             media: self.media.or(parent.media),
             limits: self.limits.inherit(parent.limits),
+            url: self.url.clone().or_else(|| parent.url.clone()),
+            collection: self.collection.or(parent.collection),
+            name: self.name.clone().or_else(|| parent.name.clone()),
+            slug: self.slug.clone().or_else(|| parent.slug.clone()),
+            category: self.category.clone().or_else(|| parent.category.clone()),
+            labels: if self.labels.is_empty() {
+                parent.labels.clone()
+            } else {
+                self.labels.clone()
+            },
+            headers: if self.headers.is_empty() {
+                parent.headers.clone()
+            } else {
+                merge_headers(&parent.headers, &self.headers)
+            },
+            html: self.html.or(parent.html),
+            branch: self.branch.clone().or_else(|| parent.branch.clone()),
+            sources: if self.sources.is_empty() {
+                parent.sources.clone()
+            } else {
+                self.sources.clone()
+            },
+            discussions: self
+                .discussions
+                .clone()
+                .or_else(|| parent.discussions.clone()),
+            networks: (),
         }
     }
+}
+
+pub(super) fn merge_headers(
+    base: &BTreeMap<String, String>,
+    overlay: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut headers = base.clone();
+    for (name, value) in overlay {
+        headers.retain(|existing, _| !existing.eq_ignore_ascii_case(name));
+        headers.insert(name.clone(), value.clone());
+    }
+    headers
 }
 
 #[cfg(test)]

@@ -143,6 +143,12 @@ The retry preserves aggr's user agent and configured request headers, certificat
 redirect origin boundaries, host pacing, total timeout, and decompressed body limit. It shares the
 ordinary response and article cache; challenge pages are not successful article captures.
 
+A CloudFront 403 whose body is the "Request blocked" page is a different refusal: that edge
+serves the article to a Mozilla-compatible user agent and rejects aggr's own token. One retry
+sends `Mozilla/5.0 (compatible; aggr/<version>; +https://github.com/aymericbeaumet/aggr)`, which
+still names this release, and the origin keeps that form for the rest of the run. A configured
+`User-Agent` is never replaced. Any other 403 stays a failure.
+
 This is an HTTP transport fallback implemented in Rust, with BoringSSL linked into the binary.
 It does not run Python, a browser, JavaScript challenges, or an external proxy service, and does
 not import browser cookies or obtain challenge cookies. Sites requiring interactive verification
@@ -167,7 +173,10 @@ Charts that a page draws in the browser (Vega-Lite specifications streamed in a 
 as on openai.com) leave an empty placeholder in the server HTML, and aggr never executes page
 scripts. When the specification carries its data inline, the placeholder receives that data as a
 table with the chart title and its caption, so the figures stay readable and searchable; the drawn
-chart itself is not reproduced. Rows and columns are bounded.
+chart itself is not reproduced. A chart already drawn in the page as an inline SVG is read the
+same way: bar lengths against the labeled axis become that table, and the drawing is not stored.
+A sponsor logo placed in the article is kept; a sponsor block that pitches something is not.
+Rows and columns are bounded.
 
 An item that only kept feed content because the original page was unavailable (a Cloudflare
 challenge, an outage, or a rate limit at capture time), or whose archived body is such a loading
@@ -457,6 +466,12 @@ unknown language names are retained without promising a matching syntax grammar.
 markup becomes inline code. Cloudflare email-protection payloads are decoded as escaped text,
 including package versions mistakenly classified as email addresses, without running publisher
 JavaScript. LWN's trailing article-index navigation is removed without removing prose tables.
+A trailing call to translate the article, including a banner image whose address exists only for
+that call, is removed while cleaning Markdown, so an archive that already stored it loses the
+block on the next render. A subtitle kept in the page headline, a short release line classed as that subtitle, or schema.org
+`alternativeHeadline`, rather than in the article body, is copied in at extraction. A byline or a
+date in that spot is left out. An archive that never stored that sentence needs a fresh
+original-page capture.
 Consecutive numbered citations stay inline, as does prose following a link. Intentional HTML
 line breaks remain intact; action-link layout rules must not split citations or ordinary prose.
 

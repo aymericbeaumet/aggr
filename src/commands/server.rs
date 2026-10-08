@@ -405,8 +405,12 @@ async fn refresh(
         false
     };
     let store = crate::store::Store::open(&state.data);
-    let discussions =
-        crate::discussions::cached(&project.config.networks, &store.items()?, &state.cache);
+    let discussions = crate::discussions::cached(
+        &project.config.defaults.discussions,
+        &crate::discussions::by_source(&project.sources),
+        &store.items()?,
+        &state.cache,
+    );
     if sync_sources {
         render_with_discussion_refresh(
             project.clone(),
@@ -433,12 +437,7 @@ async fn render_with_discussion_refresh(
     let previous = cached.fingerprint();
     let rebuilt =
         render_snapshot(project.clone(), build_args, state, cached, visible_change).await?;
-    if !project
-        .config
-        .networks
-        .iter()
-        .any(|network| network.provider.is_some())
-    {
+    if !crate::discussions::any_provider(&project.config.defaults.discussions, &project.sources) {
         return Ok(rebuilt);
     }
     println!("articles ready; refreshing discussion links in the background…");
@@ -1425,7 +1424,7 @@ mod tests {
             .await;
         let config_path = tmp.path().join("aggr.toml");
         std::fs::write(&config_path, format!(
-            "[site]\npwa = false\n[[sources]]\nslug = \"blog\"\nurl = \"{}/feed\"\n[[networks]]\nprovider = \"hackernews\"\n",
+            "[defaults]\ndiscussions = [\"hackernews\"]\n[site]\npwa = false\n[[sources]]\nslug = \"blog\"\nurl = \"{}/feed\"\n",
             server.base_url(),
         )).unwrap();
         let project = Arc::new(Project::load_offline(&config_path).await.unwrap());

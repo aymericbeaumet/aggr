@@ -103,6 +103,7 @@ pub fn extract_article(page: &str, url: &Url) -> Result<ExtractedArticle> {
         }
     }
     let labels = crate::model::normalize_labels(labels);
+    remove_translation_widgets(&readability);
     preserve_share_named_media_wrappers(&readability);
     preserve_cited_notes(&readability);
     // Figure filenames such as `replies.png` can resemble comment widgets to Readability.
@@ -122,12 +123,23 @@ pub fn extract_article(page: &str, url: &Url) -> Result<ExtractedArticle> {
         .doc
         .select("article:has(figure img), article:has(div.figure img)")
         .add_class("readability-content");
+    // The dek lives beside the title, outside the region Readability keeps. Capture it while
+    // the whole page is still in the document.
+    let subtitle = article_subtitle(&readability);
+    // Readability drops an inline chart without scoring it, and storage then strips every `<svg>`.
+    // A sponsor logo inside the article is the post's, even when its list is classed `sponsor`.
+    replace_inline_chart_svgs(&readability);
+    keep_article_sponsor_images(&readability);
     let article = readability
         .parse()
         .context("extracting readable article content")?;
-    let html = article.content.to_string();
+    let mut html = article.content.to_string();
+    // A dek must not turn an empty extraction into an article: the page still failed.
     if !has_meaningful_extracted_content(&html, url) {
         bail!("extracted article has no readable content");
+    }
+    if let Some(subtitle) = subtitle.filter(|subtitle| !extracted_contains(&html, subtitle)) {
+        html = format!("<p>{}</p>{html}", escape_html(&subtitle));
     }
     Ok(ExtractedArticle {
         html,
@@ -489,6 +501,265 @@ fn chart_table(spec: &serde_json::Value) -> Option<String> {
     Some(html)
 }
 
+/// gleam.run draws its benchmark figures with Lustre (`<svg class="gerbil">`) inside the article.
+/// The bars are the figure: their lengths against the labeled axis are the numbers, and the
+/// drawing itself cannot be stored. An icon `<svg>` has no `bar` rectangles and stays out.
+fn replace_inline_chart_svgs(readability: &Readability) {
+    let charts = readability
+        .doc
+        .select("article svg")
+        .iter()
+        .collect::<Vec<_>>();
+    let tables = charts
+        .iter()
+        .map(|svg| svg_chart_table(&svg.html()))
+        .collect::<Vec<_>>();
+    for (svg, table) in charts.iter().zip(tables).rev() {
+        if let Some(table) = table {
+            svg.replace_with_html(table);
+        }
+    }
+}
+
+struct SvgText {
+    x: f64,
+    y: f64,
+    label: String,
+}
+
+struct SvgBar {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+fn svg_chart_table(svg_html: &str) -> Option<String> {
+    let fragment = Html::parse_fragment(svg_html);
+    let text_selector = Selector::parse("text").ok()?;
+    let bar_selector = Selector::parse("rect").ok()?;
+    let texts = fragment
+        .select(&text_selector)
+        .filter_map(|node| {
+            let label = normalize_space(&node.text().collect::<String>());
+            if label.is_empty() {
+                return None;
+            }
+            Some(SvgText {
+                x: element_f64(node, "x")?,
+                y: element_f64(node, "y")?,
+                label,
+            })
+        })
+        .collect::<Vec<_>>();
+    let bars = fragment
+        .select(&bar_selector)
+        .filter(|node| {
+            node.value().attr("class").is_some_and(|class| {
+                class
+                    .split_whitespace()
+                    .any(|token| token.eq_ignore_ascii_case("bar"))
+            })
+        })
+        .filter_map(|node| {
+            Some(SvgBar {
+                x: element_f64(node, "x").unwrap_or(0.0),
+                y: element_f64(node, "y").unwrap_or(0.0),
+                width: element_f64(node, "width")?,
+                height: element_f64(node, "height")?,
+            })
+        })
+        .filter(|bar| bar.width > 1.0 && bar.height > 1.0)
+        .take(MAX_CHART_ROWS)
+        .collect::<Vec<_>>();
+    if bars.len() < 2 {
+        return None;
+    }
+    let measurements = texts
+        .iter()
+        .filter_map(|text| {
+            let (value, unit) = measurement(&text.label)?;
+            Some((text, value, unit))
+        })
+        .collect::<Vec<_>>();
+    let unit = measurements.first()?.2;
+    if measurements.len() < 2 || measurements.iter().any(|(_, _, label)| *label != unit) {
+        return None;
+    }
+    let horizontal = axis_span(measurements.iter().map(|(text, _, _)| text.y)) < 4.0
+        && axis_span(measurements.iter().map(|(text, _, _)| text.x)) > 10.0;
+    let vertical = axis_span(measurements.iter().map(|(text, _, _)| text.x)) < 4.0
+        && axis_span(measurements.iter().map(|(text, _, _)| text.y)) > 10.0;
+    let position = |text: &SvgText| if horizontal { text.x } else { text.y };
+    if !horizontal && !vertical {
+        return None;
+    }
+    let mut axis = measurements
+        .iter()
+        .map(|(text, value, _)| (position(text), *value))
+        .collect::<Vec<_>>();
+    axis.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let (origin, origin_value) = *axis.first()?;
+    let (end, end_value) = *axis.last()?;
+    let span = end - origin;
+    if span.abs() < 1.0 {
+        return None;
+    }
+    let at = |pos: f64| origin_value + (pos - origin) * (end_value - origin_value) / span;
+    let categories = texts
+        .iter()
+        .filter(|text| {
+            measurement(&text.label).is_none() && text.label.chars().any(char::is_alphabetic)
+        })
+        .collect::<Vec<_>>();
+    if categories.len() < 2 {
+        return None;
+    }
+    let mut pairs = Vec::new();
+    for (bar_index, bar) in bars.iter().enumerate() {
+        let center = if horizontal {
+            bar.y + bar.height / 2.0
+        } else {
+            bar.x + bar.width / 2.0
+        };
+        for (label_index, label) in categories.iter().enumerate() {
+            let label_pos = if horizontal { label.y } else { label.x };
+            pairs.push(((center - label_pos).abs(), bar_index, label_index));
+        }
+    }
+    pairs.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let mut used_bars = vec![false; bars.len()];
+    let mut used_labels = vec![false; categories.len()];
+    let mut rows = Vec::new();
+    for (distance, bar_index, label_index) in pairs {
+        if used_bars[bar_index] || used_labels[label_index] {
+            continue;
+        }
+        let bar = &bars[bar_index];
+        let thickness = if horizontal { bar.height } else { bar.width };
+        if distance > thickness.max(8.0) {
+            continue;
+        }
+        let value = if horizontal {
+            (at(bar.x + bar.width) - at(bar.x)).abs()
+        } else {
+            (at(bar.y) - at(bar.y + bar.height)).abs()
+        };
+        used_bars[bar_index] = true;
+        used_labels[label_index] = true;
+        let order = if horizontal { bar.y } else { bar.x };
+        rows.push((order, categories[label_index].label.clone(), value));
+    }
+    if rows.len() < 2 {
+        return None;
+    }
+    rows.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let mut html = String::from(
+        "<table class=\"chart-data\"><caption>Chart (chart data)</caption><thead><tr><th>Label</th><th>",
+    );
+    html.push_str(&escape_html(&chart_value_heading(unit)));
+    html.push_str("</th></tr></thead><tbody>");
+    for (_, label, value) in rows {
+        html.push_str("<tr><td>");
+        html.push_str(&escape_html(&label));
+        html.push_str("</td><td>");
+        html.push_str(&escape_html(&format_chart_value(value)));
+        html.push_str("</td></tr>");
+    }
+    html.push_str("</tbody></table>");
+    Some(html)
+}
+
+fn element_f64(node: scraper::ElementRef<'_>, name: &str) -> Option<f64> {
+    node.value().attr(name)?.trim().parse().ok()
+}
+
+fn axis_span(values: impl Iterator<Item = f64>) -> f64 {
+    let mut min = f64::MAX;
+    let mut max = f64::MIN;
+    for value in values {
+        min = min.min(value);
+        max = max.max(value);
+    }
+    if min > max { 0.0 } else { max - min }
+}
+
+/// `100ms`, `1.5s`, `50%`: an axis tick, not a category such as `Gleam v1.19`.
+fn measurement(text: &str) -> Option<(f64, &str)> {
+    let text = text.trim();
+    let split = text
+        .find(|character: char| {
+            !(character.is_ascii_digit() || character == '.' || character == '-')
+        })
+        .unwrap_or(text.len());
+    if split == 0 {
+        return None;
+    }
+    let value = text[..split].parse().ok()?;
+    let unit = text[split..].trim();
+    (unit.len() <= 8
+        && unit
+            .chars()
+            .all(|character| character.is_ascii_alphabetic() || character == '%'))
+    .then_some((value, unit))
+}
+
+fn chart_value_heading(unit: &str) -> String {
+    match unit {
+        "ms" => "Time (ms)".to_string(),
+        "s" => "Time (s)".to_string(),
+        "%" => "Percent".to_string(),
+        "" => "Value".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn format_chart_value(value: f64) -> String {
+    let rounded = value.round();
+    if (value - rounded).abs() < 0.05 {
+        format!("{}", rounded as i64)
+    } else {
+        let text = format!("{value:.2}");
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+/// `ul.top-sponsors` on gleam.run is the logo under "special thanks to our top sponsor".
+/// Readability treats any class containing `sponsor` as an ad, except on an anchor, which is
+/// why the GitHub mark survives and the Lambda Class mark does not. A pitch that has something
+/// to say is still an ad.
+fn keep_article_sponsor_images(readability: &Readability) {
+    let credits = readability
+        .doc
+        .select("article [class*='sponsor' i], article [id*='sponsor' i]")
+        .iter()
+        .filter(|node| !node.is("a, img, svg"))
+        .filter(|node| !node.select("img[src]").is_empty())
+        .filter(|node| node.text().split_whitespace().count() <= 12)
+        .collect::<Vec<_>>();
+    for node in credits {
+        for name in ["class", "id"] {
+            let Some(value) = node.attr(name).map(|value| value.to_string()) else {
+                continue;
+            };
+            let tokens = value.split_whitespace().collect::<Vec<_>>();
+            let kept = tokens
+                .iter()
+                .copied()
+                .filter(|token| !token.to_ascii_lowercase().contains("sponsor"))
+                .collect::<Vec<_>>();
+            if kept.len() == tokens.len() {
+                continue;
+            }
+            if kept.is_empty() {
+                node.remove_attr(name);
+            } else {
+                node.set_attr(name, &kept.join(" "));
+            }
+        }
+    }
+}
+
 fn chart_cell(value: Option<&serde_json::Value>) -> String {
     match value {
         None | Some(serde_json::Value::Null) => String::new(),
@@ -622,6 +893,237 @@ fn preserve_share_named_media_wrappers(readability: &Readability) {
             wrapper.remove_attr("id");
         }
     }
+}
+
+/// A publisher's "translate this article" block (diff.wikimedia.org's `#translate-post`).
+/// `notranslate` does not count: that token opts text out of translation, and it does not start
+/// with `translate`. A long section that happens to be named like a widget stays; the solicitation
+/// is a short block whose own text is about translating.
+const TRANSLATION_WIDGET_WORDS: std::ops::RangeInclusive<usize> = 1..=90;
+
+fn names_translation_widget(value: &str) -> bool {
+    value
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| token.to_ascii_lowercase().starts_with("translate"))
+}
+
+fn remove_translation_widgets(readability: &Readability) {
+    let widgets = readability
+        .doc
+        .select("[class*='translate' i], [id*='translate' i]")
+        .iter()
+        .filter(|node| {
+            node.attr("class")
+                .is_some_and(|value| names_translation_widget(&value))
+                || node
+                    .attr("id")
+                    .is_some_and(|value| names_translation_widget(&value))
+        })
+        .filter(|node| {
+            !node.ancestors(None).iter().any(|ancestor| {
+                ancestor
+                    .attr("class")
+                    .is_some_and(|value| names_translation_widget(&value))
+                    || ancestor
+                        .attr("id")
+                        .is_some_and(|value| names_translation_widget(&value))
+            })
+        })
+        .filter(|node| {
+            let text = node.text();
+            TRANSLATION_WIDGET_WORDS.contains(&text.split_whitespace().count())
+                && text.to_ascii_lowercase().contains("translat")
+        })
+        .collect::<Vec<_>>();
+    for widget in widgets {
+        widget.remove();
+    }
+}
+
+/// The sentence under the title. Readability never sees it when the publisher leaves it in the
+/// headline rather than the article, and a feed summary is not a substitute: most of those are
+/// teasers. The visible paragraph wins, including a short release line classed as the subtitle
+/// (`hero-subtitle` on gleam.run). A byline or a date in that spot is not one. schema.org
+/// `alternativeHeadline` covers a page that states the same sentence only in its structured data.
+fn article_subtitle(readability: &Readability) -> Option<String> {
+    let subtitle = headline_dek(readability).or_else(|| alternative_headline(readability))?;
+    let title = readability
+        .doc
+        .select("h1")
+        .iter()
+        .next()
+        .map(|heading| normalize_space(&heading.text()))
+        .unwrap_or_default();
+    (!same_folded(&subtitle, &title)).then_some(subtitle)
+}
+
+fn headline_dek(readability: &Readability) -> Option<String> {
+    for node in readability
+        .doc
+        .select(
+            "[class*='headline' i] > p, [class*='standfirst' i], [class*='dek' i], [class*='subtitle' i], [id*='subtitle' i]",
+        )
+        .iter()
+    {
+        if node.ancestors(None).is("nav, aside, footer") {
+            continue;
+        }
+        let standfirst = node
+            .attr("class")
+            .is_some_and(|value| names_standfirst_or_dek(&value))
+            || node
+                .attr("id")
+                .is_some_and(|value| names_standfirst_or_dek(&value));
+        let release = node.attr("class").is_some_and(|value| names_subtitle(&value))
+            || node.attr("id").is_some_and(|value| names_subtitle(&value));
+        let parent = node.parent();
+        let follows_title = node.prev_sibling().is("h1");
+        // `hero-subtitle` (gleam.run) is the release line under the title. The same letters in
+        // `subtitles` name a captions track, which is not that line.
+        if release && !standfirst {
+            let text = normalize_space(&node.text());
+            if follows_title
+                && !is_attribution(&text)
+                && (is_subtitle(&text) || is_short_subtitle(&text))
+            {
+                return Some(text);
+            }
+            continue;
+        }
+        if !standfirst && !parent.is("h1") && parent.select("h1").is_empty() {
+            continue;
+        }
+        let text = normalize_space(&node.text());
+        if is_subtitle(&text) || (standfirst && follows_title && is_short_subtitle(&text)) {
+            return Some(text);
+        }
+    }
+    None
+}
+
+fn names_standfirst_or_dek(value: &str) -> bool {
+    name_tokens(value).any(|token| token == "dek" || token.contains("standfirst"))
+}
+
+/// A class or id token that is the subtitle, not a captions track (`subtitles`) or a longer word.
+fn names_subtitle(value: &str) -> bool {
+    name_tokens(value).any(|token| token == "subtitle")
+}
+
+fn name_tokens(value: &str) -> impl Iterator<Item = String> + '_ {
+    value
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+}
+
+fn alternative_headline(readability: &Readability) -> Option<String> {
+    for script in readability
+        .doc
+        .select("script[type='application/ld+json']")
+        .iter()
+    {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&script.text()) else {
+            continue;
+        };
+        if let Some(subtitle) = json_alternative_headline(&value, &mut 0) {
+            return Some(subtitle);
+        }
+    }
+    None
+}
+
+fn json_alternative_headline(value: &serde_json::Value, steps: &mut usize) -> Option<String> {
+    *steps += 1;
+    if *steps > 512 {
+        return None;
+    }
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(found) = json_alternative_headline(item, steps) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(text) = map
+                .get("alternativeHeadline")
+                .and_then(serde_json::Value::as_str)
+            {
+                let text = normalize_space(text);
+                if is_subtitle(&text) {
+                    return Some(text);
+                }
+            }
+            map.get("@graph")
+                .and_then(|graph| json_alternative_headline(graph, steps))
+        }
+        _ => None,
+    }
+}
+
+const SUBTITLE_CHARS: std::ops::RangeInclusive<usize> = 12..=360;
+const SUBTITLE_WORDS: std::ops::RangeInclusive<usize> = 5..=50;
+const SHORT_SUBTITLE_WORDS: std::ops::RangeInclusive<usize> = 2..=4;
+
+fn is_subtitle(text: &str) -> bool {
+    SUBTITLE_CHARS.contains(&text.chars().count())
+        && SUBTITLE_WORDS.contains(&text.split_whitespace().count())
+        && subtitle_text(text)
+}
+
+/// `Gleam v1.19.0 released!`: a release line is shorter than a dek. The five-word floor stays for
+/// an unlabelled paragraph, where `By Jane Doe` would otherwise qualify.
+fn is_short_subtitle(text: &str) -> bool {
+    SUBTITLE_CHARS.contains(&text.chars().count())
+        && SHORT_SUBTITLE_WORDS.contains(&text.split_whitespace().count())
+        && subtitle_text(text)
+        && !is_attribution(text)
+}
+
+fn subtitle_text(text: &str) -> bool {
+    text.chars().any(char::is_alphabetic) && !text.to_ascii_lowercase().starts_with("http")
+}
+
+/// A byline or a date sitting where a subtitle would: `By Louis Pilfold`, `05 October, 2026`.
+/// The `by` prefix only counts on a short line, so a sentence that opens with "By the time" stays.
+fn is_attribution(text: &str) -> bool {
+    let lower = fold_text(text);
+    if SHORT_SUBTITLE_WORDS.contains(&lower.split_whitespace().count())
+        && (lower.starts_with("by ")
+            || lower.starts_with("written by ")
+            || lower.starts_with("posted by "))
+    {
+        return true;
+    }
+    if super::dates::parse(text).is_some() {
+        return true;
+    }
+    lower
+        .split_once(" by ")
+        .is_some_and(|(date, _)| super::dates::parse(date).is_some())
+}
+
+fn normalize_space(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn fold_text(value: &str) -> String {
+    normalize_space(value)
+        .replace(['\u{2019}', '\u{2018}'], "'")
+        .to_lowercase()
+}
+
+fn same_folded(left: &str, right: &str) -> bool {
+    fold_text(left) == fold_text(right)
+}
+
+/// The extracted article already says this, whatever quote mark or capitalisation it used.
+fn extracted_contains(html: &str, subtitle: &str) -> bool {
+    let needle = fold_text(subtitle);
+    !needle.is_empty() && fold_text(&html_to_text(html)).contains(&needle)
 }
 
 /// Messages a page shows while its scripts fetch the real content (harnesstax.github.io renders
@@ -1080,6 +1582,51 @@ mod tests {
     }
 
     #[test]
+    fn inline_chart_svgs_become_tables_and_sponsor_logos_stay() {
+        // gleam.run: the benchmark figures are `<svg class="gerbil">` bar charts inside the
+        // article, and the top-sponsor logo is a list Readability treats as an advertisement.
+        let prose = "The benchmark measures how long it takes to compile one hundred modules, and the bars are the result. ".repeat(8);
+        let first = r#"<svg class="gerbil" viewBox="0 0 500 250"><text x="85.5" y="237.2">0ms</text><text x="165.15" y="237.2">100ms</text><text x="483.75" y="237.2">500ms</text><text x="71.5" y="61.8">Gleam v1.17</text><text x="71.5" y="169.4">Gleam v1.19</text><rect class="bar gleam" x="85.5" y="18.76" width="345.681" height="86.08"></rect><rect class="bar gleam" x="85.5" y="126.36" width="272.403" height="86.08"></rect></svg>"#;
+        let second = r#"<svg class="gerbil" viewBox="0 0 500 250"><text x="131" y="237.2">0ms</text><text x="480.5" y="237.2">1000ms</text><text x="117" y="212.44">Gleam (JavaScript)</text><text x="117" y="190.92">Go</text><rect class="bar gleam" x="131" y="203.832" width="65.706" height="17.216"></rect><rect class="bar" x="131" y="182.312" width="68.1525" height="17.216"></rect></svg>"#;
+        let html = format!(
+            "<html><head><title>Gleam release</title></head><body><main><article class='prose'><p>{prose}</p><p>This chart shows the time taken, lower is better.</p>{first}<p>As you can see, a considerable improvement.</p><p>Here are the results:</p>{second}<a class='sponsor-level0' href='https://github.com/sponsors/gleam-lang'><img src='https://gleam.run/images/community/github.svg' alt='GitHub Sponsors'></a><ul class='top-sponsors'><li><a href='https://lambdaclass.com/'><img src='https://gleam.run/images/sponsors/lambda-class-white.png' alt='Lambda Class'></a></li></ul><p>An inline icon <svg class='icon' viewBox='0 0 16 16'><path d='M1 1h2v2z'/></svg> stays prose.</p><div class='sponsor-pitch'><img src='https://ads.example/spot.png' alt='Advertisement'><p>Buy this unrelated product from our sponsor network today and save a fortune on things you do not need.</p></div><p>{prose}</p></article></main></body></html>"
+        );
+        let url =
+            Url::parse("https://gleam.run/news/gleam-doesnt-compile-to-erlang-source-anymore/")
+                .unwrap();
+        let markdown = to_markdown(&extract_article(&html, &url).unwrap().html, Some(&url));
+        let compact = markdown.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            compact.contains("| Gleam v1.17 | 434 |") && compact.contains("| Gleam v1.19 | 342 |"),
+            "{markdown}"
+        );
+        assert!(
+            compact.find("Gleam v1.17").unwrap() < compact.find("Gleam v1.19").unwrap(),
+            "{markdown}"
+        );
+        assert!(
+            compact.contains("| Gleam (JavaScript) | 188 |") && compact.contains("| Go | 195 |"),
+            "{markdown}"
+        );
+        assert_eq!(
+            markdown.matches("Chart (chart data)").count(),
+            2,
+            "{markdown}"
+        );
+        assert!(markdown.contains("considerable improvement"), "{markdown}");
+        assert!(
+            markdown.contains("https://gleam.run/images/sponsors/lambda-class-white.png"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("https://gleam.run/images/community/github.svg"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("ads.example/spot.png"), "{markdown}");
+        assert!(!markdown.contains("M1 1h2v2z"), "{markdown}");
+    }
+
+    #[test]
     #[ignore = "requires saved upstream HTML in AGGR_ARTICLE_HTML"]
     fn saved_openai_scorecard_chart_becomes_a_table() {
         let page = std::fs::read_to_string(std::env::var("AGGR_ARTICLE_HTML").unwrap()).unwrap();
@@ -1114,6 +1661,209 @@ mod tests {
         assert!(markdown.contains("Two watches side by side"), "{markdown}");
         assert!(!markdown.contains("icons/x.svg"), "{markdown}");
         assert!(!markdown.contains("Share on Facebook"), "{markdown}");
+    }
+
+    #[test]
+    fn translation_widget_is_removed_while_translation_prose_stays() {
+        // diff.wikimedia.org: `#translate-post` sits inside the article, after the prose.
+        let prose = "Wikimedia volunteers have stayed resilient while the traffic from automated agents keeps climbing. ".repeat(8);
+        let section = "Machine translation changes how readers reach a Wikipedia article and how editors review the result. ".repeat(8);
+        let page = format!(
+            "<html><head><title>Agents on Wikimedia</title></head><body><article class='entry-content'><h1>Agents on Wikimedia</h1><p>{prose}</p><h2>How translation works</h2><section class='translation-notes'><p>{section}</p></section><p class='notranslate'>A notranslate label keeps the word translate visible in the article.</p><pre><code class='notranslate'>translate(\"message\")</code></pre><div id='translate-post' class='translate-post'><div class='translate-post-image'><img src='https://diff.wikimedia.org/wp-content/themes/interconnection/assets/images/translate-post.jpg' alt=''></div><div class='translate-post-content'><h2>Can you help us translate this article?</h2><p>In order for this article to reach as many people as possible we would like your help. Can you translate this article to get the message out?</p><a class='translate-post-login' href='https://diff.wikimedia.org/wp-login.php?redirect_to=%23translate-post'>Start translation</a></div></div></article></body></html>"
+        );
+        let url = Url::parse("https://diff.wikimedia.org/2026/10/05/agents/").unwrap();
+        let article = extract_article(&page, &url).unwrap();
+        let text = html_to_text(&article.html);
+        assert!(text.contains("stayed resilient"), "{text}");
+        assert!(text.contains("how editors review the result"), "{text}");
+        assert!(
+            text.contains("A notranslate label keeps the word translate visible"),
+            "{text}"
+        );
+        assert!(text.contains("translate(\"message\")"), "{text}");
+        assert!(!text.contains("Start translation"), "{text}");
+        assert!(
+            !text.contains("Can you help us translate this article"),
+            "{text}"
+        );
+        assert!(!text.contains("translate-post.jpg"), "{text}");
+        assert!(!article.html.contains("translate-post"), "{}", article.html);
+    }
+
+    #[test]
+    fn publisher_subtitle_is_copied_into_the_article() {
+        // dev.37signals.com: the dek is the paragraph under the title, outside `.post__content`,
+        // and the same sentence is schema.org alternativeHeadline. A meta description is not.
+        let title = "Hot Cell v1.0: Securing Active Storage in the age of AI";
+        let dek = "Hot Cell v1.0 moves Active Storage\u{2019}s image, video, and PDF processing out of your Rails app and into a locked-down sidecar container.";
+        let teaser =
+            "This newsletter teaser is a summary and must not become the article subtitle.";
+        let prose = "Today we are releasing Hot Cell, a suite of gems, that moves attachment processing into an unprivileged sidecar container. ".repeat(8);
+        // The dek's box is a sibling of the page body, not of the article, which is what leaves
+        // it out of the region Readability keeps on dev.37signals.com.
+        let page = |headline: &str, body: &str, json: &str| {
+            format!(
+                "<html><head><title>{title}</title><meta name='description' content='{teaser}'><script type='application/ld+json'>{json}</script></head><body>{headline}<main><article class='post__content content'><p>{body}</p><p>Further detail follows the opening and keeps this region the article.</p></article><p>A margin note sits outside the article.</p></main></body></html>"
+            )
+        };
+        let json = format!(
+            r#"{{"@context":"https://schema.org","@type":"BlogPosting","headline":"{title}","alternativeHeadline":"{dek}"}}"#
+        );
+        let headline = format!(
+            "<div class='page__headline page__headline--post'><h1>{title}</h1><p>By Jane Doe</p><p>{dek}</p></div>"
+        );
+        let url = Url::parse("https://dev.37signals.com/hot-cell-1-0/").unwrap();
+        let article = extract_article(&page(&headline, &prose, &json), &url).unwrap();
+        let text = html_to_text(&article.html);
+        assert_eq!(
+            text.matches("locked-down sidecar container").count(),
+            1,
+            "{text}"
+        );
+        assert!(text.starts_with("Hot Cell v1.0 moves"), "{text}");
+        assert!(text.contains("Today we are releasing Hot Cell"), "{text}");
+        assert!(!text.contains("newsletter teaser"), "{text}");
+        assert!(!text.contains("By Jane Doe"), "{text}");
+        let markdown = to_markdown(&article.html, Some(&url));
+        let cleaned = crate::content::cleanup::strip_article_metadata(
+            &markdown,
+            title,
+            None,
+            "dev-37signals-com",
+        );
+        assert!(
+            cleaned.contains("locked-down sidecar container"),
+            "{cleaned}"
+        );
+
+        // The same sentence only in structured data, with a WebSite script that has none.
+        let website =
+            r#"{"@context":"https://schema.org","@type":"WebSite","name":"37signals Dev"}"#;
+        let scripts = format!(
+            "<script type='application/ld+json'>{website}</script><script type='application/ld+json'>{json}</script>"
+        );
+        let structured = format!(
+            "<html><head><title>{title}</title>{scripts}</head><body><h1>{title}</h1><article class='post__content content'><p>{prose}</p></article></body></html>"
+        );
+        let text = html_to_text(&extract_article(&structured, &url).unwrap().html);
+        assert_eq!(
+            text.matches("locked-down sidecar container").count(),
+            1,
+            "{text}"
+        );
+        assert!(text.starts_with("Hot Cell v1.0 moves"), "{text}");
+
+        // Already the opening sentence, including a straight apostrophe against the curly one.
+        let straight = dek.replace('\u{2019}', "'");
+        let repeated = extract_article(
+            &page(&headline, &format!("{straight} {prose}"), &json),
+            &url,
+        )
+        .unwrap();
+        assert_eq!(
+            html_to_text(&repeated.html)
+                .matches("locked-down sidecar container")
+                .count(),
+            1,
+            "{}",
+            repeated.html
+        );
+
+        // A standfirst is the dek even when it is not under the headline.
+        let standfirst =
+            "A standfirst sits under the title and tells the reader what the piece is about.";
+        let introduced = format!(
+            "<html><head><title>Notes</title></head><body><p class='standfirst'>{standfirst}</p><article><h1>Notes</h1><p>{prose}</p></article></body></html>"
+        );
+        let text = html_to_text(
+            &extract_article(
+                &introduced,
+                &Url::parse("https://example.com/notes").unwrap(),
+            )
+            .unwrap()
+            .html,
+        );
+        assert!(text.contains(standfirst), "{text}");
+        assert_eq!(text.matches(standfirst).count(), 1, "{text}");
+
+        // The title restated as alternativeHeadline is the title, not a subtitle.
+        let titled = format!(
+            r#"{{"@type":"BlogPosting","headline":"{title}","alternativeHeadline":"{title}"}}"#
+        );
+        let text = html_to_text(
+            &extract_article(&page(&format!("<h1>{title}</h1>"), &prose, &titled), &url)
+                .unwrap()
+                .html,
+        );
+        assert!(!text.contains("locked-down sidecar container"), "{text}");
+        assert!(text.matches(title).count() <= 1, "{text}");
+        assert!(text.contains("Today we are releasing Hot Cell"), "{text}");
+    }
+
+    #[test]
+    fn release_line_under_the_title_is_copied_and_a_byline_is_not() {
+        // gleam.run: `<p class="hero-subtitle">` is the release line beside the h1, outside
+        // `<article class="prose">`. The date and the author sit in `.post-authored` instead.
+        let title = "Gleam doesn't compile to Erlang source anymore";
+        let release = "Gleam v1.19.0 released!";
+        let prose = "Gleam is a type-safe and scalable language, and this release changes how it compiles. ".repeat(8);
+        let page = |subtitle: &str, body: &str| {
+            format!(
+                "<html><head><title>{title} | Gleam programming language</title><meta name='description' content='News post: {release}'></head><body><div class='page-header'><nav class='navbar'><a href='/news/'>News</a></nav><div class='hero'><div class='content'><div class='text'><h1>{title}</h1>{subtitle}</div></div></div></div><div class='player'><h2>Talk</h2><p class='subtitles'>Closed captions stay with the video and out of the article text.</p></div><main class='page content'><div class='post'><p class='post-authored'><time>05 October, 2026</time> by <a href='https://github.com/lpil'>Louis Pilfold</a></p><article class='prose'><p>{body}</p><h2>A new compilation target</h2><p>The generator now writes Erlang abstract forms, which the runtime loads directly.</p></article></div></main></body></html>"
+            )
+        };
+        let url =
+            Url::parse("https://gleam.run/news/gleam-doesnt-compile-to-erlang-source-anymore/")
+                .unwrap();
+        let article = extract_article(
+            &page(&format!("<p class='hero-subtitle'>{release}</p>"), &prose),
+            &url,
+        )
+        .unwrap();
+        let text = html_to_text(&article.html);
+        assert!(text.starts_with(release), "{text}");
+        assert_eq!(text.matches(release).count(), 1, "{text}");
+        assert!(text.contains("type-safe and scalable language"), "{text}");
+        assert!(!text.contains("News post:"), "{text}");
+        assert!(!text.contains("Louis Pilfold"), "{text}");
+        assert!(!text.contains("Closed captions"), "{text}");
+        let markdown = to_markdown(&article.html, Some(&url));
+        let cleaned =
+            crate::content::cleanup::strip_article_metadata(&markdown, title, None, "lobste-rs");
+        assert!(cleaned.contains(release), "{cleaned}");
+
+        // The same sentence already opening the article is not written twice.
+        let repeated = extract_article(
+            &page(
+                &format!("<p class='hero-subtitle'>{release}</p>"),
+                &format!("{release} {prose}"),
+            ),
+            &url,
+        )
+        .unwrap();
+        assert_eq!(
+            html_to_text(&repeated.html).matches(release).count(),
+            1,
+            "{}",
+            repeated.html
+        );
+
+        // A byline, a date, a one-word kicker, and a captions track are not the release line.
+        for subtitle in [
+            "<p class='hero-subtitle'>By Louis Pilfold</p>",
+            "<p class='hero-subtitle'>05 October, 2026</p>",
+            "<p class='hero-subtitle'>05 October, 2026 by Louis Pilfold</p>",
+            "<p class='hero-subtitle'>News</p>",
+            "<p class='dek'>By Jane Doe</p>",
+        ] {
+            let text = html_to_text(&extract_article(&page(subtitle, &prose), &url).unwrap().html);
+            assert!(
+                text.starts_with("Gleam is a type-safe"),
+                "{subtitle} -> {text}"
+            );
+            assert!(!text.contains("By Louis Pilfold"), "{text}");
+            assert!(!text.contains("By Jane Doe"), "{text}");
+        }
     }
 
     /// `AGGR_ARTICLE_HTML=page.html AGGR_ARTICLE_URL=https://… cargo test … saved_page_converts

@@ -86,7 +86,7 @@
 <div data-static-feed hidden={searching}>
 {#if list.rows.length}
 <ol class="rows" role="list" start={offset + 1} style="--rank-indent: {indent}ch">
-{#each list.rows as row, index (row.path)}<Row {row} rank={offset + index + 1} base={page.base} excerpts={page.site.excerpts} language={page.site.language} hidden={hidden(index)} selected={selected(row)} fresh={marked(row)} />{/each}
+{#each list.rows as row, index (row.path)}<Row {row} rank={offset + index + 1} base={page.base} language={page.site.language} hidden={hidden(index)} selected={selected(row)} fresh={marked(row)} />{/each}
 </ol>
 {:else}
 <p class="empty">Nothing here yet.</p>

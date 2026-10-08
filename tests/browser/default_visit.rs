@@ -51,40 +51,20 @@ async fn first_visit_reuses_content_addressed_assets_from_the_http_cache() -> Re
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
-async fn reader_introduction_collapses_and_survives_navigation() -> Result<()> {
+async fn reading_list_actions_fit_a_phone() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fixture = Fixture::with_pwa(false)?;
-    let config = fixture.directory.path().join("aggr.toml");
-    let text = std::fs::read_to_string(&config)?;
-    std::fs::write(
-        &config,
-        format!("{text}\n[site.params]\nintroduction=true\n"),
-    )?;
     fixture.build()?;
     let client = browser_client().await?;
     let result = async {
-        client.set_window_rect(0, 0, 1280, 900).await?;
-        client.goto(&fixture.base).await?;
-        wait_booted(&client).await?;
-        anyhow::ensure!(client.execute("return document.querySelector('.reader-intro')?.open === true", vec![]).await? == true);
-        screenshot(&client, "reader-intro-desktop").await?;
-        phone_session(&client).await?;
-        screenshot(&client, "reader-intro-mobile").await?;
-        anyhow::ensure!(client.execute("return document.documentElement.scrollWidth <= innerWidth", vec![]).await? == true, "reader introduction must fit a phone");
-        client.find(Locator::Css(".reader-intro summary")).await?.click().await?;
-        client.find(Locator::Css(".rows .row [data-row-open]")).await?.click().await?;
-        wait_for(&client, "document.body.dataset.kind === 'item'").await?;
-        anyhow::ensure!(client.execute("return getComputedStyle(document.querySelector('.reader-intro')).display === 'none'", vec![]).await? == true);
-        client.back().await?;
-        wait_for(&client, "document.body.dataset.kind === 'river'").await?;
-        anyhow::ensure!(client.execute("return document.querySelector('.reader-intro')?.open === false", vec![]).await? == true, "the introduction stays collapsed after reading an article");
         client.goto(&format!("{}browse/", fixture.base)).await?;
         wait_booted(&client).await?;
-        anyhow::ensure!(client.execute("return document.querySelectorAll('.reading-list-actions a').length === 3 && document.documentElement.scrollWidth <= innerWidth", vec![]).await? == true, "subscription actions stay available on a phone");
+        phone_session(&client).await?;
+        anyhow::ensure!(client.execute("return document.querySelector('.reader-intro') === null && document.querySelectorAll('.reading-list-actions a').length === 3 && document.documentElement.scrollWidth <= innerWidth", vec![]).await? == true, "subscription actions stay available on a phone");
         screenshot(&client, "reading-list-mobile").await?;
         Ok(())
     }.await;
-    report_failure(&client, "reader-introduction", &result).await;
+    report_failure(&client, "reading-list", &result).await;
     finish(client, result).await
 }
 

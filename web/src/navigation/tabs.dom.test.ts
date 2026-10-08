@@ -40,6 +40,7 @@ describe('tab marks', () => {
     const root = document.createElement('div');
     root.innerHTML = `
       <nav data-site-navigation>
+        <a class="brand" data-route="" href="/"></a>
         <a data-route="" data-kinds="river" href="/"></a>
         <a data-route="browse/" data-kinds="browse categories category" href="/browse/"></a>
       </nav>
@@ -53,6 +54,8 @@ describe('tab marks', () => {
 
   it('marks one route current on the header and the tab bar together', () => {
     const root = tabs();
+    markCurrentTab(root, '');
+    expect(root.querySelector('.brand')?.hasAttribute('aria-current')).toBe(false);
     markCurrentTab(root, 'browse/');
     const current = [...root.querySelectorAll('[aria-current]')].map((node) => node.getAttribute('data-route'));
     expect(current).toEqual(['browse/', 'browse/']);

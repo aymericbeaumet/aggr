@@ -34,7 +34,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use sha1::{Digest as _, Sha1};
 
-use crate::config::{Config, SiteConfig, SiteIdentityKind, Source};
+use crate::config::{Config, NetworkConfig, SiteConfig, SiteIdentityKind, Source};
 use crate::content;
 use crate::model::Item;
 use crate::store::Store;
@@ -598,26 +598,24 @@ fn prepare_site(
         .description
         .clone()
         .unwrap_or_else(|| default_site_description(&config.site.title));
-    let discussion_shortcuts = context::discussion_shortcuts(&config.networks);
+    let enabled_discussions =
+        crate::config::enabled_discussions(&config.defaults.discussions, sources);
+    let discussion_shortcuts = context::discussion_shortcuts(&enabled_discussions);
     let mut site = SiteCtx {
         hermetic: info.hermetic,
-        preferences: config.site.preferences.browser_defaults()?,
-        preference_schema: config.site.preferences.schema(),
+        preferences: config.preferences.browser_defaults()?,
+        preference_schema: config.preferences.schema(),
         title: config.site.title.clone(),
         description,
-        identity: config
-            .site
-            .identity
-            .as_ref()
-            .map(|identity| SiteIdentityCtx {
-                kind: match identity.kind {
-                    SiteIdentityKind::Person => "Person",
-                    SiteIdentityKind::Organization => "Organization",
-                },
-                name: identity.name.clone(),
-                url: identity.url.as_ref().map(ToString::to_string),
-                same_as: identity.same_as.iter().map(ToString::to_string).collect(),
-            }),
+        identity: config.identity.as_ref().map(|identity| SiteIdentityCtx {
+            kind: match identity.kind {
+                SiteIdentityKind::Person => "Person",
+                SiteIdentityKind::Organization => "Organization",
+            },
+            name: identity.name.clone(),
+            url: identity.url.as_ref().map(ToString::to_string),
+            same_as: identity.same_as.iter().map(ToString::to_string).collect(),
+        }),
         language: config.site.language.clone(),
         og_locale: context::og_locale(&config.site.language),
         base_path: base.clone(),
@@ -642,8 +640,7 @@ fn prepare_site(
             })
         }),
         has_categories: false,
-        discussions: config
-            .networks
+        discussions: enabled_discussions
             .iter()
             .zip(discussion_shortcuts)
             .map(|(d, shortcut)| context::DiscussionLinkCtx {
@@ -655,7 +652,6 @@ fn prepare_site(
             })
             .collect(),
         entry_shortcuts: Vec::new(),
-        params: config.site.params.clone(),
     };
     let theme = theme();
     let mut build_ctx = BuildCtx {
@@ -723,6 +719,10 @@ fn prepare_site(
     });
     let source_by_slug: BTreeMap<&str, &SourceCtx> =
         source_ctxs.iter().map(|s| (s.slug.as_str(), s)).collect();
+    let discussions_by_slug: BTreeMap<&str, &[NetworkConfig]> = sources
+        .iter()
+        .map(|source| (source.slug.as_str(), source.discussions.as_slice()))
+        .collect();
 
     let dates: Vec<_> = all_items.iter().map(Item::created_at).collect();
     let window = window(
@@ -806,7 +806,10 @@ fn prepare_site(
                     category,
                     links: links.as_ref(),
                     excerpt,
-                    discussions: &config.networks,
+                    discussions: discussions_by_slug
+                        .get(item.front.source.as_str())
+                        .copied()
+                        .unwrap_or(config.defaults.discussions.as_slice()),
                     resolutions: &info.discussions,
                     now: info.now,
                 },
@@ -1289,9 +1292,8 @@ fn build_once(
     phase("search index");
 
     if config.site.pwa {
-        let offline_items = &archive_items[..archive_items
-            .len()
-            .min(config.site.preferences.offline_items)];
+        let offline_items =
+            &archive_items[..archive_items.len().min(config.preferences.offline_items)];
         write(
             &out.join("offline.html"),
             pages_ctx
@@ -1328,7 +1330,7 @@ fn build_once(
             content_version: build_ctx.content_version.clone(),
             precache: assets::precache_entries(out, paths, &written_assets)?,
             offline_catalog_url: "offline-catalog.json".into(),
-            offline_count: config.site.preferences.offline_items,
+            offline_count: config.preferences.offline_items,
             search_manifest: offline::search_manifest(out, &search_catalogue)?,
         };
         // Version the worker by its whole source, the compiled bundle's hashed name included, so
@@ -4450,7 +4452,7 @@ category = "Science"
 items_per_page = 1
 repository = "owner/reader"
 
-[site.identity]
+[identity]
 type = "person"
 name = "Ada Example"
 url = "https://example.com/ada"

@@ -111,7 +111,7 @@ pub fn ci_cached_paths() -> Vec<String> {
 }
 
 /// Bump when article extraction semantics change. Raw responses remain reusable across bumps.
-const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-15";
+const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-18";
 const MAX_ARTICLE_METADATA_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_ARTICLE_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXTRACTED_ARTICLE_BYTES: usize = 16 * 1024 * 1024;
@@ -244,6 +244,7 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
     &[
         source!("config", "config.rs"),
         source!("source-policy", "config/policy.rs"),
+        source!("discussions-config", "config/network_config.rs"),
         source!("retention", "store/retention.rs"),
         source!("language", "config/language.rs"),
         source!("preferences", "config/preferences.rs"),

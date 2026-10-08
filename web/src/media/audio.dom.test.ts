@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { enhanceAudio } from './audio';
+import { resetPlayback } from './now-playing';
 
 // The audio card as `item.html` writes it, with a known archived length.
 const CARD = `<div class="native-audio has-artwork" data-audio-player data-audio-component>
@@ -50,9 +51,9 @@ type Fake = {
  * jsdom has no media pipeline: playback, timing and volume are stood in for on the element so
  * the bindings can be exercised.
  */
-function fixture(): Fake {
+function fixture(src = 'episode.mp3'): Fake {
   const card = document.createElement('div');
-  card.innerHTML = CARD;
+  card.innerHTML = CARD.replaceAll('episode.mp3', src);
   document.body.append(card);
   const root = card.firstElementChild as HTMLElement;
   const audio = root.querySelector('audio') as HTMLAudioElement;
@@ -99,6 +100,8 @@ function fixture(): Fake {
 const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));
 
 afterEach(() => {
+  resetPlayback();
+  sessionStorage.clear();
   document.body.innerHTML = '';
 });
 
@@ -198,19 +201,68 @@ describe('enhanceAudio', () => {
     expect(card.querySelector('[data-audio-status]')?.textContent).toBe('Audio unavailable. Try playing again.');
   });
 
-  it('stops and releases the recording when the page is left', () => {
+  it('keeps a started recording playing when the page is left', () => {
     const { card, audio, pause, load, metadata } = fixture();
     const controller = new AbortController();
     enhanceAudio(card, controller.signal);
     metadata(600);
     card.querySelector<HTMLButtonElement>('[data-audio-toggle]')?.click();
     controller.abort();
+    expect(pause).not.toHaveBeenCalled();
+    expect(audio.hasAttribute('src')).toBe(true);
+    expect(load).not.toHaveBeenCalled();
+    expect(audio.paused).toBe(false);
+    expect(document.getElementById('now-playing-audio')?.contains(audio)).toBe(true);
+    // The card's listeners left with the page; the recording is elsewhere.
+    card.querySelector<HTMLButtonElement>('[data-audio-skip="30"]')?.click();
+    expect(audio.currentTime).toBe(0);
+  });
+
+  it('releases an unplayed recording when the page is left', () => {
+    const { card, audio, pause, load } = fixture();
+    const controller = new AbortController();
+    enhanceAudio(card, controller.signal);
+    controller.abort();
     expect(pause).toHaveBeenCalled();
     expect(audio.hasAttribute('src')).toBe(false);
     expect(load).toHaveBeenCalled();
-    // Disposed: the controls no longer reach the player.
-    card.querySelector<HTMLButtonElement>('[data-audio-skip="30"]')?.click();
-    expect(audio.currentTime).toBe(0);
+    expect(document.getElementById('now-playing-audio')).toBeNull();
+  });
+
+  it('attaches a returned episode to the recording already playing', () => {
+    const first = fixture();
+    const left = new AbortController();
+    enhanceAudio(first.card, left.signal);
+    first.metadata(600);
+    first.card.querySelector<HTMLButtonElement>('[data-audio-toggle]')?.click();
+    left.abort();
+
+    const second = fixture();
+    enhanceAudio(second.card, new AbortController().signal);
+    expect(second.audio.isConnected).toBe(false);
+    expect(document.getElementById('now-playing-audio')?.contains(first.audio)).toBe(true);
+    expect(second.card.dataset.audioState).toBe('playing');
+    second.card.querySelector<HTMLButtonElement>('[data-audio-toggle]')?.click();
+    expect(first.pause).toHaveBeenCalled();
+    expect(first.audio.paused).toBe(true);
+    expect(second.card.dataset.audioState).toBe('paused');
+  });
+
+  it('stops the previous episode when another one starts', () => {
+    const first = fixture();
+    enhanceAudio(first.card, new AbortController().signal);
+    first.metadata(600);
+    first.card.querySelector<HTMLButtonElement>('[data-audio-toggle]')?.click();
+
+    const second = fixture('other.mp3');
+    enhanceAudio(second.card, new AbortController().signal);
+    second.metadata(600);
+    second.card.querySelector<HTMLButtonElement>('[data-audio-toggle]')?.click();
+    expect(first.pause).toHaveBeenCalled();
+    expect(first.audio.hasAttribute('src')).toBe(false);
+    expect(first.audio.closest('.native-audio')).toBe(first.card);
+    expect(document.getElementById('now-playing-audio')?.contains(second.audio)).toBe(true);
+    expect(second.audio.paused).toBe(false);
   });
 
   it('leaves a card without its controls alone', () => {

@@ -47,7 +47,6 @@ pub struct SiteCtx {
     pub discussions: Vec<DiscussionLinkCtx>,
     /// First nine feed entries, available to global `g 1` … `g 9` shortcuts.
     pub entry_shortcuts: Vec<String>,
-    pub params: toml::Table,
 }
 
 impl SiteCtx {
@@ -803,8 +802,8 @@ pub fn compact_name(name: &str) -> String {
         .collect()
 }
 
-/// Assign deterministic, collision-free uppercase shortcuts to enabled discussion networks.
-/// Existing reader keys are reserved; later networks fall through to the next unused letter in
+/// Assign deterministic, collision-free uppercase shortcuts to enabled discussions.
+/// Existing reader keys are reserved; later discussions fall through to the next unused letter in
 /// their configured name.
 pub fn discussion_shortcuts(networks: &[crate::config::NetworkConfig]) -> Vec<Option<String>> {
     let mut used = BTreeSet::from(['D', 'G', 'J', 'K', 'O', 'U']);
@@ -1027,7 +1026,6 @@ mod tests {
             has_categories: false,
             discussions: Vec::new(),
             entry_shortcuts: Vec::new(),
-            params: toml::Table::new(),
         };
         // (base_url, path) -> (url, absolute, endpoint)
         let cases = [
