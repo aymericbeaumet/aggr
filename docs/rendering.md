@@ -469,9 +469,10 @@ the episode (a link back),
 15-second back, play/pause, 30-second forward, mute and volume for audio, seek, elapsed time, a
 speed cycle, and close. The volume slider hides when the device owns the level.
 Twitch draws its own controls, so those transport buttons stay disabled and it keeps the keys it
-draws itself. Starting a player does not move keyboard focus into its frame. YouTube and Vimeo
-give a taken focus back to the page, fullscreen aside, and focus returns to the page before a
-frame is removed, so the reader's shortcuts do not depend on a reload. The bar hides while that player is on screen, and the two stay in step. The phone's lock screen and headset controls play,
+draws itself. Starting a player does not move keyboard focus into its frame. A player or interactive
+viewer that takes focus is handed back over the next few frames, fullscreen and Twitch excepted,
+and focus returns to the page before a frame is removed. Playback sliders and selects keep the
+reader's letter keys. The bar hides while that player is on screen, and the two stay in step. The phone's lock screen and headset controls play,
 pause, and seek a recording the bar can drive, and previous and next skip 15 and 30 seconds.
 Closing the bar, or leaving the site, stops it. A position from this
 visit is offered the next time that recording is played. Media that never started is still released

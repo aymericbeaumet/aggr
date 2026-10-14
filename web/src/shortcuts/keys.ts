@@ -1,12 +1,76 @@
 import type { DiscussionLinkCtx } from '../generated/DiscussionLinkCtx';
 
-/** Whether a key event belongs to an editor: shortcuts never fire while typing. */
+const TEXT_ENTRY = new Set(['text', 'search', 'url', 'email', 'password', 'tel', 'number']);
+
+/**
+ * Whether a key event belongs to text entry. Shortcuts never fire while typing. A slider, a
+ * select, or a player is not text entry: letter keys still belong to the reader.
+ */
 export function editing(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    (target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])") !== null ||
-      ['textbox', 'combobox', 'searchbox'].includes(target.getAttribute('role') || ''))
-  );
+  if (!(target instanceof Element)) return false;
+  const editable = target.closest('[contenteditable]');
+  if (editable instanceof HTMLElement && editable.getAttribute('contenteditable')?.toLowerCase() !== 'false') return true;
+  const field = target.closest('input, textarea, [role="textbox"], [role="searchbox"], [role="combobox"]');
+  if (field instanceof HTMLTextAreaElement) return true;
+  if (field instanceof HTMLInputElement) return TEXT_ENTRY.has(field.type);
+  const role = field?.getAttribute('role') ?? '';
+  return role === 'textbox' || role === 'searchbox' || role === 'combobox';
+}
+
+/** Arrow keys move a slider, a select, or native playback. Letter shortcuts stay with the reader. */
+export function controlOwnsArrows(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  const control = target.closest('input, select, video, audio');
+  if (
+    control instanceof HTMLSelectElement ||
+    control instanceof HTMLVideoElement ||
+    control instanceof HTMLAudioElement
+  ) {
+    return true;
+  }
+  return control instanceof HTMLInputElement && control.type === 'range';
+}
+
+const modifiers = { meta: false, ctrl: false, alt: false };
+// A fresh page trusts the event flags, so a chord works before any modifier key has been seen.
+// Once a modifier is released, or the window blurs, a later flag is stuck until that key goes down again.
+let trustModifiers = true;
+
+function modifierName(event: KeyboardEvent): 'meta' | 'ctrl' | 'alt' | null {
+  if (event.key === 'Meta') return 'meta';
+  if (event.key === 'Control') return 'ctrl';
+  if (event.key === 'Alt') return 'alt';
+  return null;
+}
+
+/** Record a modifier key going down or up. A letter whose flag is merely stuck does not count. */
+export function noteModifier(event: KeyboardEvent, pressed: boolean): void {
+  const name = modifierName(event);
+  if (!name) return;
+  modifiers[name] = pressed;
+  trustModifiers = modifiers.meta || modifiers.ctrl || modifiers.alt;
+}
+
+/** A blur delivers the matching keyup somewhere else. The next letter is not a chord. */
+export function noteModifierBlur(): void {
+  modifiers.meta = false;
+  modifiers.ctrl = false;
+  modifiers.alt = false;
+  trustModifiers = false;
+}
+
+/** Back to a fresh page: event flags count again. Tests start here. */
+export function resetModifiers(): void {
+  modifiers.meta = false;
+  modifiers.ctrl = false;
+  modifiers.alt = false;
+  trustModifiers = true;
+}
+
+/** Which modifier flags should block a shortcut. Empty after a blur or a release. */
+export function modifiersHeld(event: KeyboardEvent): { meta: boolean; ctrl: boolean; alt: boolean } {
+  if (!trustModifiers) return { meta: false, ctrl: false, alt: false };
+  return { meta: event.metaKey, ctrl: event.ctrlKey, alt: event.altKey };
 }
 
 /** The article the external shortcuts act on: the one on screen, or the row under the cursor. */

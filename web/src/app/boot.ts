@@ -2,6 +2,7 @@ import { flushSync, mount } from 'svelte';
 import { contentElement } from '../model/extract';
 import { readModel } from '../model/page';
 import { navigation } from '../navigation';
+import { installFrameFocus } from '../media/frame-focus';
 import { installShortcuts } from '../shortcuts';
 import { installShortcutHelp } from '../shortcuts/help';
 import { installSearchIntent } from '../shortcuts/search';
@@ -81,6 +82,7 @@ export function boot(): void {
   safely('pictures', installPictureStates);
   safely('shortcut-help', installShortcutHelp);
   safely('shortcuts', installShortcuts);
+  safely('frame-focus', installFrameFocus);
   // Deployment polling, the new-entry badges, pull-to-refresh and the service worker.
   safely('reader', () => startReader());
   // Everything that belongs to the page on screen, run when it arrives: now, and again each time

@@ -92,6 +92,9 @@
 
   function blur(): void {
     search.focused = false;
+    // A composition can finish outside the field and leave this set. The next focus would then
+    // swallow its own keys.
+    search.composing = false;
     search.driver?.blur();
   }
 

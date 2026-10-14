@@ -46,8 +46,9 @@ A podcast, native video, or YouTube, Vimeo, or Twitch player that has started ke
 those page changes. Audio is parked outside the page. A picture is seated once, at the size it
 started, and that seat scales between the article and the now-playing bar (persistent chrome, beside
 the status bar). The provider frame keeps its parent and layout size, so the elapsed time and the
-bar's transport continue. Starting it does not move keyboard focus into the frame, and YouTube and
-Vimeo give focus back to the page, so shortcuts keep working without a reload. System media keys play, pause, and seek a recording the bar can drive,
+bar's transport continue. Starting it does not move keyboard focus into the frame. A player or
+interactive viewer that takes focus is handed back to the page over the next few frames, fullscreen
+and Twitch excepted, and playback sliders and selects do not swallow reader shortcuts. System media keys play, pause, and seek a recording the bar can drive,
 and previous and next skip 15 and 30 seconds. Parked audio can be muted from the bar. Twitch keeps
 the keys it draws itself. Dismissing the bar or leaving the site stops it. Media that never
 started is released with the page.

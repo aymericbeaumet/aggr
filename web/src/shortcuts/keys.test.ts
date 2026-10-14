@@ -1,5 +1,14 @@
-import { describe, expect, it } from 'vitest';
-import { externalTarget, gotoTarget, scrollDistance, type Subject } from './keys';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  externalTarget,
+  gotoTarget,
+  modifiersHeld,
+  noteModifier,
+  noteModifierBlur,
+  resetModifiers,
+  scrollDistance,
+  type Subject,
+} from './keys';
 
 const networks = [
   { name: 'hackernews', url: 'https://hn.algolia.com/?q={url}', shortcut: 'H', found: false },
@@ -37,6 +46,37 @@ describe('gotoTarget', () => {
     expect(gotoTarget('0', root, [])).toBeNull();
     expect(gotoTarget('z', root, [])).toBeNull();
     expect(gotoTarget('constructor', root, [])).toBeNull();
+  });
+});
+
+describe('modifiersHeld', () => {
+  const chord = (extra: Partial<KeyboardEvent>): KeyboardEvent =>
+    ({ key: 'j', metaKey: false, ctrlKey: false, altKey: false, ...extra }) as KeyboardEvent;
+
+  afterEach(() => resetModifiers());
+
+  it('trusts modifier flags on a fresh page', () => {
+    expect(modifiersHeld(chord({ metaKey: true }))).toEqual({ meta: true, ctrl: false, alt: false });
+    expect(modifiersHeld(chord({ ctrlKey: true })).ctrl).toBe(true);
+  });
+
+  it('ignores a flag after the key is released until it goes down again', () => {
+    noteModifier(chord({ key: 'Control' }), true);
+    noteModifier(chord({ key: 'Control' }), false);
+    expect(modifiersHeld(chord({ ctrlKey: true })).ctrl).toBe(false);
+    noteModifier(chord({ key: 'Control' }), true);
+    expect(modifiersHeld(chord({ ctrlKey: true })).ctrl).toBe(true);
+  });
+
+  it('ignores a flag after blur until a modifier goes down again', () => {
+    noteModifierBlur();
+    expect(modifiersHeld(chord({ metaKey: true, ctrlKey: true, altKey: true }))).toEqual({
+      meta: false,
+      ctrl: false,
+      alt: false,
+    });
+    noteModifier(chord({ key: 'Meta' }), true);
+    expect(modifiersHeld(chord({ metaKey: true })).meta).toBe(true);
   });
 });
 

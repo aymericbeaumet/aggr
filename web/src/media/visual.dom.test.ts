@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import NowPlaying from '../app/NowPlaying.svelte';
 import { enhanceAudio } from './audio';
 import { enhanceVideoFacade } from './facades';
+import { resetFrameFocus } from './frame-focus';
 import { dismiss, resetPlayback } from './now-playing';
 import { watchNativeVideo } from './visual';
 
@@ -79,6 +80,7 @@ afterEach(() => {
   if (view) unmount(view);
   view = null;
   resetPlayback();
+  resetFrameFocus();
   document.body.replaceChildren();
   document.documentElement.removeAttribute('data-now-playing');
   document.documentElement.style.removeProperty('--now-playing-offset');

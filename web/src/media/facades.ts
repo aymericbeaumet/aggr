@@ -1,4 +1,5 @@
 import { SPEEDS, type Playback, type PlaybackState } from './audio';
+import { installFrameFocus } from './frame-focus';
 import { claimVisual, connectVisual, visualPlaying, type Episode } from './now-playing';
 import { duration, endsAt, timingHost, type Phase, type TimingState } from './timing';
 
@@ -427,6 +428,10 @@ export function enhanceVideoFacade(preview: HTMLAnchorElement, signal: AbortSign
 
     player.classList.add('is-loading');
     player.setAttribute('aria-busy', 'true');
+    // Twitch draws its own keys, including after this frame leaves the player for the picture.
+    if (provider === 'twitch') frame.dataset.keys = 'player';
+    // Hand the keyboard back after the click, and again if the provider focuses the frame late.
+    installFrameFocus();
     // Append before the loading state promotes, so the card is where the picture returns.
     player.appendChild(frame);
     opened.assume('loading');
@@ -457,33 +462,6 @@ export function enhanceVideoFacade(preview: HTMLAnchorElement, signal: AbortSign
       },
       { signal: opened.signal },
     );
-    // A cross-origin frame that holds focus swallows every keydown, and the reader's shortcuts
-    // stay dead until the document reloads. The poster click already authorized playback.
-    // Clicking the player focuses it without a focus event on the element: the window blur is
-    // the signal, and the frame is already the active element. Give the keyboard back on the
-    // next frame, once that click has landed, except while the reader has fullscreened it.
-    // Twitch draws the keys itself, so a later click may keep them.
-    if (provider !== 'twitch') {
-      let restoring = false;
-      const keepKeys = () => {
-        if (restoring || document.fullscreenElement === frame || document.activeElement !== frame) return;
-        const page = document.getElementById('content');
-        restoring = true;
-        if (page instanceof HTMLElement) page.focus({ preventScroll: true });
-        else frame.blur();
-        restoring = false;
-      };
-      frame.addEventListener('focus', keepKeys, { signal: opened.signal });
-      window.addEventListener('blur', () => requestAnimationFrame(keepKeys), { signal: opened.signal });
-      document.addEventListener(
-        'fullscreenchange',
-        () => {
-          if (!document.fullscreenElement) requestAnimationFrame(keepKeys);
-        },
-        { signal: opened.signal },
-      );
-    }
-
     // Twitch refuses to render below 400×300. A narrow column gets a player laid out at that
     // size and scaled down to fit, rather than a player that widens the article or a refusal.
     if (provider === 'twitch') {

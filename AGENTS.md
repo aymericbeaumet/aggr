@@ -437,10 +437,11 @@ cargo run -- sync --dry-run -vv              # fetch without writing, with debug
   page changes. Audio is parked outside the page once playback leaves idle. A picture is seated
   once, at the size it started, and that seat scales between the article and the now-playing bar
   (persistent chrome, outside the page scope). The provider frame keeps its parent and layout size,
-  so playback, the elapsed time, and the bar's transport continue. Do not move keyboard focus into
-  that frame: a cross-origin player that holds it swallows the reader's shortcuts until the document
-  reloads. YouTube and Vimeo give focus back to the page (fullscreen excepted); return focus to the
-  page before the frame is removed. Twitch may keep a click's focus, since it draws its own keys. System media keys play, pause,
+  so playback, the elapsed time, and the bar's transport continue. Reader shortcuts keep working
+  unless focus is in a text field. A cross-origin frame, player or interactive viewer, that takes
+  focus is handed back to `#content` over several frames, fullscreen and Twitch excepted; return
+  focus to the page before the frame is removed. Playback sliders and selects do not swallow those
+  keys. Twitch may keep a click's focus, since it draws its own keys. System media keys play, pause,
   and seek a recording the bar can drive, and previous and next skip 15 and 30 seconds. Parked
   audio can be muted from the bar. Twitch keeps the keys it draws itself. Dismissing the bar or
   leaving the site stops it. Media that never started is released with the page. Interactive viewers are
