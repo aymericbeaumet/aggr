@@ -14,7 +14,7 @@ fn default_fixture() -> Result<Fixture> {
     let text = std::fs::read_to_string(&config)?;
     std::fs::write(
         &config,
-        text.replace("preferences.offline_items=4\n", "")
+        text.replace("[preferences]\noffline_items=4\n", "")
             .replace("items_per_page=3\n", "")
             .replace(crate::harness::ARCHIVED_MEDIA_SETTINGS, ""),
     )?;

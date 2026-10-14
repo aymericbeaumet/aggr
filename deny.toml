@@ -1,6 +1,6 @@
 # cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
 #
-# `cargo deny check` runs locally (`cargo install cargo-deny --locked`) and in the `deps` job of
+# Run locally with `mise exec -- cargo deny check`; CI runs it in the `deps` job of
 # .github/workflows/ci.yml. Every relaxation below names its reason; change the configuration
 # with the dependency change that makes an entry obsolete, never to make a failing check pass.
 
@@ -90,10 +90,10 @@ skip = [
   { crate = "shlex@1", reason = "bindgen" },
   { crate = "itertools@0.13", reason = "bindgen" },
   { crate = "nom@7", reason = "cexpr (bindgen), pori, wax" },
-  # Fontations 0.39/0.41 generations behind hayro's PDF rendering.
-  { crate = "read-fonts@0.39", reason = "hayro-interpret" },
-  { crate = "skrifa@0.42", reason = "hayro-interpret" },
-  { crate = "font-types@0.11", reason = "hayro-interpret" },
+  # resvg keeps the older Fontations generation beside hayro's PDF rendering.
+  { crate = "read-fonts@0.41", reason = "harfrust and skrifa via usvg (resvg)" },
+  { crate = "skrifa@0.44", reason = "usvg (resvg)" },
+  { crate = "fearless_simd@0.7", reason = "vello_common via hayro" },
   # Smaller pairs.
   { crate = "base64@0.22", reason = "fantoccini, headers, httpmock (dev)" },
   { crate = "bit-set@0.8", reason = "dom_query, fancy-regex" },

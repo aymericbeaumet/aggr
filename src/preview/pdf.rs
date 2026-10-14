@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, anyhow, bail};
-use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_interpret::{InterpreterSettings, util::TransformExt};
 use hayro::hayro_syntax::{Pdf, object::Object};
+use hayro::kurbo::Affine;
 use hayro::vello_cpu::color::palette::css::WHITE;
+use hayro::vello_cpu::{Pixmap, RasterizerSettings, RenderContext, Resources, TargetInit};
 use hayro::{RenderCache, RenderSettings};
 use image::{DynamicImage, RgbaImage};
 
@@ -58,21 +60,28 @@ pub(super) fn thumbnail(bytes: &[u8], alt: Option<String>) -> Result<super::Thum
     if width < 2 || height < 2 {
         bail!("PDF page is too narrow for a preview");
     }
-    let settings = RenderSettings {
-        x_scale: scale,
-        y_scale: scale,
-        width: Some(width),
-        height: Some(height),
-        bg_color: WHITE,
-    };
-    let pixmap = hayro::render(
+    // The convenience renderer truncates scaled dimensions; keep our rounded canvas.
+    let mut context = RenderContext::new(width, height);
+    hayro::render_into(
         page,
         &RenderCache::new(),
         &InterpreterSettings {
             render_annotations: false,
             ..InterpreterSettings::default()
         },
-        &settings,
+        &RenderSettings::default(),
+        &mut context,
+        Affine::scale(f64::from(scale)) * page.initial_transform(true).to_kurbo(),
+    );
+    context.flush();
+    let mut pixmap = Pixmap::new(width, height);
+    context.render_with(
+        &mut pixmap,
+        &mut Resources::default(),
+        RasterizerSettings {
+            target_init: TargetInit::Clear(WHITE),
+            ..RasterizerSettings::default()
+        },
     );
     let image = RgbaImage::from_raw(
         u32::from(width),
@@ -194,6 +203,14 @@ mod tests {
     fn pdf_preview_preserves_landscape_ratio() {
         let preview = thumbnail(&test_pdf(600, 300), None).unwrap();
         assert_eq!((preview.width, preview.height), (256, 128));
+    }
+
+    #[test]
+    fn pdf_preview_preserves_rounded_pixel_dimensions() {
+        let preview = thumbnail(&test_pdf(600, 400), None).unwrap();
+        assert_eq!((preview.width, preview.height), (256, 171));
+        let image = image::load_from_memory(&preview.bytes).unwrap();
+        assert_eq!((image.width(), image.height()), (256, 171));
     }
 
     #[test]
