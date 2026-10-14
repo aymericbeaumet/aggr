@@ -42,6 +42,7 @@ ignore = [
   { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 is unmaintained but declared complete by its authors; syntect loads its bundled syntax and theme packs with it and has no bincode-free release" },
   { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained; pagefind pulls it through rust-patch-derive, at build time only" },
   { id = "RUSTSEC-2024-0320", reason = "yaml-rust is unmaintained; syntect and pagefind (through twelf/serde_yaml) still depend on it" },
+  { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained and the advisory has no safe upgrade; serde_yaml_ng 0.10.0 still requires 0.2.11" },
 ]
 
 [bans]
