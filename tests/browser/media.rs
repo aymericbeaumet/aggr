@@ -468,7 +468,11 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                         vec![],
                     )
                     .await?;
-                wait_for(client, "!!document.querySelector('#now-playing-picture iframe')").await?;
+                wait_for(
+                    client,
+                    "!!document.querySelector('#now-playing-picture iframe')",
+                )
+                .await?;
                 client.execute_async("const done=arguments[arguments.length-1];requestAnimationFrame(()=>requestAnimationFrame(()=>done(true)))", vec![]).await?;
                 let after = media_box(client, ".video-player").await?;
                 ensure_media_box_stable(
