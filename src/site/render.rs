@@ -882,9 +882,15 @@ mod tests {
         assert!(css.contains("env(safe-area-inset-left)"));
         assert!(css.contains("env(safe-area-inset-right)"));
         assert!(css.contains(".itemhead { position: sticky; top: var(--top-nav-offset);"));
-        assert!(css.contains(
-            ".feed-toolbar { position: sticky; top: calc(var(--top-nav-offset) + var(--feed-heading, 0px));"
-        ));
+        let toolbar = css
+            .split_once(".feed-toolbar {")
+            .unwrap()
+            .1
+            .split_once('}')
+            .unwrap()
+            .0;
+        assert!(toolbar.contains("position: sticky;"));
+        assert!(toolbar.contains("top: calc(var(--top-nav-offset) + var(--feed-heading, 0px));"));
         assert!(css.contains("env(safe-area-inset-bottom)"));
         assert!(css.contains("@media (pointer: coarse)"));
         assert!(css.contains("font-size: 16px"));

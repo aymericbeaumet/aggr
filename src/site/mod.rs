@@ -3978,7 +3978,8 @@ category = "Science"
     #[test]
     fn install_shell_omits_collection_pages() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, mut sources, store) = fixture(dir.path(), 1, "preferences.offline_items=0\n");
+        let (config, mut sources, store) =
+            fixture(dir.path(), 1, "[preferences]\noffline_items=0\n");
         sources[0].category = Some("Research".into());
         let mut item = store.items().unwrap().remove(0);
         item.front.labels = vec!["topic-000".into(), "topic-001".into()];
@@ -4038,7 +4039,7 @@ category = "Science"
         let (config, sources, store) = fixture(
             dir.path(),
             3,
-            "preferences.offline_items = 2\nindexing = true\n",
+            "indexing = true\n[preferences]\noffline_items = 2\n",
         );
         let out = dir.path().join("out");
         let mut build_info = info(out.clone());
