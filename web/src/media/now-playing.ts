@@ -745,6 +745,7 @@ function showVisual(home: Element, node: HTMLElement): void {
   if (preview) preview.hidden = true;
   home.classList.add('is-loaded');
   home.classList.remove('is-loading');
+  document.getElementById(PICTURE_ID)?.classList.remove('is-loading');
   home.dataset.videoMounted = 'true';
 }
 

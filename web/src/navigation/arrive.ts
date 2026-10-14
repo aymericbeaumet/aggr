@@ -82,6 +82,11 @@ export function arrive(saved: number | undefined, hash: string, doc: Document = 
   const focusArrived = () => {
     const main = doc.getElementById('content');
     if (!(main instanceof HTMLElement) || !main.isConnected) return;
+    const active = doc.activeElement;
+    // A control inside the arriving page already has the keyboard. Search opened
+    // by the shortcut that landed here is the case that matters: taking focus
+    // back onto the page container would leave the field behind.
+    if (active instanceof HTMLElement && active !== main && active !== doc.body && main.contains(active)) return;
     main.setAttribute('data-navigation-focus', '');
     main.focus({ preventScroll: true });
   };

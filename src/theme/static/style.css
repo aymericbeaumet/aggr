@@ -813,6 +813,9 @@ body[data-kind="item"] .main {
 
 .video-player.is-loading iframe { opacity: 0; }
 .video-player.is-loaded iframe { opacity: 1; }
+/* The frame leaves the card for the seat while it is still loading. Hide it there too, and let the poster show through the seat. */
+#now-playing-picture.is-loading { background: transparent; }
+#now-playing-picture.is-loading :is(iframe, video) { opacity: 0; }
 .native-video video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
 .native-audio { display: grid; grid-template-columns: minmax(0, 1fr); box-sizing: border-box; min-height: 19rem; margin: 0 0 1.5rem; padding: 0; overflow: hidden; border: 1px solid color-mix(in srgb, var(--warm) 28%, var(--faint)); border-radius: 1rem; background: color-mix(in srgb, var(--warm) 4%, var(--panel)); }
 .native-audio.has-artwork { grid-template-columns: minmax(0, 38.2fr) minmax(0, 61.8fr); }

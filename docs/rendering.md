@@ -242,7 +242,9 @@ Disabling single-key shortcuts leaves modifier shortcuts and native keyboard ope
 `j`/`k` and the arrows walk a list alike, so the vim keys are a preference rather than a
 requirement; an article page keeps the arrows for scrolling, which is what reading it needs.
 Cmd/Ctrl+K, or `/` where single-key shortcuts are on, focuses the shared global search field; a
-page without one lands on the feed with it focused. Escape closes suggestions and removes focus.
+page without one lands on the feed with it focused. Arrival focuses the page on the next frame,
+and leaves a control inside that page alone when one already has the keyboard, so the field
+stays focused when the shortcut is what opened the feed. Escape closes suggestions and removes focus.
 Both modifiers are always handled; only the name shown differs, so the shortcut help marks a
 platform-specific pair with `data-platform-key` and `<html data-platform>` settles which one it
 shows. A mapping that reads the same everywhere, such as `Ctrl+d`, carries no such marking.
@@ -414,7 +416,8 @@ Interactive and PDF viewer links are figure captions, centered and italic. Porta
 and article JSON include equivalent italic links; they keep the publisher destination.
 
 Provider players are facades: nothing is requested from YouTube, Vimeo, or Twitch until the reader
-activates the poster, and activation starts playback in one click. A body paragraph that is only a
+activates the poster, and activation starts playback in one click. The picture is seated over the
+card as soon as it starts loading; the poster stays visible until that frame loads. A body paragraph that is only a
 link to a supported video (a bare URL, a text link, or a linked thumbnail) renders as the same facade
 so videos play inside aggr; its poster is the linked picture or the archived provider thumbnail.
 Portable outputs keep the plain link. Embed URLs come from validated provider identifiers; YouTube uses its privacy-enhanced

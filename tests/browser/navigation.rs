@@ -153,7 +153,7 @@ async fn video_facade_contracts(client: &Client, fixture: &Fixture) -> Result<()
             .click()
             .await?;
         let video = client.execute(r#"
-          const frame=document.querySelector('.video-player iframe'), url=new URL(window.videoContract.url);
+          const frame=document.querySelector('#now-playing-picture iframe'), url=new URL(window.videoContract.url);
           return {...window.videoContract,host:url.hostname,parent:url.searchParams.get('parent'),autoplay:url.searchParams.get('autoplay'),rel:url.searchParams.get('rel'),dnt:url.searchParams.get('dnt'),h:url.searchParams.get('h'),frames:document.querySelectorAll('iframe').length,width:frame.clientWidth,height:frame.clientHeight,overflow:document.documentElement.scrollWidth>innerWidth};
         "#,vec![]).await?;
         assert_eq!(video["host"], host, "{video}");

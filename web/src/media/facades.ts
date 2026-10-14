@@ -435,9 +435,13 @@ export function enhanceVideoFacade(preview: HTMLAnchorElement, signal: AbortSign
     // Append before the loading state promotes, so the card is where the picture returns.
     player.appendChild(frame);
     opened.assume('loading');
+    // The frame leaves the card for the seat as soon as it is loading. The card's
+    // cover rule no longer matches it, so the seat keeps the poster in front.
+    document.getElementById('now-playing-picture')?.classList.add('is-loading');
     frame.addEventListener(
       'load',
       () => {
+        document.getElementById('now-playing-picture')?.classList.remove('is-loading');
         player.classList.add('is-loaded');
         player.removeAttribute('aria-busy');
         preview.hidden = true;
