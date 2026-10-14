@@ -261,8 +261,14 @@ async fn archive_pages_swap_in_place_and_nothing_outside_the_archive_is_fetched(
           const done = arguments[arguments.length - 1], root = document.documentElement;
           const frame = () => new Promise(resolve => requestAnimationFrame(() => resolve()));
           (async () => {
+            // The cursor's row may already have the keyboard. Leave it before scrolling, or the
+            // browser pulls that row back into view and the saved place is no longer 300.
+            const main = document.getElementById('content');
+            if (main instanceof HTMLElement) main.focus({preventScroll:true});
             root.style.paddingBottom = '200vh';
+            root.style.overflowAnchor = 'none';
             scrollTo(0, 300); await frame(); await frame();
+            const marked = scrollY;
             document.querySelector('.row [data-row-open]').click();
             while (document.body.dataset.kind !== 'item') await frame();
             // A fling carrying the article as Back is pressed.
@@ -270,15 +276,20 @@ async fn archive_pages_swap_in_place_and_nothing_outside_the_archive_is_fetched(
             fling(); await frame(); await frame();
             history.back();
             while (document.body.dataset.kind !== 'river') await new Promise(resolve => setTimeout(resolve));
-            const arrived = {held: root.style.overflow === 'hidden', at: scrollY};
+            const arrived = {held: root.style.overflow === 'hidden', at: scrollY, marked};
             document.querySelector('.brand').click();
             for (let i = 0; i < 20; i++) await frame();
             done({...arrived, top: scrollY, overflow: root.style.overflow});
             root.style.removeProperty('padding-bottom');
+            root.style.removeProperty('overflow-anchor');
           })();
         "#, vec![]).await?;
         anyhow::ensure!(
-            held["held"] == true && held["at"] == 300 && held["top"] == 0 && held["overflow"] == "",
+            held["marked"] == 300
+                && held["held"] == true
+                && held["at"] == 300
+                && held["top"] == 0
+                && held["overflow"] == "",
             "the title takes a held page to its top and ends the hold: {held}"
         );
         Ok(())
