@@ -56,7 +56,7 @@ class Preferences {
   }
 
   get feedPageSize(): number {
-    return positiveInteger(this.values?.['feed-page-size'], 25);
+    return positiveInteger(this.values?.['feed-page-size'], 50);
   }
 
   get singleKeyShortcuts(): boolean {
@@ -71,7 +71,7 @@ class Preferences {
     return String(this.values?.motion ?? 'auto');
   }
 
-  /** Offline downloads require an explicit site default or saved preference. */
+  /** How many recent articles the worker keeps offline (`offline-items`); none until the reader asks. */
   get offlineItems(): number {
     const value = this.values?.['offline-items'];
     return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0;

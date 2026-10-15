@@ -25,7 +25,8 @@ use sha1::{Digest as _, Sha1};
 use support::aggr_command;
 pub(crate) use support::git;
 
-pub(crate) const ARCHIVED_MEDIA_SETTINGS: &str = "[defaults]\ncontent='heavy'\nmedia='local'\n";
+pub(crate) const ARCHIVED_MEDIA_SETTINGS: &str =
+    "content_download_strategy='article'\nmedia_download_strategy='original'\n";
 
 pub(crate) struct Fixture {
     pub(crate) directory: tempfile::TempDir,
@@ -108,7 +109,7 @@ impl Fixture {
         std::fs::write(
             root.join("aggr.toml"),
             format!(
-                "[site]\ntitle='Reading room'\npwa={pwa}\nitems_per_page=3\nmax_age_days=10000\npreferences.offline_items=4\n{ARCHIVED_MEDIA_SETTINGS}[[sources]]\nurl='https://publisher.invalid/feed'\nslug='example'\nname='Example'\ncategory='Engineering'\n[[networks]]\nprovider='hackernews'\n[[networks]]\nprovider='reddit'\n"
+                "[defaults]\ndiscussions=['hackernews','reddit']\n{ARCHIVED_MEDIA_SETTINGS}[site]\ntitle='Reading room'\npwa={pwa}\nitems_per_page=3\nmax_age_days=10000\n[preferences]\noffline_items=4\n[[sources]]\nurl='https://publisher.invalid/feed'\nslug='example'\nname='Example'\ncategory='Engineering'\n"
             ),
         )?;
         git(root, &["add", "aggr.toml"])?;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cacheNames, stale } from './caches';
+import { cacheNames, SHELL_REVISION, stale } from './caches';
 import { harness, scope, tick } from './harness';
 import { isBuildMessage, isOfflineStatus, parsePageMessage, validOfflineCount } from './messages';
 import type { ClientLike, MessageEventLike } from './types';
@@ -93,36 +93,6 @@ describe('messages', () => {
 });
 
 describe('activation', () => {
-  it('reuses HTTP-cached content-addressed shell assets while refreshing mutable files', async () => {
-    const assets = ['assets/style-0123456789ab.css', 'assets/app/app-Ck4TY_xv.js'];
-    const { ctx, state } = harness({ config: {
-      precache: ['', ...assets, 'assets/unversioned.js'].map(url => ({ url, revision: 'revision', required: true })),
-    } });
-    const modes = new Map<string, RequestCache | undefined>();
-    state.network = async (url, init) => {
-      modes.set(url, init?.cache);
-      return new Response(url);
-    };
-    const work: Promise<unknown>[] = [];
-    lifecycle(ctx).install({ waitUntil: promise => work.push(promise) });
-    await Promise.all(work);
-    for (const asset of assets) expect(modes.get(`${scope}${asset}`)).toBe('force-cache');
-    expect(modes.get(scope)).toBe('reload');
-    expect(modes.get(`${scope}assets/unversioned.js`)).toBe('reload');
-  });
-
-  it('a default first visit installs only the shell and does not fetch any archive data', async () => {
-    const { ctx, requests } = harness();
-    const handler = lifecycle(ctx);
-    const work: Promise<unknown>[] = [];
-    handler.install({ waitUntil: promise => work.push(promise) });
-    await Promise.all(work);
-    handler.activate({ waitUntil: promise => work.push(promise) });
-    await Promise.all(work);
-    expect(requests).toEqual([scope]);
-    expect(ctx.state.configurationCount).toBe(0);
-  });
-
   it('enables preload, drops stale caches, claims clients and restores the persisted count', async () => {
     const { ctx, storage, claims, preloadEnabled, messages } = harness();
     const handlers = lifecycle(ctx);
@@ -156,6 +126,28 @@ describe('activation', () => {
     await Promise.all(waited);
     expect(ctx.state.configurationCount).toBe(1);
     await expect((await storage.open(ctx.names.offlineSettings)).match(`${scope}__offline_count`)).resolves.toBeTruthy();
+  });
+
+  it('copies an unchanged shell response and fetches one whose revision moved', async () => {
+    const style = 'assets/style-aaaaaaaaaaaa.css';
+    const { ctx, storage, requests } = harness({
+      config: {
+        precache: [
+          { url: 'offline.html', revision: 'same', required: true },
+          { url: style, revision: 'new', required: true },
+        ],
+      },
+    });
+    const old = await storage.open(`${ctx.names.namespace}shell-old`);
+    await old.put(`${scope}offline.html`, new Response('kept', { headers: { [SHELL_REVISION]: 'same' } }));
+    await old.put(`${scope}${style}`, new Response('stale', { headers: { [SHELL_REVISION]: 'old' } }));
+    const installs: Promise<unknown>[] = [];
+    lifecycle(ctx).install({ waitUntil: (promise) => installs.push(promise) });
+    await Promise.all(installs);
+    expect(requests).toEqual([`${scope}${style}`]);
+    const shell = await storage.open(ctx.names.shell);
+    expect(await (await shell.match(`${scope}offline.html`))?.text()).toBe('kept');
+    expect((await shell.match(`${scope}${style}`))?.headers.get(SHELL_REVISION)).toBe('new');
   });
 
   it('tolerates optional shell resources that fail', async () => {

@@ -3,3 +3,5 @@
 * text=auto eol=lf
 *.png binary
 *.ttf binary
+# The generated client contains template literals with meaningful trailing whitespace.
+src/theme/static/app/*.js -whitespace

@@ -1,27 +1,31 @@
-.PHONY: all build release test lint fmt fmt-check check check-rust timings client-build client-check client-dev msrv clean install run help
+.PHONY: all setup build release test lint fmt fmt-check check check-rust timings client-build client-check client-dev msrv clean install run help
 
 all: check
 
+setup:
+	mise install rust node cmake ninja actionlint aqua:EmbarkStudios/cargo-deny chromedriver
+	mise exec -- npm ci --prefix web
+
 build:
-	cargo build --locked
+	mise exec -- cargo build --locked
 
 timings:
-	cargo build --locked --timings
+	mise exec -- cargo build --locked --timings
 
 release:
-	cargo build --locked --release
+	mise exec -- cargo build --locked --release
 
 test:
-	cargo test --locked
+	mise exec -- cargo test --locked
 
 lint:
-	cargo clippy --locked --all-targets -- --deny warnings
+	mise exec -- cargo clippy --locked --all-targets -- --deny warnings
 
 fmt:
-	cargo fmt --all
+	mise exec -- cargo fmt --all
 
 fmt-check:
-	cargo fmt --all -- --check
+	mise exec -- cargo fmt --all -- --check
 
 # Keep the two Cargo commands ordered while frontend checks run alongside them.
 check: fmt-check
@@ -32,7 +36,7 @@ check-rust:
 	$(MAKE) test
 
 # Node is pinned in mise.toml and only needed to develop the reader: its compiled bundles are
-# committed under themes/default/static/app and embedded by the Rust binary.
+# committed under src/theme/static/app and embedded by the Rust binary.
 client-build:
 	mise exec -- npm --prefix web run build
 
@@ -45,20 +49,21 @@ client-dev:
 
 # Build with the minimum supported Rust version declared in Cargo.toml.
 msrv:
-	cargo +$$(perl -ne 'print $$1 if /^rust-version = "(.*)"/' Cargo.toml) build --locked
+	mise exec rust@$$(perl -ne 'print $$1 if /^rust-version = "(.*)"/' Cargo.toml) -- cargo build --locked
 
 clean:
-	cargo clean
+	mise exec -- cargo clean
 
 install:
-	cargo install --path . --locked
+	mise exec -- cargo install --path . --locked
 
 # Sync, render and live-reload the demo config: make run ARGS="dev --port 3000"
 run:
-	cargo run --locked -- --config examples/aggr.toml $(ARGS)
+	mise exec -- cargo run --locked -- --config examples/aggr.toml $(ARGS)
 
 help:
 	@echo "Available targets:"
+	@echo "  setup      - Install locked development tools and client packages"
 	@echo "  build      - Build debug binary"
 	@echo "  release    - Build release binary"
 	@echo "  test       - Run all tests"

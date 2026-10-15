@@ -6,7 +6,19 @@
 //! in the other.
 
 use anyhow::{Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::de::{Error, IgnoredAny};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// `[site.preferences]` used to nest these settings. The table is `[preferences]`.
+pub(super) fn reject_legacy_site_preferences<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: Deserializer<'de>,
+{
+    IgnoredAny::deserialize(deserializer)?;
+    Err(Error::custom(
+        "`[site.preferences]` has moved to `[preferences]`",
+    ))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields, rename_all(serialize = "kebab-case"))]
@@ -125,7 +137,7 @@ impl Default for ReaderPreferences {
             word_spacing: TextSpacing::Normal,
             density: Density::Compact,
             thumbnails: Thumbnails::Show,
-            feed_page_size: 25,
+            feed_page_size: 50,
             motion: Motion::Auto,
             single_key_shortcuts: true,
             scroll_amount: 10,
@@ -273,13 +285,13 @@ fn number(
 impl ReaderPreferences {
     pub(super) fn validate(&self) -> Result<()> {
         if ![10, 25, 50].contains(&self.feed_page_size) {
-            bail!("[site.preferences] feed_page_size must be 10, 25, or 50");
+            bail!("[preferences] feed_page_size must be 10, 25, or 50");
         }
         if !(1..=100).contains(&self.scroll_amount) {
-            bail!("[site.preferences] scroll_amount must be between 1 and 100 lines");
+            bail!("[preferences] scroll_amount must be between 1 and 100 lines");
         }
         if self.offline_items > 1000 {
-            bail!("[site.preferences] offline_items must be between 0 and 1000");
+            bail!("[preferences] offline_items must be between 0 and 1000");
         }
         Ok(())
     }
@@ -508,29 +520,29 @@ mod tests {
 
     #[test]
     fn reader_defaults_use_preferences_and_disable_indentation() {
-        let config = Config::parse("[site.preferences]\nscroll_amount=7\n").unwrap();
-        let values = config.site.preferences.browser_defaults().unwrap();
+        let config = Config::parse("[preferences]\nscroll_amount=7\n").unwrap();
+        let values = config.preferences.browser_defaults().unwrap();
         assert_eq!(values["paragraph-indent"], false);
         assert_eq!(values["scroll-amount"], 7);
-        assert_eq!(values["feed-page-size"], "25");
+        assert_eq!(values["feed-page-size"], "50");
         assert_eq!(values.as_object().unwrap().len(), 18);
     }
 
     #[test]
     fn offline_items_reaches_the_browser_with_validated_bounds() {
-        let config = Config::parse("[site.preferences]\noffline_items=7\n").unwrap();
-        let values = config.site.preferences.browser_defaults().unwrap();
+        let config = Config::parse("[preferences]\noffline_items=7\n").unwrap();
+        let values = config.preferences.browser_defaults().unwrap();
         assert_eq!(values["offline-items"], 7);
-        let rule = &config.site.preferences.schema().bootstrap["offline-items"];
+        let rule = &config.preferences.schema().bootstrap["offline-items"];
         assert_eq!(rule.min, Some(0));
         assert_eq!(rule.max, Some(1000));
-        assert!(Config::parse("[site.preferences]\noffline_items=1001\n").is_err());
+        assert!(Config::parse("[preferences]\noffline_items=1001\n").is_err());
     }
 
     #[test]
     fn reader_defaults_accept_typed_overrides_and_reject_invalid_values() {
-        let config = Config::parse("[site.preferences]\nparagraph_indent=true\nfont_family='serif'\nscroll_amount=15\ntheme='sepia'\n").unwrap();
-        let values = config.site.preferences.browser_defaults().unwrap();
+        let config = Config::parse("[preferences]\nparagraph_indent=true\nfont_family='serif'\nscroll_amount=15\ntheme='sepia'\n").unwrap();
+        let values = config.preferences.browser_defaults().unwrap();
         assert_eq!(values["paragraph-indent"], true);
         assert_eq!(values["font-family"], "serif");
         assert_eq!(values["scroll-amount"], 15);
@@ -544,7 +556,7 @@ mod tests {
             "unknown=true",
         ] {
             assert!(
-                Config::parse(&format!("[site.preferences]\n{setting}\n")).is_err(),
+                Config::parse(&format!("[preferences]\n{setting}\n")).is_err(),
                 "{setting}"
             );
         }
@@ -553,7 +565,18 @@ mod tests {
     #[test]
     fn documented_reader_defaults_match_compiled_defaults() {
         let config = Config::parse(crate::config::DEFAULTS).unwrap();
-        assert_eq!(config.site.preferences, ReaderPreferences::default());
+        assert_eq!(config.preferences, ReaderPreferences::default());
+    }
+
+    #[test]
+    fn nested_site_preferences_has_moved() {
+        let error = Config::parse("[site.preferences]\ntheme='dark'\n").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("`[site.preferences]` has moved to `[preferences]`"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -596,9 +619,8 @@ mod tests {
 
     #[test]
     fn site_defaults_flow_into_both_schema_views() {
-        let config =
-            Config::parse("[site.preferences]\ntheme='dark'\nfeed_page_size=25\n").unwrap();
-        let schema = config.site.preferences.schema();
+        let config = Config::parse("[preferences]\ntheme='dark'\nfeed_page_size=25\n").unwrap();
+        let schema = config.preferences.schema();
         assert_eq!(schema.bootstrap["theme"].initial, "dark");
         assert_eq!(schema.bootstrap["feed-page-size"].initial, "25");
         let feed = schema

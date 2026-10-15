@@ -11,6 +11,7 @@
   import Preferences from '../pages/Preferences.svelte';
   import { page as shown } from '../state/page.svelte';
   import Header from './Header.svelte';
+  import NowPlaying from './NowPlaying.svelte';
   import StatusBar from './StatusBar.svelte';
 
   let { page, content = null }: { page: ClientPage; content?: Element | null } = $props();
@@ -38,3 +39,4 @@
 {/key}
 </main>
 <footer class="footer" data-nosnippet><a href="https://github.com/aymericbeaumet/aggr" target="_blank" rel="noopener noreferrer">built with aggr</a></footer>
+<NowPlaying />

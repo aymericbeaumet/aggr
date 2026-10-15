@@ -2,6 +2,9 @@
 
 import type { CacheStorageLike, Fetch, Timeouts } from './types';
 
+/** Header on a precached shell response, so the next worker can copy it when the bytes are unchanged. */
+export const SHELL_REVISION = 'x-aggr-revision';
+
 /** Visited pages kept for offline reading. */
 export const PAGE_LIMIT = 200;
 /** Content-addressed assets kept beside them. */

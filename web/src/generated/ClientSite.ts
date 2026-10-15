@@ -9,11 +9,7 @@ export type ClientSite = { title: string, language: string,
 /**
  * Whether a manifest and service worker were built.
  */
-pwa: boolean, 
-/**
- * Whether rows show excerpts (`[site.params] excerpts`).
- */
-excerpts: boolean, discussions: Array<DiscussionLinkCtx>, 
+pwa: boolean, discussions: Array<DiscussionLinkCtx>, 
 /**
  * The first nine feed entries, for the `g 1` … `g 9` shortcuts.
  */

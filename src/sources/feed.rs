@@ -323,7 +323,7 @@ async fn discovery_ladder(
             return Ok(discovered);
         }
         bail!(
-            "light mode only imports RSS, Atom, or JSON Feed; no feed was discovered; use a feed URL or set content = \"heavy\" for HTML extraction"
+            "feed capture only imports RSS, Atom, or JSON Feed; no feed was discovered; use a feed URL or set content_download_strategy = \"article\" for HTML extraction"
         );
     }
 
@@ -1853,6 +1853,7 @@ Second paragraph.</media:description></media:group>
             documents: crate::config::DocumentPolicy::Original,
             limits: crate::config::Limits::default(),
             content: crate::config::ContentMode::Light,
+            discussions: Vec::new(),
             engine: crate::config::Engine::Feed { url },
         }
     }
@@ -2672,9 +2673,9 @@ Second paragraph.</media:description></media:group>
         };
         let error = match fetch(&configured, &source, &ctx).await {
             Err(error) => error,
-            Ok(_) => panic!("light mode cannot import HTML article cards"),
+            Ok(_) => panic!("feed capture cannot import HTML article cards"),
         };
-        assert!(format!("{error:#}").contains("content = \"heavy\""));
+        assert!(format!("{error:#}").contains("content_download_strategy = \"article\""));
         homepage.assert_calls_async(1).await;
         article.assert_calls_async(0).await;
         listing.assert_calls_async(0).await;

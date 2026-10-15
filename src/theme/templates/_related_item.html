@@ -2,7 +2,6 @@
   <div class="row-content">
     <div class="row-copy">
       <a class="article-more-link title"{% if coming_next %} rel="next"{% endif %} href="{{ item.url | url_for }}">{{ item.title }}</a>
-      {% if site.params.excerpts and item.excerpt %}<p class="excerpt">{{ item.excerpt }}</p>{% endif %}
       {% include "_metadata.html" %}
     </div>
     {% if item.preview %}<span class="preview-media" style="{% if item.preview.color %}--preview-color: {{ item.preview.color }}; {% endif %}--image-preview: url('{{ item.preview.placeholder.data_url }}')"><img class="preview-image" src="{{ item.preview.url | url_for }}" width="{{ item.preview.width }}" height="{{ item.preview.height }}" alt="{{ item.preview.alt or '' }}" loading="lazy" decoding="async"></span>{% endif %}

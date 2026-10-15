@@ -160,7 +160,7 @@ pub async fn run_with_cache(
     let reprocess_args = args.clone();
     let store_root = worktree.dir().to_path_buf();
     let retention_sources = project.sources.clone();
-    let defaults = project.config.defaults;
+    let defaults = project.config.defaults.clone();
     let (known_links, existing_paths, reprocessed, initially_removed) =
         tokio::task::spawn_blocking(move || {
             let removed = if reprocess_args.dry_run {
@@ -313,7 +313,7 @@ fn sanitized_source_error(source: &Source, err: &anyhow::Error) -> anyhow::Error
     anyhow::anyhow!(redact_source_secrets(source, &format!("{err:#}")))
 }
 
-/// Drop expired and excess article families independently for each feed.
+/// Drop feeds that left the config, then expired and excess article families for each feed.
 fn apply_retention(
     store: &Store,
     defaults: &crate::config::Defaults,
@@ -321,9 +321,21 @@ fn apply_retention(
     now: DateTime<Utc>,
 ) -> Result<usize> {
     let items = store.items()?;
-    let drop = store.retention_plan(&items, defaults.limits, sources, now)?;
-    store.record_evictions(&items, &drop, sources, defaults)?;
+    let drop = store.retention_plan(&items, sources, now)?;
+    let configured: BTreeSet<&str> = sources.iter().map(|source| source.slug.as_str()).collect();
+    let dropped: BTreeSet<&str> = drop.iter().map(String::as_str).collect();
+    // Leaving the config is not a limit change. Recording it would suppress the feed if it is
+    // subscribed again under the same policy.
+    let policy_drop: Vec<String> = items
+        .iter()
+        .filter(|item| {
+            configured.contains(item.front.source.as_str()) && dropped.contains(item.path.as_str())
+        })
+        .map(|item| item.path.clone())
+        .collect();
+    store.record_evictions(&items, &policy_drop, sources, defaults)?;
     store.remove_items(&drop)?;
+    store.remove_unconfigured_sources(&configured)?;
     Ok(drop.len())
 }
 

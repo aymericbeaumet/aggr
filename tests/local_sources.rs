@@ -30,8 +30,8 @@ fn local_feed_sources_persist_articles_without_paths_and_repeat_without_a_commit
     std::fs::write(
         repository.join("aggr.toml"),
         r#"[defaults]
-content = "light"
-media = "remote"
+content_download_strategy = "feed"
+media_download_strategy = "remote"
 max_age_days = 0
 
 [[sources]]
@@ -117,12 +117,9 @@ fn a_source_language_marks_its_articles_when_it_differs_from_the_site_language()
         r#"[site]
 language = "en"
 
-[site.params]
-excerpts = true
-
 [defaults]
-content = "light"
-media = "remote"
+content_download_strategy = "feed"
+media_download_strategy = "remote"
 max_age_days = 0
 
 [[sources]]
@@ -192,15 +189,8 @@ url = "gazette.xml"
         river.contains(" lang=\"fr\">Article en français</a>"),
         "{river}"
     );
-    assert!(
-        river.contains("<p class=\"excerpt\" lang=\"fr\">Un texte en français.</p>"),
-        "{river}"
-    );
+    assert!(!river.contains("class=\"excerpt\""), "{river}");
     assert!(river.contains("\">English article</a>"), "{river}");
-    assert!(
-        river.contains("<p class=\"excerpt\">An English text.</p>"),
-        "{river}"
-    );
     assert_eq!(
         river.matches("lang=\"en\"").count(),
         1,

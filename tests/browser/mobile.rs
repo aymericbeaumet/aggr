@@ -188,13 +188,7 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
         "document.querySelector('.preview-image')?.naturalWidth === 240",
     )
     .await?;
-    // Focusing the row expresses intent before opening it; visibility alone does not prefetch.
-    client
-        .execute(
-            "document.querySelector('.rows .row [data-row-open]').focus()",
-            vec![],
-        )
-        .await?;
+    // The row a tap opens has already been fetched while the reader looked at it.
     wait_for(
         client,
         "performance.getEntriesByType('resource').some(entry => entry.initiatorType === 'fetch' && entry.name === document.querySelector('.rows .row [data-row-open]').href)",
@@ -742,18 +736,21 @@ async fn mobile_feed_search_stays_below_header_while_articles_and_results_scroll
     let client = browser_client().await?;
     let result=async {
         phone_session(&client).await?;
-        for width in [390,1024] {
+        for width in [390, 720, 1280] {
             emulate(&client,"Emulation.setDeviceMetricsOverride",json!({"width":width,"height":844,"deviceScaleFactor":1,"mobile":width<640})).await?;
             client.goto(&fixture.base).await?;
             wait_booted_with(&client,"document.querySelectorAll('[data-static-feed] .row').length>=20").await?;
+            client.execute("window.__feedToolbarTop=document.querySelector('.feed-toolbar').getBoundingClientRect().top",vec![]).await?;
             client.execute("scrollTo(0,700)",vec![]).await?;
             wait_for(&client,"scrollY>=600 && Math.abs(document.querySelector('.feed-toolbar').getBoundingClientRect().top-document.querySelector('.top').getBoundingClientRect().bottom)<1").await?;
             let pinned=client.execute(r#"
               const toolbar=document.querySelector('.feed-toolbar'),input=document.querySelector('#q'),box=input.getBoundingClientRect();
+              const top=toolbar.getBoundingClientRect().top;
               return {position:getComputedStyle(toolbar).position,visible:document.elementFromPoint(box.x+box.width/2,box.y+box.height/2)===input,
-                separateResults:!toolbar.querySelector('[data-search-results]'),tabs:[...document.querySelectorAll('.mobile-tabs a')].map(a=>a.textContent.trim()),scroll:scrollY};
+                separateResults:!toolbar.querySelector('[data-search-results]'),tabs:[...document.querySelectorAll('.mobile-tabs a')].map(a=>a.textContent.trim()),scroll:scrollY,
+                still:Math.abs(top-window.__feedToolbarTop)<1};
             "#,vec![]).await?;
-            anyhow::ensure!(pinned["position"]=="sticky" && pinned["visible"]==true && pinned["separateResults"]==true && pinned["tabs"]==json!(["feed","browse","preferences"]),"only the search field stays pinned below the header: {pinned}");
+            anyhow::ensure!(pinned["position"]=="sticky" && pinned["visible"]==true && pinned["separateResults"]==true && pinned["still"]==true && pinned["tabs"]==json!(["feed","browse","preferences"]),"the search field stays where it loaded, pinned below the header: {pinned}");
             key(&client,"/").await?;
             wait_for(&client,"document.activeElement?.id==='q'").await?;
             let focused_scroll=client.execute("return scrollY",vec![]).await?;
@@ -762,8 +759,8 @@ async fn mobile_feed_search_stays_below_header_while_articles_and_results_scroll
             wait_for(&client,"document.querySelectorAll('[data-search-results] .row').length>=20").await?;
             client.execute("document.querySelector('#q').blur();scrollTo(0,700)",vec![]).await?;
             wait_for(&client,"scrollY>=600 && Math.abs(document.querySelector('.feed-toolbar').getBoundingClientRect().top-document.querySelector('.top').getBoundingClientRect().bottom)<1").await?;
-            let results=client.execute("return {query:document.querySelector('#q').value,active:document.querySelector('.mobile-tabs [aria-current]')?.dataset.route,resultsTop:document.querySelector('[data-search-results]').getBoundingClientRect().top,fieldBottom:document.querySelector('.feed-toolbar').getBoundingClientRect().bottom}",vec![]).await?;
-            anyhow::ensure!(results["query"]=="source:\"publisher.invalid\"" && results["active"]=="" && results["resultsTop"].as_f64().unwrap()<results["fieldBottom"].as_f64().unwrap(),"results scroll independently under the field while Feed stays active: {results}");
+            let results=client.execute("return {query:document.querySelector('#q').value,active:document.querySelector('.mobile-tabs [aria-current]')?.dataset.route,resultsTop:document.querySelector('[data-search-results]').getBoundingClientRect().top,fieldBottom:document.querySelector('.feed-toolbar').getBoundingClientRect().bottom,fieldTop:document.querySelector('.feed-toolbar').getBoundingClientRect().top,resting:window.__feedToolbarTop}",vec![]).await?;
+            anyhow::ensure!(results["query"]=="source:\"publisher.invalid\"" && results["active"]=="" && results["resultsTop"].as_f64().unwrap()<results["fieldBottom"].as_f64().unwrap() && (results["fieldTop"].as_f64().unwrap()-results["resting"].as_f64().unwrap()).abs()<1.0,"results scroll independently under the field while Feed stays active: {results}");
             if width<640 {
                 let keyboard=client.execute_async(r#"
                   const done=arguments[arguments.length-1],input=document.querySelector('#q'),viewport=visualViewport,bar=document.querySelector('.mobile-tabs'),before=scrollY;
@@ -797,10 +794,7 @@ async fn feed_page_size_slices_static_pages_and_keeps_the_cursor_visible() -> Re
     let config = fixture.directory.path().join("aggr.toml");
     std::fs::write(
         &config,
-        std::fs::read_to_string(&config)?.replace(
-            "items_per_page=3",
-            "items_per_page=50\npreferences.feed_page_size=50",
-        ),
+        std::fs::read_to_string(&config)?.replace("items_per_page=3", "items_per_page=50"),
     )?;
     let archive = fixture.directory.path().join(".aggr/data");
     let date = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")?;
@@ -910,21 +904,14 @@ async fn feed_page_size_contracts(client: &Client, fixture: &Fixture) -> Result<
         "every article appears in exactly one slice: {}",
         distinct.len()
     );
-    // Resetting the saved preference restores this site's explicit 50-entry default.
+    // Without the preference the static page is the page: every row shows and the pager stays.
     client.execute("localStorage.removeItem('aggr:feed-page-size');window.dispatchEvent(new StorageEvent('storage',{key:'aggr:feed-page-size'}))", vec![]).await?;
     wait_for(client, "document.querySelector('[data-feed-pager] [data-page-status]')?.textContent === 'page 2 / 2'").await?;
     let unsliced = client.execute(STATE, vec![]).await?;
     anyhow::ensure!(
         unsliced["visible"].as_array().map(Vec::len) == Some(25)
             && unsliced["pagerHidden"] == false,
-        "the site default page size shows the whole static page: {unsliced}"
+        "the default page size shows the whole static page: {unsliced}"
     );
-    client.refresh().await?;
-    wait_booted_with(
-        client,
-        "document.querySelectorAll('[data-static-feed] .row').length === 25",
-    )
-    .await?;
-    wait_for(client, "document.querySelector('[data-feed-pager] [data-page-status]')?.textContent === 'page 2 / 2'").await?;
     Ok(())
 }

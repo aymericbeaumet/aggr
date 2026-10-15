@@ -96,7 +96,7 @@ pub enum Fetch {
 fn require_heavy(source: &Source, provider: &str) -> Result<()> {
     anyhow::ensure!(
         source.content == ContentMode::Heavy,
-        "{provider} provides HTML articles rather than RSS, Atom, or JSON Feed; use a feed URL or set content = \"heavy\" for this source"
+        "{provider} provides HTML articles rather than RSS, Atom, or JSON Feed; use a feed URL or set content_download_strategy = \"article\" for this source"
     );
     Ok(())
 }
@@ -189,10 +189,13 @@ mod tests {
         ] {
             let error = match result {
                 Err(error) => format!("{error:#}"),
-                Ok(_) => panic!("{name} HTML requires heavy mode"),
+                Ok(_) => panic!("{name} HTML requires article capture"),
             };
             assert!(error.contains(name), "{error}");
-            assert!(error.contains("content = \"heavy\""), "{error}");
+            assert!(
+                error.contains("content_download_strategy = \"article\""),
+                "{error}"
+            );
         }
         requests.assert_calls_async(0).await;
     }

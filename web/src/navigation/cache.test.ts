@@ -15,6 +15,7 @@ describe('PageCache', () => {
     expect(requests).toBe(1);
     await first.page;
     expect(first.ready).toBe(true);
+    expect(first.fetched).toEqual(page('a'));
     for (let index = 0; index < 30; index += 1) cache.load(`p${index}`);
     expect(cache.size).toBe(24);
     expect(cache.has('a')).toBe(false);

@@ -1,3 +1,11 @@
+[settings]
+lockfile = true
+
 [tools]
-node = "26.0.0"
-"npm:chromedriver" = "154.0.0"
+actionlint = "1.7.12"
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
+cmake = "4.4.4"
+node = "26.12.0"
+ninja = "1.13.2"
+chromedriver = "155.0.8059.39"
+rust = { version = "1.99.0", profile = "default" }

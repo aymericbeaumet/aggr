@@ -18,7 +18,12 @@ Combine full text with `source:`, `category:`, `tag:`, `date:`, `sort:`, quoted 
 exclusions such as `-tag:sponsored`. Completion suggests real archive values and dates; hover over
 the field for syntax help. See [client development](client.md) for the search contract.
 
+The search field stays fixed under the header on every platform while the feed scrolls, and its
+results scroll beneath it.
+
 Archived points and comment counts appear alongside metadata only when the source recorded them.
+Hacker News points and comment counts stay in the archive and are left off the page; the discussion
+link is the thread. Lobsters and other recorded counts stay visible.
 
 ## Sharing a passage
 
@@ -33,7 +38,7 @@ resolved in the reader from the article's own text.
 ## Mobile
 
 Feed, browse, and preferences sit in a compact bottom tab bar above the home indicator.
-The feed search field stays pinned below the header while its results scroll.
+The whole bar is the hit target, and the tab lights up as soon as it is pressed.
 The current tab has a rounded selected background. Links read by colour rather than an underline, and taps do
 not flash the platform's default highlight.
 
@@ -49,7 +54,7 @@ dates, page size, motion, keyboard shortcuts, and d/u scroll distance. Paragraph
 off by default. Settings stay on the device; all initial values can be set in `aggr.toml`:
 
 ```toml
-[site.preferences]
+[preferences]
 paragraph_indent = false
 font_family = "serif"
 line_spacing = "relaxed"
@@ -84,7 +89,7 @@ separately.
 | `o` / `Enter` in article lists | Open the selected item. |
 | `j` / `k` in articles | Open the older / newer article. Moving past either end returns to the feed. |
 | `O` | Open the original for the selected feed item or current article. |
-| Uppercase network key | Open the selected/current item's matched discussion, or search that enabled network for its original URL. Built-ins use `H`, `R`, and `X`. |
+| Uppercase discussion key | Open the selected/current item's matched discussion, or search that enabled discussion for its original URL. Built-ins use `H`, `R`, and `X`. |
 | `u` / `d` in articles | Scroll up / down. |
 | `g f` (or `g i`), `g b` (or `g l`), `g p` | Feed, browse, preferences. |
 | `g 1` … `g 9` | Open one of the first nine feed entries. |

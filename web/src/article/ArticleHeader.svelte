@@ -33,4 +33,6 @@
 <p class="empty article-access-notice">The publisher requires a subscription. <a href={header.link} title={header.link} target="_blank" rel="noopener noreferrer">Open the original</a>{#if article.access.archive_lookup_url}{' or '}<a href={article.access.archive_lookup_url} target="_blank" rel="noopener noreferrer">find an archived copy</a>{/if}.</p>
 {:else if article.access.kind === 'titles_only'}
 <p class="empty">This source publishes titles only — <a href={header.link} title={header.link} target="_blank" rel="noopener noreferrer">open the original</a>.</p>
+{:else if article.access.kind === 'missing'}
+<p class="empty">The article text isn't here yet — <a href={header.link} title={header.link} target="_blank" rel="noopener noreferrer">open the original</a>.</p>
 {/if}

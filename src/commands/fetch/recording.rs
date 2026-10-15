@@ -82,17 +82,29 @@ async fn infer_at(
     {
         return Ok(Some(seconds));
     }
-    if failures.blocked(&url) {
-        return Ok(None);
-    }
+    // A watch page that is missing or rate-limited still has a public length. The probe key
+    // includes that lookup so an earlier HTML-only miss does not hide it for a day.
+    let player_lookup = crate::sources::youtube::is_video_url(&url);
     let probe = Probe(Namespace::RecordingDuration.dir(cache_dir).join(format!(
         "{}.probe",
-        crate::model::sha1_hex(format!("{}\0{:?}\0{:?}", url, headers, audio))
+        crate::model::sha1_hex(format!(
+            "{}\0{:?}\0{:?}{}",
+            url,
+            headers,
+            audio,
+            if player_lookup { "\0yt-player" } else { "" }
+        ))
     )));
     let previous = probe.read()?;
     if previous
         .is_some_and(|previous| now.duration_since(previous).unwrap_or_default() < RETRY_AFTER)
     {
+        return Ok(None);
+    }
+    if player_lookup && let Some(seconds) = youtube_player_duration(client, &url).await {
+        return Ok(Some(seconds));
+    }
+    if failures.blocked(&url) {
         return Ok(None);
     }
     if cached.is_some() && previous.is_none() {
@@ -145,6 +157,27 @@ async fn infer_at(
         probe.record(now)?;
     }
     Ok(duration)
+}
+
+/// YouTube's watch page often withholds `lengthSeconds`. The player document still publishes it.
+async fn youtube_player_duration(client: &http::Client, url: &Url) -> Option<u64> {
+    let id = crate::sources::youtube::video_id(url)?;
+    let endpoint = Url::parse(crate::sources::youtube::PLAYER_METADATA_URL).ok()?;
+    let response = client
+        .post_json(
+            &endpoint,
+            &crate::sources::youtube::player_metadata_body(&id),
+        )
+        .await
+        .map_err(|error| {
+            log::debug!("YouTube player duration unavailable for {url}: {error:#}");
+            error
+        })
+        .ok()?;
+    let http::Response::Ok(body) = response else {
+        return None;
+    };
+    crate::sources::youtube::duration_from_player_json(&String::from_utf8_lossy(&body.bytes), &id)
 }
 
 fn safe_url(value: &str) -> Option<Url> {

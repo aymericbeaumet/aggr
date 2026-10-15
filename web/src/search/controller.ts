@@ -336,7 +336,7 @@ function refresh(): void {
 }
 
 export const driver: SearchDriver = {
-  arrive(runQuery = true) {
+  arrive() {
     sessionFor();
     cancelQuery();
     contextWork?.abort();
@@ -348,13 +348,11 @@ export const driver: SearchDriver = {
     search.open = false;
     search.busy = false;
     search.error = '';
-    if (search.active) {
-      if (runQuery) void run(restore());
-    }
+    if (search.active) void run(restore());
     else {
       hideResults();
       search.address = '';
-      void loadCatalogue().catch(() => {});
+      // The catalogue loads when the field is used. The articles on screen get the connection first.
     }
   },
   leave() {

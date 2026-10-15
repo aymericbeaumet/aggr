@@ -70,16 +70,62 @@ struct Job {
     previous_misses: u32,
 }
 
-/// Reuse previous matches while dev refreshes its sources, without waiting for providers.
-pub fn cached(configs: &[NetworkConfig], items: &[Item], cache_root: &Path) -> ResolutionSet {
-    let root = Namespace::Discussions.dir(cache_root);
-    let providers: BTreeSet<_> = configs
+pub fn by_source(sources: &[crate::config::Source]) -> BTreeMap<String, Vec<NetworkConfig>> {
+    sources
+        .iter()
+        .map(|source| (source.slug.clone(), source.discussions.clone()))
+        .collect()
+}
+
+/// True when a lookup provider is enabled for some source, or for the site when nothing is
+/// subscribed yet.
+pub fn any_provider(defaults: &[NetworkConfig], sources: &[crate::config::Source]) -> bool {
+    if sources.is_empty() {
+        defaults.iter().any(|config| config.provider.is_some())
+    } else {
+        sources.iter().any(|source| {
+            source
+                .discussions
+                .iter()
+                .any(|config| config.provider.is_some())
+        })
+    }
+}
+
+fn has_provider(
+    defaults: &[NetworkConfig],
+    by_source: &BTreeMap<String, Vec<NetworkConfig>>,
+) -> bool {
+    defaults.iter().any(|config| config.provider.is_some())
+        || by_source
+            .values()
+            .any(|configs| configs.iter().any(|config| config.provider.is_some()))
+}
+
+fn providers_for<'a>(
+    defaults: &'a [NetworkConfig],
+    by_source: &'a BTreeMap<String, Vec<NetworkConfig>>,
+    slug: &str,
+) -> impl Iterator<Item = NetworkProvider> + 'a {
+    by_source
+        .get(slug)
+        .map(Vec::as_slice)
+        .unwrap_or(defaults)
         .iter()
         .filter_map(|config| config.provider)
-        .collect();
+}
+
+/// Reuse previous matches while dev refreshes its sources, without waiting for providers.
+pub fn cached(
+    defaults: &[NetworkConfig],
+    by_source: &BTreeMap<String, Vec<NetworkConfig>>,
+    items: &[Item],
+    cache_root: &Path,
+) -> ResolutionSet {
+    let root = Namespace::Discussions.dir(cache_root);
     let mut out = ResolutionSet::default();
     for item in items {
-        for &provider in &providers {
+        for provider in providers_for(defaults, by_source, &item.front.source) {
             if let Some(found) = read_cache(&cache_path(&root, provider, &item.front.link))
                 .and_then(|entry| entry.found)
             {
@@ -91,17 +137,14 @@ pub fn cached(configs: &[NetworkConfig], items: &[Item], cache_root: &Path) -> R
 }
 
 pub async fn resolve(
-    configs: &[NetworkConfig],
+    defaults: &[NetworkConfig],
+    by_source: &BTreeMap<String, Vec<NetworkConfig>>,
     items: &[Item],
     client: Arc<http::Client>,
     cache_root: &Path,
     now: DateTime<Utc>,
 ) -> Result<ResolutionSet> {
-    let providers: BTreeSet<_> = configs
-        .iter()
-        .filter_map(|config| config.provider)
-        .collect();
-    if providers.is_empty() {
+    if !has_provider(defaults, by_source) {
         return Ok(ResolutionSet::default());
     }
     let cache_root = Namespace::Discussions.dir(cache_root);
@@ -118,7 +161,7 @@ pub async fn resolve(
     let mut jobs = Vec::new();
     let mut out = ResolutionSet::default();
     for item in ordered {
-        for &provider in &providers {
+        for provider in providers_for(defaults, by_source, &item.front.source) {
             let lookup_key = key(provider, &item.front.link);
             if !seen.insert(lookup_key) {
                 continue;
@@ -455,7 +498,7 @@ mod tests {
         )
         .unwrap();
         let config =
-            crate::config::Config::parse("[[networks]]\nprovider = \"hackernews\"").unwrap();
+            crate::config::Config::parse("[defaults]\ndiscussions = [\"hackernews\"]\n").unwrap();
         let item = Item {
             path: "items/blog/article".into(),
             front: crate::model::FrontMatter {
@@ -464,20 +507,35 @@ mod tests {
             },
             body: String::new(),
         };
-        let resolutions = cached(&config.networks, std::slice::from_ref(&item), dir.path());
+        let resolutions = cached(
+            &config.defaults.discussions,
+            &BTreeMap::new(),
+            std::slice::from_ref(&item),
+            dir.path(),
+        );
         assert_eq!(
             resolutions.get(NetworkProvider::HackerNews, link),
             Some(&found)
         );
         assert!(
-            cached(&[], std::slice::from_ref(&item), dir.path())
-                .get(NetworkProvider::HackerNews, link)
-                .is_none()
+            cached(
+                &[],
+                &BTreeMap::new(),
+                std::slice::from_ref(&item),
+                dir.path()
+            )
+            .get(NetworkProvider::HackerNews, link)
+            .is_none()
         );
         assert!(
-            cached(&config.networks, &[], dir.path())
-                .get(NetworkProvider::HackerNews, link)
-                .is_none()
+            cached(
+                &config.defaults.discussions,
+                &BTreeMap::new(),
+                &[],
+                dir.path()
+            )
+            .get(NetworkProvider::HackerNews, link)
+            .is_none()
         );
     }
 

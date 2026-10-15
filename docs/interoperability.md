@@ -85,13 +85,13 @@ item with its title, `https://qwen.ai/blog?id=<path>` as the link, its RFC 3339 
 tags as labels, the small cover image as the preview candidate, and the article HTML (the first
 of `.post-content`, `article`, `main`, or `body`) as content; the source is titled `Qwen` with
 `https://qwen.ai/` as its site URL. An article without a path, title, or content is a source
-error rather than an empty item. Because the API already carries the whole article, heavy mode
+error rather than an empty item. Because the API already carries the whole article, article capture
 never requests the JavaScript shell for it, and the daily retry that upgrades feed-only captures
-skips the source, as it does for light-mode and mirrored sources.
+skips the source, as it does for feed-strategy and mirrored sources.
 
 ## Public threads
 
-Heavy article extraction joins public posts by the original author. Mastodon/ActivityPub follows
+Article capture joins public posts by the original author. Mastodon/ActivityPub follows
 same-origin ActivityStreams parents and replies. X/Twitter status URLs use public xcancel HTML;
 stored attribution and post links use `x.com`, and images use their original media URLs. X source
 credentials are never forwarded to xcancel. No login, browser cookies, or publisher scripts are used.
@@ -124,7 +124,7 @@ is kept byte for byte as the master and served as-is, its size is read from the 
 box so the space is reserved before it loads, and it carries a flat stand-in preview instead of a
 ThumbHash. It gains no WebP renditions. A CDN that answers `auto=format` with AVIF regardless of
 `Accept` — Linear's, for one — is archived this way rather than skipped. Having no decoder also
-means AVIF cannot be compacted: under `media = "compressed"` it keeps its exact bytes, as
+means AVIF cannot be compacted: under `media_download_strategy = "compressed"` it keeps its exact bytes, as
 colour-managed and high-bit-depth images do.
 
 AVIF support stops there deliberately, and two gaps follow from never decoding it. An animated AVIF
@@ -142,6 +142,12 @@ Successful choices are remembered in a bounded, in-memory origin cache for the r
 The retry preserves aggr's user agent and configured request headers, certificate verification,
 redirect origin boundaries, host pacing, total timeout, and decompressed body limit. It shares the
 ordinary response and article cache; challenge pages are not successful article captures.
+
+A CloudFront 403 whose body is the "Request blocked" page is a different refusal: that edge
+serves the article to a Mozilla-compatible user agent and rejects aggr's own token. One retry
+sends `Mozilla/5.0 (compatible; aggr/<version>; +https://github.com/aymericbeaumet/aggr)`, which
+still names this release, and the origin keeps that form for the rest of the run. A configured
+`User-Agent` is never replaced. Any other 403 stays a failure.
 
 This is an HTTP transport fallback implemented in Rust, with BoringSSL linked into the binary.
 It does not run Python, a browser, JavaScript challenges, or an external proxy service, and does
@@ -167,7 +173,10 @@ Charts that a page draws in the browser (Vega-Lite specifications streamed in a 
 as on openai.com) leave an empty placeholder in the server HTML, and aggr never executes page
 scripts. When the specification carries its data inline, the placeholder receives that data as a
 table with the chart title and its caption, so the figures stay readable and searchable; the drawn
-chart itself is not reproduced. Rows and columns are bounded.
+chart itself is not reproduced. A chart already drawn in the page as an inline SVG is read the
+same way: bar lengths against the labeled axis become that table, and the drawing is not stored.
+A sponsor logo placed in the article is kept; a sponsor block that pitches something is not.
+Rows and columns are bounded.
 
 An item that only kept feed content because the original page was unavailable (a Cloudflare
 challenge, an outage, or a rate limit at capture time), or whose archived body is such a loading
@@ -217,10 +226,10 @@ The newer stable pair requires Rust 1.98; the older stable utility release has a
 GPL-3.0 license. Review the actual package licenses, compiler requirements, and platform builds
 before changing these pins.
 
-Building from source additionally needs CMake 3.22+, a C/C++ toolchain, Git, and native libclang
-for bindgen. Linux CI installs `cmake libclang-dev build-essential`; macOS uses Xcode tools and
-Homebrew `cmake llvm`, with `LIBCLANG_PATH="$(brew --prefix llvm)/lib"`. Windows uses the native
-Visual Studio environment, Ninja, and LLVM; `LIBCLANG_PATH` points to LLVM's `bin` directory.
+Building from source additionally needs the CMake version pinned in `mise.toml`, a C/C++ toolchain,
+Git, and native libclang for bindgen. Run `make setup` for the mise tools. Linux CI installs
+`libclang-dev build-essential`; macOS uses Xcode's native tools and libclang. Windows uses the native
+Visual Studio environment, mise's Ninja, and LLVM; `LIBCLANG_PATH` points to LLVM's `bin` directory.
 Windows x64 also needs NASM. Windows ARM64 uses clang-cl's integrated assembler instead of NASM.
 These are contributor and release build requirements; prebuilt binaries do not require them.
 CI and release workflows keep native Linux GNU, macOS, and Windows runners for both architectures.
@@ -228,7 +237,7 @@ Windows ARM64 must pass those workflows; upstream's documented build matrix does
 
 ## PDF preservation
 
-In heavy content mode, direct PDF articles and explicitly resolved PDF alternates can retain an
+With `content_download_strategy = "article"`, direct PDF articles and explicitly resolved PDF alternates can retain an
 item-owned document companion. Capture obeys `fetch.max_body_bytes` (10 MB by default) and accepts
 at most 16 MiB. It requires a PDF signature and a compatible response type, and validates the
 stored path and content hash before publication. HTML challenges never
@@ -353,7 +362,7 @@ descriptor schema is [`aggr-instance.schema.json`](aggr-instance.schema.json).
 
 The config link identifies the tracked root file used for the build when that identity is known. It
 does not embed the full effective configuration: local collection files, remote collection bodies,
-themes, environment expansion, and the binary version remain separate inputs. Pin or vendor remote
+environment expansion, and the binary version remain separate inputs. Pin or vendor remote
 collections when repeatable rebuilding matters.
 
 An instance can also consume another instance's retained data through its repository URL.
@@ -380,8 +389,8 @@ repository's complete Git history.
 
 Retention removes an item from the current static site and discovery outputs. Append-only Git
 history still contains the old object while its ancestor commits remain reachable, but search
-engines are not a Git-history recovery interface. Set `[defaults] max_items`, `max_age_days`, and
-`max_bytes` to zero, and clear `since`, when the live site should keep the complete captured archive.
+engines are not a Git-history recovery interface. Set `[defaults] count_max`, `max_age_days`, and
+`size_max` to zero, and clear `since`, when the live site should keep the complete captured archive.
 
 ## Preservation boundary
 
@@ -457,13 +466,20 @@ unknown language names are retained without promising a matching syntax grammar.
 markup becomes inline code. Cloudflare email-protection payloads are decoded as escaped text,
 including package versions mistakenly classified as email addresses, without running publisher
 JavaScript. LWN's trailing article-index navigation is removed without removing prose tables.
+A trailing call to translate the article, including a banner image whose address exists only for
+that call, is removed while cleaning Markdown, so an archive that already stored it loses the
+block on the next render. A subtitle kept in the page headline, a short release line classed as that subtitle, or schema.org
+`alternativeHeadline`, rather than in the article body, is copied in at extraction. A byline or a
+date in that spot is left out. An archive that never stored that sentence needs a fresh
+original-page capture.
 Consecutive numbered citations stay inline, as does prose following a link. Intentional HTML
 line breaks remain intact; action-link layout rules must not split citations or ordinary prose.
 
 `--reprocess` can recover these semantics when the retained HTML still contains them. Language
 metadata discarded by an older extraction needs an original-page extraction; it cannot be reliably
 reconstructed from the stored code alone. Extraction cache versions change with these rules.
-Reprocessing includes articles from renamed or removed sources and runs before source fetching.
+Reprocessing covers articles the current config still retains and runs before source fetching.
+A source removed from the config is dropped by retention first.
 
 Explicit `--refresh` may fill missing previews or article media while preserving existing
 companions and historical blob URLs. To refresh existing dev items, run `dev --refresh` once and

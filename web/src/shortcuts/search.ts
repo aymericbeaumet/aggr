@@ -24,6 +24,15 @@ export function searchField(): HTMLInputElement | null {
   return field instanceof HTMLInputElement ? field : null;
 }
 
+/** Put the keyboard in the search field and select what it already holds. */
+function placeSearchFocus(field: HTMLInputElement): void {
+  const current = field.isConnected ? field : searchField();
+  if (!current) return;
+  current.focus({ preventScroll: true });
+  revealSearchField(current);
+  if (document.activeElement === current) current.select();
+}
+
 /** Focus the shared search field, coming home first when the current page has none. */
 export function focusSearch(): void {
   const field = searchField();
@@ -34,9 +43,14 @@ export function focusSearch(): void {
   // The field is about to be used: have the search module here before the first keystroke.
   void search.load().catch(() => {});
   // Focus first without moving, then decide: the field's own box is what we measure.
-  field.focus({ preventScroll: true });
-  revealSearchField(field);
-  field.select();
+  placeSearchFocus(field);
+  // Arrival claims the page on the next frame. When that claim wins, put the field back.
+  requestAnimationFrame(() => {
+    if (!field.isConnected) return;
+    const active = document.activeElement;
+    const main = document.getElementById('content');
+    if (active === main || active === document.body || active === document.documentElement) placeSearchFocus(field);
+  });
 }
 
 /** The field reveals itself on use, and a page reached with `?focus-search` starts in it. */

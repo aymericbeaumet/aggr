@@ -17,7 +17,6 @@
   const rows = $derived(results?.rows ?? []);
   const offset = $derived(results ? (results.page - 1) * results.size : 0);
   const indent = $derived(String(offset + rows.length).length - 1);
-  const excerpts = $derived(shown.model?.site.excerpts ?? true);
   const language = $derived(shown.model?.site.language ?? '');
   const status = $derived(results || search.busy ? search.status : '');
   /** Pages the worker holds complete for offline reading, by their absolute address. */
@@ -66,7 +65,7 @@
 
 <div data-search-results data-nosnippet>
   <p id="search-status" role="status" aria-live="polite" hidden={!status}>{status}</p>
-  <ol id="list" class="rows search-results" role="list" aria-busy={results && search.busy ? 'true' : 'false'} hidden={!results} style={results ? `--rank-indent: ${indent}ch` : undefined} bind:this={list}>{#each rows as row, index (row.url)}<Row {row} rank={offset + index + 1} {base} {excerpts} {language} selected={selected(row)} saved={saved(row)} />{/each}</ol>
+  <ol id="list" class="rows search-results" role="list" aria-busy={results && search.busy ? 'true' : 'false'} hidden={!results} style={results ? `--rank-indent: ${indent}ch` : undefined} bind:this={list}>{#each rows as row, index (row.url)}<Row {row} rank={offset + index + 1} {base} {language} selected={selected(row)} saved={saved(row)} />{/each}</ol>
   <p id="empty" hidden={!results || results.total !== 0}>No articles match this search. Try fewer filters or different words.</p>
   <nav class="pager search-pager" aria-label="Search results pages" hidden={!results || results.pages <= 1}>
     <span class="pager-side"><a data-search-page-previous href={pageHref((results?.page ?? 1) - 1)} hidden={!results || results.page <= 1} onclick={(event) => turn(event, -1)}>newer</a></span>

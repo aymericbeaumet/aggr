@@ -18,6 +18,11 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="{{ site.title }}">
 {% endif %}
+<link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
+{% if client_page.site.assets.app %}
+{% for chunk in client_page.site.assets.imports %}<link rel="modulepreload" href="{{ chunk | url_for }}">{% endfor %}
+{% if client_page.site.assets.css %}<link rel="stylesheet" href="{{ client_page.site.assets.css | url_for }}">{% endif %}
+{% endif %}
 <script id="aggr-preferences" type="application/json">{{ site.preference_schema.bootstrap | json }}</script>
 <script src="{{ 'assets/app/bootstrap.js' | url_for }}"></script>
 <meta name="aggr:network" content="{{ site.network_url }}">
@@ -56,11 +61,6 @@
 {% elif item and item.preview %}<meta name="twitter:image" content="{{ site.base_url }}{{ item.preview.url }}">{% if item.preview.alt %}<meta name="twitter:image:alt" content="{{ item.preview.alt }}">{% endif %}
 {% else %}<meta name="twitter:image" content="{{ site.base_url }}{{ 'assets/icon-512.png' | site_path }}"><meta name="twitter:image:alt" content="{{ site.title }} app icon">{% endif %}
 {% endif %}
-<link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
-{% if client_page.site.assets.app %}
-{% for chunk in client_page.site.assets.imports %}<link rel="modulepreload" href="{{ chunk | url_for }}">{% endfor %}
-{% if client_page.site.assets.css %}<link rel="stylesheet" href="{{ client_page.site.assets.css | url_for }}">{% endif %}
-{% endif %}
 <noscript><style>.progressive-image,.preview-image,.article-lead img{color:inherit}</style></noscript>
 {% if page.feed_path is not none %}{% set feed_path = page.feed_path %}{% set feed_title = page.feed_title or site.title %}
 <link rel="alternate" type="application/atom+xml" title="{{ feed_title }}" href="{{ (feed_path ~ 'atom.xml') | url_for }}">
@@ -80,13 +80,6 @@
 </head>
 <body data-kind="{{ page.kind }}">
 <a class="skip-link" href="#content">skip to content</a>
-{% if site.params.introduction == true %}
-<details class="reader-intro" open data-nosnippet>
-  <summary>A feed reader backed by your Git repository</summary>
-  <p>aggr turns a reading list into a searchable static site and saves captured articles as Markdown. Explore this reader's sources or create one from your own reading list.</p>
-  <nav aria-label="About this reader"><a href="https://github.com/aymericbeaumet/aggr#create-your-reader" target="_blank" rel="noopener noreferrer">Make your own</a><a href="{{ 'browse/' | url_for }}">Explore the reading list</a><a href="{{ 'sources.opml' | url_for }}" download>Download subscriptions</a></nav>
-</details>
-{% endif %}
 {% macro key_pair(first, second, separator='+', platform='') %}<span class="key-pair"{% if platform %} data-platform-key="{{ platform }}"{% endif %}><kbd>{{ first }}</kbd><small>{{ separator }}</small><kbd>{{ second }}</kbd></span>{% endmacro %}
 <dialog id="shortcut-help" class="shortcut-help" aria-labelledby="shortcut-help-title" aria-keyshortcuts="?" data-nosnippet>
   <form method="dialog">
@@ -112,7 +105,7 @@
           <div><dt><kbd>j</kbd></dt><dd>Older article</dd></div>
           <div><dt><kbd>k</kbd></dt><dd>Newer article</dd></div>
           <div><dt><kbd>O</kbd></dt><dd>Open original</dd></div>
-          {% for discussion in site.discussions %}{% if discussion.shortcut %}<div><dt><kbd>{{ discussion.shortcut }}</kbd></dt><dd>Open {{ discussion.name }} discussion / search</dd></div>{% endif %}{% endfor %}
+          {% for discussion in site.discussions %}{% if discussion.shortcut %}<div><dt><kbd>{{ discussion.shortcut }}</kbd></dt><dd>Open {{ discussion.name }}</dd></div>{% endif %}{% endfor %}
         </dl>
       </section>
       <section aria-labelledby="shortcut-lists">

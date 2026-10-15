@@ -83,7 +83,7 @@ async fn run_prevalidated(
     }
     let now = super::offline::clock(&project.repo, local_sha.as_deref())?;
     let generation = site::render_generation(
-        &store.retained_items(project.config.defaults.limits, &project.sources, now)?,
+        &store.retained_items(&project.sources, now)?,
         &project.config.site,
         now,
     );
@@ -325,7 +325,7 @@ pub fn run_ephemeral(
     let store = Store::open(data_dir).with_image_cache(cache_dir);
     let now = Utc::now();
     let generation = site::render_generation(
-        &store.retained_items(project.config.defaults.limits, &project.sources, now)?,
+        &store.retained_items(&project.sources, now)?,
         &project.config.site,
         now,
     );
@@ -367,17 +367,20 @@ pub async fn resolve_discussions(
 ) -> Result<ResolutionSet> {
     // Mirrors the provider check inside `discussions::resolve`: without a lookup provider there
     // is nothing to match, so the archive is not parsed only to be discarded.
-    if project
-        .config
-        .networks
-        .iter()
-        .all(|network| network.provider.is_none())
-    {
+    if !crate::discussions::any_provider(&project.config.defaults.discussions, &project.sources) {
         return Ok(ResolutionSet::default());
     }
     let items = store.items()?;
     let client = Arc::new(crate::http::Client::new(&project.config.fetch)?);
-    crate::discussions::resolve(&project.config.networks, &items, client, cache_dir, now).await
+    crate::discussions::resolve(
+        &project.config.defaults.discussions,
+        &crate::discussions::by_source(&project.sources),
+        &items,
+        client,
+        cache_dir,
+        now,
+    )
+    .await
 }
 
 /// `--out`, else `[site] out`, both relative to the directory holding `aggr.toml`.

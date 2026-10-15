@@ -1,62 +1,35 @@
 # aggr [![ci](https://github.com/aymericbeaumet/aggr/actions/workflows/ci.yml/badge.svg)](https://github.com/aymericbeaumet/aggr/actions/workflows/ci.yml)
 
-[**Live demo**](https://aggr.aymericbeaumet.com) · [Create your reader](#create-your-reader) · [Browse the archive](https://github.com/aymericbeaumet/aggr-instance/tree/aggr)
+[**Live demo**](https://aggr.aymericbeaumet.com) · [Create your reader](#create-your-reader)
 
-A self-updating feed reader that saves articles as Markdown in your Git repository and publishes
-a searchable static site. Follow websites, read on any device, and keep a copy when the original
-disappears. No application server or separate database service to administer.
+Your own git-backed snapshot of the feeds you follow.
 
-Open source under the MIT license; see [the license](#license).
+Give aggr a website URL. It finds the feed, saves each new item as Markdown in your Git
+repository, and publishes a static site you can search and read on any device. The copy remains
+after the original page is gone. The published site is static files.
 
 <p>
   <img alt="The aggr reader on a desktop browser: a numbered feed of articles with their source, category, age and reading time" src="docs/images/reader-desktop.png" width="61%">
   <img alt="The same reader on a phone: the same articles, with feed, browse and preferences tabs along the bottom" src="docs/images/reader-mobile.png" width="20%">
 </p>
 
-## Why aggr?
-
-- **Own the archive.** Readable Markdown, original links, and capture dates live on a separate
-  Git branch. Inspect, back up, or move the files with ordinary Git tools.
-- **Start small.** Defaults reuse feed content and keep media at the publisher. Original-page
-  extraction and local media preservation are explicit choices, so the first import does not
-  need to download every article and image.
-- **Rebuild from stored data.** `aggr build --offline` renders the local archive without
-  synchronizing sources. Use `--hermetic` for a reader that loads only local resources; ordinary
-  output can display publisher-hosted media.
-- **Run your own reader.** A small `aggr.toml` and a scheduled workflow fetch sources and publish
-  static files. GitHub Pages is the ready-made path; other Git and static hosts work too.
-- **Keep reading.** Full-text search, mobile installation, keyboard navigation, and a cache of
-  recently opened pages. Choose complete offline article downloads in Preferences. New deployments
-  update open feeds without interrupting an article.
-- **Follow other instances.** Copy selected articles from another aggr repository into your own
-  independent archive, preserving their original links.
-
-Fetching runs on a schedule; the open reader checks for completed deployments every 15 seconds.
-This is automatic updating, not a real-time delivery guarantee.
-
 ## Create your reader
 
 1. [Fork the working instance](https://github.com/aymericbeaumet/aggr-instance/fork), keeping
    **Copy the main branch only** selected to start without the demo's archive.
-2. Replace `aggr.toml` with the [small starter configuration](examples/starter.toml), then edit its
-   title and sources. A website URL is enough; aggr discovers the feed.
+2. Replace `aggr.toml` with the [starter](examples/starter.toml) and edit the title and sources.
+   A website URL is enough; aggr discovers the feed.
 3. In **Settings → Pages → Build and deployment**, set **Source** to **GitHub Actions**.
-4. Open **Actions**, enable workflows, and run **aggr** on `main`. When it finishes, open the
-   deployment link. Without a custom domain, it is `https://<you>.github.io/<repo>/`.
+4. Open **Actions**, enable workflows, and run **aggr** on `main`. The site is
+   `https://<you>.github.io/<repo>/` until you set a domain.
 
-Edit the configuration before enabling Actions so the first run uses your sources.
-The starter has two sources, with each feed bounded to 250 retained items, 730 days and 1 GB of
-retained files. It uses feed content and publisher-hosted images, previews and PDFs; no originals
-are downloaded just to populate a reading list. The reader initially shows 25 entries, loads search when needed, and
-starts with automatic offline downloads disabled. First-deployment time depends on the sources,
-runner availability and host; the live demo can be tried immediately without setup.
+Edit the configuration before the first run. The starter follows two sites and keeps each feed to
+250 items, 730 days, and 1 GB, using the feed text and leaving images at the publisher.
+Original-page extraction and local media are settings you turn on when you want them. The default
+GitHub setup publishes the reader and its archive publicly. See [sources](docs/sources.md),
+[hosting](docs/hosting.md), and [build budgets](docs/build-budget.md).
 
-Builds default to a 1 GB output limit. When you enable local media preservation, article text takes
-priority over media that cannot fit. The original Git archive is unchanged by publication choices.
-See [build budgets](docs/build-budget.md) and [source options](docs/sources.md).
-The default GitHub setup publishes the reader and its archive publicly.
-
-To try it locally instead:
+To try it on your machine:
 
 ```sh
 mise use -g github:aymericbeaumet/aggr   # or download a binary from Releases
@@ -65,72 +38,52 @@ aggr init
 aggr dev                             # http://127.0.0.1:7319
 ```
 
-`dev` does not commit or push. See [source configuration](docs/sources.md) for OPML, podcasts,
-video channels, collections, and image options, or [hosting](docs/hosting.md) for deployment.
-
-## Git is the database
-
-```text
-Your sources → scheduled sync → Markdown on the aggr branch → static reader
-```
-
-The main branch holds configuration; the unrelated `aggr` branch holds captured articles and
-optional media. A no-op sync creates no commit. One broken source does not stop healthy sources.
-Data history is append-only: retention removes files from the current tree, but older commits
-remain available. It does not shrink the accumulated Git history.
-
-```text
-items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.md
-items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.html
-items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.preview-202cd0284a4a.webp
----
-title: Announcing a Maintainer in Residence
-link: https://blog.rust-lang.org/2026/09/22/maintainer-in-residence/
-source: blog-rust-lang-org
-published: 2026-09-22T00:00:00Z
-first_seen: 2026-09-24T00:01:38Z
-content: extracted
----
-```
-
-[Inspect real stored files](https://github.com/aymericbeaumet/aggr-instance/tree/aggr) or read the
-[Git contract](docs/git-model.md). In a September 2026 snapshot using local image preservation,
-the 50-source demo held 2,314 article Markdown files and 4.38 GB of archive files, 99% of those bytes
-in images. Six incremental
-runs had a median render time of 41 seconds and a total job time of 6 minutes 12 seconds.
-See [the measurements and hosting limits](docs/benchmarks.md) before choosing your configuration.
-
-## Know the tradeoffs
-
-- Reading state and preferences stay in each browser; there is no cross-device read-state sync.
-- Captures preserve readable content, not complete websites. Feed content can be a summary;
-  original-page extraction is optional and can fail. Offline reading covers cached pages and
-  explicitly downloaded articles with their retained images. Publisher-hosted media, embedded
-  video and audio still need a connection.
-- Public hosting republishes captured content. Search-engine indexing is opt-in, but `noindex`
-  is not access control or permission to republish. Original links and attribution remain visible.
-  See [publication and privacy](docs/hosting.md#publication-and-search-indexing).
-- Git history and saved media grow. Retention bounds the current archive, not past commits;
-  hosting limits and scheduled-run delays still apply.
+`dev` does not commit or push.
 
 ## How is it different?
 
 | Project | Focus |
 |---|---|
-| [Miniflux](https://miniflux.app) / [FreshRSS](https://freshrss.org) | Server-backed feed reading. They offer APIs or exports; aggr stores the archive directly as files in Git and serves a static reader. |
-| [Bubo](https://github.com/georgemandis/bubo-rss) | A minimal static page of feed links. aggr also captures article content for reading and archiving. |
-| [wallabag](https://wallabag.org) | Saving articles to read later. aggr centers on following sources automatically. |
-| [ArchiveBox](https://github.com/ArchiveBox/ArchiveBox) | Broader web preservation, including scheduled feed imports. aggr centers on a feed reader and Markdown history in Git. |
+| [Miniflux](https://miniflux.app) / [FreshRSS](https://freshrss.org) | A server that reads feeds for you. aggr stores the articles as files in Git and serves a static site. |
+| [Bubo](https://github.com/georgemandis/bubo-rss) | One generated page of feed links. aggr also keeps the article text. |
+| [wallabag](https://wallabag.org) | Pages you save, to read later. aggr follows sources on a schedule. |
+| [ArchiveBox](https://github.com/ArchiveBox/ArchiveBox) | Broad snapshots of the web, including feeds. aggr is a reader whose history is Markdown in Git. |
 
-## Documentation and contributing
+## The archive is a Git branch
+
+Configuration stays on your primary branch. Articles live on a separate `aggr` branch: one
+Markdown file per item, with the original URL and the time it was first captured. A sync that
+changes nothing creates no commit, and one broken source does not stop the others. Items copied
+from another aggr repository keep their original links. See
+[copying another instance](docs/sources.md#copying-another-aggr-instance).
+
+```text
+website URL → scheduled sync → Markdown on the aggr branch → static reader
+```
+
+An open feed picks up a finished deployment on its own. [Reading](docs/reading.md) covers search,
+the phone layout, keyboard shortcuts, and offline copies. A stored item and the rules for editing
+the branch are in the [Git model](docs/git-model.md). How large the public demo is, and how long a
+run takes, is in [benchmarks](docs/benchmarks.md).
+
+## Limits
+
+- Reading state stays in the browser that recorded it.
+- A capture keeps the article or the feed entry. Feed text can be a summary, and original-page
+  extraction can fail. Video and audio still come from the publisher.
+- A public site republishes what it captured. Pages ask search engines to skip them unless you
+  opt in, and that request leaves a public repository public. The original link stays on every
+  item. See [publication](docs/hosting.md#publication-and-search-indexing).
+- Retention limits the current tree. Older commits remain for as long as that history is kept.
+  See the [Git model](docs/git-model.md).
+
+## Documentation
 
 [Sources](docs/sources.md) · [Reader](docs/reading.md) · [Commands](docs/commands.md) ·
 [Hosting](docs/hosting.md) · [Rendering](docs/rendering.md) · [Git model](docs/git-model.md) ·
 [Interoperability](docs/interoperability.md) · [Performance](docs/performance.md)
 
-See [sharing a reader](docs/sharing.md) for useful links, subscription exports and setup expectations.
-
-Rust generates the site; the reader is a Svelte application compiled ahead of time and shipped
+Rust generates the site. The reader is a Svelte application compiled ahead of time and shipped
 inside the binary, so building a site never needs Node. See [contributing](CONTRIBUTING.md) and
 [client development](docs/client.md).
 

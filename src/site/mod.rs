@@ -34,7 +34,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use sha1::{Digest as _, Sha1};
 
-use crate::config::{Config, SiteConfig, SiteIdentityKind, Source};
+use crate::config::{Config, NetworkConfig, SiteConfig, SiteIdentityKind, Source};
 use crate::content;
 use crate::model::Item;
 use crate::store::Store;
@@ -403,15 +403,17 @@ pub fn relative_root(path: &str) -> String {
 }
 
 /// What the worker reads from `self.AGGR_SW`: its cache version, the application and content
-/// versions, and the revisioned install-time lists. `sw.js` is this object followed by an
-/// `importScripts` of the compiled worker, so the worker's scope stays the site root.
+/// versions, and the revisioned install-time lists. The article catalogue is
+/// `offline-catalog.json`, not part of this script, so installing the worker does not download
+/// it. `sw.js` is this object followed by an `importScripts` of the compiled worker, so the
+/// worker's scope stays the site root.
 #[derive(Serialize)]
 struct SwConfig {
     version: String,
     app_version: String,
     content_version: String,
     precache: Vec<assets::PrecacheEntry>,
-    offline_catalog: offline::Catalogue,
+    offline_catalog_url: String,
     offline_count: usize,
     search_manifest: serde_json::Value,
 }
@@ -596,26 +598,24 @@ fn prepare_site(
         .description
         .clone()
         .unwrap_or_else(|| default_site_description(&config.site.title));
-    let discussion_shortcuts = context::discussion_shortcuts(&config.networks);
+    let enabled_discussions =
+        crate::config::enabled_discussions(&config.defaults.discussions, sources);
+    let discussion_shortcuts = context::discussion_shortcuts(&enabled_discussions);
     let mut site = SiteCtx {
         hermetic: info.hermetic,
-        preferences: config.site.preferences.browser_defaults()?,
-        preference_schema: config.site.preferences.schema(),
+        preferences: config.preferences.browser_defaults()?,
+        preference_schema: config.preferences.schema(),
         title: config.site.title.clone(),
         description,
-        identity: config
-            .site
-            .identity
-            .as_ref()
-            .map(|identity| SiteIdentityCtx {
-                kind: match identity.kind {
-                    SiteIdentityKind::Person => "Person",
-                    SiteIdentityKind::Organization => "Organization",
-                },
-                name: identity.name.clone(),
-                url: identity.url.as_ref().map(ToString::to_string),
-                same_as: identity.same_as.iter().map(ToString::to_string).collect(),
-            }),
+        identity: config.identity.as_ref().map(|identity| SiteIdentityCtx {
+            kind: match identity.kind {
+                SiteIdentityKind::Person => "Person",
+                SiteIdentityKind::Organization => "Organization",
+            },
+            name: identity.name.clone(),
+            url: identity.url.as_ref().map(ToString::to_string),
+            same_as: identity.same_as.iter().map(ToString::to_string).collect(),
+        }),
         language: config.site.language.clone(),
         og_locale: context::og_locale(&config.site.language),
         base_path: base.clone(),
@@ -640,8 +640,7 @@ fn prepare_site(
             })
         }),
         has_categories: false,
-        discussions: config
-            .networks
+        discussions: enabled_discussions
             .iter()
             .zip(discussion_shortcuts)
             .map(|(d, shortcut)| context::DiscussionLinkCtx {
@@ -653,7 +652,6 @@ fn prepare_site(
             })
             .collect(),
         entry_shortcuts: Vec::new(),
-        params: config.site.params.clone(),
     };
     let theme = theme();
     let mut build_ctx = BuildCtx {
@@ -677,7 +675,7 @@ fn prepare_site(
     // Sources: config order, enriched with stored state and counts.
     let status = store.status()?;
     let stored_items: Vec<_> = store
-        .retained_items(config.defaults.limits, sources, info.now)?
+        .retained_items(sources, info.now)?
         .into_iter()
         .filter(is_visible_item)
         .collect();
@@ -721,6 +719,10 @@ fn prepare_site(
     });
     let source_by_slug: BTreeMap<&str, &SourceCtx> =
         source_ctxs.iter().map(|s| (s.slug.as_str(), s)).collect();
+    let discussions_by_slug: BTreeMap<&str, &[NetworkConfig]> = sources
+        .iter()
+        .map(|source| (source.slug.as_str(), source.discussions.as_slice()))
+        .collect();
 
     let dates: Vec<_> = all_items.iter().map(Item::created_at).collect();
     let window = window(
@@ -804,7 +806,10 @@ fn prepare_site(
                     category,
                     links: links.as_ref(),
                     excerpt,
-                    discussions: &config.networks,
+                    discussions: discussions_by_slug
+                        .get(item.front.source.as_str())
+                        .copied()
+                        .unwrap_or(config.defaults.discussions.as_slice()),
                     resolutions: &info.discussions,
                     now: info.now,
                 },
@@ -1287,9 +1292,8 @@ fn build_once(
     phase("search index");
 
     if config.site.pwa {
-        let offline_items = &archive_items[..archive_items
-            .len()
-            .min(config.site.preferences.offline_items)];
+        let offline_items =
+            &archive_items[..archive_items.len().min(config.preferences.offline_items)];
         write(
             &out.join("offline.html"),
             pages_ctx
@@ -1310,20 +1314,23 @@ fn build_once(
                 ))?
                 .as_bytes(),
         )?;
-        // The shell installs first; complete article downloads run separately.
+        // The shell installs first: the reader frame and the assets that paint it. Collection
+        // pages and article bodies stay out of that download and are cached when opened.
+        // Eager reader chunks come from the module graph. A positive offline count fetches the
+        // catalogue and then the selected article families.
         let paths = precache::paths(&theme(), &renderer, &assets)?;
+        let catalogue = offline::catalogue(out, &archive_items, &article_images, &written_assets)?;
+        write(
+            &out.join("offline-catalog.json"),
+            &serde_json::to_vec(&catalogue)?,
+        )?;
         let mut sw_config = SwConfig {
             version: cache_version(&build_ctx),
             app_version: build_ctx.app_version.clone(),
             content_version: build_ctx.content_version.clone(),
             precache: assets::precache_entries(out, paths, &written_assets)?,
-            offline_catalog: offline::publish_catalogue(
-                out,
-                &archive_items,
-                &article_images,
-                &written_assets,
-            )?,
-            offline_count: config.site.preferences.offline_items,
+            offline_catalog_url: "offline-catalog.json".into(),
+            offline_count: config.preferences.offline_items,
             search_manifest: offline::search_manifest(out, &search_catalogue)?,
         };
         // Version the worker by its whole source, the compiled bundle's hashed name included, so
@@ -1570,21 +1577,6 @@ mod tests {
             .expect("worker configuration line");
         serde_json::from_str(line.trim_end_matches(';')).unwrap()
     }
-
-    fn worker_catalogue(out: &Path, worker: &str) -> serde_json::Value {
-        use sha2::Digest as _;
-        let config = worker_config(worker);
-        let reference = &config["offline_catalog"];
-        let bytes = std::fs::read(out.join(reference["url"].as_str().unwrap())).unwrap();
-        assert_eq!(reference["size"], bytes.len());
-        assert_eq!(
-            reference["digest"],
-            hex::encode(sha2::Sha256::digest(&bytes))
-        );
-        let articles: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(reference["count"], articles.as_array().unwrap().len());
-        articles
-    }
     use crate::store::Status;
     use chrono::TimeZone;
 
@@ -1593,9 +1585,9 @@ mod tests {
     }
 
     #[test]
-    fn retained_sources_keep_metadata_and_archive_pages_after_config_removal() {
+    fn stored_state_names_items_the_caller_still_selected() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, _, store) = fixture(dir.path(), 2, "max_age_days = 30\npwa = false\n");
+        let (_, _, store) = fixture(dir.path(), 2, "max_age_days = 30\npwa = false\n");
         store
             .write_source_state(
                 "blog",
@@ -1621,55 +1613,37 @@ mod tests {
         assert_eq!(source.count, 2);
         assert_eq!(source.latest, Some(day(2)));
         assert_eq!(source.page, "sources/blog/");
+    }
 
+    #[test]
+    fn a_feed_absent_from_the_config_stays_out_of_the_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _, store) = fixture(dir.path(), 2, "max_age_days = 30\npwa = false\n");
+        store
+            .write_source_state(
+                "blog",
+                &crate::store::SourceState {
+                    title: Some("Hacker News: Best".into()),
+                    site_url: Some("https://news.ycombinator.com/".into()),
+                    resolved_url: Some("https://hnrss.org/best".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let out = dir.path().join("out");
-        build(&config, &[], &store, dir.path(), &info(out.clone())).unwrap();
-        let archive = std::fs::read_to_string(out.join("sources/hnrss.org/index.html")).unwrap();
-        assert!(archive.contains("Post 0"));
-        assert!(archive.contains("Post 1"));
-        assert!(archive.contains("Hacker News: Best"));
-        let article =
-            std::fs::read_to_string(out.join("items/blog/2026-09-01-post-0/index.html")).unwrap();
-        assert!(
-            article.contains("href=\"../../../sources/hnrss.org/\""),
-            "{article}"
+        let summary = build(&config, &[], &store, dir.path(), &info(out.clone())).unwrap();
+        assert_eq!(summary.items, 0);
+        let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(!feed.contains("Post 0"), "{feed}");
+        assert!(!feed.contains("Post 1"), "{feed}");
+        assert!(!feed.contains("Hacker News: Best"), "{feed}");
+        assert!(!out.join("sources/hnrss.org").exists());
+        assert!(!out.join("items/blog/2026-09-01-post-0/index.html").exists());
+        assert_eq!(
+            store.items().unwrap().len(),
+            2,
+            "rendering omits the feed without deleting the archive"
         );
-        assert!(article.contains("title=\"Hacker News: Best\">hnrss.org</a>"));
-        let archive_document = scraper::Html::parse_document(&archive);
-        assert!(
-            archive_document
-                .select(&scraper::Selector::parse(".row .tags").unwrap())
-                .next()
-                .is_none()
-        );
-        for (html, root) in [(&archive, "../../"), (&article, "../../../")] {
-            let document = scraper::Html::parse_document(html);
-            let selector = scraper::Selector::parse(".meta .domain").unwrap();
-            let source_link = document.select(&selector).next().unwrap();
-            assert_eq!(
-                source_link
-                    .select(&scraper::Selector::parse("a.source-feed").unwrap())
-                    .next()
-                    .unwrap()
-                    .value()
-                    .attr("href"),
-                Some(format!("{root}sources/hnrss.org/").as_str())
-            );
-            assert_eq!(
-                source_link.text().collect::<String>().trim(),
-                "blog.example via hnrss.org"
-            );
-            let emphasis = scraper::Selector::parse("em").unwrap();
-            assert_eq!(
-                source_link
-                    .select(&emphasis)
-                    .next()
-                    .unwrap()
-                    .text()
-                    .collect::<String>(),
-                "via hnrss.org"
-            );
-        }
     }
 
     /// Page-relative links reduced to their site-relative form, so pages at different depths
@@ -2142,7 +2116,7 @@ mod tests {
         use crate::store::NewItem;
 
         let mut config = Config::parse(&format!(
-            "[site]\ntitle = \"Demo <site>\"\n{extra}\n[defaults]\nmedia = \"local\"\nmax_items = 0\nmax_age_days = 0\nmax_bytes = 0\n[[sources]]\nslug = \"blog\"\nurl = \"https://blog.example/feed\"\n"
+            "[site]\ntitle = \"Demo <site>\"\n{extra}\n[defaults]\nmedia_download_strategy = \"original\"\ncount_max = 0\nmax_age_days = 0\nsize_max = 0\n[[sources]]\nslug = \"blog\"\nurl = \"https://blog.example/feed\"\n"
         ))
         .unwrap();
         config.defaults.media = crate::config::MediaPolicy::Local;
@@ -2819,6 +2793,7 @@ category = "Science"
             "sources/blog.example/atom.xml",
             "categories/news/rss.xml",
             "sw.js",
+            "offline-catalog.json",
         ] {
             let text = std::fs::read_to_string(out.join(path)).unwrap();
             for excluded in ["Duplicate headline", "Excluded short", "Hidden headline"] {
@@ -2857,6 +2832,46 @@ category = "Science"
         assert!(
             out.join("items/blog/2026-09-01-post-0/index.html")
                 .is_file()
+        );
+    }
+
+    #[test]
+    fn a_source_removed_from_the_config_leaves_the_build() {
+        use crate::model::{FrontMatter, file_stem, item_dir};
+        use crate::store::NewItem;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (config, sources, store) = fixture(dir.path(), 1, "pwa = false\n");
+        let date = day(19);
+        let front = FrontMatter {
+            title: "Gone post".into(),
+            link: "https://gone.example/post".into(),
+            source: "gone".into(),
+            published: Some(date),
+            first_seen: date,
+            ..Default::default()
+        };
+        store
+            .write_item(NewItem {
+                dir: &item_dir("gone", date),
+                stem: &file_stem(date, &front.title),
+                front: &front,
+                body: "Removed subscription",
+                html: None,
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let out = dir.path().join("out");
+        let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
+        assert_eq!(summary.items, 1);
+        let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(!feed.contains("Gone post"), "{feed}");
+        assert!(!out.join("sources/gone.example").exists());
+        assert_eq!(
+            store.items().unwrap().len(),
+            2,
+            "rendering omits the feed without deleting the archive"
         );
     }
 
@@ -3667,7 +3682,14 @@ category = "Science"
             .unwrap()
             .clone();
         assert!(precache.iter().all(|entry| entry["url"] != path));
-        let catalogue = worker_catalogue(&out, &worker);
+        let catalogue: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(out.join("offline-catalog.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            worker_config(&worker)["offline_catalog_url"],
+            "offline-catalog.json"
+        );
+        assert!(!worker.contains("\"offline_catalog\":"));
         assert!(
             catalogue[0]["resources"]
                 .as_array()
@@ -3954,12 +3976,13 @@ category = "Science"
     }
 
     #[test]
-    fn offline_shell_leaves_collection_archives_and_optional_chunks_on_demand() {
+    fn install_shell_omits_collection_pages() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, mut sources, store) = fixture(dir.path(), 1, "preferences.offline_items=0\n");
+        let (config, mut sources, store) =
+            fixture(dir.path(), 1, "[preferences]\noffline_items=0\n");
         sources[0].category = Some("Research".into());
         let mut item = store.items().unwrap().remove(0);
-        item.front.labels = (0..300).map(|index| format!("topic-{index:03}")).collect();
+        item.front.labels = vec!["topic-000".into(), "topic-001".into()];
         let (directory, stem) = item.path.rsplit_once('/').unwrap();
         store
             .write_item(crate::store::NewItem {
@@ -3975,40 +3998,39 @@ category = "Science"
         let out = dir.path().join("out");
         build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
         let worker = std::fs::read_to_string(out.join("sw.js")).unwrap();
-        let entries: Vec<serde_json::Value> = worker_config(&worker)["precache"]
+        let precache: Vec<String> = worker_config(&worker)["precache"]
             .as_array()
             .unwrap()
-            .clone();
-        let collection_roots: Vec<_> = entries
             .iter()
-            .filter_map(|entry| entry["url"].as_str())
-            .filter(|url| url.split('/').filter(|part| !part.is_empty()).count() == 2)
-            .filter(|url| {
-                url.starts_with("sources/")
-                    || url.starts_with("categories/")
-                    || url.starts_with("tags/")
-            })
+            .filter_map(|entry| entry["url"].as_str().map(str::to_owned))
             .collect();
-        assert!(collection_roots.is_empty(), "{collection_roots:?}");
         for path in [
+            "sources/",
+            "categories/",
+            "tags/",
             "sources/blog.example/",
             "categories/research/",
             "tags/topic-000/",
+            "tags/topic-001/",
         ] {
-            assert!(out.join(path).join("index.html").is_file());
-        }
-        assert!(out.join("tags/topic-299/index.html").is_file());
-        for entry in &entries {
-            let path = entry["url"].as_str().unwrap();
             assert!(
-                !["/search-", "/media-", "/Form-"]
-                    .iter()
-                    .any(|name| path.contains(name)),
-                "{path}"
+                !precache.iter().any(|url| url == path),
+                "{path} is not an install download"
             );
+            assert!(out.join(path).join("index.html").is_file(), "{path}");
         }
-        assert_eq!(worker_config(&worker)["offline_count"], 0);
-        assert_eq!(worker_catalogue(&out, &worker).as_array().unwrap().len(), 1);
+        assert!(precache.iter().any(|url| url == "browse/"));
+        assert!(precache.iter().any(|url| url.contains("favicon-")));
+        assert!(precache.iter().all(|url| !url.contains("icon-512-")));
+        assert!(!worker.contains("\"items/"), "{worker}");
+        let catalogue: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(out.join("offline-catalog.json")).unwrap())
+                .unwrap();
+        assert!(catalogue.iter().any(|entry| {
+            entry["url"]
+                .as_str()
+                .is_some_and(|url| url.contains("items/"))
+        }));
     }
 
     #[test]
@@ -4017,7 +4039,7 @@ category = "Science"
         let (config, sources, store) = fixture(
             dir.path(),
             3,
-            "preferences.offline_items = 2\nindexing = true\n",
+            "indexing = true\n[preferences]\noffline_items = 2\n",
         );
         let out = dir.path().join("out");
         let mut build_info = info(out.clone());
@@ -4125,24 +4147,24 @@ category = "Science"
             !sw.contains("assets/logo-"),
             "the multi-megabyte source icon is not precached"
         );
-        // The worker's behaviour lives in its compiled bundle; `sw.js` carries the lists it
-        // needs: the precache, the download catalogue and limit, and the search manifest.
-        assert!(sw.contains("\"offline_catalog\":"));
+        // The worker's behaviour lives in its compiled bundle. `sw.js` carries the install
+        // shell, the catalogue location and limit, and the search manifest. Article families
+        // stay in the catalogue file.
+        assert!(!sw.contains("\"offline_catalog\":"));
+        assert!(sw.contains("\"offline_catalog_url\":\"offline-catalog.json\""));
         assert!(sw.contains("\"offline_count\":"));
         assert!(sw.contains("\"search_manifest\":"));
         assert!(sw.contains("\"offline.html\""));
-        assert!(!sw.contains("\"browse/\""));
+        assert!(sw.contains("\"browse/\""));
         assert!(!sw.contains("\"items/"), "{sw}");
-        let catalogue = worker_catalogue(&out, &sw);
-        assert_eq!(catalogue.as_array().unwrap().len(), 3);
-        assert_eq!(config["offline_count"], 2);
-        assert!(
-            catalogue
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|item| item["url"].as_str().unwrap().starts_with("items/"))
-        );
+        let catalogue: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(out.join("offline-catalog.json")).unwrap())
+                .unwrap();
+        assert!(catalogue.iter().any(|entry| {
+            entry["url"]
+                .as_str()
+                .is_some_and(|url| url.starts_with("items/"))
+        }));
 
         let offline = std::fs::read_to_string(out.join("offline.html")).unwrap();
         assert!(offline.contains("id=\"offline-articles\""));
@@ -4453,7 +4475,7 @@ category = "Science"
 items_per_page = 1
 repository = "owner/reader"
 
-[site.identity]
+[identity]
 type = "person"
 name = "Ada Example"
 url = "https://example.com/ada"
@@ -4724,7 +4746,12 @@ same_as = ["https://social.example/@ada"]
         let out = dir.path().join("out");
         let summary = build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
         assert_eq!(summary.pages, 1 + 1 + 6);
-        for name in ["manifest.webmanifest", "sw.js", "offline.html"] {
+        for name in [
+            "manifest.webmanifest",
+            "sw.js",
+            "offline.html",
+            "offline-catalog.json",
+        ] {
             assert!(!out.join(name).exists(), "{name} was written");
         }
         let river = std::fs::read_to_string(out.join("index.html")).unwrap();
@@ -4836,8 +4863,10 @@ same_as = ["https://social.example/@ada"]
             asset.bytes
         );
         assert_eq!(published_media(&build_info.out).get(&local), Some(&hash));
-        let worker = std::fs::read_to_string(build_info.out.join("sw.js")).unwrap();
-        let catalogue = worker_catalogue(&build_info.out, &worker);
+        let catalogue: Vec<serde_json::Value> = serde_json::from_slice(
+            &std::fs::read(build_info.out.join("offline-catalog.json")).unwrap(),
+        )
+        .unwrap();
         let resources = catalogue[0]["resources"].as_array().unwrap();
         assert!(
             resources

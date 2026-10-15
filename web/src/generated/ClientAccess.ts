@@ -3,4 +3,4 @@
 /**
  * Why an article body may be missing.
  */
-export type ClientAccess = { "kind": "normal" } | { "kind": "subscription_required", archive_lookup_url: string | null, } | { "kind": "titles_only" };
+export type ClientAccess = { "kind": "normal" } | { "kind": "subscription_required", archive_lookup_url: string | null, } | { "kind": "titles_only" } | { "kind": "missing" };

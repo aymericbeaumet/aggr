@@ -1,24 +1,60 @@
 //! Independent capture policies and the per-feed retained corpus.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::network_config::{
+    NetworkConfig, deserialize_discussions, deserialize_optional_discussions,
+    reject_legacy_networks,
+};
 use super::{ContentMode, DocumentPolicy, ImagePolicy, PreviewPolicy};
 
-#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Defaults {
+    #[serde(rename = "content_download_strategy")]
     pub content: ContentMode,
+    #[serde(rename = "media_download_strategy")]
     pub media: MediaPolicy,
     #[serde(flatten)]
     pub limits: Limits,
+    /// Fills a source that omits `url`. Collection expansion still uses the entry's own URL.
+    pub url: Option<String>,
+    /// Applies to entries that omit `collection`. It is not copied onto expanded feeds.
+    pub collection: Option<bool>,
+    pub name: Option<String>,
+    pub slug: Option<String>,
+    pub category: Option<String>,
+    pub labels: Vec<String>,
+    pub headers: BTreeMap<String, String>,
+    /// Overrides `[store] html` for sources that omit `html`.
+    pub html: Option<bool>,
+    /// Aggr repositories only.
+    pub branch: Option<String>,
+    /// Aggr repositories only. Empty means no filter.
+    pub sources: Vec<String>,
+    /// Places searched for a conversation about each article. A source list replaces this one.
+    #[serde(deserialize_with = "deserialize_discussions")]
+    pub discussions: Vec<NetworkConfig>,
+    #[serde(
+        default,
+        skip_serializing,
+        rename = "networks",
+        deserialize_with = "reject_legacy_networks"
+    )]
+    #[allow(dead_code)]
+    networks: (),
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Limits {
+    #[serde(rename = "count_max")]
     pub max_items: usize,
     pub max_age_days: u32,
+    #[serde(rename = "size_max", deserialize_with = "deserialize_byte_size")]
     pub max_bytes: u64,
     #[serde(default, deserialize_with = "deserialize_since")]
     pub since: Option<NaiveDate>,
@@ -52,8 +88,14 @@ impl Limits {
 #[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct LimitOverrides {
+    #[serde(rename = "count_max")]
     pub max_items: Option<usize>,
     pub max_age_days: Option<u32>,
+    #[serde(
+        rename = "size_max",
+        default,
+        deserialize_with = "deserialize_optional_byte_size"
+    )]
     pub max_bytes: Option<u64>,
     pub since: Option<Since>,
 }
@@ -144,6 +186,157 @@ fn deserialize_since<'de, D: Deserializer<'de>>(
     Option::<Since>::deserialize(deserializer).map(|value| value.and_then(Since::date))
 }
 
+const BYTE_SIZE_EXPECT: &str = "a byte count or a size such as 1GB or 1GiB";
+
+fn deserialize_byte_size<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    deserializer.deserialize_any(ByteSize)
+}
+
+fn deserialize_optional_byte_size<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    deserializer.deserialize_any(OptionalByteSize)
+}
+
+struct ByteSize;
+
+impl<'de> serde::de::Visitor<'de> for ByteSize {
+    type Value = u64;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str(BYTE_SIZE_EXPECT)
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        u64::try_from(value).map_err(|_| E::custom("size_max cannot be negative"))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(value)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        parse_byte_size(value).map_err(E::custom)
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, _value: f64) -> Result<Self::Value, E> {
+        Err(E::custom(format!("size_max must be {BYTE_SIZE_EXPECT}")))
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _value: bool) -> Result<Self::Value, E> {
+        Err(E::custom(format!("size_max must be {BYTE_SIZE_EXPECT}")))
+    }
+}
+
+struct OptionalByteSize;
+
+impl<'de> serde::de::Visitor<'de> for OptionalByteSize {
+    type Value = Option<u64>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str(BYTE_SIZE_EXPECT)
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        ByteSize.visit_i64(value).map(Some)
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(Some(value))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        parse_byte_size(value).map(Some).map_err(E::custom)
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        ByteSize.visit_f64(value).map(Some)
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+        ByteSize.visit_bool(value).map(Some)
+    }
+}
+
+/// Decimal units (`kB`, `MB`, `GB`, `TB`) are powers of 1000. Binary units (`KiB`, `MiB`,
+/// `GiB`, `TiB`) are powers of 1024. A bare number, or `B`, is a byte count. Zero is unbounded.
+fn parse_byte_size(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(format!("size_max must be {BYTE_SIZE_EXPECT}"));
+    }
+    let mut end = 0;
+    let mut dots = 0u8;
+    for (index, byte) in text.bytes().enumerate() {
+        if byte.is_ascii_digit() {
+            end = index + 1;
+        } else if byte == b'.' && dots == 0 {
+            dots = 1;
+            end = index + 1;
+        } else {
+            break;
+        }
+    }
+    let number = &text[..end];
+    let unit = text[end..].trim();
+    if number.is_empty() || number == "." || number.ends_with('.') {
+        return Err(format!("size_max must be {BYTE_SIZE_EXPECT}"));
+    }
+    let (whole, fraction) = match number.split_once('.') {
+        Some((whole, fraction)) => (if whole.is_empty() { "0" } else { whole }, fraction),
+        None => (number, ""),
+    };
+    if fraction.len() > 6 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("size_max has too many decimal places".into());
+    }
+    let whole = whole
+        .parse::<u64>()
+        .map_err(|_| "size_max is too large".to_string())?;
+    let multiplier = byte_multiplier(unit).ok_or_else(|| {
+        format!("unknown size_max unit {unit:?}; use B, kB, MB, GB, TB, KiB, MiB, GiB, or TiB")
+    })?;
+    scale_byte_size(whole, fraction, multiplier)
+}
+
+fn byte_multiplier(unit: &str) -> Option<u64> {
+    match unit.to_ascii_lowercase().as_str() {
+        "" | "b" => Some(1),
+        "k" | "kb" => Some(1_000),
+        "m" | "mb" => Some(1_000_000),
+        "g" | "gb" => Some(1_000_000_000),
+        "t" | "tb" => Some(1_000_000_000_000),
+        "ki" | "kib" => Some(1024),
+        "mi" | "mib" => Some(1024 * 1024),
+        "gi" | "gib" => Some(1024 * 1024 * 1024),
+        "ti" | "tib" => Some(1024u64.saturating_pow(4)),
+        _ => None,
+    }
+}
+
+fn scale_byte_size(whole: u64, fraction: &str, multiplier: u64) -> Result<u64, String> {
+    let mut bytes = u128::from(whole) * u128::from(multiplier);
+    if !fraction.is_empty() {
+        let fractional = fraction
+            .parse::<u128>()
+            .map_err(|_| "size_max is too large".to_string())?;
+        let scale = 10u128.pow(fraction.len() as u32);
+        let product = u128::from(multiplier) * fractional;
+        bytes += product / scale;
+        if product % scale * 2 >= scale {
+            bytes += 1;
+        }
+    }
+    u64::try_from(bytes).map_err(|_| "size_max is too large".to_string())
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum MediaPolicy {
     #[default]
@@ -178,7 +371,9 @@ impl Serialize for MediaPolicy {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::Remote => serializer.serialize_str("remote"),
-            Self::Local => serializer.serialize_str("local"),
+            // `original` and `compressed` both keep media on disk. `original` is the
+            // publisher's bytes; `local` is not a value.
+            Self::Local => serializer.serialize_str("original"),
             Self::Compressed(policy) => {
                 use serde::ser::SerializeStruct as _;
                 let mut value = serializer.serialize_struct("MediaPolicy", 3)?;
@@ -217,7 +412,7 @@ impl<'de> Deserialize<'de> for MediaPolicy {
         }
         match mode.as_str() {
             "remote" => Ok(Self::Remote),
-            "local" => Ok(Self::Local),
+            "original" => Ok(Self::Local),
             "compressed" => {
                 let defaults = crate::media::CompactPolicy::archive();
                 let jpeg_quality = quality.unwrap_or(defaults.jpeg_quality);
@@ -235,29 +430,90 @@ impl<'de> Deserialize<'de> for MediaPolicy {
                 }))
             }
             _ => Err(serde::de::Error::custom(
-                "media must be remote, compressed, or local",
+                "media_download_strategy must be remote, compressed, or original",
             )),
         }
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct DocumentDefaults {
+    #[serde(rename = "content_download_strategy")]
     pub content: Option<ContentMode>,
+    #[serde(rename = "media_download_strategy")]
     pub media: Option<MediaPolicy>,
     #[serde(flatten)]
     pub limits: LimitOverrides,
+    pub url: Option<String>,
+    pub collection: Option<bool>,
+    pub name: Option<String>,
+    pub slug: Option<String>,
+    pub category: Option<String>,
+    pub labels: Vec<String>,
+    pub headers: BTreeMap<String, String>,
+    pub html: Option<bool>,
+    pub branch: Option<String>,
+    pub sources: Vec<String>,
+    #[serde(deserialize_with = "deserialize_optional_discussions")]
+    pub discussions: Option<Vec<NetworkConfig>>,
+    #[serde(
+        default,
+        skip_serializing,
+        rename = "networks",
+        deserialize_with = "reject_legacy_networks"
+    )]
+    #[allow(dead_code)]
+    networks: (),
 }
 
 impl DocumentDefaults {
-    pub fn inherit(self, parent: Self) -> Self {
+    pub fn inherit(&self, parent: &Self) -> Self {
         Self {
             content: self.content.or(parent.content),
             media: self.media.or(parent.media),
             limits: self.limits.inherit(parent.limits),
+            url: self.url.clone().or_else(|| parent.url.clone()),
+            collection: self.collection.or(parent.collection),
+            name: self.name.clone().or_else(|| parent.name.clone()),
+            slug: self.slug.clone().or_else(|| parent.slug.clone()),
+            category: self.category.clone().or_else(|| parent.category.clone()),
+            labels: if self.labels.is_empty() {
+                parent.labels.clone()
+            } else {
+                self.labels.clone()
+            },
+            headers: if self.headers.is_empty() {
+                parent.headers.clone()
+            } else {
+                merge_headers(&parent.headers, &self.headers)
+            },
+            html: self.html.or(parent.html),
+            branch: self.branch.clone().or_else(|| parent.branch.clone()),
+            sources: if self.sources.is_empty() {
+                parent.sources.clone()
+            } else {
+                self.sources.clone()
+            },
+            discussions: self
+                .discussions
+                .clone()
+                .or_else(|| parent.discussions.clone()),
+            networks: (),
         }
     }
+}
+
+pub(super) fn merge_headers(
+    base: &BTreeMap<String, String>,
+    overlay: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut headers = base.clone();
+    for (name, value) in overlay {
+        headers.retain(|existing, _| !existing.eq_ignore_ascii_case(name));
+        headers.insert(name.clone(), value.clone());
+    }
+    headers
 }
 
 #[cfg(test)]
@@ -276,7 +532,7 @@ mod tests {
 
     #[test]
     fn source_limits_inherit_individually_and_can_clear_each_constraint() {
-        let config = Config::parse("[defaults]\ncontent = 'heavy'\nmedia = 'local'\nmax_items = 42\nmax_age_days = 12\nmax_bytes = 345\nsince = 2026-01-02\n[[sources]]\nurl = 'https://example.com/feed'\nmax_items = 0\nsince = false\ncontent = 'light'\nmedia = 'compressed'\n").unwrap();
+        let config = Config::parse("[defaults]\ncontent_download_strategy = 'article'\nmedia_download_strategy = 'original'\ncount_max = 42\nmax_age_days = 12\nsize_max = '345'\nsince = 2026-01-02\n[[sources]]\nurl = 'https://example.com/feed'\ncount_max = 0\nsince = false\ncontent_download_strategy = 'feed'\nmedia_download_strategy = 'compressed'\n").unwrap();
         let source = config.sources().unwrap().remove(0);
         assert_eq!(
             source.limits,
@@ -299,7 +555,14 @@ mod tests {
     fn strict_flat_schema_rejects_unknown_keys_and_old_policies() {
         for text in [
             "[defaults]\nmax_item = 2",
-            "[defaults.limits]\nmax_items = 2",
+            "[defaults]\ncontent = 'feed'",
+            "[defaults]\nmedia = 'remote'",
+            "[defaults]\nmax_items = 2",
+            "[defaults]\nmax_bytes = 2",
+            "[defaults]\ncontent_download_strategy = 'light'",
+            "[defaults]\ncontent_download_strategy = 'heavy'",
+            "[defaults]\nmedia_download_strategy = 'local'",
+            "[defaults.limits]\ncount_max = 2",
             "[fetch]\ncontent = 'heavy'",
             "[fetch]\nmax_items_per_source = 2",
             "[store]\nmax_items = 2",
@@ -340,7 +603,7 @@ mod tests {
     #[test]
     fn media_modes_are_independent_and_only_compression_is_tunable() {
         let config = Config::parse(
-            "[defaults]\nmedia = { mode = 'compressed', quality = 60, max_axis = 1200 }\n",
+            "[defaults]\nmedia_download_strategy = { mode = 'compressed', quality = 60, max_axis = 1200 }\n",
         )
         .unwrap();
         assert_eq!(
@@ -350,19 +613,81 @@ mod tests {
                 max_axis: 1200
             })
         );
+        let original = Config::parse("[defaults]\nmedia_download_strategy = 'original'\n").unwrap();
+        assert_eq!(original.defaults.media, MediaPolicy::Local);
+        assert_eq!(original.defaults.media.images(), ImagePolicy::Original);
+        assert_eq!(original.defaults.media.previews(), PreviewPolicy::Local);
+        assert_eq!(
+            original.defaults.media.documents(),
+            DocumentPolicy::Original
+        );
+        assert_eq!(
+            Config::parse("[defaults]\nmedia_download_strategy = { mode = 'original' }\n")
+                .unwrap()
+                .defaults
+                .media,
+            MediaPolicy::Local
+        );
         for value in [
             "true",
-            "'original'",
+            "'local'",
             "'compact'",
-            "{ mode = 'local', quality = 50 }",
+            "{ mode = 'local' }",
+            "{ mode = 'original', quality = 50 }",
             "{ mode = 'compressed', quality = 0 }",
             "{ mode = 'compressed', max_axis = 1 }",
             "{ mode = 'compressed', typo = 1 }",
         ] {
             assert!(
-                Config::parse(&format!("[defaults]\nmedia = {value}")).is_err(),
+                Config::parse(&format!("[defaults]\nmedia_download_strategy = {value}")).is_err(),
                 "{value}"
             );
         }
+    }
+
+    #[test]
+    fn size_max_accepts_byte_counts_and_human_units() {
+        let cases = [
+            ("0", 0),
+            ("1000000000", 1_000_000_000),
+            ("'1GB'", 1_000_000_000),
+            ("'1 GB'", 1_000_000_000),
+            ("'1gb'", 1_000_000_000),
+            ("'1000MB'", 1_000_000_000),
+            ("'1.5MB'", 1_500_000),
+            ("'1GiB'", 1024 * 1024 * 1024),
+            ("'512KiB'", 512 * 1024),
+            ("'1.5KB'", 1_500),
+            ("'.5kB'", 500),
+            ("'345B'", 345),
+        ];
+        for (value, bytes) in cases {
+            let config = Config::parse(&format!("[defaults]\nsize_max = {value}\n")).unwrap();
+            assert_eq!(config.defaults.limits.max_bytes, bytes, "{value}");
+        }
+        assert_eq!(
+            Config::parse("[defaults]\nsize_max = 1_000_000_000\n")
+                .unwrap()
+                .defaults
+                .limits
+                .max_bytes,
+            1_000_000_000
+        );
+        for value in [
+            "true",
+            "-1",
+            "1.5",
+            "'GB'",
+            "''",
+            "'1.2.3GB'",
+            "'-1GB'",
+            "'10000000000TB'",
+        ] {
+            assert!(
+                Config::parse(&format!("[defaults]\nsize_max = {value}\n")).is_err(),
+                "{value}"
+            );
+        }
+        assert!(Config::parse("[defaults]\ncount_max = '250'\n").is_err());
     }
 }

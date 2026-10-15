@@ -24,7 +24,7 @@ struct SourceSnapshot {
 }
 
 fn needs_snapshot(source: &SourceConfig) -> bool {
-    source.collection
+    source.is_collection()
         || source.url.as_deref().is_some_and(|value| {
             value.contains("${")
                 || url::Url::parse(value).is_ok_and(|url| {
@@ -145,13 +145,14 @@ pub(super) async fn capture(
             slug: Some(source.slug.clone()),
             name: source.name.clone(),
             category: source.category.clone(),
-            labels: source.labels.clone(),
+            labels: raw.labels.clone(),
             html: raw.html,
             content: raw.content,
             media: raw.media,
             limits: raw.limits,
             branch: raw.branch.clone(),
             sources: raw.sources.clone(),
+            discussions: raw.discussions.clone(),
             ..Default::default()
         });
     }

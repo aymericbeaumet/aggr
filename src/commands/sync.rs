@@ -25,7 +25,10 @@ pub async fn run(project: &Project, args: &SyncArgs) -> Result<Option<Resolution
     let report = fetch::run(project, worktree, &args.fetch).await?;
 
     let mut discussions = None;
-    if !args.fetch.dry_run && !args.fetch.backfill_media && !project.config.networks.is_empty() {
+    if !args.fetch.dry_run
+        && !args.fetch.backfill_media
+        && crate::discussions::any_provider(&project.config.defaults.discussions, &project.sources)
+    {
         let cache = project.build_cache_dir()?;
         let store = crate::store::Store::open(worktree.dir());
         match super::build::resolve_discussions(project, &store, &cache, chrono::Utc::now()).await {

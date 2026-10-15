@@ -4,6 +4,8 @@ export type Fetched = { url: string; html: string };
 export type PageRecord = {
   time: number;
   page: Promise<Fetched>;
+  /** The response, once it has arrived. Present together with `ready`. */
+  fetched: Fetched | null;
   /** Whether the page has arrived. */
   ready: boolean;
   /** The page parsed ahead of time, taken by the swap that uses it. */
@@ -85,9 +87,16 @@ export class PageCache {
   }
 
   private create(key: string): PageRecord {
-    const record: PageRecord = { time: this.now(), page: Promise.reject(new Error('unset')), ready: false, parsed: null };
+    const record: PageRecord = {
+      time: this.now(),
+      page: Promise.reject(new Error('unset')),
+      fetched: null,
+      ready: false,
+      parsed: null,
+    };
     record.page.catch(() => {});
     record.page = this.request(key).then((page) => {
+      record.fetched = page;
       record.ready = true;
       this.onReady?.(key, record, page);
       return page;

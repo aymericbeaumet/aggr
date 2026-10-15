@@ -17,11 +17,6 @@ export interface OfflineItem {
   resources: ResourceEntry[];
 }
 
-/** A versioned catalogue fetched only after the reader enables offline downloads. */
-export interface OfflineCatalogue extends SearchFile {
-  count: number;
-}
-
 /** One file of a published search index, with the size and digest that verify it. */
 export interface SearchFile {
   url: string;
@@ -39,14 +34,16 @@ export interface SearchManifest {
 
 /**
  * `self.AGGR_SW`, defined by `sw.js` before it imports this worker: the cache version, the
- * application and content versions, and the revisioned install-time lists.
+ * application and content versions, and the revisioned install-time lists. The article catalogue
+ * is a separate file, fetched only when a download count is set.
  */
 export interface SwConfig {
   version: string;
   app_version: string;
   content_version: string;
   precache: ResourceEntry[];
-  offline_catalog: OfflineCatalogue;
+  /** Site path of `offline-catalog.json`. Absent from the install precache. */
+  offline_catalog_url: string;
   offline_count: number;
   /** The index this build published; its manifest is fetched from `base`. */
   search_manifest: Pick<SearchManifest, 'version' | 'base'>;

@@ -81,44 +81,4 @@ export function timingHost(player: Element): (state: TimingState) => void {
   };
 }
 
-/**
- * Follow a native `<video>` for its timing line. The archived length stands in until the file
- * says its own; leaving the page stops the download as well as the playback.
- */
-export function followNativeVideo(video: HTMLVideoElement, signal: AbortSignal): void {
-  const frame = video.closest('.native-video');
-  if (!frame) return;
-  const report = timingHost(frame);
-  const archived = duration(Number(video.dataset.durationSeconds));
-  let phase: Phase = video.paused ? 'paused' : video.readyState >= 3 ? 'playing' : 'loading';
-  const emit = () =>
-    report({
-      phase,
-      duration: Number.isNaN(video.duration) ? archived : duration(video.duration),
-      position: video.currentTime,
-      speed: video.playbackRate,
-    });
-  const setPhase = (next: Phase) => {
-    phase = next;
-    emit();
-  };
-  for (const name of ['loadedmetadata', 'durationchange', 'timeupdate', 'ratechange']) {
-    video.addEventListener(name, emit, { signal });
-  }
-  video.addEventListener('play', () => setPhase('loading'), { signal });
-  video.addEventListener('playing', () => setPhase('playing'), { signal });
-  video.addEventListener('waiting', () => setPhase(video.paused ? 'paused' : 'loading'), { signal });
-  video.addEventListener('pause', () => setPhase(video.ended ? 'ended' : 'paused'), { signal });
-  video.addEventListener('ended', () => setPhase('ended'), { signal });
-  video.addEventListener('error', () => setPhase('error'), { signal });
-  signal.addEventListener(
-    'abort',
-    () => {
-      video.pause();
-      video.removeAttribute('src');
-      video.load();
-    },
-    { once: true },
-  );
-  emit();
-}
+

@@ -10,7 +10,7 @@ article text and the Git archive. Measure repository storage separately from dep
 The [two-source starter](../examples/starter.toml) was measured in an isolated fresh repository,
 using the optimized development binary, release-mode HTML, and live feed requests on an Apple
 M4 Pro with 48 GiB RAM (macOS 26.6.2 arm64). Other verification tasks ran concurrently.
-The policies were `content = "light"`, `media = "remote"`, 250 items, 730 days, and 1 GB per feed.
+The policies were `content_download_strategy = "feed"`, `media_download_strategy = "remote"`, 250 items, 730 days, and 1 GB per feed.
 
 | Measurement | Result |
 | --- | ---: |
@@ -78,8 +78,8 @@ and publication but does not reclaim previously committed Git objects. This is a
 and a different media policy from the live demo, so these results do not establish a speedup ratio
 against its reported full job time.
 
-For the comparable current configuration, use `content = "light"`, `media = "remote"`, and
-`max_items = 0`, `max_age_days = 0`, `max_bytes = 0` under `[defaults]`; migrate any explicit
+For the comparable current configuration, use `content_download_strategy = "feed"`, `media_download_strategy = "remote"`, and
+`count_max = 0`, `max_age_days = 0`, `size_max = 0` under `[defaults]`; migrate any explicit
 source media fields too. In a disposable checkout containing the selected data objects, run:
 
 ```sh
@@ -285,7 +285,7 @@ In the archive measured above, lossless WebP renditions alone outweighed every m
 
 ```toml
 [defaults]
-media = { mode = "compressed", quality = 72, max_axis = 1600 }
+media_download_strategy = { mode = "compressed", quality = 72, max_axis = 1600 }
 ```
 
 `"compressed"` archives one bounded copy per image and no renditions, which removes both the

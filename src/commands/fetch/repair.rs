@@ -586,7 +586,7 @@ pub(super) async fn repair_feed_captures(
     context: &FetchOneContext<'_>,
     mut transaction: Option<&mut SourceTransaction>,
 ) -> Result<usize> {
-    // Sources whose feed content is final by design (light mode, mirrors, Qwen's API-backed blog)
+    // Sources whose feed content is final by design (feed strategy, mirrors, Qwen's API-backed blog)
     // are never retried.
     if matches!(source.engine, Engine::Aggr { .. })
         || source.content == ContentMode::Light
@@ -604,9 +604,10 @@ pub(super) async fn repair_feed_captures(
         return Ok(0);
     };
     let retries = CaptureRetries::new(context.cache_dir);
+    // An explicit refresh asks for another attempt now. A normal run still waits a day.
     let due = items
         .iter()
-        .filter(|(_, raw)| retries.due(&raw.link))
+        .filter(|(_, raw)| context.options.refresh || retries.due(&raw.link))
         .take(MAX_CAPTURE_RETRIES_PER_RUN)
         .cloned()
         .collect::<Vec<_>>();
@@ -919,6 +920,7 @@ mod tests {
             .unwrap();
         let configured = Source {
             previews: crate::config::PreviewPolicy::Disabled,
+            discussions: Vec::new(),
             engine: Engine::Feed {
                 url: Url::parse(&server.url("/feed")).unwrap(),
             },
@@ -1040,6 +1042,7 @@ mod tests {
             .unwrap();
         let configured = Source {
             previews: crate::config::PreviewPolicy::Disabled,
+            discussions: Vec::new(),
             engine: Engine::Feed {
                 url: Url::parse(&server.url("/feed")).unwrap(),
             },
@@ -1217,6 +1220,7 @@ mod tests {
                 } else {
                     crate::config::PreviewPolicy::Disabled
                 },
+                discussions: Vec::new(),
                 engine: Engine::Feed {
                     url: Url::parse(&server.url("/feed")).unwrap(),
                 },
@@ -1383,6 +1387,7 @@ mod tests {
         let original_modified = fs::metadata(&original_file).unwrap().modified().unwrap();
         let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
         let configured = Source {
+            discussions: Vec::new(),
             engine: Engine::Feed {
                 url: Url::parse(&server.url("/feed")).unwrap(),
             },
@@ -1691,6 +1696,7 @@ mod tests {
         let store = Arc::new(Store::open(root.path()));
         let client = http::Client::new(&crate::config::FetchConfig::default()).unwrap();
         let configured = Source {
+            discussions: Vec::new(),
             engine: Engine::Feed {
                 url: Url::parse(&server.url("/feed")).unwrap(),
             },
@@ -1789,6 +1795,7 @@ mod tests {
             content: ContentMode::Light,
             images: crate::config::ImagePolicy::Remote,
             documents: crate::config::DocumentPolicy::Original,
+            discussions: Vec::new(),
             engine: Engine::Feed {
                 url: Url::parse(&server.url("/feed")).unwrap(),
             },

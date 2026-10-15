@@ -184,6 +184,7 @@ mod tests {
             content: ContentMode::Light,
             images: crate::config::ImagePolicy::Remote,
             documents: crate::config::DocumentPolicy::Original,
+            discussions: Vec::new(),
             engine: Engine::Feed {
                 url: Url::parse(&server.url(format!("/{slug}"))).unwrap(),
             },

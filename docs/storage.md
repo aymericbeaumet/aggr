@@ -20,22 +20,23 @@ Use explicit preservation policies when local media is valuable:
 
 ```toml
 [defaults]
-content = "light"       # feed content; "heavy" also extracts article pages
-media = "remote"        # alternatively "compressed" or "local"
-max_items = 250
+content_download_strategy = "feed"       # feed entry; "article" also extracts the original page
+media_download_strategy = "remote"        # alternatively "compressed" or "original"
+count_max = 250
 max_age_days = 730
-max_bytes = 1_000_000_000
+size_max = "1GB"                           # decimal; an integer is a raw byte count
 # since = 2026-01-01
 
 [[sources]]
 url = "https://example.com/feed.xml"
-content = "heavy"
-media = "compressed"
-max_items = 100
+content_download_strategy = "article"
+media_download_strategy = "compressed"
+count_max = 100
 ```
 
-Each source inherits omitted fields individually. `compressed` keeps a bounded reading copy of
-images; `local` retains original image and PDF bytes. Responsive copies are generated for
+Each source inherits omitted fields individually. `compressed` and `original` both store media
+locally: `compressed` keeps a bounded reading copy of images, and `original` retains the publisher's
+image and PDF bytes. Responsive copies are generated for
 publication in disposable caches; neither adds responsive copies to new archive commits.
 Media settings affect future capture and publication, without rewriting retained masters.
 See [source policies](sources.md).
@@ -48,6 +49,11 @@ UTC date; if both date limits are set, the later cutoff wins. Dates use publicat
 updated time, then first capture. Set a numeric limit to `0` to disable it; `since = false` clears
 an inherited date.
 
+A source removed from the config is not retained. Offline builds omit its articles without
+rewriting the archive. The next sync deletes those article families from the current tree and
+clears that source's state, seen list, and eviction record, so subscribing again fetches it as
+a new source. Historical commits keep the old files.
+
 Expired items are removed first, then the oldest excess items until both count and size fit.
 Bytes include Markdown, saved HTML, PDFs, image masters, and obsolete owned companions, even
 under a remote-media policy. Cleanup removes entire article families only from the feed that
@@ -58,8 +64,8 @@ entries before article or media requests. Offline builds select the same retaine
 changing the archive.
 
 These are current article-file limits, not Git repository quotas. Normal deletion commits preserve
-historical blobs and permalinks. Source state and compact deduplication/eviction records remain;
-manual deletions stay suppressed. Widening a policy permits previously policy-evicted items to be
+historical blobs and permalinks. For a feed that stays configured, source state and compact
+deduplication and eviction records remain, and manual deletions stay suppressed. Widening a policy permits previously policy-evicted items to be
 captured again if the upstream still supplies them. Repeating the same policy does not repeatedly
 download and discard oversized articles. Old deletions without eviction records remain suppressed.
 Disposable caches have separate bounds below.

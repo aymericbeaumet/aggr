@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use reqwest::header::{
     ACCEPT, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue, IF_MODIFIED_SINCE,
-    IF_NONE_MATCH, LAST_MODIFIED, LOCATION, RETRY_AFTER,
+    IF_NONE_MATCH, LAST_MODIFIED, LOCATION, RETRY_AFTER, USER_AGENT,
 };
 use tokio::time::Instant;
 use url::Url;
@@ -26,6 +26,8 @@ pub struct Client {
     http1_origins: Mutex<HashSet<url::Origin>>,
     compatible: tokio::sync::OnceCell<wreq::Client>,
     compatible_origins: Mutex<HashSet<url::Origin>>,
+    /// Origins whose edge blocked aggr's own user agent and accepted the Mozilla-compatible form.
+    browser_identity: Mutex<HashSet<url::Origin>>,
     max_body_bytes: usize,
     retries: u32,
     timeout: Duration,
@@ -235,6 +237,15 @@ pub fn user_agent() -> String {
     )
 }
 
+/// The same release identity, in the Mozilla-compatible form a few edges require before they
+/// will serve the page. The product name, version and URL stay in the token.
+pub fn browser_compatible_user_agent() -> String {
+    format!(
+        "Mozilla/5.0 (compatible; aggr/{}; +https://github.com/aymericbeaumet/aggr)",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 impl Client {
     pub(crate) fn max_body_bytes(&self) -> usize {
         self.max_body_bytes
@@ -243,6 +254,23 @@ impl Client {
     /// Total budget of one request, retries included.
     pub(crate) fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    fn uses_browser_identity(&self, url: &Url) -> bool {
+        self.browser_identity
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(&url.origin())
+    }
+
+    fn remember_browser_identity(&self, url: &Url) {
+        let mut origins = self
+            .browser_identity
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if origins.len() < 256 {
+            origins.insert(url.origin());
+        }
     }
 
     /// The ordinary client with h2 disabled, built only when an origin has needed it.
@@ -276,11 +304,40 @@ impl Client {
             http1_origins: Mutex::new(HashSet::new()),
             compatible: tokio::sync::OnceCell::new(),
             compatible_origins: Mutex::new(HashSet::new()),
+            browser_identity: Mutex::new(HashSet::new()),
             max_body_bytes: config.max_body_bytes,
             retries: config.retries,
             timeout: Duration::from_secs(config.timeout_secs),
             hosts: HostLimiter::new(Duration::ZERO),
         })
+    }
+
+    /// One JSON POST on the ordinary client. Used when a publisher's HTML page does not carry
+    /// metadata that a small documented endpoint does.
+    pub async fn post_json(&self, url: &Url, body: &str) -> Result<Response> {
+        if !matches!(url.scheme(), "http" | "https") {
+            bail!("unsupported request URL scheme");
+        }
+        let send = async {
+            self.hosts.wait(url).await;
+            let response = self
+                .inner
+                .post(url.clone())
+                .header(CONTENT_TYPE, "application/json")
+                .body(body.to_owned())
+                .send()
+                .await
+                .map_err(reqwest::Error::without_url)
+                .context("sending request")?;
+            self.read(Received::ordinary(response)).await
+        };
+        match tokio::time::timeout(self.timeout, send).await {
+            Ok(result) => result,
+            Err(_) => bail!(
+                "request exceeded total timeout of {} seconds",
+                self.timeout.as_secs()
+            ),
+        }
     }
 
     pub async fn get(&self, request: Request<'_>) -> Result<Response> {
@@ -362,6 +419,9 @@ impl Client {
         let mut url = url.clone();
         for redirects in 0..=10 {
             self.hosts.wait(&url).await;
+            if !headers.contains_key(USER_AGENT) && self.uses_browser_identity(&url) {
+                headers.insert(USER_AGENT, browser_user_agent_header());
+            }
             let mut compatible = self
                 .compatible_origins
                 .lock()
@@ -390,6 +450,22 @@ impl Client {
                 }
                 Err(err) => return Err(err),
             };
+            // CloudFront's "Request blocked" page refuses aggr's own user agent and serves
+            // the article to the Mozilla-compatible form of the same identity. One retry, then
+            // that origin keeps the form for the rest of the run.
+            if !headers.contains_key(USER_AGENT)
+                && cloudfront_request_blocked(&mut response).await?
+            {
+                log::debug!(
+                    "{}: retrying a CloudFront block with the Mozilla-compatible identity",
+                    url.origin().ascii_serialization()
+                );
+                self.remember_browser_identity(&url);
+                headers.insert(USER_AGENT, browser_user_agent_header());
+                drop(response);
+                self.hosts.wait(&url).await;
+                response = self.send_once(&url, headers.clone(), compatible).await?;
+            }
             if response.is_challenge() && !compatible && challenged_origin.is_none() {
                 *challenged_origin = Some(url.origin());
                 compatible = true;
@@ -542,6 +618,44 @@ impl Client {
             content_type,
         }))
     }
+}
+
+fn browser_user_agent_header() -> HeaderValue {
+    HeaderValue::from_str(&browser_compatible_user_agent())
+        .unwrap_or_else(|_| HeaderValue::from_static("Mozilla/5.0 (compatible; aggr)"))
+}
+
+/// CloudFront's bot block is a 403 page, not a `cf-mitigated` challenge. Other 403s are left
+/// unread so the caller can still report the status.
+async fn cloudfront_request_blocked(response: &mut Received) -> Result<bool> {
+    if response.status != reqwest::StatusCode::FORBIDDEN || !cloudfront_edge(&response.headers) {
+        return Ok(false);
+    }
+    let mut bytes = Vec::new();
+    while bytes.len() < 4096 {
+        match response.body.next().await {
+            Some(Ok(chunk)) => {
+                let room = 4096 - bytes.len();
+                bytes.extend(chunk.iter().take(room).copied());
+            }
+            Some(Err(error)) => return Err(error),
+            None => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(text.contains("Request blocked") && text.to_ascii_lowercase().contains("cloudfront"))
+}
+
+fn cloudfront_edge(headers: &HeaderMap) -> bool {
+    let server = headers
+        .get("server")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("cloudfront"));
+    let cache = headers
+        .get("x-cache")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("cloudfront"));
+    server || cache
 }
 
 #[derive(Debug)]
@@ -1144,6 +1258,56 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("total timeout"));
         assert!(started.elapsed() < Duration::from_millis(1500));
+    }
+
+    #[tokio::test]
+    async fn cloudfront_request_blocked_retries_with_the_mozilla_compatible_identity() {
+        let server = MockServer::start_async().await;
+        let blocked = server
+            .mock_async(|when, then| {
+                when.header("user-agent", user_agent());
+                then.status(403)
+                    .header("server", "CloudFront")
+                    .header("x-cache", "Error from cloudfront")
+                    .body("Request blocked. Generated by cloudfront (CloudFront)");
+            })
+            .await;
+        let article = server
+            .mock_async(|when, then| {
+                when.header("user-agent", browser_compatible_user_agent());
+                then.status(200)
+                    .body("<article><p>Leading F1 drivers are despairing.</p></article>");
+            })
+            .await;
+        let client = client();
+        let first = Url::parse(&server.url("/story")).unwrap();
+        let Response::Ok(body) = client.get(Request::get(&first)).await.unwrap() else {
+            panic!("expected the article");
+        };
+        assert!(body.text().contains("Leading F1 drivers"));
+        let second = Url::parse(&server.url("/another")).unwrap();
+        let Response::Ok(_) = client.get(Request::get(&second)).await.unwrap() else {
+            panic!("expected the remembered identity to be reused");
+        };
+        assert_eq!(blocked.calls_async().await, 1);
+        assert_eq!(article.calls_async().await, 2);
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_forbidden_page_is_not_retried_as_a_cloudfront_block() {
+        let server = MockServer::start_async().await;
+        let denied = server
+            .mock_async(|when, then| {
+                when.header("user-agent", user_agent());
+                then.status(403).body("no");
+            })
+            .await;
+        let error = client()
+            .get(Request::get(&Url::parse(&server.url("/private")).unwrap()))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("403"));
+        assert_eq!(denied.calls_async().await, 1);
     }
 
     #[tokio::test]

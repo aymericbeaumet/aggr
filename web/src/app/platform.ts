@@ -3,6 +3,8 @@
  * document and its static chrome, never on nodes a component owns.
  */
 
+import { tabAt } from '../navigation/tabs';
+
 /** While Shift is held, links reveal where they lead. Styled entirely by the stylesheet. */
 export function installShiftHover(): void {
   const held = (on: boolean) => document.documentElement.classList.toggle('is-shift-held', on);
@@ -27,9 +29,13 @@ export function installTapFeedback(): void {
     'pointerdown',
     (event) => {
       const target = event.target;
-      if (!(target instanceof Element) || !target.closest('.mobile-tabs')) return;
+      if (!(target instanceof Element)) return;
+      const tabs = target.closest('.mobile-tabs');
+      if (!tabs) return;
       clear();
-      target.closest('a')?.setAttribute('data-pressed', '');
+      // The padding and the home-indicator gap are part of the bar. The column under the
+      // finger is the one that was hit, even when the event target is the bar itself.
+      tabAt(tabs, event.clientX, event.clientY)?.setAttribute('data-pressed', '');
     },
     { passive: true },
   );
@@ -113,4 +119,30 @@ export function markPlatform(): void {
   )
     ? 'apple'
     : 'other';
+}
+
+/**
+ * The feed search sticks where it already sits: under the header, and under a scoped title when
+ * the page has one. Both heights are measured. A wrapping header is taller than the single-row
+ * fallback, and the title on a source, category or tag page sits between the header and the
+ * field. A page without that title clears the extra offset. The observer ends with the page.
+ */
+export function installFeedChrome(signal: AbortSignal): void {
+  const header = document.querySelector('.top');
+  if (!(header instanceof HTMLElement)) return;
+  const apply = () => {
+    if (signal.aborted) return;
+    const height = header.getBoundingClientRect().height;
+    if (height > 0) document.documentElement.style.setProperty('--top-nav-offset', `${height}px`);
+    const heading = document.querySelector('.listhead');
+    const block = heading instanceof HTMLElement ? heading.getBoundingClientRect().height : 0;
+    document.documentElement.style.setProperty('--feed-heading', `${block}px`);
+  };
+  apply();
+  if (typeof ResizeObserver === 'undefined') return;
+  const observer = new ResizeObserver(apply);
+  observer.observe(header);
+  const heading = document.querySelector('.listhead');
+  if (heading instanceof HTMLElement) observer.observe(heading);
+  signal.addEventListener('abort', () => observer.disconnect(), { once: true });
 }

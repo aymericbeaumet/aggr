@@ -4,6 +4,44 @@ use url::Url;
 
 use crate::media_duration::RecordingDuration;
 
+/// Public player metadata. A watch page often answers a reader with a consent wall or `429`
+/// and no `lengthSeconds`; this document still names the requested video's length.
+pub const PLAYER_METADATA_URL: &str =
+    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
+
+pub fn player_metadata_body(id: &str) -> String {
+    format!(
+        r#"{{"context":{{"client":{{"clientName":"WEB","clientVersion":"2.20251001.00.00","hl":"en"}}}},"videoId":"{id}"}}"#
+    )
+}
+
+/// `lengthSeconds` for `id` only. A live or upcoming broadcast has no final length.
+pub fn duration_from_player_json(body: &str, id: &str) -> Option<u64> {
+    let player: Value = serde_json::from_str(body).ok()?;
+    if player
+        .pointer("/videoDetails/videoId")
+        .and_then(Value::as_str)
+        != Some(id)
+    {
+        return None;
+    }
+    if unfinished_broadcast(&player) {
+        return None;
+    }
+    [
+        "/videoDetails/lengthSeconds",
+        "/microformat/playerMicroformatRenderer/lengthSeconds",
+    ]
+    .iter()
+    .find_map(|path| {
+        let value = player.pointer(path)?;
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.parse::<u64>().ok())
+            .filter(|seconds| *seconds > 0)
+    })
+}
+
 /// Read public metadata from the already fetched page, never from a recommended video's player.
 pub fn duration_seconds(page: &str, video: &Url) -> Option<u64> {
     let id = super::video_id(video)?;
@@ -176,6 +214,17 @@ mod tests {
 
     fn player(value: Value) -> String {
         format!("<script>var ytInitialPlayerResponse = {value};</script>")
+    }
+
+    #[test]
+    fn player_metadata_reports_only_the_requested_videos_length() {
+        let body = r#"{"videoDetails":{"videoId":"FsDUOUV9Vs8","lengthSeconds":"4229"}}"#;
+        assert_eq!(duration_from_player_json(body, "FsDUOUV9Vs8"), Some(4229));
+        assert_eq!(duration_from_player_json(body, "other"), None);
+        let live =
+            r#"{"videoDetails":{"videoId":"FsDUOUV9Vs8","lengthSeconds":"40","isLive":true}}"#;
+        assert_eq!(duration_from_player_json(live, "FsDUOUV9Vs8"), None);
+        assert!(player_metadata_body("FsDUOUV9Vs8").contains(r#""videoId":"FsDUOUV9Vs8""#));
     }
 
     #[test]
