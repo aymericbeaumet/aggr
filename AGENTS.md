@@ -136,14 +136,18 @@ docs/*.md                                 the user-facing reference the readme l
 ## Commands
 
 ```sh
+make setup                                   # install the mise-pinned tools and locked client packages
 make check                                   # fmt, clippy, Rust tests, svelte-check and vitest
 make client-build                            # rebuild the committed client under src/theme/static/app/
 make client-dev                              # Vite with HMR; AGGR_VITE_URL=http://127.0.0.1:5173 aggr dev uses it
-AGGR_UPDATE_PARITY=1 cargo test --bin aggr parity   # refresh web/test/parity after changing a partial or the model
-cargo test --test cli                        # end-to-end only
+AGGR_UPDATE_PARITY=1 mise exec -- cargo test --bin aggr parity   # refresh web/test/parity after changing a partial or the model
+mise exec -- cargo test --locked --test cli  # end-to-end only
 make run ARGS="dev --port 3000"              # dogfood examples/aggr.toml
-cargo run -- sync --dry-run -vv              # fetch without writing, with debug logs
+mise exec -- cargo run --locked -- sync --dry-run -vv  # fetch without writing, with debug logs
 ```
+
+Keep development tool versions in `mise.toml` and `mise.lock`, including all CI build tools.
+Use mise for local commands and CI; native OS libraries and compilers remain system prerequisites.
 
 ## Conventions
 

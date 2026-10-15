@@ -74,13 +74,16 @@ sits behind `@supports` or a feature check and degrades to plain HTML.
 ## Development
 
 ```sh
-mise install                      # node
-npm ci --prefix web
+make setup                       # mise tools and locked client packages
 make client-check                 # svelte-check + vitest
 make client-build                 # rebuild the committed bundle under src/theme/static/app/
 make client-dev                   # Vite dev server with HMR
-AGGR_VITE_URL=http://127.0.0.1:5173 cargo run -- dev --config examples/aggr.toml
+AGGR_VITE_URL=http://127.0.0.1:5173 make run ARGS="dev"
 ```
+
+`mise.toml` and `mise.lock` pin the development tools. `Cargo.lock` and
+`web/package-lock.json` pin the Rust and client packages. Run `make setup` after
+changing any of those files.
 
 With `AGGR_VITE_URL` set, the development server replaces the compiled module tag in its HTML
 with Vite's client and the source entry, so component edits hot-swap; static HTML, media and data
@@ -132,13 +135,13 @@ search results mark saved articles and omit previews that are unavailable offlin
 ## Browser regression tests
 
 The browser suite uses a local ChromeDriver and a temporary, pinned article archive. `mise.toml`
-pins the `chromedriver` npm package to the installed Chrome's major version; if its binary is
-missing after `mise install`, run `node install.js` inside that package once to download it.
+pins ChromeDriver to the same Chrome for Testing release used by CI. Use a matching Chrome browser
+locally, or point `AGGR_CHROME_BINARY` at one.
 
 ```sh
 mise exec -- chromedriver --port=9515 --allowed-ips=127.0.0.1
 # In another terminal:
-AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser -- --ignored
+AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 mise exec -- cargo test --locked --test browser -- --ignored
 ```
 
 Set `AGGR_CHROME_BINARY` if Chrome is outside its usual location and `AGGR_BROWSER_TIMEOUT_SECS`
@@ -167,7 +170,7 @@ samples predate the smaller install shell: collection pages and the article cata
 longer part of service-worker installation.
 
 ```sh
-AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser default_visit -- --ignored --test-threads=1 --nocapture
+AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 mise exec -- cargo test --locked --test browser default_visit -- --ignored --test-threads=1 --nocapture
 ```
 
 ## Query syntax

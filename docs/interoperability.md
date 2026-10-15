@@ -226,10 +226,10 @@ The newer stable pair requires Rust 1.98; the older stable utility release has a
 GPL-3.0 license. Review the actual package licenses, compiler requirements, and platform builds
 before changing these pins.
 
-Building from source additionally needs CMake 3.22+, a C/C++ toolchain, Git, and native libclang
-for bindgen. Linux CI installs `cmake libclang-dev build-essential`; macOS uses Xcode tools and
-Homebrew `cmake llvm`, with `LIBCLANG_PATH="$(brew --prefix llvm)/lib"`. Windows uses the native
-Visual Studio environment, Ninja, and LLVM; `LIBCLANG_PATH` points to LLVM's `bin` directory.
+Building from source additionally needs the CMake version pinned in `mise.toml`, a C/C++ toolchain,
+Git, and native libclang for bindgen. Run `make setup` for the mise tools. Linux CI installs
+`libclang-dev build-essential`; macOS uses Xcode's native tools and libclang. Windows uses the native
+Visual Studio environment, mise's Ninja, and LLVM; `LIBCLANG_PATH` points to LLVM's `bin` directory.
 Windows x64 also needs NASM. Windows ARM64 uses clang-cl's integrated assembler instead of NASM.
 These are contributor and release build requirements; prebuilt binaries do not require them.
 CI and release workflows keep native Linux GNU, macOS, and Windows runners for both architectures.
