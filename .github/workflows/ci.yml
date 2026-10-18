@@ -183,7 +183,8 @@ jobs:
           file="$(tr -d '[:space:]' < VERSION)"
           [ "$cargo" = "$file" ] || { echo "Cargo.toml says $cargo, VERSION says $file"; exit 1; }
 
-  # Exercise the same major-channel resolution used by the stable reusable workflow.
+  # Exercise a published major channel. A new major has no release until this workflow passes,
+  # so test the previous published channel during bootstrap and the new one after publication.
   installer:
     runs-on: ubuntu-24.04
     permissions:
@@ -197,14 +198,19 @@ jobs:
         run: |
           declared="$(tr -d '[:space:]' < VERSION)"
           major="${declared%%.*}"
-          latest="$(gh release list \
-            --repo "$RELEASE_REPOSITORY" \
-            --exclude-drafts \
-            --exclude-pre-releases \
-            --limit 1000 \
-            --json tagName \
-            --jq "map(select(.tagName | test(\"^v${major}\\\\.[0-9]+\\\\.[0-9]+$\"))) | max_by(.tagName | ltrimstr(\"v\") | split(\".\") | map(tonumber)) | .tagName // empty")"
-          [ -n "$latest" ] || { echo "no published v$major release"; exit 1; }
+          latest=""
+          while [ "$major" -ge 1 ]; do
+            latest="$(gh release list \
+              --repo "$RELEASE_REPOSITORY" \
+              --exclude-drafts \
+              --exclude-pre-releases \
+              --limit 1000 \
+              --json tagName \
+              --jq "map(select(.tagName | test(\"^v${major}\\\\.[0-9]+\\\\.[0-9]+$\"))) | max_by(.tagName | ltrimstr(\"v\") | split(\".\") | map(tonumber)) | .tagName // empty")"
+            [ -n "$latest" ] && break
+            major="$((major - 1))"
+          done
+          [ -n "$latest" ] || { echo "no published aggr release to test"; exit 1; }
           echo "major=$major" >> "$GITHUB_OUTPUT"
           echo "expected=${latest#v}" >> "$GITHUB_OUTPUT"
       - id: install-major
