@@ -637,7 +637,7 @@ async fn mobile_physical_taps_navigate_once_without_delay() -> Result<()> {
         touch(&client,"touchEnd",None).await?;
         wait_booted_with(&client,&format!("location.href==={} && document.body.dataset.kind==='item'",row["url"])).await?;
         // Its tags read as a line of words rather than a column of tap-sized boxes.
-        let tags=client.execute("const tags=[...document.querySelectorAll('.item-tags .tag')];return {count:tags.length,heights:tags.every(tag=>tag.getBoundingClientRect().height<=33),widths:tags.every(tag=>getComputedStyle(tag).minWidth==='auto'||getComputedStyle(tag).minWidth==='0px')}",vec![]).await?;
+        let tags=client.execute("const tags=[...document.querySelectorAll('.itemhead .meta .tag')];return {count:tags.length,heights:tags.every(tag=>tag.getBoundingClientRect().height<=33),widths:tags.every(tag=>getComputedStyle(tag).minWidth==='auto'||getComputedStyle(tag).minWidth==='0px')}",vec![]).await?;
         anyhow::ensure!(tags["heights"]==true && tags["widths"]==true,"tags keep their own width and a compact height on touch: {tags}");
 
         Ok(())

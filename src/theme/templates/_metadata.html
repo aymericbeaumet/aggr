@@ -10,4 +10,5 @@
   {% for discussion in metadata.discussions %}<span class="meta-field"><a class="discussion" data-discussion="{{ discussion.name }}" href="{{ discussion.url }}" title="{{ discussion.url }}" target="_blank" rel="noopener noreferrer" aria-label="{{ discussion.name }}, matching discussion found{% if discussion.score is defined %}, score {{ discussion.score }}{% endif %}">{{ discussion.name }}</a></span>{% endfor %}
   {% if metadata.points is defined %}<span class="meta-field"><span>{{ metadata.points }} points</span></span>{% endif %}
   {% if metadata.comments %}<span class="meta-field"><a href="{{ metadata.comments.url }}" title="{{ metadata.comments.url }}" target="_blank" rel="noopener noreferrer">{% if metadata.comments.count is defined %}{{ metadata.comments.count }} {% endif %}comments</a></span>{% endif %}
+  {% if show_item_tags is defined and show_item_tags and item.labels %}<span class="meta-field"><span class="meta-tags">{% for label in item.labels %}{% if not loop.first %} {% endif %}<a class="tag p-category" rel="tag" href="{{ (label | slug) | facet_url('tag') }}">#{{ label }}</a>{% endfor %}</span></span>{% endif %}
 </div>

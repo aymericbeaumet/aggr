@@ -368,7 +368,7 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         timeTitle:head.querySelector('.dt-published').getAttribute('title'),
         linksTitled:Array.from(head.querySelectorAll('.u-bookmark-of, .discussion')).every(link => link.title === link.href),
         indent:parseFloat(getComputedStyle(body.querySelector('p')).textIndent),
-        separateTags:!head.querySelector('.meta .item-tags'), metadataOrder:Array.from(head.querySelector('.meta').children).map(node => node.firstElementChild.className), categoryBelow:!!head.querySelector('.item-tags a[href*="categories/"]'), categoryText:head.querySelector('.meta .category')?.textContent, categoryUrl:head.querySelector('.meta .category a')?.pathname, categoryQuery:new URL(head.querySelector('.meta .category a').href).searchParams.get('q'), leadingRule:getComputedStyle(body.querySelector('hr:first-child')).display,
+        metadataOrder:Array.from(head.querySelector('.meta').children).map(node => node.firstElementChild.className), categoryText:head.querySelector('.meta .category')?.textContent, categoryUrl:head.querySelector('.meta .category a')?.pathname, categoryQuery:new URL(head.querySelector('.meta .category a').href).searchParams.get('q'), leadingRule:getComputedStyle(body.querySelector('hr:first-child')).display,
         outline:getComputedStyle(document.querySelector('main')).outlineStyle,
         highlighted:!!body.querySelector('pre span'), bodyLeft:body.getBoundingClientRect().left, bodyWidth:body.getBoundingClientRect().width,
         footerLeft:footer.left, footerWidth:footer.width, moreLeft:more.left, moreWidth:more.width,
@@ -399,7 +399,6 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
             "u-bookmark-of"
         ])
     );
-    assert_eq!(article["categoryBelow"], false);
     assert_eq!(article["categoryText"], "/engineering");
     assert_eq!(article["categoryUrl"], "/reader/");
     assert_eq!(article["categoryQuery"], "category:\"engineering\"");
@@ -445,7 +444,6 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
     );
     assert_eq!(article["highlighted"], true);
     assert_eq!(article["linksTitled"], true);
-    assert_eq!(article["separateTags"], true);
     assert!(
         article["publicationTitle"]
             .as_str()
@@ -586,15 +584,12 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
     }
     let reading_header = client.execute_async(r#"
       const done = arguments[arguments.length - 1], head = document.querySelector('.itemhead');
-      const tags = head.querySelector('.item-tags');
       async function sample(y) {
         window.scrollTo(0,y);
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const title=head.querySelector('.itemhead-title');
         return {size:parseFloat(getComputedStyle(title).fontSize) * new DOMMatrixReadOnly(getComputedStyle(title).transform).a,
-          opacity:parseFloat(getComputedStyle(tags).opacity), height:tags.getBoundingClientRect().height,
           metadata:getComputedStyle(head.querySelector('.meta')).display,
-          separate:tags.getBoundingClientRect().top >= head.querySelector('.meta').getBoundingClientRect().bottom,
           offset:parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop), bottom:head.getBoundingClientRect().bottom,
           titleBox:head.querySelector('h1').getBoundingClientRect().height,
           compact:(() => { const node = head.querySelector('.itemhead-title-compact'), box = node.getBoundingClientRect(), frame = head.getBoundingClientRect();
@@ -605,18 +600,15 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
       (async () => done({expanded:await sample(0),quarter:await sample(40),half:await sample(80),
         condensed:await sample(520),reverseHalf:await sample(80),restored:await sample(0)}))();
     "#, vec![]).await?;
-    assert_eq!(reading_header["expanded"]["separate"], true);
     for (before, after) in [
         ("expanded", "quarter"),
         ("quarter", "half"),
         ("half", "condensed"),
     ] {
-        for field in ["size", "opacity", "height"] {
-            assert!(
-                reading_header[before][field].as_f64() > reading_header[after][field].as_f64(),
-                "header must fold continuously ({field}): {reading_header}"
-            );
-        }
+        assert!(
+            reading_header[before]["size"].as_f64() > reading_header[after]["size"].as_f64(),
+            "header title must fold continuously: {reading_header}"
+        );
     }
     assert_eq!(
         reading_header["half"]["size"],
@@ -626,7 +618,6 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         reading_header["expanded"]["size"],
         reading_header["restored"]["size"]
     );
-    assert_eq!(reading_header["condensed"]["height"], 0.0);
     // Folded, the whole title is still there, set smaller across the full width: the large title
     // gives way to a compact copy, and the header closes to exactly that copy's height.
     let condensed = &reading_header["condensed"];
@@ -1468,14 +1459,16 @@ async fn metadata_contracts(client: &Client, fixture: &Fixture, width: u32) -> R
     wait_booted_with(client, "!!document.querySelector('.itemhead .meta')").await?;
     let article = visible_metadata(client, ".itemhead .meta").await?;
     let article_layout = metadata_layout(client, ".itemhead .meta").await?;
+    let tag_fields = client.execute(r#"const meta=document.querySelector('.itemhead .meta'),group=meta.querySelector('.meta-tags');return {groups:meta.querySelectorAll('.meta-tags').length,tags:[...group.querySelectorAll('.tag')].map(tag=>tag.textContent),text:group.textContent,parent:group.parentElement.parentElement===meta,separator:getComputedStyle(group.parentElement,'::before').content.replaceAll('"','')}"#, vec![]).await?;
     anyhow::ensure!(
-        client
-            .execute("return !!document.querySelector('.item-tags .tag')", vec![])
-            .await?
-            == true,
-        "article tags must remain visible below its metadata"
+        tag_fields["groups"] == 1
+            && tag_fields["tags"] == json!(["#reading", "#rust"])
+            && tag_fields["text"] == "#reading #rust"
+            && tag_fields["parent"] == true
+            && (width <= 640 || tag_fields["separator"] == "·"),
+        "article tags must form one metadata group with one leading middot: {tag_fields}"
     );
-    let tags = client.execute("const tag=getComputedStyle(document.querySelector('.item-tags .tag'));const meta=getComputedStyle(document.querySelector('.itemhead .meta'));return {color:tag.color,metadataColor:meta.color,font:tag.fontSize,metadataFont:meta.fontSize,background:tag.backgroundColor,border:tag.borderTopWidth,weight:tag.fontWeight}", vec![]).await?;
+    let tags = client.execute("const tag=getComputedStyle(document.querySelector('.itemhead .meta .tag'));const meta=getComputedStyle(document.querySelector('.itemhead .meta'));return {color:tag.color,metadataColor:meta.color,font:tag.fontSize,metadataFont:meta.fontSize,background:tag.backgroundColor,border:tag.borderTopWidth,weight:tag.fontWeight}", vec![]).await?;
     anyhow::ensure!(
         tags["color"] == tags["metadataColor"]
             && tags["font"] == tags["metadataFont"]
@@ -1489,7 +1482,12 @@ async fn metadata_contracts(client: &Client, fixture: &Fixture, width: u32) -> R
     anyhow::ensure!(
         width <= 640
             || (feed_layout["typography"] == article_layout["typography"]
-                && feed_layout["fields"] == article_layout["fields"]),
+                && feed_layout["fields"]
+                    .as_array()
+                    .zip(article_layout["fields"].as_array())
+                    .is_some_and(
+                        |(feed_fields, article_fields)| article_fields.starts_with(feed_fields)
+                    )),
         "shared metadata geometry and typography differ: feed={feed_layout}, article={article_layout}"
     );
     anyhow::ensure!(
@@ -1523,8 +1521,10 @@ async fn metadata_contracts(client: &Client, fixture: &Fixture, width: u32) -> R
         }
     }
     anyhow::ensure!(
-        feed == article,
-        "feed/article metadata differ: feed={feed}, article={article}"
+        feed.as_array()
+            .zip(article.as_array())
+            .is_some_and(|(feed_fields, article_fields)| article_fields.starts_with(feed_fields)),
+        "feed/article metadata differ before article tags: feed={feed}, article={article}"
     );
     Ok(())
 }

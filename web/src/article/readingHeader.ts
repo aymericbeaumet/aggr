@@ -53,7 +53,6 @@ function measureFold(header: HTMLElement, signal: AbortSignal): void {
   if (!CSS.supports('height: calc-size(auto, size)')) {
     measured.push(
       [header.querySelector('.itemhead-title'), '--title-height'],
-      [header.querySelector('.item-tags-inner'), '--tags-height'],
     );
   }
   // The untransformed border box: the title is scaled, and whole pixels would jolt the fold.

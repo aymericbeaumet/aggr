@@ -3,6 +3,7 @@
   // cards. The fields sit on one line with no whitespace of their own; the spaces around the
   // published date and the original link are the template's.
   import type { Metadata } from '../generated/Metadata';
+  import type { ClientLabel } from '../generated/ClientLabel';
   import { formatDate, formatTimestamp, localizedTooltip, publishedTooltip } from '../dates/format';
   import { facetPage, facetUrl } from '../model/urls';
   import { clock } from '../state/clock.svelte';
@@ -12,10 +13,12 @@
   let {
     metadata,
     base,
+    labels = [],
     dateFormat = undefined,
   }: {
     metadata: Metadata;
     base: string;
+    labels?: ClientLabel[];
     /** The `date-format` style; defaults to the loaded preference, and to the template's day. */
     dateFormat?: string;
   } = $props();
@@ -52,5 +55,5 @@
   <span class="meta-field"><span class="published-date" data-date-tooltip data-date-updated={updated} title={publishedTitle} onpointerenter={look} onfocusin={look}><time class="dt-published" datetime={metadata.date} aria-label={live ? `${dateText}; ${publishedTitle}` : undefined}>{dateText}</time></span></span>
   {#if consumption}<span class="meta-field"><span class="reading-stats" data-consumption={consumption.action} data-duration-seconds={consumption.seconds || undefined} title={wordsTitle}>{#if consumption.minutes}<time datetime="PT{consumption.seconds ? consumption.seconds : consumption.minutes}{consumption.seconds ? 'S' : 'M'}">{consumption.minutes} min {consumption.action}</time>{:else}{consumption.action === 'listen' ? 'Listen' : 'Watch'}{/if}</span></span>{/if}
   <span class="meta-field"><a class="u-bookmark-of" href={metadata.original} title={metadata.original} target="_blank" rel="external noopener noreferrer via">original</a></span>
-  {#each metadata.discussions as discussion (discussion.name)}<span class="meta-field"><a class="discussion" data-discussion={discussion.name} href={discussion.url} title={discussion.url} target="_blank" rel="noopener noreferrer" aria-label="{discussion.name}, matching discussion found{discussion.score !== undefined ? `, score ${discussion.score}` : ''}">{discussion.name}</a></span>{/each}{#if metadata.points !== undefined}<span class="meta-field"><span>{metadata.points} points</span></span>{/if}{#if metadata.comments}<span class="meta-field"><a href={metadata.comments.url} title={metadata.comments.url} target="_blank" rel="noopener noreferrer">{#if metadata.comments.count !== undefined}{metadata.comments.count}{' '}{/if}comments</a></span>{/if}
+  {#each metadata.discussions as discussion (discussion.name)}<span class="meta-field"><a class="discussion" data-discussion={discussion.name} href={discussion.url} title={discussion.url} target="_blank" rel="noopener noreferrer" aria-label="{discussion.name}, matching discussion found{discussion.score !== undefined ? `, score ${discussion.score}` : ''}">{discussion.name}</a></span>{/each}{#if metadata.points !== undefined}<span class="meta-field"><span>{metadata.points} points</span></span>{/if}{#if metadata.comments}<span class="meta-field"><a href={metadata.comments.url} title={metadata.comments.url} target="_blank" rel="noopener noreferrer">{#if metadata.comments.count !== undefined}{metadata.comments.count}{' '}{/if}comments</a></span>{/if}{#if labels.length}<span class="meta-field"><span class="meta-tags">{#each labels as label, index (label.slug)}{#if index}{' '}{/if}<a class="tag p-category" rel="tag" href={facetUrl(base, label.slug, 'tag')}>#{label.name}</a>{/each}</span></span>{/if}
 </div>

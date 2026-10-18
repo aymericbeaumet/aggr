@@ -3329,7 +3329,7 @@ category = "Science"
         assert!(body.html().contains("qwen-scope/Figures/overview.png"));
         assert!(body.html().contains("Qwen-Scope main image"));
         let tags = document
-            .select(&scraper::Selector::parse(".item-tags .tag").unwrap())
+            .select(&scraper::Selector::parse(".itemhead .meta .tag").unwrap())
             .map(|tag| tag.text().collect::<String>())
             .collect::<Vec<_>>();
         assert_eq!(tags, ["#interpretability"]);

@@ -416,6 +416,7 @@ html:not([data-thumbnails="hide"]) .row-content { min-height: var(--preview-size
 .meta > * { display: inline-flex; align-items: center; min-width: 0; min-height: var(--row-meta-height); overflow-wrap: anywhere; }
 .meta-field { gap: 0; flex-wrap: nowrap; max-width: 100%; }
 .meta-field > a { display: inline-flex; align-items: center; min-height: inherit; }
+.meta-tags { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0 0.35em; }
 .published-date { display: inline-flex; align-items: center; gap: 0.25em; flex-wrap: wrap; }
 .meta a { color: inherit; }
 .meta-field > .domain { display: block; align-content: center; }
@@ -482,8 +483,6 @@ body[data-kind="item"] .main {
 .itemhead-title-compact { position: absolute; top: 0; inset-inline: 0; visibility: hidden; pointer-events: none; font-size: calc(var(--itemhead-title-size) * 0.6); font-weight: 700; line-height: 1.25; letter-spacing: -0.01em; overflow-wrap: anywhere; text-wrap: pretty; }
 .itemhead h1:focus { outline: none; }
 .tag { color: inherit; background: none; border: 0; padding: 0; border-radius: 0; font-weight: 400; }
-.item-tags { overflow: hidden; opacity: calc(1 - var(--header-progress, 0)); margin-top: calc(0.45rem * (1 - var(--header-progress, 0))); font-size: 0.875rem; line-height: 1.2; color: var(--muted); }
-.item-tags-inner { display: flex; flex-wrap: wrap; gap: 0.3rem 0.45rem; }
 .article-resources { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.45rem 1rem; margin: -0.25rem 0 1.5rem; font-size: 0.8125rem; line-height: 1.5; }
 .article-resources-label { color: var(--muted); }
 .article-resources a { color: var(--warm); font-weight: 400; overflow-wrap: anywhere; }
@@ -721,7 +720,7 @@ body[data-kind="item"] .main {
   }
   html:not([data-density="comfortable"]) .row-heading .title { line-height: 1.25; }
   html:not([data-density="comfortable"]) .row .meta { padding-left: calc(1.25rem + 0.45rem); }
-  html:not([data-density="comfortable"]) .meta, html:not([data-density="comfortable"]) .item-tags { font-size: 0.8rem; }
+  html:not([data-density="comfortable"]) .meta { font-size: 0.8rem; }
 }
 
 @media (min-width: 72.0625rem) {
@@ -787,7 +786,6 @@ body[data-kind="item"] .main {
   /* Tags read as a line of words: a tall row and a box as wide as it is high would space them
      unevenly, so each keeps its own width and a comfortable height. */
   .tag { display: inline-flex; align-items: center; min-height: 1.75rem; }
-  .item-tags-inner { gap: 0 0.7rem; }
   /* A row is one target: its metadata and thumbnail let a tap through to the row's own link,
      and only their own links keep it. */
   .row :is(.meta, .preview-media), .article-more-card .meta { pointer-events: none; }
@@ -1032,7 +1030,6 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   .itemhead::before { display: none; }
   .itemhead h1 { height: auto; font-size: 2rem; }
   .itemhead-title-compact { display: none !important; }
-  .item-tags { height: auto; visibility: visible !important; }
   .video-player { break-inside: avoid; }
   .video-player:has(iframe) { display: none; }
   .video-preview-play { display: none; }
@@ -1315,7 +1312,7 @@ html[data-navigating]::before {
    view. Once the script has measured it, the large title hands over to a compact copy set at
    0.6em across the full width, the way a native large title gives way to the inline one: one
    fades out before the other fades in, so the two never overlap, and the box closes from one
-   height to the other. The tags give up theirs entirely. */
+   height to the other. */
 body[data-kind="item"] .itemhead-title { display: block; transform-origin: left top; transform: scale(calc(1 - 0.4 * var(--header-progress, 0))); }
 body[data-kind="item"] .itemhead[style*="--compact-height"] .itemhead-title { opacity: clamp(0, calc((0.5 - var(--header-progress, 0)) / 0.15), 1); }
 /* The compact copy sits where the title does: under the header's own folding top padding. */
@@ -1323,16 +1320,13 @@ body[data-kind="item"] .itemhead[style*="--compact-height"] .itemhead-title-comp
 @supports (height: calc-size(auto, size)) {
   body[data-kind="item"] .itemhead h1 { height: calc-size(auto, size * (1 - 0.4 * var(--header-progress, 0))); overflow: hidden; }
   body[data-kind="item"] .itemhead[style*="--compact-height"] h1 { height: calc-size(auto, size - (size - var(--compact-height)) * var(--header-progress, 0)); }
-  body[data-kind="item"] .item-tags { height: calc-size(auto, size * (1 - var(--header-progress, 0))); }
 }
 /* Without calc-size (Safari) the script measures the natural heights once per resize, so the
    folding title does not leave its full height standing empty under it. */
 @supports not (height: calc-size(auto, size)) {
   body[data-kind="item"] .itemhead[style*="--title-height"] h1 { height: calc(var(--title-height) * (1 - 0.4 * var(--header-progress, 0))); overflow: hidden; }
   body[data-kind="item"] .itemhead[style*="--title-height"][style*="--compact-height"] h1 { height: calc(var(--title-height) - (var(--title-height) - var(--compact-height)) * var(--header-progress, 0)); }
-  body[data-kind="item"] .itemhead[style*="--tags-height"] .item-tags { height: calc(var(--tags-height) * (1 - var(--header-progress, 0))); }
 }
-body[data-kind="item"] .item-tags-inner { min-height: 0; overflow: hidden; }
 
 @keyframes aggr-reading-progress {
   from { transform: scaleX(0); }

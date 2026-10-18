@@ -890,8 +890,8 @@ async fn rich_search_contracts(client: &Client, fixture: &Fixture) -> Result<()>
             fixture.base
         ))
         .await?;
-    wait_for(client, "document.querySelector('.item-tags .tag')").await?;
-    canonical_facet_click(client, ".item-tags .tag", "tag:reading", 45).await?;
+    wait_for(client, "document.querySelector('.itemhead .meta .tag')").await?;
+    canonical_facet_click(client, ".itemhead .meta .tag", "tag:reading", 45).await?;
     // The same two facets again, this time on a result the search itself rendered.
     for (selector, qualifier) in [
         (

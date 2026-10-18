@@ -354,7 +354,8 @@ Use mise for local commands and CI; native OS libraries and compilers remain sys
   browser has to answer: same list, no index to download. Modules a page can use load with the
   page; search downloads its index only after query or focus intent.
 - Keep source names visible below titles in feed, search, and item metadata; tags appear only
-  on item pages. The feed toolbar's omission of sources does not apply to individual feed entries.
+  on item pages, grouped after the other metadata fields with one middot before the group. The feed
+  toolbar's omission of sources does not apply to individual feed entries.
   Put separators outside links and hover targets. Share metadata typography and spacing; format
   dates before the first paint instead of reserving empty date columns.
 - Use recording duration for watch/listen metadata; never substitute transcript or show-note read
