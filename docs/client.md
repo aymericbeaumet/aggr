@@ -135,18 +135,22 @@ search results mark saved articles and omit previews that are unavailable offlin
 ## Browser regression tests
 
 The browser suite uses a local ChromeDriver and a temporary, pinned article archive. `mise.toml`
-pins ChromeDriver to the same Chrome for Testing release used by CI. Use a matching Chrome browser
-locally, or point `AGGR_CHROME_BINARY` at one.
+pins ChromeDriver and Chrome for Testing to the same release. `make setup` installs both through
+mise on supported desktop platforms. Point `AGGR_CHROME_BINARY` at the mise-installed browser:
 
 ```sh
 mise exec -- chromedriver --port=9515 --allowed-ips=127.0.0.1
 # In another terminal:
+AGGR_CHROME_BINARY="$(mise where http:chrome-for-testing)/chrome-linux64/chrome" \
 AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 mise exec -- cargo test --locked --test browser -- --ignored
 ```
 
-Set `AGGR_CHROME_BINARY` if Chrome is outside its usual location and `AGGR_BROWSER_TIMEOUT_SECS`
-(default 45) when a loaded machine needs longer waits. CI installs matching browser and driver
-versions; failure screenshots and logs are saved under `target/browser-artifacts/`.
+The example path is for Linux x64. On macOS, use
+`$(mise where http:chrome-for-testing)/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`
+on Apple silicon, or replace `arm64` with `x64` on Intel. On Windows x64, the path is
+`$(mise where http:chrome-for-testing)/chrome-win64/chrome.exe`. Set
+`AGGR_BROWSER_TIMEOUT_SECS` (default 45) when a loaded machine needs longer waits. CI saves
+failure screenshots and logs under `target/browser-artifacts/`.
 
 ### First-visit budget
 

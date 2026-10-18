@@ -24,11 +24,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-amd64, os: ubuntu-latest }
+          - { name: linux-amd64, os: ubuntu-24.04 }
           - { name: linux-arm64, os: ubuntu-24.04-arm }
-          - { name: macos-arm64, os: macos-latest }
+          - { name: macos-arm64, os: macos-26 }
           - { name: macos-amd64, os: macos-15-intel }
-          - { name: windows-amd64, os: windows-latest }
+          - { name: windows-amd64, os: windows-2025 }
           - { name: windows-arm64, os: windows-11-arm }
     runs-on: ${{ matrix.os }}
     steps:
@@ -38,6 +38,9 @@ jobs:
         with:
           version: 2026.10.11
           install_args: rust cmake ninja
+      - name: Install Windows x64 assembler
+        if: matrix.name == 'windows-amd64'
+        run: mise install http:nasm
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -70,7 +73,7 @@ jobs:
       - uses: jdx/mise-action@v5
         with:
           version: 2026.10.11
-          install_args: rust cmake ninja chromedriver
+          install_args: rust cmake ninja chromedriver http:chrome-for-testing
       - uses: Swatinem/rust-cache@v2
         with:
           # Restore what test (linux-amd64) built for the same lockfile instead of keeping a
@@ -81,19 +84,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          browser_dir="$(mktemp -d "$RUNNER_TEMP/aggr-chrome.XXXXXX")"
-          # mise.toml pins the driver to an exact Chrome for Testing release.
-          browser_version="$(mise exec -- chromedriver --version | awk '{ print $2 }')"
-          curl --fail --silent --show-error --location --retry 3 \
-            "https://storage.googleapis.com/chrome-for-testing-public/$browser_version/linux64/chrome-linux64.zip" \
-            --output "$browser_dir/chrome.zip"
-          unzip -q "$browser_dir/chrome.zip" -d "$browser_dir"
-          mapfile -t dependencies < "$browser_dir/chrome-linux64/deb.deps"
+          browser_dir="$(mise where http:chrome-for-testing)/chrome-linux64"
+          mapfile -t dependencies < "$browser_dir/deb.deps"
           sudo apt-get update -qq
           sudo apt-get satisfy -y --no-install-recommends "${dependencies[@]}"
-          "$browser_dir/chrome-linux64/chrome" --version
+          "$browser_dir/chrome" --version
           mise exec -- chromedriver --version
-          echo "AGGR_CHROME_BINARY=$browser_dir/chrome-linux64/chrome" >> "$GITHUB_ENV"
+          echo "AGGR_CHROME_BINARY=$browser_dir/chrome" >> "$GITHUB_ENV"
       - name: Test reader and offline browser contracts
         shell: bash
         env:
@@ -128,7 +125,7 @@ jobs:
           compression-level: 0
 
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - id: msrv
@@ -149,7 +146,7 @@ jobs:
   # bundles under src/theme/static/app (Node is a development tool only; the binary embeds
   # the committed output).
   client:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
@@ -167,7 +164,7 @@ jobs:
   # as configured in deny.toml. Use the same mise-pinned cargo-deny as local development.
   deps:
     name: deps (cargo-deny)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
@@ -178,7 +175,7 @@ jobs:
 
   # The version is committed in two places; keep them equal before anything gets tagged.
   version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - run: |
@@ -188,7 +185,7 @@ jobs:
 
   # Exercise the same major-channel resolution used by the stable reusable workflow.
   installer:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:

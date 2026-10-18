@@ -198,6 +198,8 @@ Use mise for local commands and CI; native OS libraries and compilers remain sys
 - The browser suite (`tests/browser/`) is one module per topic, and every test builds its own
   fixture site and Chrome session. `AGGR_BROWSER_TIMEOUT_SECS` lengthens its waits on a loaded
   machine; `AGGR_BUILD_WORKERS` pins the build's worker count.
+- Keep downloadable development tools in `mise.toml` and `mise.lock`, including the browser
+  matching ChromeDriver and Windows x64 NASM. CI may install native OS libraries separately.
 
 ## Reader and ingestion invariants
 

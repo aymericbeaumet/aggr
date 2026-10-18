@@ -3,7 +3,7 @@
 all: check
 
 setup:
-	mise install rust node cmake ninja actionlint aqua:EmbarkStudios/cargo-deny chromedriver
+	mise install
 	mise exec -- npm ci --prefix web
 
 build:

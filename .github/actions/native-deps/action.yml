@@ -1,7 +1,7 @@
 name: native-deps
 description: >-
   Installs native libraries and compiler support for the BoringSSL build behind wreq.
-  Rust, CMake and Ninja come from the repository's mise configuration; clang-sys locates
+  Rust, CMake, Ninja and Windows x64 NASM come from the repository's mise configuration; clang-sys locates
   Xcode's libclang on macOS without Homebrew llvm or LIBCLANG_PATH.
 
 runs:
@@ -35,8 +35,4 @@ runs:
           'CC=clang-cl' >> $env:GITHUB_ENV
           'CXX=clang-cl' >> $env:GITHUB_ENV
           'ASM=clang-cl' >> $env:GITHUB_ENV
-        } else {
-          choco install nasm --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          (Join-Path $env:ProgramFiles 'NASM') >> $env:GITHUB_PATH
         }

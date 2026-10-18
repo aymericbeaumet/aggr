@@ -130,6 +130,34 @@ checksum = "sha256:bace36e94b31c68ab6fa295f26dfa11219e0701cf7c94b0284a7d1cb13dac
 url = "https://github.com/Kitware/CMake/releases/download/v4.4.4/cmake-4.4.4-windows-x86_64.zip"
 url_api = "https://api.github.com/repos/Kitware/CMake/releases/assets/605998125"
 
+[[tools."http:chrome-for-testing"]]
+version = "155.0.8059.39"
+backend = "http:chrome-for-testing"
+
+[tools."http:chrome-for-testing"."platforms.linux-x64"]
+checksum = "sha256:55672d1f392fd3e7b7a08621b6e804e6bcb39d40cf155504abb74b3a021ea8ea"
+url = "https://storage.googleapis.com/chrome-for-testing-public/155.0.8059.39/linux64/chrome-linux64.zip"
+
+[tools."http:chrome-for-testing"."platforms.macos-arm64"]
+checksum = "blake3:eed1cf6778376cef1ff6598c8edbb115cabd41f97bede274008eff8b016dfccc"
+url = "https://storage.googleapis.com/chrome-for-testing-public/155.0.8059.39/mac-arm64/chrome-mac-arm64.zip"
+
+[tools."http:chrome-for-testing"."platforms.macos-x64"]
+checksum = "sha256:9e4da7961d4a426078f02e89ecfa569a7926ada2dc88aa53c0bd9ed0d46c3bb7"
+url = "https://storage.googleapis.com/chrome-for-testing-public/155.0.8059.39/mac-x64/chrome-mac-x64.zip"
+
+[tools."http:chrome-for-testing"."platforms.windows-x64"]
+checksum = "sha256:59ab2a6e99bde9c0bc180414988394f9f5355a0d3764c704151ee8ecea235c7e"
+url = "https://storage.googleapis.com/chrome-for-testing-public/155.0.8059.39/win64/chrome-win64.zip"
+
+[[tools."http:nasm"]]
+version = "3.02"
+backend = "http:nasm"
+
+[tools."http:nasm"."platforms.windows-x64"]
+checksum = "sha256:161d0bfaff53c2f9e9f3e69fd0672323ebabafd1268976a5cec11be92a19aee7"
+url = "https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip"
+
 [[tools.ninja]]
 version = "1.13.2"
 backend = "aqua:ninja-build/ninja"

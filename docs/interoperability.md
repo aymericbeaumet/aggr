@@ -230,7 +230,8 @@ Building from source additionally needs the CMake version pinned in `mise.toml`,
 Git, and native libclang for bindgen. Run `make setup` for the mise tools. Linux CI installs
 `libclang-dev build-essential`; macOS uses Xcode's native tools and libclang. Windows uses the native
 Visual Studio environment, mise's Ninja, and LLVM; `LIBCLANG_PATH` points to LLVM's `bin` directory.
-Windows x64 also needs NASM. Windows ARM64 uses clang-cl's integrated assembler instead of NASM.
+Windows x64 gets a pinned NASM through mise. Windows ARM64 uses clang-cl's integrated assembler
+instead of NASM.
 These are contributor and release build requirements; prebuilt binaries do not require them.
 CI and release workflows keep native Linux GNU, macOS, and Windows runners for both architectures.
 Windows ARM64 must pass those workflows; upstream's documented build matrix does not cover it.
