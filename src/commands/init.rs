@@ -21,7 +21,7 @@ permissions: { contents: write, pages: write, id-token: write }
 jobs:
   aggr:
     if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
-    uses: aymericbeaumet/aggr/.github/workflows/aggr.yml@v1
+    uses: aymericbeaumet/aggr/.github/workflows/aggr.yml@v2
 ";
 
 pub fn run(config_path: &Path, args: &InitArgs) -> Result<()> {
@@ -78,6 +78,10 @@ mod tests {
         );
         assert_eq!(workflow["on"]["schedule"][0]["cron"], "7,37 * * * *");
         assert!(workflow["on"].get("workflow_dispatch").is_some());
+        assert_eq!(
+            workflow["jobs"]["aggr"]["uses"],
+            "aymericbeaumet/aggr/.github/workflows/aggr.yml@v2"
+        );
         assert!(
             WORKFLOW.lines().count() <= 10,
             "the workflow must stay tiny"

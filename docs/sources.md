@@ -149,30 +149,42 @@ to find a feed, but a source without a usable feed reports a failure instead of 
 listing. Some feeds provide only summaries; the reader keeps the original link. Set
 `content_download_strategy = "article"` globally or on a source to permit HTML discovery and full article extraction.
 
-## Upgrading to 1.12
+## Upgrading from 1.12 to 2.0
 
-Version 1.12 changes the capture schema and enables retention by default. The stable `@v1`
-workflow selects the latest published v1 binary automatically, so review configuration and limits
-before the next scheduled sync.
+Version 2 changes the configuration schema. Version 1.12.0 uses the keys in the left column;
+version 2 uses those on the right, both in `[defaults]` and in individual `[[sources]]` tables.
+The old keys are configuration errors in version 2.
 
-| Previous setting | New setting |
+| Version 1.12 | Version 2 |
 | --- | --- |
-| `[fetch] content` | `[defaults] content_download_strategy` (`feed` or `article`) |
-| Separate `images`, `previews`, and `documents` settings | One `media_download_strategy` under `[defaults]` or on a source |
-| Image `original` / `compact` | `media_download_strategy` `original` / `compressed` |
-| `[fetch] max_items_per_source` or source `limit` | `count_max` under `[defaults]` or on a source |
-| `[store] max_items` / `max_age_days` | `count_max` / `max_age_days` under `[defaults]` or on a source |
+| `content = "light"` | `content_download_strategy = "feed"` |
+| `content = "heavy"` | `content_download_strategy = "article"` |
+| `media = "remote"` | `media_download_strategy = "remote"` |
+| `media = "compressed"` or `{ mode = "compressed", quality = 72, max_axis = 1600 }` | `media_download_strategy` with the same value |
+| `media = "local"` | `media_download_strategy = "original"` |
+| `max_items` | `count_max` |
+| `max_bytes` | `size_max` (integer bytes or a size such as `"1GB"`) |
+| `[site.preferences]` | `[preferences]` |
+| `[site.identity]` | `[identity]` |
+| `[[networks]]` tables | `discussions` list under `[defaults]` or a `[[sources]]` table |
 
-The retired keys are configuration errors. `[fetch]` retains transport settings, and `[store]`
-retains branch/path and HTML-preservation settings. The unified media policy applies to images,
-previews, and PDFs together; independent controls for those media types have been removed.
+For example, replace `[[networks]]` tables with `discussions = ["hackernews", "reddit"]`.
+A custom network becomes `{ name = "Lobsters", url = "https://lobste.rs/search?q={url}" }`
+inside that list. Put inherited discussions in `[defaults]`; a source's `discussions` replaces
+the whole list. Remove `[site.params]`: version 2 no longer accepts it. `max_age_days`, `since`,
+`[fetch]` transport settings, and `[store]` settings keep their names.
 
-Omitted limits now mean **250 items, 730 days, and 1 GB of retained article files per feed**.
+The default limits remain **250 items, 730 days, and 1 GB of retained article files per feed**.
 Sync removes excess articles and their companions from the current tree in ordinary commits;
-Git history remains. To keep an unbounded current archive, explicitly set `count_max = 0`,
+Git history remains. To keep an unbounded current archive, set `count_max = 0`,
 `max_age_days = 0`, `size_max = 0`, and clear any `since` cutoff. To retain full article extraction
-and original media, choose `content_download_strategy = "article"` and `media_download_strategy = "original"`. Sources override each field
-independently; see [storage limits](storage.md) for cleanup and recovery behavior.
+and original media, choose `content_download_strategy = "article"` and
+`media_download_strategy = "original"`. Sources override each field independently; see
+[storage limits](storage.md) for cleanup and recovery behavior.
+
+Update a GitHub instance's reusable workflow reference from `@v1` to `@v2` when migrating its
+configuration. The `@v1` channel continues to select version 1 binaries and cannot read the
+version 2 schema; `@v2` selects published version 2 binaries. See [hosting](hosting.md).
 
 ## Capture defaults and per-source limits
 
