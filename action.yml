@@ -6,7 +6,7 @@ branding:
 
 inputs:
   version:
-    description: Exact release (`1.2.3`) or compatible major channel (`1`). Defaults to the action's channel.
+    description: Exact release (`2.0.0`) or compatible major channel (`2`). Defaults to the action's channel.
     required: false
     default: ""
   token:
@@ -35,8 +35,8 @@ runs:
         set -euo pipefail
 
         # Explicit input > version-like action ref > major declared beside this action > latest.
-        # Exact semver pins. A bare major resolves at run time, so a stable workflow `@v1`
-        # automatically installs the greatest published v1.x.y release.
+        # Exact semver pins. A bare major resolves at run time, so a stable workflow
+        # automatically installs the greatest published release in its major channel.
         requested="${INPUT_VERSION#v}"
         if [ -z "$requested" ] && [[ "$ACTION_REF" =~ ^v?[0-9]+(\.[0-9]+\.[0-9]+)?$ ]]; then
           requested="${ACTION_REF#v}"
@@ -67,7 +67,7 @@ runs:
         elif [[ "$requested" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
           version="$requested"
         else
-          echo "invalid aggr version '$requested': use a major channel like 1 or an exact version like 1.3.0" >&2
+          echo "invalid aggr version '$requested': use a major channel like 2 or an exact version like 2.0.0" >&2
           exit 1
         fi
 
