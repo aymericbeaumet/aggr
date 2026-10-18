@@ -11,7 +11,7 @@ snapshot.
 ## Two branches, one set of refs
 
 ```text
-primary branch    aggr.toml, optional provider CI, themes/, templates/, static/
+primary branch    aggr.toml, optional provider CI
 aggr              orphan, append-only, never force-pushed: the data
 refs/aggr/*        lightweight pointers to data commits
 ```
@@ -41,7 +41,7 @@ README.md                                              what this branch is, how 
 items/<source>/<yyyy>/<mm>/<yyyy-mm-dd>-<slug>.md      YAML front matter + readable Markdown
 items/<source>/<yyyy>/<mm>/<yyyy-mm-dd>-<slug>.html    stripped HTML from which Markdown was derived
 sources/<source>/state.toml                            identity, resolved_url, title/site URL, language, ETag, Last-Modified, body hash
-sources/<source>/seen.txt                              "<key> <yyyy-mm-dd>" per line, append-only
+sources/<source>/seen.txt                              "<key> <yyyy-mm-dd>" per line; append-only while the source is configured
 status.toml                                            sources currently failing; absent when all is well
 .aggr-sources.json                                     resolved source presentation metadata and remote collection digests
 .aggr-discussions.json                                 captured discussion matches for local rendering
@@ -76,8 +76,9 @@ status.toml                                            sources currently failing
   discussion links. Sync writes these only when their contents change, so offline builds can use
   the selected commit's inputs without contacting collection or discussion providers.
 - **Deleted stays deleted.** Dedupe keys derived from the entry id, normalized original URL, and
-  `title|published` are appended to `seen.txt` when an item is written. They are never removed, so
-  deleting a current item does not make a later fetch add it again.
+  `title|published` are appended to `seen.txt` when an item is written. While that source stays
+  configured, those keys are not removed, so deleting a current item does not make a later fetch
+  add it again. Removing the source from the config deletes that file with the rest of the feed.
 - **HTML is safe storage, not a full web capture.** The `.html` sibling contains the extracted or
   feed HTML used to derive Markdown. Scripts, styles, inline SVG, embedded frames, event handlers,
   and active URL schemes are removed, and the file is capped at `[store] html_max_bytes`. It is
@@ -91,8 +92,26 @@ already-deleted custom-port item without another matching entry-ID or title/date
 rediscovered because its old `seen.txt` hash cannot recover the port.
 
 The original URL and first capture time (`first_seen`) live in each Markdown file's front matter.
+A stored item is that file, a sanitized HTML sibling, and any saved companions beside them:
+
+```text
+items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.md
+items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.html
+items/blog-rust-lang-org/2026/09/2026-09-22-announcing-a-maintainer-in-residence.preview-202cd0284a4a.webp
+---
+title: Announcing a Maintainer in Residence
+link: https://blog.rust-lang.org/2026/09/22/maintainer-in-residence/
+source: blog-rust-lang-org
+published: 2026-09-22T00:00:00Z
+first_seen: 2026-09-24T00:01:38Z
+content: extracted
+---
+```
+
+`content` records the stored body: `extracted` from the original page, `feed` from the feed
+entry, or `none` when only metadata was kept. It is separate from `content_download_strategy`.
 A copied aggr item also records `replicated_at`, the time it entered the current repository. A
-heavy source attempts to extract the original article; if that request or extraction fails, aggr
+source whose `content_download_strategy` is `article` attempts to extract the original page; if that request or extraction fails, aggr
 keeps the feed body, summary, or metadata it has rather than failing an otherwise healthy source.
 Recoverable article failures appear in debug logs (`-vv`). An HTTP 401 or 403 affects only that
 URL; an HTTP 429 pauses further article requests to that origin for the run. Interrupted response
@@ -229,8 +248,10 @@ editor:
   deduplicate through `seen.txt`.
 
 Do not rebase, squash, delete, or force-push the data branch. Per-feed retention (`[defaults] max_age_days`,
-`max_items`, `max_bytes`, and `since`) deletes files from its current tree in a normal commit, so older reachable commits keep
-their contents. The generated site and sitemap contain only visible items in the current retained
+`count_max`, `size_max`, and `since`) deletes files from its current tree in a normal commit, so older reachable commits keep
+their contents. Removing a source from the config does the same for that whole feed, including its
+`sources/<slug>/` state, seen list, and eviction record. Adding it again fetches it as a new
+subscription. The generated site and sitemap contain only visible items in the current retained
 tree; historical Git objects are durable but are no longer public article pages after retention
 removes them.
 

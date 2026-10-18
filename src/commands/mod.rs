@@ -73,7 +73,7 @@ pub struct Project {
     pub config: Config,
     pub sources: Vec<Source>,
     pub config_path: PathBuf,
-    /// Directory holding `aggr.toml`; themes and `templates/` are resolved against it.
+    /// Directory holding `aggr.toml`.
     pub root: PathBuf,
     pub repo: Repo,
     /// The exact commit used to resolve offline metadata, also used for article blobs and time.

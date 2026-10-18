@@ -77,9 +77,19 @@ export function arrive(saved: number | undefined, hash: string, doc: Document = 
     quiet = setTimeout(let_go, 120);
     release = stop;
   }
-  const main = doc.getElementById('content');
-  if (main instanceof HTMLElement) {
+  // Focusing the page inside the tap that opened it makes iOS treat that tap as unfinished and
+  // swallow the next one. The place is set above; focus waits until the tap has ended.
+  const focusArrived = () => {
+    const main = doc.getElementById('content');
+    if (!(main instanceof HTMLElement) || !main.isConnected) return;
+    const active = doc.activeElement;
+    // A control inside the arriving page already has the keyboard. Search opened
+    // by the shortcut that landed here is the case that matters: taking focus
+    // back onto the page container would leave the field behind.
+    if (active instanceof HTMLElement && active !== main && active !== doc.body && main.contains(active)) return;
     main.setAttribute('data-navigation-focus', '');
     main.focus({ preventScroll: true });
-  }
+  };
+  if (typeof win.requestAnimationFrame === 'function') win.requestAnimationFrame(focusArrived);
+  else focusArrived();
 }

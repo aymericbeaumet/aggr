@@ -7,8 +7,8 @@
 <link rel="alternate" type="text/plain" title="Plain text" href="{{ (representation ~ '.txt') | url_for }}">
 <link rel="alternate" type="text/x-rst" title="reStructuredText" href="{{ (representation ~ '.rst') | url_for }}">
 <link rel="alternate" type="application/ld+json" title="JSON-LD" href="{{ (representation ~ '.json') | url_for }}">
-{% if item.previous_article %}<link rel="prev" href="{{ item.previous_article.url | url_for }}">{% endif %}
-{% if item.next_article %}<link rel="next" href="{{ item.next_article.url | url_for }}">{% endif %}
+{% if item.previous_article %}<link rel="prev" href="{{ item.previous_article.url | url_for }}"><link rel="prefetch" href="{{ item.previous_article.url | url_for }}">{% endif %}
+{% if item.next_article %}<link rel="next" href="{{ item.next_article.url | url_for }}"><link rel="prefetch" href="{{ item.next_article.url | url_for }}">{% endif %}
 {% if item.published %}<meta property="article:published_time" content="{{ item.published }}">{% endif %}
 {% if item.updated %}<meta property="article:modified_time" content="{{ item.updated }}">{% endif %}
 {% if item.category %}<meta property="article:section" content="{{ item.category }}">{% endif %}
@@ -22,16 +22,17 @@
   <header class="itemhead">
     <h1 class="p-name" tabindex="-1"><span class="itemhead-title">{% for word in item.title | split(' ') %}{% if not loop.first %} {% endif %}{% if '/' in word %}<span class="itemhead-title-term">{{ word }}</span>{% else %}{{ word }}{% endif %}{% endfor %}</span></h1>
     <span class="itemhead-title-compact" aria-hidden="true">{{ item.title }}</span>
-    {% include "_metadata.html" %}
-    {% if item.labels %}<div class="item-tags" aria-label="Topics"><div class="item-tags-inner">{% for label in item.labels %}<a class="tag p-category" rel="tag" href="{{ (label | slug) | facet_url('tag') }}">#{{ label }}</a>{% endfor %}</div></div>{% endif %}
+    {% set show_item_tags = true %}{% include "_metadata.html" %}{% set show_item_tags = false %}
     <span class="itemhead-progress" aria-hidden="true"></span>
     <span class="itemhead-fade" aria-hidden="true"></span>
   </header>
   {% if item.resources %}<nav class="article-resources" aria-label="Article resources"><span class="article-resources-label">Resources</span>{% for resource in item.resources %}<a href="{{ resource.url }}" title="{{ resource.url }}" target="_blank" rel="noopener noreferrer">{{ resource.label }} <span aria-hidden="true">↗</span></a>{% endfor %}</nav>{% endif %}
   {% if item.extra.subscription_required %}
   <p class="empty article-access-notice">The publisher requires a subscription. <a href="{{ item.link }}" title="{{ item.link }}" target="_blank" rel="noopener noreferrer">Open the original</a>{% if item.extra.archive_lookup_url %} or <a href="{{ item.extra.archive_lookup_url }}" target="_blank" rel="noopener noreferrer">find an archived copy</a>{% endif %}.</p>
-  {% elif item.content == 'none' and not item.body_html and not item.video and not item.document and not item.native_media and not item.interactive %}
+  {% elif item.content == 'none' and not item.body_html and not item.video and not item.document and not item.native_media and not item.interactive and not item.article_preview %}
   <p class="empty">This source publishes titles only — <a href="{{ item.link }}" title="{{ item.link }}" target="_blank" rel="noopener noreferrer">open the original</a>.</p>
+  {% elif not item.body_html and not item.video and not item.document and not item.native_media and not item.interactive and not item.article_preview %}
+  <p class="empty">The article text isn't here yet — <a href="{{ item.link }}" title="{{ item.link }}" target="_blank" rel="noopener noreferrer">open the original</a>.</p>
   {% endif %}
   <div data-article-content>
   {% if item.document %}

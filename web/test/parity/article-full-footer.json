@@ -2,7 +2,6 @@
   "component": "ArticleFooter",
   "props": {
     "base": "../../../",
-    "excerpts": true,
     "next": {
       "age_band": "h1",
       "category": null,

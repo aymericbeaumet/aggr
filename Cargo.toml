@@ -2,7 +2,7 @@
 name = "aggr"
 version = "1.12.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.96.0"
 license = "MIT"
 description = "Git-native feed reader: aggr.toml in, static site out, history on a branch"
 authors = ["Aymeric Beaumet <hi@aymericbeaumet.com>"]
@@ -19,7 +19,7 @@ bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-comrak = { version = "0.55", default-features = false }
+comrak = { version = "0.56", default-features = false }
 dom_smoothie = "0.18"
 directories = "6"
 encoding_rs = "0.8"
@@ -28,7 +28,7 @@ env_logger = "0.11"
 feed-rs = "3"
 futures-util = "0.3"
 glob = "0.3"
-hayro = { version = "0.7.1", features = ["embed-fonts"] }
+hayro = { version = "0.8.0", features = ["embed-fonts"] }
 hex = "0.4"
 htmd = "0.5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico", "tiff", "qoi"] }

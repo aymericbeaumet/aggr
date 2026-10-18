@@ -185,7 +185,7 @@ fn hermetic_build_uses_retained_images_and_a_pinned_clock() {
     let config = std::fs::read_to_string(root.join("aggr.toml")).unwrap();
     std::fs::write(
         root.join("aggr.toml"),
-        format!("[defaults]\nmedia = 'local'\n{config}"),
+        format!("[defaults]\nmedia_download_strategy = 'original'\n{config}"),
     )
     .unwrap();
     let build = || {

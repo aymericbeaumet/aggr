@@ -389,6 +389,9 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                       const done=arguments[arguments.length-1];
                       const media=document.querySelector('.native-video video'),host=document.querySelector('[data-media-timing]');
                       const before=document.querySelector('.body').getBoundingClientRect().top;
+                      const beforeScroll=scrollY, beforeTiming=host.getBoundingClientRect().height;
+                      const heights=()=>Object.fromEntries(['.itemhead','.itemhead .meta','.native-video','.media-timing'].map(selector=>[selector,document.querySelector(selector).getBoundingClientRect().height]));
+                      const beforeHeights=heights();
                       Object.defineProperties(media,{duration:{configurable:true,value:600},currentTime:{configurable:true,value:60},paused:{configurable:true,value:false}});
                       media.playbackRate=2;
                       media.dispatchEvent(new Event('durationchange'));
@@ -398,7 +401,10 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                         const metadata=document.querySelector('.itemhead .reading-stats').textContent.trim();
                         Object.defineProperty(media,'paused',{configurable:true,value:true});
                         media.dispatchEvent(new Event('pause'));
-                        done({playing,paused:host.textContent,metadata,stable:Math.abs(document.querySelector('.body').getBoundingClientRect().top-before)<=1});
+                        const after=document.querySelector('.body').getBoundingClientRect().top;
+                        done({playing,paused:host.textContent,metadata,stable:Math.abs(after-before)<=1,
+                          bodyDelta:after-before,scrollDelta:scrollY-beforeScroll,timingBefore:beforeTiming,
+                          timingAfter:host.getBoundingClientRect().height,beforeHeights,afterHeights:heights()});
                       });
                     "#,vec![]).await?;
                     anyhow::ensure!(
@@ -452,7 +458,7 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                   let intercepted = false;
                   link.addEventListener('click', event => { intercepted = event.defaultPrevented; event.preventDefault(); }, {once:true});
                   link.dispatchEvent(new MouseEvent('click', {ctrlKey:true, bubbles:true, cancelable:true}));
-                  return {intercepted, mounted:!!document.querySelector('.video-player iframe'), role:link.getAttribute('role')};
+                  return {intercepted, mounted:!!document.querySelector('.video-player iframe, #now-playing-picture iframe'), role:link.getAttribute('role')};
                 "#, vec![]).await?;
                 anyhow::ensure!(
                     modified["intercepted"] == false
@@ -468,7 +474,11 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                         vec![],
                     )
                     .await?;
-                wait_for(client, "!!document.querySelector('.video-player iframe')").await?;
+                wait_for(
+                    client,
+                    "!!document.querySelector('#now-playing-picture iframe')",
+                )
+                .await?;
                 client.execute_async("const done=arguments[arguments.length-1];requestAnimationFrame(()=>requestAnimationFrame(()=>done(true)))", vec![]).await?;
                 let after = media_box(client, ".video-player").await?;
                 ensure_media_box_stable(
@@ -477,7 +487,7 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                     &format!("{provider} activation at {width}px"),
                 )?;
                 let pending = client.execute(r#"
-              const player=document.querySelector('.video-player'), preview=player.querySelector('.video-preview'), frame=player.querySelector('iframe'), style=getComputedStyle(frame);
+              const player=document.querySelector('.video-player'), preview=player.querySelector('.video-preview'), frame=document.querySelector('#now-playing-picture iframe'), style=getComputedStyle(frame);
               return {preview:!!preview && !preview.hidden && getComputedStyle(preview).display !== 'none',covered:style.opacity === '0' || style.visibility === 'hidden' || style.display === 'none',classes:player.className,source:frame.src,opacity:style.opacity,visibility:style.visibility,display:style.display};
             "#,vec![]).await?;
                 anyhow::ensure!(

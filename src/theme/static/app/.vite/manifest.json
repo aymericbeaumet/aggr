@@ -1,0 +1,30 @@
+{
+  "src/main.ts": {
+    "file": "app-CXc35H62.js",
+    "name": "main",
+    "src": "src/main.ts",
+    "isEntry": true,
+    "dynamicImports": [
+      "src/search/index.ts",
+      "src/media/index.ts"
+    ]
+  },
+  "src/media/index.ts": {
+    "file": "media-81MRORY5.js",
+    "name": "media",
+    "src": "src/media/index.ts",
+    "isDynamicEntry": true,
+    "imports": [
+      "src/main.ts"
+    ]
+  },
+  "src/search/index.ts": {
+    "file": "search-BCA-wRfG.js",
+    "name": "search",
+    "src": "src/search/index.ts",
+    "isDynamicEntry": true,
+    "imports": [
+      "src/main.ts"
+    ]
+  }
+}

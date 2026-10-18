@@ -6,24 +6,53 @@
 
 [defaults]
 # Applied independently to every feed; each [[sources]] table can override any key.
-# Light uses feed content. Heavy also downloads and extracts original article pages.
-content = "light"
-# Remote keeps publisher URLs. Compressed archives bounded images; local keeps original media.
-# PDFs remain exact local copies in both compressed and local modes.
-media = "remote"
+# feed keeps the feed entry. article also downloads and extracts the original page.
+content_download_strategy = "feed"
+# remote keeps publisher URLs. compressed and original both store media locally:
+# compressed archives bounded images, original keeps the publisher's bytes.
+# PDFs remain exact copies in both compressed and original modes.
+media_download_strategy = "remote"
 # Per-feed retained items, publication age, and logical article bytes, including companions.
 # Exceeding a limit removes whole articles and their companions in ordinary commits; Git history stays.
 # Zero disables an individual numeric limit. Multiple limits apply together.
-max_items = 250
+count_max = 250
 max_age_days = 730
-max_bytes = 1000000000
+# An integer is a byte count. A string accepts decimal units (kB, MB, GB, TB = 1000^n)
+# and binary units (KiB, MiB, GiB, TiB = 1024^n). "1GB" is 1000000000 bytes.
+size_max = "1GB"
 # Optional inclusive UTC date, combined with max_age_days using the newer cutoff.
 # since = "2026-01-01"
 # Tune only compressed media: quality is 1-100 and max_axis is 320-8192.
-# media = { mode = "compressed", quality = 72, max_axis = 1600 }
+# media_download_strategy = { mode = "compressed", quality = 72, max_axis = 1600 }
 # Compressed raster copies preserve transparency and animation where supported. Formats that
 # cannot be safely reduced retain their originals. Later policy changes do not re-download
 # existing masters; sync --backfill-media fills missing media without rewriting article bodies.
+# Every [[sources]] option can also be set here. A source table overrides the same key.
+# Labels combine. The source wins on a repeated header name.
+# `discussions` replaces the whole list. An empty list turns discussion links off for that source.
+# `collection` applies only to entries that omit it and is not copied onto the feeds it expands.
+# `branch` and `sources` apply only to aggr repositories. `sources = []` on an aggr source keeps
+# every upstream source and clears a list set here. An explicit `slug` is copied onto every source
+# that omits one, so those sources then share a slug and validation fails.
+# url = "https://example.com/feed"
+# collection = false
+# name = "Example"
+# slug = "example"
+# category = "news"
+# labels = ["news"]
+# headers = { Accept = "application/feed+json" }
+# html = true                 # override [store] html when a source omits it
+# branch = "aggr"             # aggr repositories only
+# sources = []                # aggr repositories only; empty means no filter
+# Places searched for a conversation about each article. No matching is done by default.
+# Built-ins are "hackernews", "reddit", and "x". They add per-item links, find the
+# highest-engagement exact match when possible, and otherwise fall back to search.
+# `{url}` and `{title}` in a custom template are URL-encoded.
+# discussions = ["hackernews", "reddit"]
+# discussions = [
+#   "hackernews",
+#   { name = "Lobsters", url = "https://lobste.rs/search?q={url}" },
+# ]
 
 [site]
 # Name shown in the navigation bar and feed metadata.
@@ -35,7 +64,7 @@ language = "en"
 # Number of entries kept in each generated feed, source, category, and tag page. The reader can
 # split these static pages into smaller browser-side feed pages without hiding any entry from
 # no-JavaScript readers or crawlers.
-items_per_page = 25
+items_per_page = 50
 # Recent home-feed window. Source/category/tag archives include every retained article.
 max_items = 5000
 # Entries older than this leave the home feed but remain in archive pages.
@@ -61,7 +90,7 @@ pwa = true
 
 # Initial reader settings. Every preference and its default is documented here.
 # Each visitor's saved preferences override these defaults; Reset restores these site values.
-[site.preferences]
+[preferences]
 theme = "auto" # auto, light, dark, sepia
 date_format = "relative" # relative, iso, local, local-time
 text_size = "default" # default, large, largest
@@ -75,7 +104,7 @@ letter_spacing = "normal" # normal, wide
 word_spacing = "normal" # normal, wide
 density = "compact" # compact, comfortable
 thumbnails = "show" # show, hide
-feed_page_size = 25 # 10, 25, 50
+feed_page_size = 50 # 10, 25, 50
 motion = "auto" # auto, off
 single_key_shortcuts = true
 scroll_amount = 10 # 1–100 lines for d/u, capped at half the available viewport
@@ -83,28 +112,11 @@ scroll_amount = 10 # 1–100 lines for d/u, capped at half the available viewpor
 offline_items = 0
 
 # Optional public identity for Schema.org metadata. `type` is "person" or "organization".
-# [site.identity]
+# [identity]
 # type = "person"
 # name = "Ada Example"
 # url = "https://example.com/ada"
 # same_as = ["https://social.example/@ada"]
-
-# Optional networks searched for conversations about each article. No matching is done by default.
-# They add per-item links, find the highest-engagement exact match when possible, and otherwise
-# fall back to search. `{url}` and `{title}` are URL-encoded.
-# [[networks]]
-# provider = "hackernews"
-# [[networks]]
-# provider = "reddit"
-# [[networks]]
-# provider = "x"
-# A custom search needs a label and URL template instead:
-# [[networks]]
-# name = "Lobsters"
-# url = "https://lobste.rs/search?q={url}"
-
-# Free-form values available to templates as `site.params`.
-[site.params]
 
 [store]
 # Orphan, append-only branch holding every item. Never force-push it.
@@ -119,7 +131,7 @@ html_max_bytes = 262144
 [fetch]
 # Maximum source requests running concurrently.
 concurrency = 16
-# Concurrent original-page downloads within each source in `heavy` mode.
+# Concurrent original-page downloads within each source when content_download_strategy is article.
 article_concurrency = 4
 # Total timeout for one HTTP request, in seconds.
 timeout_secs = 20
@@ -144,7 +156,7 @@ response_max_bytes = 268435456
 # Hashes without a preceding space remain part of the URL.
 # Options on the table apply to every expanded source. Place complete [[sources]] tables between
 # any other sections. Use separate tables for groups. Normal website URLs discover feeds.
-# In heavy mode, aggr can discover article cards when no usable feed is available.
+# With content_download_strategy = "article", aggr can discover article cards when no usable feed is available.
 # [[sources]]
 # url = "https://blog.rust-lang.org"
 # name = "Rust Blog"          # display name; the feed title when unset
@@ -155,11 +167,11 @@ response_max_bytes = 268435456
 # labels = ["programming", "rust"]
 # headers = { Authorization = "Bearer ${TOKEN}" } # `${ENV}` values are expanded
 # html = false               # override [store] html for this source
-# content = "heavy"          # override [defaults] content
-# media = "compressed"       # remote, compressed, local, or the compression table above
-# max_items = 100             # override only this count; age and byte limits still inherit
+# content_download_strategy = "article" # override [defaults]; feed or article
+# media_download_strategy = "compressed" # remote, compressed, original, or the compression table above
+# count_max = 100             # override only this count; age and byte limits still inherit
 # max_age_days = 0            # disable the relative-age limit for this source
-# max_bytes = 500000000       # include all companions in this feed's retained-byte limit
+# size_max = "500MB"          # include all companions in this feed's retained-byte limit
 # since = false              # explicitly clear an inherited absolute date
 
 # Group URLs with shared options. Use another table when the options differ.
@@ -203,6 +215,7 @@ response_max_bytes = 268435456
 # url = "https://github.com/friend/reads" # git@github.com:friend/reads.git and SSH also work
 # Alternative URL: git@github.com:friend/reads.git or https://host/x/reads.git
 # branch = "aggr"             # its data branch
-# sources = []                # only these of its source slugs; all when empty
-# max_items = 200             # per-feed count, including repository imports
+# sources = []                # only these of its source slugs; empty keeps every source.
+#                             # omitted inherits [defaults] sources
+# count_max = 200             # per-feed count, including repository imports
 # category = "friends"

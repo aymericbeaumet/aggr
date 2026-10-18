@@ -802,7 +802,6 @@ mod tests {
                 has_categories: false,
                 discussions: Vec::new(),
                 entry_shortcuts: Vec::new(),
-                params: toml::Table::new(),
             };
             let build = BuildCtx {
                 time: now,

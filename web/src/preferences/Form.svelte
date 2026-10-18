@@ -1,5 +1,5 @@
 <script lang="ts">
-  // The preferences form, loaded with the page: every control comes from the typed table in
+  // The preferences form, part of the app shell: every control comes from the typed table in
   // src/config/preferences.rs, through the page model's schema, and shows the loaded state.
   // The markup keeps the ids, classes and `data-preference` attributes `style.css` and the
   // browser suite address.

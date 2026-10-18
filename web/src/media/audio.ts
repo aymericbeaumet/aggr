@@ -1,3 +1,4 @@
+import { connect, type Episode } from './now-playing';
 import { clock, duration, endsAt, wallClock, type Phase, type TimingState } from './timing';
 
 /**
@@ -28,9 +29,9 @@ export type Playback = {
   dispose(): void;
 };
 
-/** Drive a native `<audio>` element and report its state back to whoever renders it. */
+/** Drive a native audio or video element and report its state back to whoever renders it. */
 export function createPlayback(
-  audio: HTMLAudioElement,
+  audio: HTMLMediaElement,
   update: (state: PlaybackState) => void,
   known: { duration?: number } = {},
 ): Playback {
@@ -178,12 +179,25 @@ const STATUS: Partial<Record<Phase, string>> = {
 const query = <T extends Element = HTMLElement>(root: ParentNode, selector: string): T | null =>
   root.querySelector<T>(selector);
 
-/** Bind the card's controls to its `<audio>`; `signal` ends playback when the page is left. */
+function episodeFrom(card: HTMLElement, audio: HTMLAudioElement): Episode {
+  const text = (selector: string) => card.querySelector(selector)?.textContent?.trim() ?? '';
+  const image = card.querySelector('img.audio-artwork');
+  const page = typeof location === 'undefined' ? '' : location.href.split('#')[0];
+  return {
+    src: audio.src,
+    title: text('.audio-episode') || audio.getAttribute('aria-label')?.trim() || 'Audio',
+    show: text('.audio-show'),
+    artwork: image instanceof HTMLImageElement && image.getAttribute('src') ? image.src : '',
+    page,
+  };
+}
+
+/** Bind the card's controls. A started recording survives the page; one that never played does not. */
 export function enhanceAudio(card: HTMLElement, signal: AbortSignal): void {
-  const audio = card.querySelector('audio');
+  const found = card.querySelector('audio');
   const controls = query(card, '[data-audio-controls]');
   const tools = query(card, '[data-audio-tools]');
-  if (!audio || !controls || !tools) return;
+  if (!found || !controls || !tools) return;
 
   const toggle = query(card, '[data-audio-toggle]');
   const seekBar = query<HTMLInputElement>(card, 'input[data-audio-seek]');
@@ -197,53 +211,58 @@ export function enhanceAudio(card: HTMLElement, signal: AbortSignal): void {
   const device = query(card, '[data-device-volume]');
   const skips = [...card.querySelectorAll<HTMLButtonElement>('button[data-audio-skip]')];
   let scrubbing = false;
+  // The element actually playing. A returned visit rebinds onto the parked one.
+  const box = { audio: found };
+  if (found.src) card.dataset.playingSrc = found.src;
 
-  const player = createPlayback(
-    audio,
-    (state) => {
-      card.dataset.audioState = state.phase;
-      const active = state.phase === 'playing' || state.phase === 'loading';
-      const label = active ? 'Pause' : state.phase === 'ended' ? 'Replay' : 'Play';
-      if (toggle) {
-        toggle.setAttribute('aria-label', label);
-        toggle.title = label;
-      }
-      if (status) status.textContent = STATUS[state.phase] || '';
-      if (elapsed) elapsed.textContent = clock(state.position);
-      if (total) total.textContent = state.duration ? clock(state.duration) : '--:--';
-      if (seekBar) {
-        seekBar.disabled = !state.seekable;
-        if (!scrubbing) seekBar.value = String(Math.round(state.progress * 1000));
-        seekBar.setAttribute('aria-valuetext', `${clock(state.position)} of ${clock(state.duration ?? NaN)}`);
-      }
-      for (const button of skips) button.disabled = !state.seekable;
-      // The finish time only means something while the recording plays; the total is beside it.
-      if (estimate) {
-        estimate.textContent =
-          state.endsAt !== undefined
-            ? `Ends at ${wallClock(state.endsAt)}`
-            : state.remaining !== undefined
-              ? `${clock(state.remaining)} remaining`
-              : '';
-      }
-      if (mute) {
-        const muteLabel = state.muted ? 'Unmute' : 'Mute';
-        mute.setAttribute('aria-label', muteLabel);
-        mute.setAttribute('aria-pressed', String(state.muted));
-        mute.title = muteLabel;
-      }
-      if (volume && !volume.matches(':active')) {
-        volume.hidden = !state.volumeAdjustable;
-        volume.value = String(state.volume);
-        volume.setAttribute('aria-valuetext', `${Math.round(state.volume * 100)}%`);
-        if (device) device.hidden = state.volumeAdjustable;
-      }
-      if (speed) speed.value = String(state.speed);
-      // Native controls come back if playback fails.
-      audio.toggleAttribute('data-native-visible', state.phase === 'error');
-    },
-    { duration: Number(audio.dataset.durationSeconds) },
-  );
+  const paint = (state: PlaybackState) => {
+    const audio = box.audio;
+    card.dataset.audioState = state.phase;
+    const active = state.phase === 'playing' || state.phase === 'loading';
+    const label = active ? 'Pause' : state.phase === 'ended' ? 'Replay' : 'Play';
+    if (toggle) {
+      toggle.setAttribute('aria-label', label);
+      toggle.title = label;
+    }
+    if (status) status.textContent = STATUS[state.phase] || '';
+    if (elapsed) elapsed.textContent = clock(state.position);
+    if (total) total.textContent = state.duration ? clock(state.duration) : '--:--';
+    if (seekBar) {
+      seekBar.disabled = !state.seekable;
+      if (!scrubbing) seekBar.value = String(Math.round(state.progress * 1000));
+      seekBar.setAttribute('aria-valuetext', `${clock(state.position)} of ${clock(state.duration ?? NaN)}`);
+    }
+    for (const button of skips) button.disabled = !state.seekable;
+    // The finish time only means something while the recording plays; the total is beside it.
+    if (estimate) {
+      estimate.textContent =
+        state.endsAt !== undefined
+          ? `Ends at ${wallClock(state.endsAt)}`
+          : state.remaining !== undefined
+            ? `${clock(state.remaining)} remaining`
+            : '';
+    }
+    if (mute) {
+      const muteLabel = state.muted ? 'Unmute' : 'Mute';
+      mute.setAttribute('aria-label', muteLabel);
+      mute.setAttribute('aria-pressed', String(state.muted));
+      mute.title = muteLabel;
+    }
+    if (volume && !volume.matches(':active')) {
+      volume.hidden = !state.volumeAdjustable;
+      volume.value = String(state.volume);
+      volume.setAttribute('aria-valuetext', `${Math.round(state.volume * 100)}%`);
+      if (device) device.hidden = state.volumeAdjustable;
+    }
+    if (speed) speed.value = String(state.speed);
+    // Native controls come back if playback fails. The parked element, not a silenced copy.
+    audio.toggleAttribute('data-native-visible', state.phase === 'error');
+  };
+
+  const connected = connect(found, episodeFrom(card, found), { duration: Number(found.dataset.durationSeconds) }, paint, signal);
+  box.audio = connected.audio;
+  if (connected.snapshot) paint(connected.snapshot);
+  const player = connected.playback;
 
   toggle?.addEventListener('click', () => player.toggle(), { signal });
   for (const button of skips) {
@@ -273,14 +292,4 @@ export function enhanceAudio(card: HTMLElement, signal: AbortSignal): void {
   controls.hidden = false;
   tools.hidden = false;
   card.classList.add('is-enhanced');
-  window.addEventListener('pagehide', () => player.dispose(), { signal });
-  signal.addEventListener(
-    'abort',
-    () => {
-      player.dispose();
-      audio.removeAttribute('src');
-      audio.load();
-    },
-    { once: true },
-  );
 }

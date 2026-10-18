@@ -35,7 +35,7 @@ git push -u origin HEAD
 ```
 
 The generated workflow requests a run at minutes 7 and 37 of every hour (UTC), and after root or
-nested TOML configuration and theme changes on the repository's actual default branch. Push events
+nested TOML configuration changes on the repository's actual default branch. Push events
 from other branches are ignored; scheduled and manual runs remain available.
 
 The `@v1` reference is a stable workflow contract. On every run it resolves the greatest published
@@ -178,7 +178,7 @@ For a public personal or organizational archive, add truthful ownership metadata
 making aggr guess an identity:
 
 ```toml
-[site.identity]
+[identity]
 type = "person" # or "organization"
 name = "Your Name"
 url = "https://example.com/about"

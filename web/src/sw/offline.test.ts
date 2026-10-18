@@ -7,25 +7,15 @@ import { completeSearch, configureOfflineSearch, verifiedSearchResponse } from '
 import { lifecycle } from './worker';
 
 describe('offline articles', () => {
-  it('does not download the catalogue or search index until offline reading is enabled', async () => {
+  it('fetches the article catalogue only for a positive download count, and only once', async () => {
     const { ctx, requests } = harness();
-    await configureOffline(ctx, 0);
-    await readOfflineStatus(ctx);
-    expect(requests).toEqual([]);
-    await configureOffline(ctx, 1);
-    expect(requests.filter((url) => url.includes('/offline/'))).toHaveLength(1);
-    expect((await readOfflineStatus(ctx)).saved).toHaveLength(1);
-  });
-
-  it('rejects a mismatched catalogue without pruning previously saved articles', async () => {
-    const { ctx, storage } = harness();
-    await configureOffline(ctx, 1);
-    await (await storage.open(ctx.names.shell)).delete(new URL(ctx.config.offline_catalog.url, scope).href);
-    ctx.config.offline_catalog.digest = '0'.repeat(64);
-    const result = await saveOfflineArticles(ctx, 1);
-    expect(result.failed).toBe(1);
-    expect(result.saved.map((item) => item.title)).toEqual(['Newest']);
-    expect((await readOfflineStatus(ctx)).saved).toHaveLength(1);
+    await saveOfflineArticles(ctx, 0);
+    expect(requests.some((url) => url.endsWith('offline-catalog.json'))).toBe(false);
+    await saveOfflineArticles(ctx, 1);
+    expect(requests.filter((url) => url.endsWith('offline-catalog.json'))).toHaveLength(1);
+    const before = requests.length;
+    await saveOfflineArticles(ctx, 1);
+    expect(requests.slice(before).some((url) => url.endsWith('offline-catalog.json'))).toBe(false);
   });
 
   it('require the page and every retained rendition, sharing resources across items', async () => {

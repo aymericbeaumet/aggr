@@ -1228,7 +1228,6 @@ mod tests {
             has_categories: true,
             discussions: Vec::new(),
             entry_shortcuts: Vec::new(),
-            params: toml::Table::new(),
         }
     }
 

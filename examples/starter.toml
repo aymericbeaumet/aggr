@@ -5,11 +5,11 @@ title = "My reads"
 # url = "https://reads.example.com" # custom domain; also writes CNAME
 
 [defaults]
-content = "light"
-media = "remote"
-max_items = 250
+content_download_strategy = "feed"
+media_download_strategy = "remote"
+count_max = 250
 max_age_days = 730
-max_bytes = 1000000000
+size_max = "1GB"
 
 [[sources]]
 url = "https://blog.rust-lang.org"

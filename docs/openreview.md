@@ -1,6 +1,6 @@
 # OpenReview papers
 
-Heavy article ingestion recognizes OpenReview forum URLs and same-origin challenge URLs that
+Article capture recognizes OpenReview forum URLs and same-origin challenge URLs that
 refer back to a forum. It uses the official public title-search API, then requires the exact
 requested note ID and a public top-level submission. Similar titles and private notes cannot
 replace the requested paper. Feed identity, dates, title, and existing author attribution stay intact.
@@ -21,7 +21,8 @@ starts a browser, runs Python, or uses an extraction service.
 
 Requests use the shared timeout, byte limit, pacing, and conditional response cache. Source
 credentials stay scoped to their declaring origin. API errors can reuse previously verified cached
-metadata; otherwise feed content remains available. Light sources do not request this enrichment.
+metadata; otherwise feed content remains available. Sources that keep only the feed entry do not
+request this enrichment.
 Normal ingestion preserves the original item path. Existing items require explicit refresh; the
 CLI currently has no per-item refresh selector, and `--refresh` processes existing feed-present
 entries only. Dev refresh changes its isolated cache, not the Git data branch.

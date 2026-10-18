@@ -169,11 +169,15 @@ fn verify_resource(
         .strip_prefix(&format!("{base_path}/"))
         .context("hermetic resource escapes the site base path")?;
     let root = out.canonicalize()?;
-    let target = url::Url::from_directory_path(&root)
+    let mut target = url::Url::from_directory_path(&root)
         .map_err(|()| anyhow::anyhow!("invalid output path"))?
         .join(relative)?
         .to_file_path()
         .map_err(|()| anyhow::anyhow!("invalid local resource path"))?;
+    // A prefetched article is the directory the reader opens; its file is index.html.
+    if relative.ends_with('/') {
+        target.push("index.html");
+    }
     if !target
         .canonicalize()
         .is_ok_and(|target| target.starts_with(&root) && target.is_file())

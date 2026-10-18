@@ -61,8 +61,9 @@
     untrack(() => badges.reveal(onScreen));
   });
 
-  // The list arrived at this address: the search field follows its `?q=`, and the search module
-  // warms its catalogue (Pagefind itself waits for a valid query). Leaving ends the page's work.
+  // The list arrived at this address: the search field follows its `?q=`. The catalogue waits
+  // for an idle slice (Pagefind itself waits for a valid query) and loads at once on focus.
+  // Leaving ends the page's work.
   $effect(() => {
     const href = shown.href;
     const root = shown.root;
@@ -85,7 +86,7 @@
 <div data-static-feed hidden={searching}>
 {#if list.rows.length}
 <ol class="rows" role="list" start={offset + 1} style="--rank-indent: {indent}ch">
-{#each list.rows as row, index (row.path)}<Row {row} rank={offset + index + 1} base={page.base} excerpts={page.site.excerpts} language={page.site.language} hidden={hidden(index)} selected={selected(row)} fresh={marked(row)} />{/each}
+{#each list.rows as row, index (row.path)}<Row {row} rank={offset + index + 1} base={page.base} language={page.site.language} hidden={hidden(index)} selected={selected(row)} fresh={marked(row)} />{/each}
 </ol>
 {:else}
 <p class="empty">Nothing here yet.</p>

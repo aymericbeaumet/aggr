@@ -212,7 +212,8 @@ and warm versus cold caches determine the result.
 ## Reader startup and search
 
 The reader is a Svelte application compiled ahead of time and embedded in the Rust binary. Only the
-small pre-paint bootstrap blocks rendering; the module bundle is deferred, mounts from the page's
+small pre-paint bootstrap blocks rendering. The stylesheet and modulepreloads are discovered
+before that script, and feed rows skip layout until they near the screen. The module bundle is deferred, mounts from the page's
 embedded model, and loads search and media chunks on demand. The complete static HTML remains the
 first paint and the no-JavaScript fallback.
 
@@ -220,10 +221,13 @@ Search completion uses `search-catalog.json` (version, base, document count, and
 runtime and its filter files wait until an actual query needs them, so a reader who never searches
 downloads none of it. See [client development](client.md) for the search contract.
 
-Navigation prefetch follows hover, focus, or touch intent, with at most two requests in flight.
-Unattended viewport, tab, and periodic destination guesses are disabled. The default service worker
-precaches only the shell and eager module dependencies. The complete offline catalogue is separate
-versioned JSON fetched and verified when downloads are enabled; optional chunks stay lazy.
+Prefetching is bounded. A press or a hover fetches that page at once, and a page already in memory
+is parsed ahead of the tap and swapped in the same turn. The three tabs are fetched as soon as
+the reader starts. After paint, the reader warms the first three rows already on screen. An
+article's neighbours carry `rel="prefetch"` in the document. Guesses are at most sixteen per page,
+and none at all under Save-Data or on a 2G connection. Intent is not counted. Fetched pages stay
+in memory for five minutes, 24 at most. Guesses are parsed one per frame; a page the reader means
+to open is parsed as soon as it arrives.
 
 ## Measuring changes
 

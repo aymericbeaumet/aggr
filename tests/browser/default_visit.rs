@@ -14,7 +14,7 @@ fn default_fixture() -> Result<Fixture> {
     let text = std::fs::read_to_string(&config)?;
     std::fs::write(
         &config,
-        text.replace("preferences.offline_items=4\n", "")
+        text.replace("[preferences]\noffline_items=4\n", "")
             .replace("items_per_page=3\n", "")
             .replace(crate::harness::ARCHIVED_MEDIA_SETTINGS, ""),
     )?;
@@ -51,40 +51,20 @@ async fn first_visit_reuses_content_addressed_assets_from_the_http_cache() -> Re
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
-async fn reader_introduction_collapses_and_survives_navigation() -> Result<()> {
+async fn reading_list_actions_fit_a_phone() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fixture = Fixture::with_pwa(false)?;
-    let config = fixture.directory.path().join("aggr.toml");
-    let text = std::fs::read_to_string(&config)?;
-    std::fs::write(
-        &config,
-        format!("{text}\n[site.params]\nintroduction=true\n"),
-    )?;
     fixture.build()?;
     let client = browser_client().await?;
     let result = async {
-        client.set_window_rect(0, 0, 1280, 900).await?;
-        client.goto(&fixture.base).await?;
-        wait_booted(&client).await?;
-        anyhow::ensure!(client.execute("return document.querySelector('.reader-intro')?.open === true", vec![]).await? == true);
-        screenshot(&client, "reader-intro-desktop").await?;
-        phone_session(&client).await?;
-        screenshot(&client, "reader-intro-mobile").await?;
-        anyhow::ensure!(client.execute("return document.documentElement.scrollWidth <= innerWidth", vec![]).await? == true, "reader introduction must fit a phone");
-        client.find(Locator::Css(".reader-intro summary")).await?.click().await?;
-        client.find(Locator::Css(".rows .row [data-row-open]")).await?.click().await?;
-        wait_for(&client, "document.body.dataset.kind === 'item'").await?;
-        anyhow::ensure!(client.execute("return getComputedStyle(document.querySelector('.reader-intro')).display === 'none'", vec![]).await? == true);
-        client.back().await?;
-        wait_for(&client, "document.body.dataset.kind === 'river'").await?;
-        anyhow::ensure!(client.execute("return document.querySelector('.reader-intro')?.open === false", vec![]).await? == true, "the introduction stays collapsed after reading an article");
         client.goto(&format!("{}browse/", fixture.base)).await?;
         wait_booted(&client).await?;
-        anyhow::ensure!(client.execute("return document.querySelectorAll('.reading-list-actions a').length === 3 && document.documentElement.scrollWidth <= innerWidth", vec![]).await? == true, "subscription actions stay available on a phone");
+        phone_session(&client).await?;
+        anyhow::ensure!(client.execute("return document.querySelector('.reader-intro') === null && document.querySelectorAll('.reading-list-actions a').length === 3 && document.documentElement.scrollWidth <= innerWidth", vec![]).await? == true, "subscription actions stay available on a phone");
         screenshot(&client, "reading-list-mobile").await?;
         Ok(())
     }.await;
-    report_failure(&client, "reader-introduction", &result).await;
+    report_failure(&client, "reading-list", &result).await;
     finish(client, result).await
 }
 
@@ -103,15 +83,17 @@ async fn default_visit_downloads_only_the_reader_shell_until_intent() -> Result<
           const done = arguments[arguments.length - 1];
           (async () => {
             const requested = performance.getEntriesByType('resource').map(entry => new URL(entry.name).pathname);
-            const unwanted = requested.filter(path => /\/(items|sources|categories|tags|pagefind|offline)\//.test(path)
-              || /\/(search|media|Form)-[^/]+\.js$/.test(path));
+            const visible = new Set([...document.querySelectorAll('.rows .row [data-row-open]')].map(link => new URL(link.href).pathname));
+            const lazy = path => /\/(search|media|Form)-[^/]+\.js$/.test(path);
+            const unwanted = requested.filter(path => lazy(path)
+              || (/\/(items|pagefind|offline)\//.test(path) && !visible.has(path))
+              || /\/(sources|categories|tags)\//.test(path));
             const names = await caches.keys();
             const shell = await caches.open(names.find(name => name.includes(':shell-')));
             const stored = (await shell.keys()).map(request => new URL(request.url).pathname);
             done({ unwanted, external: performance.getEntriesByType('resource').filter(entry => /^https?:/.test(entry.name) && new URL(entry.name).origin !== location.origin).map(entry => entry.name),
               transfer: [...performance.getEntriesByType('navigation'), ...performance.getEntriesByType('resource')].reduce((bytes, entry) => bytes + (entry.transferSize || 0), 0),
-              bulk: stored.filter(path => /\/(items|sources|categories|tags|pagefind|offline)\//.test(path)
-              || /\/(search|media|Form)-[^/]+\.js$/.test(path)) });
+              bulk: stored.filter(path => lazy(path) || /\/(items|pagefind|offline)\//.test(path)) });
           })().catch(error => done({error: String(error)}));
         "#, vec![]).await?;
         anyhow::ensure!(idle["unwanted"] == serde_json::json!([]), "unexpected idle requests: {idle}");

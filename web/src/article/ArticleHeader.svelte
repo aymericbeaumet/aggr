@@ -3,7 +3,7 @@
   // resource links and the access notice. The `<article>` root belongs to the page; it is
   // where `language` matters (a `lang` attribute when the article's language differs).
   import type { ClientArticle } from '../generated/ClientArticle';
-  import { facetUrl, urlFor } from '../model/urls';
+  import { urlFor } from '../model/urls';
   import Metadata from '../feed/Metadata.svelte';
 
   let {
@@ -23,8 +23,7 @@
 <header class="itemhead">
   <h1 class="p-name" tabindex="-1"><span class="itemhead-title">{#each words as word, index}{#if index}{' '}{/if}{#if word.includes('/')}<span class="itemhead-title-term">{word}</span>{:else}{word}{/if}{/each}</span></h1>
   <span class="itemhead-title-compact" aria-hidden="true">{header.title}</span>
-  <Metadata metadata={header.metadata} {base} />
-  {#if header.labels.length}<div class="item-tags" aria-label="Topics"><div class="item-tags-inner">{#each header.labels as label (label.slug)}<a class="tag p-category" rel="tag" href={facetUrl(base, label.slug, 'tag')}>#{label.name}</a>{/each}</div></div>{/if}
+  <Metadata metadata={header.metadata} labels={header.labels} {base} />
   <span class="itemhead-progress" aria-hidden="true"></span>
   <span class="itemhead-fade" aria-hidden="true"></span>
 </header>
@@ -33,4 +32,6 @@
 <p class="empty article-access-notice">The publisher requires a subscription. <a href={header.link} title={header.link} target="_blank" rel="noopener noreferrer">Open the original</a>{#if article.access.archive_lookup_url}{' or '}<a href={article.access.archive_lookup_url} target="_blank" rel="noopener noreferrer">find an archived copy</a>{/if}.</p>
 {:else if article.access.kind === 'titles_only'}
 <p class="empty">This source publishes titles only — <a href={header.link} title={header.link} target="_blank" rel="noopener noreferrer">open the original</a>.</p>
+{:else if article.access.kind === 'missing'}
+<p class="empty">The article text isn't here yet — <a href={header.link} title={header.link} target="_blank" rel="noopener noreferrer">open the original</a>.</p>
 {/if}

@@ -8,7 +8,7 @@ To retake them, run `aggr dev` against an instance whose articles you may publis
 browser chrome and personal information out of the frame, keep the files small enough that the
 README loads quickly on a phone, and describe the real capture in the alt text.
 
-A recording of a deployment reaching an already-open feed would suit the "Why aggr?" section, as
-about fifteen seconds showing a new item arriving without a page refresh. It must not imply that
+A recording of a deployment reaching an already-open feed would suit the README, as about fifteen
+seconds showing a new item arriving without a page refresh. It must not imply that
 the publisher-to-reader pipeline runs in fifteen seconds: fetching and deployment happen on their
 own schedule, and only the browser's check for a completed deployment is that quick.

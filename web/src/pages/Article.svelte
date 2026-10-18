@@ -29,5 +29,5 @@
 <article class="item h-entry" {lang} data-path={header.path} data-url={sitePath(header.url)} data-link={header.link} data-previous-url={article.previous ? sitePath(article.previous.url) : undefined} data-next-url={article.next ? sitePath(article.next.url) : undefined} {@attach swipeable}>
   <ArticleHeader {article} base={page.base} language={page.site.language} />
   <div data-article-content {@attach adopt(content)} {@attach content ? enhance({ next: article.next, previous: article.previous }) : null}></div>
-  <ArticleFooter next={article.next} recommended={article.recommended} base={page.base} excerpts={page.site.excerpts} />
+  <ArticleFooter next={article.next} recommended={article.recommended} base={page.base} />
 </article>

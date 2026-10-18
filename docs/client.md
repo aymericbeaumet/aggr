@@ -2,7 +2,7 @@
 
 Rust and MiniJinja render the complete static reader. The browser client is a Svelte 5 +
 TypeScript application in `web/`, compiled ahead of time by Vite and committed under
-`themes/default/static/app/`, where the binary embeds it like any other static file. Site
+`src/theme/static/app/`, where the binary embeds it like any other static file. Site
 generation never executes JavaScript or invokes a frontend compiler, so `cargo build`, `aggr sync`,
 `aggr build` and `aggr dev` need no Node. Search is a build-time Pagefind index; there is no
 search service.
@@ -20,7 +20,11 @@ they are stale). The article body is not in the model: it stays in the HTML as
 
 ## Boot and navigation
 
-The static page is the first paint. The deferred module reads the model, captures the article
+The static page is the first paint. The stylesheet and the entry's modulepreloads are linked
+before the blocking bootstrap script, so that first paint does not wait to discover them;
+`#aggr-preferences` stays immediately above the script, which still applies stored settings
+before paint. Feed rows use `content-visibility` at every width, so off-screen entries skip
+layout and stay addressable; printing lays them out. The deferred module reads the model, captures the article
 content (or a static page's `<main>`), mounts `App` into a detached `<div id="app">`, swaps it
 over the rendered one in the same task and flushes effects, so nothing paints in between; the
 captured element is moved into the new tree, never re-parsed. Lists and articles are rendered by
@@ -29,13 +33,25 @@ the client. If `#aggr-page` is missing or malformed the page stays static.
 
 Navigation fetches the target page, extracts its model, its content element and its `<head>`
 metadata with `DOMParser`, and re-renders `<main>` from state while the header and tab bar
-persist. A link inside the archive is fetched when it is pressed, focused or hovered (60 ms),
-with at most two intent prefetches in flight and a 24-page, five-minute cache. No pages are fetched
-just because their links are visible, and unvisited destinations are not refreshed periodically.
-Intent prefetch is off on Save-Data, slow connections, offline, or hidden tabs; following a link
-still uses ordinary navigation when necessary. Scroll positions are kept per history entry, so
-Back returns to the same place and list cursor. A non-HTML response, a page without a model or one built by another app version
+persist. A link inside the archive is fetched as soon as it is pressed or hovered, and a page
+already in memory is swapped in that same turn. The three tabs are fetched as soon as the reader
+starts. After paint, the reader warms the first three rows already on screen. An article's
+neighbours carry `rel="prefetch"`. Guesses
+are bounded to 16 requests and a 24-page, five-minute cache, and off on Save-Data or slow
+connections. The search catalogue waits for an idle slice, and loads
+at once when the field is focused. Scroll positions are kept per history entry, so Back returns to the same place and
+list cursor. A non-HTML response, a page without a model or one built by another app version
 falls back to ordinary navigation, and without JavaScript every link is an ordinary link.
+A podcast, native video, or YouTube, Vimeo, or Twitch player that has started keeps playing across
+those page changes. Audio is parked outside the page. A picture is seated once, at the size it
+started, and that seat scales between the article and the now-playing bar (persistent chrome, beside
+the status bar). The provider frame keeps its parent and layout size, so the elapsed time and the
+bar's transport continue. Starting it does not move keyboard focus into the frame. A player or
+interactive viewer that takes focus is handed back to the page over the next few frames, fullscreen
+and Twitch excepted, and playback sliders and selects do not swallow reader shortcuts. System media keys play, pause, and seek a recording the bar can drive,
+and previous and next skip 15 and 30 seconds. Parked audio can be muted from the bar. Twitch keeps
+the keys it draws itself. Dismissing the bar or leaving the site stops it. Media that never
+started is released with the page.
 
 ## Components and parity
 
@@ -58,17 +74,25 @@ sits behind `@supports` or a feature check and degrades to plain HTML.
 ## Development
 
 ```sh
-mise install                      # node
-npm ci --prefix web
+make setup                       # mise tools and locked client packages
 make client-check                 # svelte-check + vitest
-make client-build                 # rebuild the committed bundle under themes/default/static/app/
+make client-build                 # rebuild the committed bundle under src/theme/static/app/
 make client-dev                   # Vite dev server with HMR
-AGGR_VITE_URL=http://127.0.0.1:5173 cargo run -- dev --config examples/aggr.toml
+AGGR_VITE_URL=http://127.0.0.1:5173 make run ARGS="dev"
 ```
+
+`mise.toml` and `mise.lock` pin the development tools. `Cargo.lock` and
+`web/package-lock.json` pin the Rust and client packages. Run `make setup` after
+changing any of those files.
 
 With `AGGR_VITE_URL` set, the development server replaces the compiled module tag in its HTML
 with Vite's client and the source entry, so component edits hot-swap; static HTML, media and data
 stay served by aggr. The setting accepts a local HTTP origin only and has no effect on builds.
+Hashed assets — `assets/app` bundles, Rust `url_for` names, content-addressed media and Pagefind
+fragments — are served `Cache-Control: public, max-age=31536000, immutable`. HTML stays
+`no-store` and does not send `Clear-Site-Data`: the reload script already drops the reader's own
+caches, and wiping the HTTP cache on every document made the next paint wait on files that had
+not changed.
 `make check` runs the frontend checks alongside the Rust ones; CI also rebuilds the bundle and
 fails if the committed output or the generated types differ.
 The frontend installs TypeScript 6 for `tsc` and an aliased TypeScript 7 for Svelte's `--tsgo`
@@ -88,6 +112,8 @@ before writing session state, history or a worker registration.
 `src/config/preferences.rs` holds one typed table. It produces the validation rules embedded as
 JSON in `#aggr-preferences` and the form schema the client renders on `/preferences/`. Nothing
 redeclares a setting: adding one there adds its control, its validation and its default everywhere.
+The form is a static import of the preferences page, in the eager bundle with the shell. Opening
+the tab paints the controls with the page; it does not fetch a chunk.
 
 The pre-paint `bootstrap` script reads the rules and applies stored values to
 `documentElement.dataset` before paint; the app's preferences state handles changes, cross-tab
@@ -95,56 +121,47 @@ sync, and import and export. Values live in `localStorage` under `aggr:<setting>
 
 ## Offline
 
-The service worker separates automatically cached pages from selected offline downloads. The
-default offline-download count is zero. Installation caches the home/offline shell, small icons and
-the client's eager dependencies; collection pages and optional search, media and preferences
-chunks load when used. The worker references a versioned offline catalogue instead of embedding
-its article families; only an enabled offline preference downloads it, checking its byte count,
-SHA-256 digest, item count and local URLs before use. Saved user preferences still take precedence.
-Large app-installation icons remain available on demand.
-Content-addressed shell assets reuse the browser's HTTP cache during installation; pages and
-mutable manifests still request fresh responses. This avoids downloading the same client assets
-twice when the host permits caching.
-
-The offline preference saves complete article pages and their retained image renditions; readiness
+The service worker separates automatically cached pages from selected offline downloads. Its
+script carries the app shell, not the article catalogue: `offline-catalog.json` is fetched only
+when a download count is set, and individual collection pages are cached when opened. A new
+worker copies shell files whose revision matches instead of downloading them again. The
+offline preference saves complete article pages and their retained image renditions; readiness
 requires every retained file. Partial and quota failures remain visible. Any positive download
 limit also saves the complete archive search manifest, including its versioned catalogue, runtime
 and fragments. Only a fully committed index becomes active, and a previous complete index remains
 available during an update. Online/offline transitions select the matching catalogue and runtime;
 search results mark saved articles and omit previews that are unavailable offline.
 
-The optional `[site.params] introduction = true` introduction uses native `<details>` outside the Svelte
-root, so collapsing it survives navigation within the document. It appears only on the feed and
-adds no script or network dependency. Browse and source directories expose subscription downloads
-and the reading-list configuration; source/category query URLs remain shareable.
-
 ## Browser regression tests
 
 The browser suite uses a local ChromeDriver and a temporary, pinned article archive. `mise.toml`
-pins the `chromedriver` npm package to the installed Chrome's major version; if its binary is
-missing after `mise install`, run `node install.js` inside that package once to download it.
+pins ChromeDriver and Chrome for Testing to the same release. `make setup` installs both through
+mise on supported desktop platforms. Point `AGGR_CHROME_BINARY` at the mise-installed browser:
 
 ```sh
 mise exec -- chromedriver --port=9515 --allowed-ips=127.0.0.1
 # In another terminal:
-AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser -- --ignored
+AGGR_CHROME_BINARY="$(mise where http:chrome-for-testing)/chrome-linux64/chrome" \
+AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 mise exec -- cargo test --locked --test browser -- --ignored
 ```
 
-Set `AGGR_CHROME_BINARY` if Chrome is outside its usual location and `AGGR_BROWSER_TIMEOUT_SECS`
-(default 45) when a loaded machine needs longer waits. CI installs matching browser and driver
-versions; failure screenshots and logs are saved under `target/browser-artifacts/`.
+The example path is for Linux x64. On macOS, use
+`$(mise where http:chrome-for-testing)/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`
+on Apple silicon, or replace `arm64` with `x64` on Intel. On Windows x64, the path is
+`$(mise where http:chrome-for-testing)/chrome-win64/chrome.exe`. Set
+`AGGR_BROWSER_TIMEOUT_SECS` (default 45) when a loaded machine needs longer waits. CI saves
+failure screenshots and logs under `target/browser-artifacts/`.
 
 ### First-visit budget
 
 The `default_visit` contract uses a fresh browser profile, 45 fixture articles, the default
-25-entry feed, remote media policies and zero selected offline downloads. On 2026-10-04,
+feed page, remote media policies and zero selected offline downloads. On 2026-10-05,
 Chrome 154 on macOS produced these measurements over local HTTP without compression:
 
 | Measurement | Bytes |
 |---|---:|
-| Server response headers and bodies with `Cache-Control: no-store`, including service-worker installation | 833,136 |
-| Same fixture with `public, max-age=31536000, immutable` on versioned assets | 595,352 |
-| Browser navigation/resource `transferSize` with `no-store`, which omits worker requests | 390,218 |
+| Server response headers and bodies with `Cache-Control: no-store`, including service-worker installation | 937,331 |
+| Same fixture with `public, max-age=31536000, immutable` on versioned assets | 698,712 |
 | Regression budget for the `no-store` server total | 1,048,576 |
 | Regression budget with cacheable versioned assets | 786,432 |
 
@@ -152,10 +169,12 @@ The sample ends 750 ms after worker control, before typing or navigation. It als
 external HTTP requests and zero automatic article, collection, search-index or offline-catalogue
 downloads. With cacheable assets, each asset is requested at most once: worker installation reuses
 the browser's HTTP cache. Search works afterward. These are controlled fixture bytes, not
-deployed-site timings; compression and hosting cache headers change the transfer size.
+deployed-site timings; compression and hosting cache headers change the transfer size. The
+samples predate the smaller install shell: collection pages and the article catalogue are no
+longer part of service-worker installation.
 
 ```sh
-AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 cargo test --test browser default_visit -- --ignored --test-threads=1 --nocapture
+AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 mise exec -- cargo test --locked --test browser default_visit -- --ignored --test-threads=1 --nocapture
 ```
 
 ## Query syntax
@@ -257,6 +276,7 @@ fragments are loaded. Completion uses Pagefind's filtered counts for a single se
 filter-membership intersections for mixed phrases/exclusions, without loading article bodies.
 Display metadata remains opaque to Pagefind's text tokenizer. Archived points and comment counts
 are shared by static and search metadata, including explicit zero values; missing counts stay absent.
+Hacker News points, comment counts, and the discussion score are omitted from that shared view.
 
 Completion caches normalized aliases and ranking by immutable catalogue identity; detecting a
 finished facet token does not build or sort a suggestion list. A persistent search session coalesces
@@ -275,7 +295,7 @@ reusing highlights from a previous query.
 
 ## Current contracts
 
-Custom templates must keep the documented markers and the preference bootstrap. Preference imports
+The page keeps the preference bootstrap. Preference imports
 require `{ "version": 1, "preferences": { ... } }`; shared links carry this envelope in
 `#aggr-state=`. Versionless payloads, prefixed import keys, and query-string preference imports are
 rejected. Stored Markdown is authoritative; builds do not replay historical renderers to repair it.

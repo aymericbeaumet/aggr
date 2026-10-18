@@ -1,6 +1,7 @@
 //! Markdown cleanup shared by capture and build: boundary controls, the publisher metadata
 //! Readability promotes to the front of an article (dates, bylines, the source's own name),
-//! separator tidying, and the code-aware rewriting the other passes rely on.
+//! a trailing request to translate the article, separator tidying, and the code-aware rewriting
+//! the other passes rely on.
 
 use chrono::{DateTime, NaiveDate, Utc};
 
@@ -97,7 +98,8 @@ pub fn strip_article_metadata(
     published: Option<DateTime<Utc>>,
     source_slug: &str,
 ) -> String {
-    let markdown = strip_article_navigation(markdown);
+    let markdown = strip_translation_solicitation(markdown);
+    let markdown = strip_article_navigation(&markdown);
     let markdown = if source_slug == "slack-status-com" {
         format_archived_slack_status(&markdown)
     } else {
@@ -122,6 +124,121 @@ pub fn strip_article_metadata(
         return protect_markdown_code(&markdown, tidy_markdown);
     }
     markdown
+}
+
+/// diff.wikimedia.org closes an article with a banner and "Can you help us translate this
+/// article?". The banner's address exists only for that request. A section that is actually about
+/// translation, or a picture whose address is not that banner, stays. The tail after the heading
+/// has to be short and contain no further heading; a real section under the same words is longer.
+const TRANSLATION_REQUEST_WORDS: usize = 60;
+
+fn strip_translation_solicitation(markdown: &str) -> String {
+    if !markdown.to_ascii_lowercase().contains("translat") {
+        return markdown.to_string();
+    }
+    let arena = comrak::Arena::new();
+    let mut options = comrak::Options::default();
+    options.extension.table = true;
+    let root = comrak::parse_document(&arena, markdown, &options);
+    let blocks = root.children().collect::<Vec<_>>();
+    let Some(index) = blocks.iter().rposition(|node| {
+        matches!(
+            node.data.borrow().value,
+            comrak::nodes::NodeValue::Heading(_)
+        ) && is_translation_request(&block_plain_text(node))
+    }) else {
+        return markdown.to_string();
+    };
+    let tail = &blocks[index + 1..];
+    let words = tail
+        .iter()
+        .map(|node| block_plain_text(node).split_whitespace().count())
+        .sum::<usize>();
+    let later_heading = tail.iter().any(|node| {
+        node.descendants().any(|child| {
+            matches!(
+                child.data.borrow().value,
+                comrak::nodes::NodeValue::Heading(_)
+            )
+        })
+    });
+    if words > TRANSLATION_REQUEST_WORDS || later_heading {
+        return markdown.to_string();
+    }
+    let start_index = if index > 0 && paragraph_is_translation_banner(blocks[index - 1]) {
+        index - 1
+    } else {
+        index
+    };
+    let mut lines = vec![0];
+    lines.extend(markdown.match_indices('\n').map(|(at, _)| at + 1));
+    let start_line = blocks[start_index].data.borrow().sourcepos.start.line;
+    let Some(start) = lines.get(start_line.wrapping_sub(1)).copied() else {
+        return markdown.to_string();
+    };
+    if start > markdown.len() {
+        return markdown.to_string();
+    }
+    let kept = markdown[..start].trim_end_matches('\n');
+    if kept.is_empty() {
+        String::new()
+    } else {
+        format!("{kept}\n")
+    }
+}
+
+fn is_translation_request(text: &str) -> bool {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = text.to_ascii_lowercase();
+    let text = text.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+    const REQUESTS: [&str; 6] = [
+        "can you help us translate this article",
+        "can you help us translate this post",
+        "help us translate this article",
+        "help us translate this post",
+        "translate this article",
+        "translate this post",
+    ];
+    REQUESTS.contains(&text) || text.starts_with("can you help us translate ")
+}
+
+fn block_plain_text<'a>(node: &'a comrak::nodes::AstNode<'a>) -> String {
+    use comrak::nodes::NodeValue;
+    let mut text = String::new();
+    for child in node.descendants() {
+        match &child.data.borrow().value {
+            NodeValue::Text(value) => text.push_str(value),
+            NodeValue::SoftBreak | NodeValue::LineBreak => text.push(' '),
+            _ => {}
+        }
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The paragraph immediately before the request, when it is only the banner image.
+fn paragraph_is_translation_banner<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
+    use comrak::nodes::NodeValue;
+    if !matches!(node.data.borrow().value, NodeValue::Paragraph) {
+        return false;
+    }
+    let mut url = None;
+    for child in node.children() {
+        match &child.data.borrow().value {
+            NodeValue::Image(image) => {
+                if url.is_some() {
+                    return false;
+                }
+                url = Some(image.url.clone());
+            }
+            NodeValue::Text(value) if value.trim().is_empty() => {}
+            NodeValue::SoftBreak | NodeValue::LineBreak => {}
+            _ => return false,
+        }
+    }
+    url.is_some_and(|url| {
+        url.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|token| token.to_ascii_lowercase().starts_with("translate"))
+    })
 }
 
 fn format_archived_slack_status(markdown: &str) -> String {
@@ -1845,6 +1962,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn translation_solicitation_is_removed_and_translation_prose_stays() {
+        // diff.wikimedia.org: the banner and "Can you help us translate this article?" sit at the
+        // end of the stored body, after the article.
+        let prose = "Our collective priority should be the health of the overall web ecosystem.\n";
+        let banner = "![](https://diff.wikimedia.org/wp-content/themes/interconnection/assets/images/translate-post.jpg)";
+        let request = "## Can you help us translate this article?\n\nIn order for this article to reach as many people as possible we would like your help. Can you translate this article to get the message out?\n\n[Start translation](https://diff.wikimedia.org/wp-login.php?redirect_to=%2F2026%2F10%2F05%2Fopenai-rogue-agent-activities-found-on-wikimedia-projects%2F%23translate-post)\n";
+        let stored = format!("{prose}\n{banner}\n\n{request}");
+        assert_eq!(
+            strip_article_metadata(&stored, "", None, "hnrss-org"),
+            prose
+        );
+        // A picture that is not the banner stays while the request after it goes.
+        let photo = "![](https://example.com/photos/landscape.jpg)";
+        assert_eq!(
+            strip_article_metadata(
+                &format!("{prose}\n{photo}\n\n{request}"),
+                "",
+                None,
+                "hnrss-org"
+            ),
+            format!("{prose}\n{photo}\n")
+        );
+        // `notranslate` is not a translation banner.
+        let opted_out = "![](https://example.com/notranslate-banner.jpg)";
+        assert_eq!(
+            strip_article_metadata(
+                &format!("{prose}\n{opted_out}\n\n{request}"),
+                "",
+                None,
+                "hnrss-org"
+            ),
+            format!("{prose}\n{opted_out}\n")
+        );
+        // The same heading over a real section is the section.
+        let section = format!(
+            "{prose}\n## Can you help us translate this article?\n\n{}\n",
+            "Editors keep working through the translation memory one sentence at a time. "
+                .repeat(8)
+                .trim_end()
+        );
+        assert_eq!(
+            strip_article_metadata(&section, "", None, "hnrss-org"),
+            section
+        );
+        let about = "Opening paragraph.\n\n## How translation works\n\nEditors translate the interface one string at a time.\n";
+        assert_eq!(strip_article_metadata(about, "", None, "blog"), about);
+        let mention = "Opening paragraph about the outage.\n\nThe editors translate this article into several languages before it is published.\n\nClosing paragraph.\n";
+        assert_eq!(strip_article_metadata(mention, "", None, "blog"), mention);
     }
 
     #[test]

@@ -1048,7 +1048,7 @@ mod tests {
             then.status(200).body(png(64, 32, 255));
         });
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\n",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl = {:?}\n",
             server.url("/feed")
         ))
         .unwrap();
@@ -1082,7 +1082,7 @@ mod tests {
             })
             .await;
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl={:?}\n",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl={:?}\n",
             server.url("/feed")
         ))
         .unwrap();
@@ -1128,7 +1128,7 @@ mod tests {
             })
             .await;
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl={:?}\n",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl={:?}\n",
             server.url("/feed")
         ))
         .unwrap();
@@ -1209,7 +1209,7 @@ mod tests {
         )
         .unwrap();
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\n",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl = {:?}\n",
             server.url("/feed")
         ))
         .unwrap();
@@ -1249,7 +1249,7 @@ mod tests {
             then.status(500);
         });
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl={:?}",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl={:?}",
             server.url("/feed")
         ))
         .unwrap();
@@ -1342,7 +1342,7 @@ mod tests {
             then.status(200).body("not a PDF");
         });
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl={:?}\nheaders={{Authorization='reader-token'}}",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl={:?}\nheaders={{Authorization='reader-token'}}",
             server.url("/feed")
         ))
         .unwrap();
@@ -1389,7 +1389,7 @@ mod tests {
             })
             .await;
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\n",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl = {:?}\n",
             server.url("/feed")
         ))
         .unwrap();
@@ -1428,7 +1428,7 @@ mod tests {
             then.status(200).body(png(64, 32, 255));
         });
         let config = crate::config::Config::parse(&format!(
-            "[defaults]\nmedia = 'local'\n[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\", X-Api-Key = \"private\" }}\n",
+            "[defaults]\nmedia_download_strategy = 'original'\n[[sources]]\nurl = {:?}\nheaders = {{ Authorization = \"Bearer private\", X-Api-Key = \"private\" }}\n",
             source_server.url("/feed"),
         )).unwrap();
         let source = config.sources().unwrap().remove(0);

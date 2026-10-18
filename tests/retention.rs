@@ -30,7 +30,7 @@ impl Fixture {
             root,
             server,
         };
-        fixture.configure("max_items = 0\nmax_age_days = 0\nmax_bytes = 0", "", "");
+        fixture.configure("count_max = 0\nmax_age_days = 0\nsize_max = 0", "", "");
         git(&fixture.root, &["add", "aggr.toml"]).unwrap();
         git(&fixture.root, &["commit", "-qm", "config"]).unwrap();
         git(&fixture.root, &["push", "-q", "origin", "main"]).unwrap();
@@ -110,9 +110,9 @@ fn count_limits_remove_whole_families_only_from_the_affected_feed() {
     fixture.save();
     let original = fixture.head();
     fixture.configure(
-        "max_items = 1\nmax_age_days = 0\nmax_bytes = 0",
+        "count_max = 1\nmax_age_days = 0\nsize_max = 0",
         "",
-        "max_items = 3",
+        "count_max = 3",
     );
     aggr_command(&fixture.root)
         .args(["sync", "--dry-run"])
@@ -156,7 +156,7 @@ fn byte_limits_count_unreferenced_media_even_in_remote_offline_builds() {
     let image = companion(&old, ".image-123456789abc.png");
     std::fs::write(&image, vec![0; 20_000]).unwrap();
     fixture.save();
-    fixture.configure("max_items = 0\nmax_age_days = 0\nmax_bytes = 10000", "", "");
+    fixture.configure("count_max = 0\nmax_age_days = 0\nsize_max = 10000", "", "");
     let before = fixture.head();
     aggr_command(&fixture.root)
         .args(["build", "--offline"])
@@ -186,7 +186,7 @@ fn date_cutoff_is_inclusive_and_sources_can_clear_it() {
     let fixture = Fixture::new();
     let date = (Utc::now() - Duration::days(1)).date_naive();
     fixture.configure(
-        &format!("max_items = 0\nmax_age_days = 0\nmax_bytes = 0\nsince = {date}"),
+        &format!("count_max = 0\nmax_age_days = 0\nsize_max = 0\nsince = {date}"),
         "",
         "since = false",
     );
@@ -201,16 +201,16 @@ fn wider_limits_restore_policy_evictions_but_preserve_manual_deletions() {
     let seen = fixture.data().join("sources/alpha/seen.txt");
     let original_seen = std::fs::read(&seen).unwrap();
     fixture.configure(
-        "max_items = 1\nmax_age_days = 0\nmax_bytes = 0",
+        "count_max = 1\nmax_age_days = 0\nsize_max = 0",
         "",
-        "max_items = 3",
+        "count_max = 3",
     );
     fixture.sync();
     assert_eq!(fixture.articles("alpha").len(), 1);
     let ledger = fixture.data().join("sources/alpha/evicted.json");
     assert!(ledger.exists());
 
-    fixture.configure("max_items = 3\nmax_age_days = 0\nmax_bytes = 0", "", "");
+    fixture.configure("count_max = 3\nmax_age_days = 0\nsize_max = 0", "", "");
     fixture.sync();
     assert_eq!(fixture.articles("alpha").len(), 3);
     assert_eq!(std::fs::read(&seen).unwrap(), original_seen);
@@ -226,7 +226,7 @@ fn wider_limits_restore_policy_evictions_but_preserve_manual_deletions() {
         std::fs::remove_file(html).unwrap();
     }
     fixture.save();
-    fixture.configure("max_items = 4\nmax_age_days = 0\nmax_bytes = 0", "", "");
+    fixture.configure("count_max = 4\nmax_age_days = 0\nsize_max = 0", "", "");
     fixture.sync();
     assert_eq!(fixture.articles("alpha").len(), 2);
     assert!(!removed.exists());
@@ -276,9 +276,9 @@ fn media_backfill_prunes_before_requests_and_enforces_newly_saved_bytes() {
             .body(bytes.into_inner());
     });
     fixture.configure(
-        "media = 'local'\nmax_items = 2\nmax_age_days = 0\nmax_bytes = 10000",
+        "media_download_strategy = 'original'\ncount_max = 2\nmax_age_days = 0\nsize_max = 10000",
         "",
-        "max_items = 3",
+        "count_max = 3",
     );
     aggr_command(&fixture.root)
         .args(["sync", "--backfill-media"])
@@ -300,4 +300,89 @@ fn media_backfill_prunes_before_requests_and_enforces_newly_saved_bytes() {
     assert_eq!(fixture.head(), after);
     downloaded.assert_calls(1);
     feeds.assert_calls(0);
+}
+
+#[test]
+fn removing_a_source_drops_it_from_the_build_and_fetches_it_again_later() {
+    let fixture = Fixture::new();
+    let alpha = fixture.article("alpha-0");
+    let beta = fixture.article("beta-0");
+    let alpha_stem = alpha.file_stem().unwrap().to_str().unwrap().to_string();
+    let beta_stem = beta.file_stem().unwrap().to_str().unwrap().to_string();
+    let relative = beta
+        .strip_prefix(fixture.data())
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
+    let before = fixture.head();
+    std::fs::write(
+        fixture.root.join("aggr.toml"),
+        format!(
+            "[site]\ntitle = 'Limits'\n[defaults]\ncount_max = 0\nmax_age_days = 0\nsize_max = 0\n[[sources]]\nurl = '{}'\nslug = 'alpha'\n",
+            fixture.server.url("/alpha.xml")
+        ),
+    )
+    .unwrap();
+
+    aggr_command(&fixture.root)
+        .args(["build", "--offline"])
+        .assert()
+        .success();
+    let home = std::fs::read_to_string(fixture.root.join("_site/index.html")).unwrap();
+    assert!(home.contains("alpha-0"), "{home}");
+    assert!(!home.contains("beta-0"), "{home}");
+    assert!(
+        fixture
+            .root
+            .join(format!("_site/items/alpha/{alpha_stem}/index.html"))
+            .is_file()
+    );
+    assert!(
+        !fixture
+            .root
+            .join(format!("_site/items/beta/{beta_stem}/index.html"))
+            .exists()
+    );
+    assert!(
+        beta.exists(),
+        "an offline build leaves the archive in place"
+    );
+    assert!(fixture.data().join("sources/beta/seen.txt").is_file());
+    assert_eq!(fixture.head(), before);
+
+    fixture.sync();
+    assert!(!beta.exists());
+    assert!(fixture.articles("beta").is_empty());
+    assert_eq!(fixture.articles("alpha").len(), 3);
+    assert!(!fixture.data().join("sources/beta/seen.txt").exists());
+    assert!(!fixture.data().join("sources/beta/state.toml").exists());
+    assert!(!fixture.data().join("sources/beta/evicted.json").exists());
+    let removed = fixture.head();
+    assert_ne!(removed.trim(), before.trim());
+    assert!(
+        git(&fixture.data(), &["log", "-1", "--format=%B"])
+            .unwrap()
+            .contains("retention: -")
+    );
+    assert!(
+        git(
+            &fixture.data(),
+            &["show", &format!("{}:{relative}", before.trim())]
+        )
+        .unwrap()
+        .contains("beta-0")
+    );
+    git(
+        &fixture.data(),
+        &["merge-base", "--is-ancestor", before.trim(), removed.trim()],
+    )
+    .unwrap();
+
+    fixture.sync();
+    assert_eq!(fixture.head(), removed);
+
+    fixture.configure("count_max = 0\nmax_age_days = 0\nsize_max = 0", "", "");
+    fixture.sync();
+    assert_eq!(fixture.articles("beta").len(), 3);
+    assert!(fixture.data().join("sources/beta/seen.txt").is_file());
 }

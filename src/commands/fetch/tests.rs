@@ -24,6 +24,7 @@ pub(crate) fn source() -> Source {
         images: crate::config::ImagePolicy::Original,
         documents: crate::config::DocumentPolicy::Original,
         limits: crate::config::Limits::default(),
+        discussions: Vec::new(),
         engine: crate::config::Engine::Feed {
             url: Url::parse("https://blog.example/feed").unwrap(),
         },
@@ -296,6 +297,7 @@ async fn recording_probes_and_article_preparation_never_wait_for_each_other() {
         ..options()
     };
     let configured = Source {
+        discussions: Vec::new(),
         engine: Engine::Feed {
             url: Url::parse(&server.url("/feed")).unwrap(),
         },
@@ -547,6 +549,7 @@ async fn slow_first_article_does_not_block_later_downloads_or_change_filenames()
     let configured = Source {
         images: crate::config::ImagePolicy::Remote,
         documents: crate::config::DocumentPolicy::Original,
+        discussions: Vec::new(),
         engine: Engine::Feed {
             url: Url::parse(&server.url("/feed")).unwrap(),
         },
@@ -1361,6 +1364,7 @@ async fn media_backfill_preserves_prose_and_never_refetches_feeds_or_articles() 
         content: ContentMode::Light,
         previews: crate::config::PreviewPolicy::Remote,
         documents: crate::config::DocumentPolicy::Remote,
+        discussions: Vec::new(),
         engine: Engine::Feed {
             url: Url::parse(&server.url("/feed")).unwrap(),
         },
@@ -1435,6 +1439,7 @@ async fn undated_policy_evictions_keep_capture_time_when_limits_change() {
             max_bytes: 0,
             since: None,
         },
+        discussions: Vec::new(),
         engine: Engine::Feed {
             url: Url::parse(&server.url("/feed")).unwrap(),
         },
@@ -1560,6 +1565,7 @@ async fn source_limits_skip_article_and_media_requests_outside_the_selected_item
         let store = Arc::new(Store::open(root.path()));
         let configured = Source {
             limits,
+            discussions: Vec::new(),
             engine: Engine::Feed {
                 url: Url::parse(&server.url("/feed")).unwrap(),
             },

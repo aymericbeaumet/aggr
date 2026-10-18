@@ -1,0 +1,43 @@
+{
+  "component": "ArticleHeader",
+  "props": {
+    "article": {
+      "access": {
+        "kind": "missing"
+      },
+      "authors": [],
+      "has_margin_notes": false,
+      "header": {
+        "age_band": "h1",
+        "category": null,
+        "excerpt": "",
+        "labels": [],
+        "language": null,
+        "link": "https://blog.example/missing",
+        "metadata": {
+          "date": "2026-09-30T11:00:00+00:00",
+          "discussions": [],
+          "feed_sources": [],
+          "is_aggregated": false,
+          "original": "https://blog.example/missing",
+          "reading_minutes": 0,
+          "source_display": "blog.example",
+          "source_query": "blog",
+          "source_slug": "blog",
+          "source_title": "Blog",
+          "word_count": 0
+        },
+        "path": "items/blog/2026/09/missing",
+        "preview": null,
+        "title": "Article text not captured",
+        "url": "items/blog/missing/"
+      },
+      "next": null,
+      "previous": null,
+      "recommended": [],
+      "resources": []
+    },
+    "base": "../../../",
+    "language": "en"
+  }
+}

@@ -7,6 +7,5 @@ import type { SourceMembershipCtx } from "./SourceMembershipCtx";
 
 /**
  * The display-only contract shared by static metadata and search result components.
- * Existing item fields remain available to custom themes.
  */
 export type Metadata = { original: string, date: string, updated?: string, source_slug: string, source_query: string, source_display: string, source_title: string, category?: Category, feed_display?: string, feed_sources: Array<SourceMembershipCtx>, is_aggregated: boolean, word_count: number, reading_minutes: number, consumption?: Consumption, discussions: Array<Discussion>, points?: number, comments?: Comments, };

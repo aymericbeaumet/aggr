@@ -32,9 +32,7 @@ fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 30, 12, 0, 0).unwrap()
 }
 
-fn site(excerpts: bool) -> SiteCtx {
-    let mut params = toml::Table::new();
-    params.insert("excerpts".into(), toml::Value::Boolean(excerpts));
+fn site() -> SiteCtx {
     SiteCtx {
         hermetic: false,
         title: "Reader".into(),
@@ -63,7 +61,6 @@ fn site(excerpts: bool) -> SiteCtx {
             score: None,
         }],
         entry_shortcuts: Vec::new(),
-        params,
     }
 }
 
@@ -153,7 +150,7 @@ fn rows() -> Vec<(&'static str, ItemCtx)> {
             BODY,
         ),
         Some("Engineering"),
-        "An excerpt shown under the title when the site enables excerpts.",
+        "A stored excerpt used by descriptions and feeds, not by the row.",
     );
     full.language = Some("fr".into());
     full.labels = vec!["rust".into(), "web".into()];
@@ -442,42 +439,35 @@ fn render_static(site: &SiteCtx, kind: &str, title: &str, path: &str, template: 
 }
 
 fn fixtures() -> Vec<Fixture> {
-    let site_on = site(true);
-    let site_off = site(false);
+    let site = site();
     let mut out = Vec::new();
 
     for (name, row) in rows() {
-        for (suffix, site) in [("", &site_on), ("-no-excerpts", &site_off)] {
-            if !suffix.is_empty() && row.excerpt.is_empty() {
-                continue;
-            }
-            let rendered = render_list(
-                site,
-                "river",
-                "Reader",
-                "",
-                std::slice::from_ref(&row),
-                None,
-                None,
-                50,
-                0,
-            );
-            let ClientView::List(list) = &rendered.model.page else {
-                unreachable!()
-            };
-            out.push(Fixture {
-                name: Box::leak(format!("{name}{suffix}").into_boxed_str()),
-                component: "Row",
-                props: serde_json::json!({
-                    "row": list.rows[0],
-                    "rank": 1,
-                    "base": rendered.model.base,
-                    "excerpts": rendered.client_site.excerpts,
-                    "language": rendered.client_site.language,
-                }),
-                html: outer(&rendered.document, "ol.rows > li.row"),
-            });
-        }
+        let rendered = render_list(
+            &site,
+            "river",
+            "Reader",
+            "",
+            std::slice::from_ref(&row),
+            None,
+            None,
+            50,
+            0,
+        );
+        let ClientView::List(list) = &rendered.model.page else {
+            unreachable!()
+        };
+        out.push(Fixture {
+            name,
+            component: "Row",
+            props: serde_json::json!({
+                "row": list.rows[0],
+                "rank": 1,
+                "base": rendered.model.base,
+                "language": rendered.client_site.language,
+            }),
+            html: outer(&rendered.document, "ol.rows > li.row"),
+        });
     }
 
     // A long river: the pager on the first, a middle and the last page.
@@ -498,7 +488,7 @@ fn fixtures() -> Vec<Fixture> {
         })
         .collect();
     for (name, index) in [("pager-first", 0), ("pager-middle", 1), ("pager-last", 3)] {
-        let rendered = render_list(&site_on, "river", "Reader", "", &many, None, None, 2, index);
+        let rendered = render_list(&site, "river", "Reader", "", &many, None, None, 2, index);
         let ClientView::List(list) = &rendered.model.page else {
             unreachable!()
         };
@@ -513,17 +503,7 @@ fn fixtures() -> Vec<Fixture> {
             html: outer(&rendered.document, "[data-static-feed] > nav.pager"),
         });
     }
-    let rendered = render_list(
-        &site_on,
-        "river",
-        "Reader",
-        "",
-        &many[..1],
-        None,
-        None,
-        50,
-        0,
-    );
+    let rendered = render_list(&site, "river", "Reader", "", &many[..1], None, None, 50, 0);
     let ClientView::List(list) = &rendered.model.page else {
         unreachable!()
     };
@@ -566,7 +546,7 @@ fn fixtures() -> Vec<Fixture> {
     for (name, title, prefix, source, category) in scoped {
         let kind = name.split('-').next().unwrap();
         let rendered = render_list(
-            &site_on,
+            &site,
             kind,
             title,
             prefix,
@@ -620,7 +600,7 @@ fn fixtures() -> Vec<Fixture> {
             html: outer(&rendered.document, "header.top, nav.mobile-tabs"),
         });
     }
-    let rendered = render_list(&site_on, "river", "Reader", "", &many, None, None, 50, 0);
+    let rendered = render_list(&site, "river", "Reader", "", &many, None, None, 50, 0);
     out.push(Fixture {
         name: "toolbar-river",
         component: "Toolbar",
@@ -664,6 +644,13 @@ fn fixtures() -> Vec<Fixture> {
     refresh(&mut article);
     let mut titles_only = context(&item("titles", "Titles only", 3, ""), None, "");
     refresh(&mut titles_only);
+    let mut missing = context(
+        &item("missing", "Article text not captured", 1, ""),
+        None,
+        "",
+    );
+    missing.content = ContentKind::Feed;
+    refresh(&mut missing);
     let mut subscription = context(&item("wall", "Behind a paywall", 4, BODY), None, "");
     subscription.body_html = Some("<p>Teaser</p>".into());
     subscription
@@ -677,13 +664,14 @@ fn fixtures() -> Vec<Fixture> {
     let mut bare = plain.clone();
     bare.body_html = Some("<p>Body</p>".into());
     refresh(&mut bare);
-    for (name, item, site) in [
-        ("article-full", &article, &site_on),
-        ("article-titles-only", &titles_only, &site_on),
-        ("article-subscription", &subscription, &site_on),
-        ("article-bare", &bare, &site_off),
+    for (name, item) in [
+        ("article-full", &article),
+        ("article-titles-only", &titles_only),
+        ("article-missing", &missing),
+        ("article-subscription", &subscription),
+        ("article-bare", &bare),
     ] {
-        let rendered = render_article(site, item);
+        let rendered = render_article(&site, item);
         let ClientView::Article(model) = &rendered.model.page else {
             unreachable!()
         };
@@ -705,7 +693,6 @@ fn fixtures() -> Vec<Fixture> {
                     "next": model.next,
                     "recommended": model.recommended,
                     "base": rendered.model.base,
-                    "excerpts": rendered.client_site.excerpts,
                 }),
                 html: outer(&rendered.document, "footer.article-footer"),
             });
@@ -716,7 +703,7 @@ fn fixtures() -> Vec<Fixture> {
     // client-rendered or adopted kind.
     // Adopted regions (the article's content, a static page's main) are emptied on the fixture
     // side because the server renderer has no DOM to adopt them from.
-    let rendered = render_list(&site_on, "river", "Reader", "", &many, None, None, 3, 0);
+    let rendered = render_list(&site, "river", "Reader", "", &many, None, None, 3, 0);
     out.push(Fixture {
         name: "page-river",
         component: "App",
@@ -724,7 +711,7 @@ fn fixtures() -> Vec<Fixture> {
         html: inner(&rendered.document, "#app"),
     });
     let rendered = render_list(
-        &site_on,
+        &site,
         "source",
         "Blog",
         "sources/blog/",
@@ -740,7 +727,7 @@ fn fixtures() -> Vec<Fixture> {
         props: serde_json::json!({ "page": rendered.model }),
         html: inner(&rendered.document, "#app"),
     });
-    let rendered = render_article(&site_on, &article);
+    let rendered = render_article(&site, &article);
     out.push(Fixture {
         name: "page-article",
         component: "App",
@@ -751,7 +738,7 @@ fn fixtures() -> Vec<Fixture> {
             "div",
         ),
     });
-    let rendered = render_static(&site_on, "browse", "Browse", "browse/", "browse.html");
+    let rendered = render_static(&site, "browse", "Browse", "browse/", "browse.html");
     out.push(Fixture {
         name: "page-browse",
         component: "App",

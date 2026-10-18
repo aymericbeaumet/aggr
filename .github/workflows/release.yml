@@ -18,7 +18,7 @@ env:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -46,24 +46,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-amd64, os: ubuntu-latest }
+          - { name: linux-amd64, os: ubuntu-24.04 }
           - { name: linux-arm64, os: ubuntu-24.04-arm }
           - { name: darwin-amd64, os: macos-15-intel }
-          - { name: darwin-arm64, os: macos-latest }
-          - { name: windows-amd64, os: windows-latest }
+          - { name: darwin-arm64, os: macos-26 }
+          - { name: windows-amd64, os: windows-2025 }
           - { name: windows-arm64, os: windows-11-arm }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/native-deps
+      - uses: jdx/mise-action@v5
+        with:
+          version: 2026.10.11
+          install_args: rust cmake ninja
+      - name: Install Windows x64 assembler
+        if: matrix.name == 'windows-amd64'
+        run: mise install http:nasm
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           # Release builds only ever run on tag refs, whose caches main and pull requests can
           # never restore; restore the branch caches but never add tag-scoped entries.
           save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-      - run: cargo build --release --locked
+      - run: mise exec -- cargo build --release --locked
       - shell: bash
         env:
           ARCHIVE: aggr-${{ matrix.name }}
@@ -83,7 +89,7 @@ jobs:
 
   release:
     needs: [verify, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8

@@ -5,12 +5,13 @@ use crate::model::Item;
 use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 
-/// Remove expired articles, then oldest excess articles until count and byte limits fit.
-/// Sizes include Markdown, HTML, and owned media companions. Each feed has its own allowance.
+/// Remove articles whose feed left the config, then expired articles, then oldest excess
+/// articles until count and byte limits fit. Sizes include Markdown, HTML, and owned media
+/// companions. Each configured feed has its own allowance. `None` means that feed is gone.
 pub fn plan(
     items: &[Item],
     sizes: &BTreeMap<String, u64>,
-    limits: impl Fn(&str) -> Limits,
+    limits: impl Fn(&str) -> Option<Limits>,
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let mut feeds: BTreeMap<&str, Vec<&Item>> = BTreeMap::new();
@@ -19,7 +20,10 @@ pub fn plan(
     }
     let mut removed = Vec::new();
     for (source, mut items) in feeds {
-        let limits = limits(source);
+        let Some(limits) = limits(source) else {
+            removed.extend(items.into_iter().map(|item| item.path.clone()));
+            continue;
+        };
         items.sort_by(|a, b| {
             b.created_at()
                 .cmp(&a.created_at())
@@ -94,9 +98,11 @@ mod tests {
         let removed = plan(
             &items,
             &BTreeMap::new(),
-            |source| Limits {
-                max_items: if source == "a" { 1 } else { 250 },
-                ..Limits::default()
+            |source| {
+                Some(Limits {
+                    max_items: if source == "a" { 1 } else { 250 },
+                    ..Limits::default()
+                })
             },
             now(),
         );
@@ -114,9 +120,11 @@ mod tests {
         let removed = plan(
             &items,
             &sizes,
-            |source| Limits {
-                max_bytes: if source == "a" { 80 } else { 40 },
-                ..unlimited()
+            |source| {
+                Some(Limits {
+                    max_bytes: if source == "a" { 80 } else { 40 },
+                    ..unlimited()
+                })
             },
             now(),
         );
@@ -132,9 +140,11 @@ mod tests {
         let removed = plan(
             &items,
             &BTreeMap::new(),
-            |_| Limits {
-                since: Some(chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap()),
-                ..unlimited()
+            |_| {
+                Some(Limits {
+                    since: Some(chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap()),
+                    ..unlimited()
+                })
             },
             now(),
         );
@@ -147,9 +157,11 @@ mod tests {
             plan(
                 &items,
                 &BTreeMap::new(),
-                |_| Limits {
-                    max_items: 1,
-                    ..unlimited()
+                |_| {
+                    Some(Limits {
+                        max_items: 1,
+                        ..unlimited()
+                    })
                 },
                 now()
             ),
@@ -160,14 +172,32 @@ mod tests {
             plan(
                 &items,
                 &sizes,
-                |_| Limits {
-                    max_bytes: 100,
-                    ..unlimited()
+                |_| {
+                    Some(Limits {
+                        max_bytes: 100,
+                        ..unlimited()
+                    })
                 },
                 now()
             ),
             ["items/a/a", "items/a/z"]
         );
-        assert!(plan(&items, &sizes, |_| unlimited(), now()).is_empty());
+        assert!(plan(&items, &sizes, |_| Some(unlimited()), now()).is_empty());
+    }
+
+    #[test]
+    fn a_feed_removed_from_the_config_drops_every_article() {
+        let items = vec![
+            item("kept", "new", 1),
+            item("gone", "new", 1),
+            item("gone", "older", 2),
+        ];
+        let removed = plan(
+            &items,
+            &BTreeMap::new(),
+            |source| (source == "kept").then(unlimited),
+            now(),
+        );
+        assert_eq!(removed, ["items/gone/new", "items/gone/older"]);
     }
 }

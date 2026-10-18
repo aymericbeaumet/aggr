@@ -19,6 +19,9 @@ status.toml                                           sources currently failing 
   matter. Fetches never overwrite an existing file.
 - **Delete an item**: delete the `.md` (and `.html`). Its keys stay in `seen.txt`, so it will not
   come back.
+- **Remove a source**: delete it from `aggr.toml`. The next sync removes that feed's current
+  files, including `seen.txt`, so adding it again fetches it as a new subscription. Older commits
+  still have the files.
 - **Rename a source**: items live under the source slug, so set `slug` in `aggr.toml` before the
   first fetch if you care about the directory name.
 

@@ -1,7 +1,7 @@
 // The worker lifecycle: install the shell, activate by dropping stale caches and restoring the
 // persisted offline configuration, route fetches, and answer the page protocol.
 
-import { fetchEntry, stale } from './caches';
+import { fetchEntry, SHELL_REVISION, stale } from './caches';
 import { createContext, offlineUrl, type WorkerContext } from './context';
 import { parsePageMessage, validOfflineCount, type BuildMessage } from './messages';
 import { configureOffline, readOfflineStatus } from './offline';
@@ -19,23 +19,42 @@ export function lifecycle(ctx: WorkerContext): WorkerHandlers {
   return {
     install(event) {
       event.waitUntil(
-        ctx.caches
-          .open(ctx.names.shell)
-          .then((cache) =>
-            // Required shell failures keep the previous working worker installed.
-            Promise.all(
-              ctx.config.precache.map((entry) => {
-                const url = offlineUrl(ctx, entry.url);
-                const cacheMode = immutable(ctx.scopePath, new URL(url).pathname) ? 'force-cache' : 'reload';
-                return fetchEntry(ctx.fetch, url, ctx.timeouts.precache, undefined, cacheMode)
-                  .then((response) => cache.put(url, response))
-                  .catch((error: unknown) => {
-                    if (entry.required) throw error;
+        (async () => {
+          const cache = await ctx.caches.open(ctx.names.shell);
+          const prefix = `${ctx.names.namespace}shell-`;
+          const previous = (await ctx.caches.keys()).filter((name) => name.startsWith(prefix) && name !== ctx.names.shell);
+          // Required shell failures keep the previous working worker installed.
+          await Promise.all(
+            ctx.config.precache.map(async (entry) => {
+              const url = offlineUrl(ctx, entry.url);
+              try {
+                let response: Response | undefined;
+                for (const name of previous) {
+                  const hit = await (await ctx.caches.open(name)).match(url);
+                  if (hit?.ok && hit.headers.get(SHELL_REVISION) === entry.revision) {
+                    response = hit;
+                    break;
+                  }
+                }
+                if (!response) {
+                  const cacheMode = immutable(ctx.scopePath, new URL(url).pathname) ? 'force-cache' : 'reload';
+                  const fetched = await fetchEntry(ctx.fetch, url, ctx.timeouts.precache, undefined, cacheMode);
+                  const headers = new Headers(fetched.headers);
+                  headers.set(SHELL_REVISION, entry.revision);
+                  response = new Response(fetched.body, {
+                    status: fetched.status,
+                    statusText: fetched.statusText,
+                    headers,
                   });
-              }),
-            ),
-          )
-          .then(() => ctx.skipWaiting()),
+                }
+                await cache.put(url, response);
+              } catch (error) {
+                if (entry.required) throw error;
+              }
+            }),
+          );
+          await ctx.skipWaiting();
+        })(),
       );
     },
 

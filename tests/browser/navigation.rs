@@ -153,7 +153,7 @@ async fn video_facade_contracts(client: &Client, fixture: &Fixture) -> Result<()
             .click()
             .await?;
         let video = client.execute(r#"
-          const frame=document.querySelector('.video-player iframe'), url=new URL(window.videoContract.url);
+          const frame=document.querySelector('#now-playing-picture iframe'), url=new URL(window.videoContract.url);
           return {...window.videoContract,host:url.hostname,parent:url.searchParams.get('parent'),autoplay:url.searchParams.get('autoplay'),rel:url.searchParams.get('rel'),dnt:url.searchParams.get('dnt'),h:url.searchParams.get('h'),frames:document.querySelectorAll('iframe').length,width:frame.clientWidth,height:frame.clientHeight,overflow:document.documentElement.scrollWidth>innerWidth};
         "#,vec![]).await?;
         assert_eq!(video["host"], host, "{video}");
@@ -207,11 +207,11 @@ async fn archive_pages_swap_in_place_and_nothing_outside_the_archive_is_fetched(
             client.execute("return !document.querySelector('script[type=speculationrules]')", vec![]).await? == true,
             "no speculation rules compete with the reader's own fetching"
         );
-        // A keyboard focus expresses intent; merely showing rows does not fetch their pages.
-        client.execute("document.querySelector('.rows .row [data-row-open]').focus()", vec![]).await?;
+        // Once the page has settled, the tabs and the rows the reader lingers on are fetched
+        // ahead; a link that leaves the archive never is, whichever ones the fixture renders.
         wait_for(&client, r#"(() => {
           const fetched = new Set(performance.getEntriesByType('resource').filter(entry => entry.initiatorType === 'fetch').map(entry => entry.name));
-          return fetched.has(document.querySelector('.rows .row [data-row-open]').href);
+          return [...document.querySelectorAll('.mobile-tabs a[data-route], .rows .row [data-row-open]')].every(link => fetched.has(link.href) || link.href.split('#')[0] === location.href.split('#')[0]);
         })()"#).await?;
         let outward = client.execute(r#"
           const fetched = new Set(performance.getEntriesByType('resource').map(entry => entry.name));
@@ -261,8 +261,14 @@ async fn archive_pages_swap_in_place_and_nothing_outside_the_archive_is_fetched(
           const done = arguments[arguments.length - 1], root = document.documentElement;
           const frame = () => new Promise(resolve => requestAnimationFrame(() => resolve()));
           (async () => {
+            // The cursor's row may already have the keyboard. Leave it before scrolling, or the
+            // browser pulls that row back into view and the saved place is no longer 300.
+            const main = document.getElementById('content');
+            if (main instanceof HTMLElement) main.focus({preventScroll:true});
             root.style.paddingBottom = '200vh';
+            root.style.overflowAnchor = 'none';
             scrollTo(0, 300); await frame(); await frame();
+            const marked = scrollY;
             document.querySelector('.row [data-row-open]').click();
             while (document.body.dataset.kind !== 'item') await frame();
             // A fling carrying the article as Back is pressed.
@@ -270,15 +276,20 @@ async fn archive_pages_swap_in_place_and_nothing_outside_the_archive_is_fetched(
             fling(); await frame(); await frame();
             history.back();
             while (document.body.dataset.kind !== 'river') await new Promise(resolve => setTimeout(resolve));
-            const arrived = {held: root.style.overflow === 'hidden', at: scrollY};
+            const arrived = {held: root.style.overflow === 'hidden', at: scrollY, marked};
             document.querySelector('.brand').click();
             for (let i = 0; i < 20; i++) await frame();
             done({...arrived, top: scrollY, overflow: root.style.overflow});
             root.style.removeProperty('padding-bottom');
+            root.style.removeProperty('overflow-anchor');
           })();
         "#, vec![]).await?;
         anyhow::ensure!(
-            held["held"] == true && held["at"] == 300 && held["top"] == 0 && held["overflow"] == "",
+            held["marked"] == 300
+                && held["held"] == true
+                && held["at"] == 300
+                && held["top"] == 0
+                && held["overflow"] == "",
             "the title takes a held page to its top and ends the hold: {held}"
         );
         Ok(())
