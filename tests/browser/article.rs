@@ -396,7 +396,8 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
             "category",
             "published-date",
             "reading-stats",
-            "u-bookmark-of"
+            "u-bookmark-of",
+            "meta-tags"
         ])
     );
     assert_eq!(article["categoryText"], "/engineering");

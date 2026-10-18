@@ -389,6 +389,7 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                       const done=arguments[arguments.length-1];
                       const media=document.querySelector('.native-video video'),host=document.querySelector('[data-media-timing]');
                       const before=document.querySelector('.body').getBoundingClientRect().top;
+                      const beforeScroll=scrollY, beforeTiming=host.getBoundingClientRect().height;
                       Object.defineProperties(media,{duration:{configurable:true,value:600},currentTime:{configurable:true,value:60},paused:{configurable:true,value:false}});
                       media.playbackRate=2;
                       media.dispatchEvent(new Event('durationchange'));
@@ -398,7 +399,10 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                         const metadata=document.querySelector('.itemhead .reading-stats').textContent.trim();
                         Object.defineProperty(media,'paused',{configurable:true,value:true});
                         media.dispatchEvent(new Event('pause'));
-                        done({playing,paused:host.textContent,metadata,stable:Math.abs(document.querySelector('.body').getBoundingClientRect().top-before)<=1});
+                        const after=document.querySelector('.body').getBoundingClientRect().top;
+                        done({playing,paused:host.textContent,metadata,stable:Math.abs(after-before)<=1,
+                          bodyDelta:after-before,scrollDelta:scrollY-beforeScroll,timingBefore:beforeTiming,
+                          timingAfter:host.getBoundingClientRect().height});
                       });
                     "#,vec![]).await?;
                     anyhow::ensure!(
