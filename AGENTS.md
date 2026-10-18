@@ -361,7 +361,8 @@ Use mise for local commands and CI; native OS libraries and compilers remain sys
   Put separators outside links and hover targets. Share metadata typography and spacing; format
   dates before the first paint instead of reserving empty date columns.
 - Use recording duration for watch/listen metadata; never substitute transcript or show-note read
-  time. Completion estimates require finite active playback and must account for playback speed.
+  time. Reserve room for a later native duration in item metadata so playback cannot add a header
+  row. Completion estimates require finite active playback and must account for playback speed.
   A length comes from the feed, else the page's structured data, else the player JSON whose object
   names the page's own URL or the exact media URL as a value (`media_duration::embedded`). A
   YouTube watch page that omits `lengthSeconds` is asked once a day via the public player

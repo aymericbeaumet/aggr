@@ -439,6 +439,8 @@ html:not([data-thumbnails="hide"]) .row-content { min-height: var(--preview-size
 .article-lead img { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: 0.4rem; }
 .meta .published-date { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .meta .reading-stats { white-space: nowrap; }
+.itemhead .reading-stats[data-consumption="watch"]:not([data-duration-seconds]),
+.itemhead .reading-stats[data-consumption="listen"]:not([data-duration-seconds]) { display: inline-flex; min-inline-size: 12ch; }
 .item { overflow-anchor: none; font-size: var(--reading-size); max-width: var(--reading-measure); margin-inline: auto; }
 /* An article's page is as wide as the window, so its header can span it the way the navigation
    above does; the margins that centred the column become padding and leave the same content box,

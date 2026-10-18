@@ -486,6 +486,7 @@ Shared metadata uses `consumption` to distinguish reading, listening, and watchi
 recording duration produces “10 min listen” or “10 min watch”; unknown media durations use “Listen”
 or “Watch”, never the read time of show notes or a transcript. Feed-provided durations are retained
 as `extra.duration_seconds`, and loaded native media can correct the article's displayed duration.
+The article header reserves space for that correction so it does not gain a metadata row during playback.
 The Rust fetch/build path also reads matching YouTube player and primary AudioObject/VideoObject
 metadata before playback. RSS durations share a strict parser for seconds, MM:SS, HH:MM:SS, and
 ISO 8601; byte lengths, active broadcasts, and unrelated recommended videos are never durations.
