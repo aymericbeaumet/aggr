@@ -1,5 +1,5 @@
 //! A purpose-built Pagefind index. Titles, exact/normalized original URLs, and cleaned article
-//! prose are searchable. Display metadata (the same `ClientRow` feed rows render) travels in
+//! prose are searchable. Display metadata and Rust-rendered feed row fragments travel in
 //! result chunks with zero runtime weight,
 //! avoiding a second whole-corpus request before the first result can render.
 
@@ -51,6 +51,21 @@ pub struct SearchCatalogue {
 }
 
 impl SearchDocument {
+    pub fn with_rendered_row(
+        renderer: &super::render::Renderer,
+        site: &super::context::SiteCtx,
+        item: &ItemCtx,
+        prose: &str,
+    ) -> Result<Self> {
+        let mut document = Self::new(item, prose);
+        let row = super::client::ClientSearchRow::render(renderer, site, item)?;
+        document.meta.insert(
+            "aggr_display".into(),
+            hex::encode(serde_json::to_vec(&row).context("serializing search row")?),
+        );
+        Ok(document)
+    }
+
     pub fn new(item: &ItemCtx, prose: &str) -> Self {
         let mut meta = BTreeMap::new();
         meta.insert("title".into(), item.title.clone());
@@ -155,8 +170,8 @@ fn build(out: &Path, documents: &[SearchDocument], language: &str) -> Result<Sea
     build_cached(out, documents, language, None)
 }
 
-/// Restore an identical index even when page templates changed. Search content and display
-/// metadata are the complete input, so this cache remains independent from rendered HTML.
+/// Restore an identical index when unrelated page templates changed. Search content, display
+/// metadata and rendered row fragments are the complete input.
 pub fn build_cached(
     out: &Path,
     documents: &[SearchDocument],
@@ -446,6 +461,127 @@ mod tests {
             item,
             crate::content::PreparedMarkdown::new(markdown).plain_text(),
         )
+    }
+
+    fn site() -> super::super::context::SiteCtx {
+        super::super::context::SiteCtx {
+            hermetic: false,
+            title: "Reader".into(),
+            description: String::new(),
+            identity: None,
+            language: "en".into(),
+            og_locale: "en".into(),
+            base_path: "/reader/".into(),
+            base_url: Some("https://reader.test/reader/".into()),
+            indexing: false,
+            repository: None,
+            data_branch: "aggr".into(),
+            network_url: "",
+            instance_type_url: "",
+            pwa: false,
+            preferences: serde_json::json!({}),
+            preference_schema: crate::config::preferences::ReaderPreferences::default().schema(),
+            config_page_url: None,
+            config_url: None,
+            has_categories: false,
+            discussions: Vec::new(),
+            entry_shortcuts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn search_fragments_reuse_the_static_row_with_portable_root_relative_urls() {
+        let renderer =
+            crate::site::render::Renderer::new(crate::site::render::Theme::default()).unwrap();
+        let site = site();
+        let mut item = item();
+        item.title = "<script>markup</script> & title".into();
+        item.language = Some("fr".into());
+        item.metadata = super::super::display::Metadata::from(&item);
+        let document =
+            SearchDocument::with_rendered_row(&renderer, &site, &item, "Article prose").unwrap();
+        let display: serde_json::Value =
+            serde_json::from_slice(&hex::decode(&document.meta["aggr_display"]).unwrap()).unwrap();
+        let html = display["html"]
+            .as_str()
+            .expect("Rust-rendered row fragment");
+        let expected = renderer.render("_item.html", minijinja::context! {
+            item => item, site => site, page => minijinja::context! { root => "" }, rank => 1,
+        }).unwrap();
+        assert_eq!(html, expected);
+        assert!(html.contains("&lt;script&gt;markup&lt;/script&gt; &amp; title"));
+        assert!(!html.contains("<script>markup"));
+        assert!(html.contains("lang=\"fr\""));
+        let fragment = scraper::Html::parse_fragment(html);
+        let title = fragment
+            .select(&scraper::Selector::parse("a[data-row-open]").unwrap())
+            .next()
+            .unwrap();
+        let href = title.value().attr("href").unwrap();
+        assert_eq!(href, item.url);
+        let source = fragment
+            .select(&scraper::Selector::parse(".source-resolved").unwrap())
+            .next()
+            .unwrap()
+            .parent()
+            .and_then(scraper::ElementRef::wrap)
+            .unwrap();
+        assert_eq!(source.value().attr("href"), Some("sources/blog/"));
+        for base in [
+            "https://reader.test/",
+            "https://reader.test/reader/",
+            "https://mirror.test/nested/archive/",
+        ] {
+            let base = url::Url::parse(base).unwrap();
+            assert_eq!(
+                base.join(href).unwrap().as_str(),
+                format!("{base}{}", item.url)
+            );
+        }
+        assert!(!document.meta["aggr_display"].contains("row-heading"));
+        assert!(!document.content.contains("row-heading"));
+    }
+
+    #[test]
+    fn rendered_row_template_changes_invalidate_the_search_index() {
+        let item = item();
+        let site = site();
+        let original = SearchDocument::with_rendered_row(
+            &crate::site::render::Renderer::new(crate::site::render::Theme::default()).unwrap(),
+            &site,
+            &item,
+            "Article prose",
+        )
+        .unwrap();
+        let theme = tempfile::tempdir().unwrap();
+        std::fs::create_dir(theme.path().join("templates")).unwrap();
+        std::fs::write(
+            theme.path().join("templates/_metadata.html"),
+            "<span>row-template-marker</span>",
+        )
+        .unwrap();
+        let renderer = crate::site::render::Renderer::new(
+            crate::site::render::Theme::from_source_tree(theme.path()),
+        )
+        .unwrap();
+        let changed =
+            SearchDocument::with_rendered_row(&renderer, &site, &item, "Article prose").unwrap();
+        assert_ne!(
+            fingerprint(&[original], "en").unwrap(),
+            fingerprint(std::slice::from_ref(&changed), "en").unwrap()
+        );
+        assert!(!changed.content.contains("row-template-marker"));
+        assert!(!changed.meta["aggr_display"].contains("row-template-marker"));
+        std::fs::write(
+            theme.path().join("templates/_item.html"),
+            "{{ invalid syntax",
+        )
+        .unwrap();
+        let broken = crate::site::render::Renderer::new(
+            crate::site::render::Theme::from_source_tree(theme.path()),
+        )
+        .unwrap();
+        assert!(SearchDocument::with_rendered_row(&broken, &site, &item, "Article prose").is_err());
     }
 
     #[test]

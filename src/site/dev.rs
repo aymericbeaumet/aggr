@@ -2,11 +2,15 @@
 //! media and the search index are materialized only when a browser asks for them.
 
 use std::collections::BTreeMap;
+#[cfg(any(debug_assertions, test))]
 use std::path::{Component, Path};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+#[cfg(any(debug_assertions, test))]
 use anyhow::Result;
 
+#[cfg(any(debug_assertions, test))]
+use super::page::{Collection, FIXED_PAGES};
 use super::*;
 
 #[derive(Default)]
@@ -75,15 +79,7 @@ pub(super) fn prepare_markdown(
     prepared
 }
 
-struct Collection {
-    kind: &'static str,
-    title: String,
-    prefix: String,
-    indices: Vec<usize>,
-    source: Option<usize>,
-    category: Option<(bool, usize)>,
-}
-
+#[cfg(any(debug_assertions, test))]
 pub(crate) struct Site {
     prepared: PreparedSite,
     store: Store,
@@ -105,8 +101,10 @@ pub(crate) struct Site {
     // never sees a half-written family; serving previously materialized files is inexpensive.
     materialized: Mutex<Materialized>,
     directory: Option<tempfile::TempDir>,
+    archive_directory: Option<Arc<tempfile::TempDir>>,
 }
 
+#[cfg(any(debug_assertions, test))]
 #[derive(Default)]
 struct Materialized {
     assets: assets::Published,
@@ -116,6 +114,7 @@ struct Materialized {
 
 /// Stored companion names already carry immutable content hashes. Counting these requires no
 /// image reads and gives lazy pages the same repeated-publisher-picture suppression as a build.
+#[cfg(any(debug_assertions, test))]
 fn shared_media(
     prepared: &PreparedSite,
 ) -> (
@@ -184,6 +183,7 @@ fn shared_media(
     (hidden_previews, hidden_images)
 }
 
+#[cfg(any(debug_assertions, test))]
 impl Site {
     pub(crate) fn prepare(
         config: &Config,
@@ -216,47 +216,7 @@ impl Site {
             .enumerate()
             .map(|(i, item)| (item.url.clone(), i))
             .collect();
-        let mut collections = vec![Collection {
-            kind: "river",
-            title: prepared.site.title.clone(),
-            prefix: String::new(),
-            indices: prepared
-                .river_items
-                .iter()
-                .filter_map(|item| articles.get(&item.url).copied())
-                .collect(),
-            source: None,
-            category: None,
-        }];
-        for (i, source) in prepared.source_ctxs.iter().enumerate() {
-            collections.push(Collection {
-                kind: "source",
-                title: source.name.clone(),
-                prefix: source.page.clone(),
-                indices: prepared
-                    .source_members
-                    .get(&source.slug)
-                    .cloned()
-                    .unwrap_or_default(),
-                source: Some(i),
-                category: None,
-            });
-        }
-        for (is_tag, terms, members) in [
-            (false, &prepared.categories, &prepared.category_members),
-            (true, &prepared.tags, &prepared.tag_members),
-        ] {
-            for (i, term) in terms.iter().enumerate() {
-                collections.push(Collection {
-                    kind: if is_tag { "tag" } else { "category" },
-                    title: term.name.clone(),
-                    prefix: term.page.clone(),
-                    indices: members.get(&term.slug).cloned().unwrap_or_default(),
-                    source: None,
-                    category: Some((is_tag, i)),
-                });
-            }
-        }
+        let collections = prepared.collections();
         let lists = collections
             .iter()
             .enumerate()
@@ -336,6 +296,7 @@ impl Site {
             catalogue,
             materialized: Mutex::default(),
             directory: None,
+            archive_directory: None,
         })
     }
 
@@ -345,6 +306,11 @@ impl Site {
 
     pub(crate) fn own_directory(mut self, directory: tempfile::TempDir) -> Self {
         self.directory = Some(directory);
+        self
+    }
+
+    pub(crate) fn own_archive(mut self, directory: Arc<tempfile::TempDir>) -> Self {
+        self.archive_directory = Some(directory);
         self
     }
 
@@ -470,10 +436,12 @@ impl Site {
         let documents = (0..self.prepared.archive_items.len())
             .map(|index| {
                 let ctx = self.with_preview(index, &mut lock(&self.materialized))?;
-                Ok(pagefind::SearchDocument::new(
+                pagefind::SearchDocument::with_rendered_row(
+                    &self.prepared.renderer,
+                    &self.prepared.site,
                     &ctx,
                     self.prepared.prepared_bodies[index].plain_text(),
-                ))
+                )
             })
             .collect::<Result<Vec<_>>>()?;
         let staging = tempfile::Builder::new()
@@ -506,21 +474,12 @@ impl Site {
             for index in pager.range.clone() {
                 items[index] = self.with_preview(collection.indices[index], state)?;
             }
-            let category = collection.category.map(|(tag, i)| {
-                if tag {
-                    &prepared.tags[i]
-                } else {
-                    &prepared.categories[i]
-                }
-            });
-            let page = ListPage {
-                kind: collection.kind,
-                title: &collection.title,
-                prefix: &collection.prefix,
-                list: &items,
-                source: collection.source.map(|i| &prepared.source_ctxs[i]),
-                category,
-            };
+            let page = collection.page(
+                &items,
+                &prepared.source_ctxs,
+                &prepared.categories,
+                &prepared.tags,
+            );
             write(
                 &self.root().join(key),
                 self.pages().list(&page, pager)?.as_bytes(),
@@ -580,37 +539,13 @@ impl Site {
             )?;
             return Ok(true);
         }
-        let simple = match key {
-            "browse/index.html" => Some(("browse", "Browse", "browse/", "browse.html")),
-            "sources/index.html" => Some(("sources", "Sources", "sources/", "browse.html")),
-            "categories/index.html" => {
-                Some(("categories", "Categories", "categories/", "browse.html"))
-            }
-            "tags/index.html" => Some(("tags", "Tags", "tags/", "browse.html")),
-            "preferences/index.html" => Some((
-                "preferences",
-                "Preferences",
-                "preferences/",
-                "preferences.html",
-            )),
-            "404.html" => Some(("404", "Not found", "404.html", "404.html")),
-            "offline.html" if self.prepared.site.pwa => {
-                Some(("offline", "Offline", "offline.html", "offline.html"))
-            }
-            "manifest.webmanifest" if self.prepared.site.pwa => Some((
-                "manifest",
-                prepared.site.title.as_str(),
-                "manifest.webmanifest",
-                "manifest.webmanifest",
-            )),
-            _ => None,
-        };
-        if let Some((kind, title, path, template)) = simple {
+        if let Some((page, _)) = FIXED_PAGES
+            .iter()
+            .find(|(page, _)| page.output_path() == Path::new(key))
+        {
             write(
                 &self.root().join(key),
-                self.pages()
-                    .simple(SimplePage::new(kind, title, path, template))?
-                    .as_bytes(),
+                self.pages().simple(*page)?.as_bytes(),
             )?;
             return Ok(true);
         }

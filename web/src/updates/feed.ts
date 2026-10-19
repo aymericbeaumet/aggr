@@ -46,16 +46,56 @@ function anchor(doc: Document): { url: string; top: number } | null {
  * synchronously, that keeps the reader's place by the row they were looking at. Returns the
  * model shown, or null when there was nothing to swap.
  */
-export function applyFreshList(freshPage: ClientPage, doc: Document = document, win: Window = window): ClientPage | null {
+export type RenderedList = { model: ClientPage; content: Element };
+
+export function applyFreshList(fetched: RenderedList, doc: Document = document, win: Window = window): ClientPage | null {
+  const freshPage = fetched.model;
   const current = page.model;
   const href = page.href;
   if (!current || href === null) return null;
   const next = withFreshList(current, freshPage);
   if (!next) return null;
+  const feed = doc.querySelector<HTMLElement>('[data-static-feed]');
+  const freshFeed = fetched.content.querySelector<HTMLElement>('[data-static-feed]');
+  if (!feed || !freshFeed) return null;
   const held = win.scrollY > 0 ? anchor(doc) : null;
+  const active = doc.activeElement instanceof HTMLAnchorElement ? doc.activeElement.href : null;
+  const main = feed.parentElement;
+  const heading = main?.querySelector(':scope > .listhead');
+  const incomingHeading = fetched.content.querySelector('.listhead');
+  if (incomingHeading && heading) heading.replaceWith(incomingHeading);
+  else if (incomingHeading && main) main.insertBefore(incomingHeading, main.querySelector(':scope > .feed-toolbar') ?? feed);
+  else heading?.remove();
+  const list = feed.querySelector<HTMLOListElement>('ol.rows');
+  const incoming = freshFeed.querySelector<HTMLOListElement>('ol.rows');
+  if (list && incoming && current.page.view === 'list' && freshPage.page.view === 'list') {
+    const previous = new Map(current.page.data.rows.map((row) => [row.path, JSON.stringify(row)]));
+    const models = new Map(freshPage.page.data.rows.map((row) => [row.path, JSON.stringify(row)]));
+    const retained = new Map([...list.querySelectorAll<HTMLElement>('.row[data-path]')].map((row) => [row.dataset.path, row]));
+    const rows = [...incoming.children].map((node) => {
+      const path = (node as HTMLElement).dataset.path;
+      const row = path && previous.get(path) === models.get(path) ? retained.get(path) ?? node : node;
+      const rank = row.querySelector('.rank');
+      const incomingRank = node.querySelector('.rank');
+      if (rank && incomingRank) rank.textContent = incomingRank.textContent;
+      return row;
+    });
+    list.replaceChildren(...rows);
+    for (const attribute of [...list.attributes]) list.removeAttribute(attribute.name);
+    for (const attribute of [...incoming.attributes]) list.setAttribute(attribute.name, attribute.value);
+    const pager = feed.querySelector('nav.pager');
+    const nextPager = freshFeed.querySelector('nav.pager');
+    if (pager && nextPager) pager.replaceWith(nextPager);
+    else if (pager) pager.remove();
+    else if (nextPager) feed.append(nextPager);
+  } else feed.replaceChildren(...freshFeed.childNodes);
   badges.resetMarks();
   page.show({ model: next, content: page.content, href });
   flushSync();
+  if (active) {
+    const link = [...feed.querySelectorAll<HTMLAnchorElement>('[data-row-open]')].find((candidate) => candidate.href === active);
+    if (link && doc.activeElement !== link) link.focus({ preventScroll: true });
+  }
   if (held) {
     const restored = [...doc.querySelectorAll<HTMLElement>(ROWS)].find((row) => row.dataset.url === held.url);
     if (restored) win.scrollBy(0, restored.getBoundingClientRect().top - held.top);
@@ -64,14 +104,15 @@ export function applyFreshList(freshPage: ClientPage, doc: Document = document, 
 }
 
 /** Fetch the page at `href` again and read its model; null for anything that is not one of ours. */
-export async function loadPage(href: string, signal: AbortSignal): Promise<ClientPage | null> {
+export async function loadPage(href: string, signal: AbortSignal): Promise<RenderedList | null> {
   const response = await fetch(href, { cache: 'no-store', signal, headers: { accept: 'text/html' } });
   if (!response.ok) return null;
-  return extract(parseDocument(await response.text()))?.model ?? null;
+  const fetched = extract(parseDocument(await response.text()));
+  return fetched?.content ? { model: fetched.model, content: fetched.content } : null;
 }
 
 export type FeedUpdaterOptions = {
-  load?: (href: string, signal: AbortSignal) => Promise<ClientPage | null>;
+  load?: (href: string, signal: AbortSignal) => Promise<RenderedList | null>;
   /** After rows were swapped: the versions the page now carries are on screen. */
   onApplied?: (model: ClientPage) => void;
 };
@@ -149,7 +190,7 @@ export class FeedUpdater {
       const current = page.model;
       if (!current) return;
       // A page from another release needs that release's styles and scripts: the pill says so.
-      if (freshPage.build.app !== current.build.app) {
+      if (freshPage.model.build.app !== current.build.app) {
         this.wanted = null;
         return;
       }

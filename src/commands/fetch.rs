@@ -68,6 +68,18 @@ pub struct SourceReport {
     pub unchanged: bool,
 }
 
+#[cfg(debug_assertions)]
+pub enum Progress {
+    Prepared(tokio::sync::oneshot::Sender<()>),
+    Source {
+        slug: String,
+        captured: tokio::sync::oneshot::Sender<()>,
+    },
+}
+
+#[cfg(not(debug_assertions))]
+pub enum Progress {}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum StatePolicy {
     /// Preserve the no-new-items/no-commit invariant of the append-only branch.
@@ -78,7 +90,7 @@ pub enum StatePolicy {
 
 impl Report {
     pub fn added(&self) -> usize {
-        self.sources.iter().map(|s| s.added).sum::<usize>() + self.reprocessed
+        self.sources.iter().map(|s| s.added).sum()
     }
 
     pub fn ok(&self) -> usize {
@@ -114,6 +126,7 @@ const RECORDING_PROBE_SLOTS: usize = 8;
 
 #[derive(Clone)]
 struct Options {
+    ownership: Option<Arc<super::lock::DevLock>>,
     archived_links: Arc<SharedLinks>,
     existing_paths: Arc<OnceCell<ExistingPaths>>,
     dry_run: bool,
@@ -152,32 +165,67 @@ pub async fn run_with_cache(
     cache_dir: &Path,
     state_policy: StatePolicy,
 ) -> Result<Report> {
+    run_with_cache_progress(project, worktree, args, cache_dir, state_policy, None, None).await
+}
+
+/// Pause at stable local preparation and completed source transactions until development has
+/// captured their archive inputs. A closed receiver lets synchronization continue normally.
+pub(super) async fn run_with_cache_progress(
+    project: &Project,
+    worktree: &Worktree,
+    args: &FetchArgs,
+    cache_dir: &Path,
+    state_policy: StatePolicy,
+    _progress: Option<tokio::sync::mpsc::Sender<Progress>>,
+    ownership: Option<Arc<super::lock::DevLock>>,
+) -> Result<Report> {
+    #[cfg(debug_assertions)]
+    let progress = _progress;
     let now = Utc::now();
     let selected: Vec<Source> = project.sources.clone();
     let store = Arc::new(Store::open(worktree.dir()).with_image_cache(cache_dir));
     let client = Arc::new(http::Client::new(&project.config.fetch)?);
     let index_store = store.clone();
     let reprocess_args = args.clone();
+    let reprocess_cache = cache_dir.to_path_buf();
     let store_root = worktree.dir().to_path_buf();
     let retention_sources = project.sources.clone();
     let defaults = project.config.defaults.clone();
-    let (known_links, existing_paths, reprocessed, initially_removed) =
-        tokio::task::spawn_blocking(move || {
+    let (known_links, existing_paths, reprocessed, initially_removed) = blocking_write(
+        "preparing archived article bodies and index",
+        ownership.clone(),
+        move || {
             let removed = if reprocess_args.dry_run {
                 0
             } else {
                 apply_retention(&index_store, &defaults, &retention_sources, now)?
             };
-            let reprocessed = reprocess_stored_bodies(&index_store, &reprocess_args, &store_root)?;
+            let reprocessed = reprocess_stored_bodies(
+                &index_store,
+                &reprocess_args,
+                &store_root,
+                &reprocess_cache,
+            )?;
             let (links, paths) = index_archive(index_store.items()?);
             Ok::<_, anyhow::Error>((links, paths, reprocessed, removed))
-        })
-        .await
-        .context("preparing archived article bodies and index")??;
+        },
+    )
+    .await?;
     if reprocessed > 0 {
         println!("reprocess: {reprocessed} stored article body(ies)");
     }
+    #[cfg(debug_assertions)]
+    if !args.dry_run
+        && (reprocessed > 0 || initially_removed > 0)
+        && let Some(progress) = &progress
+    {
+        let (captured, resume) = tokio::sync::oneshot::channel();
+        if progress.send(Progress::Prepared(captured)).await.is_ok() {
+            let _ = resume.await;
+        }
+    }
     let options = Options {
+        ownership,
         archived_links: Arc::new(SharedLinks::new(known_links)),
         existing_paths: Arc::new(OnceCell::new_with(Some(existing_paths))),
         dry_run: args.dry_run,
@@ -248,6 +296,24 @@ pub async fn run_with_cache(
             "{}",
             source_progress(&report, elapsed, reports.len() + 1, project.sources.len())
         );
+        #[cfg(debug_assertions)]
+        if !args.dry_run
+            && report.outcome == Outcome::Ok
+            && !report.unchanged
+            && let Some(progress) = &progress
+        {
+            let (captured, resume) = tokio::sync::oneshot::channel();
+            if progress
+                .send(Progress::Source {
+                    slug: report.slug.clone(),
+                    captured,
+                })
+                .await
+                .is_ok()
+            {
+                let _ = resume.await;
+            }
+        }
         reports.push(report);
     }
     let order: BTreeMap<&str, usize> = project
@@ -289,6 +355,33 @@ pub async fn run_with_cache(
         removed,
         reprocessed,
     })
+}
+
+/// A cancelled caller cannot roll back or release cache ownership while its disk write runs.
+struct PendingWrite(std::sync::mpsc::Receiver<()>);
+
+impl Drop for PendingWrite {
+    fn drop(&mut self) {
+        let _ = self.0.recv();
+    }
+}
+
+pub(super) async fn blocking_write<T: Send + 'static>(
+    context: &'static str,
+    ownership: Option<Arc<super::lock::DevLock>>,
+    write: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let (finished, completion) = std::sync::mpsc::channel();
+    let pending = PendingWrite(completion);
+    let result = tokio::task::spawn_blocking(move || {
+        let _finished = finished;
+        let _ownership = ownership;
+        write()
+    })
+    .await
+    .context(context)?;
+    drop(pending);
+    result
 }
 
 fn source_progress(

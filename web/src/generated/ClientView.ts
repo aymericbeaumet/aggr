@@ -4,7 +4,7 @@ import type { ClientList } from "./ClientList";
 import type { ClientPreferences } from "./ClientPreferences";
 
 /**
- * What the page shows. Lists and articles are client-rendered; preferences and the offline page
- * are client-only; everything else is static markup the client adopts whole.
+ * The behavior available on a Rust-rendered page. Navigation adopts its static markup;
+ * interactive islands use these typed values without duplicating page templates.
  */
 export type ClientView = { "view": "list", "data": ClientList } | { "view": "article", "data": ClientArticle } | { "view": "preferences", "data": ClientPreferences } | { "view": "offline" } | { "view": "static" };

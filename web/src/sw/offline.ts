@@ -3,7 +3,8 @@
 
 import { fetchEntry } from './caches';
 import { broadcastOfflineStatus, disabledSearchStatus, offlineUrl, type WorkerContext } from './context';
-import { isRecord, validOfflineCount, type OfflineStatus, type SavedArticle } from './messages';
+import { validOfflineCount, type OfflineStatus } from './messages';
+import { commitSelection, completeItems, localOfflineItem, pruneSelection, readSelection, resourceKey, storedResource, validPageRevision } from './protected';
 import { configureOfflineSearch, restoreSearch } from './search';
 import type { OfflineItem, ResourceEntry } from './types';
 
@@ -22,22 +23,9 @@ async function catalog(ctx: WorkerContext): Promise<OfflineItem[]> {
     'reload',
   );
   const body: unknown = await response.json();
-  const items = Array.isArray(body) ? body.filter(validOfflineItem) : [];
+  const items = Array.isArray(body) ? body.filter((item) => localOfflineItem(ctx, item)) : [];
   ctx.state.offlineCatalog = items;
   return items;
-}
-
-export function validOfflineItem(value: unknown): value is OfflineItem {
-  return (
-    isRecord(value) &&
-    typeof value.url === 'string' &&
-    typeof value.title === 'string' &&
-    Array.isArray(value.resources) &&
-    value.resources.length > 0 &&
-    value.resources.every(
-      (entry: unknown) => isRecord(entry) && typeof entry.url === 'string' && typeof entry.revision === 'string',
-    )
-  );
 }
 
 /** The current state from storage: only articles whose every resource is present at its revision count as saved. */
@@ -48,28 +36,12 @@ export async function readOfflineStatus(ctx: WorkerContext): Promise<OfflineStat
   const configured = await settings.match(offlineUrl(ctx, '__offline_count'));
   const persisted = configured ? Number(await configured.text()) : config.offline_count;
   let count = state.configurationCount === null ? persisted : state.configurationCount;
-  if (!validOfflineCount(count)) count = 0;
-  const response = await settings.match(offlineUrl(ctx, '__offline_articles'));
-  const saved: unknown = response ? await response.json().catch(() => []) : [];
-  const pages = await ctx.caches.open(names.offlinePages);
-  const revisions = await ctx.caches.open(names.offlineRevisions);
-  const complete: SavedArticle[] = [];
-  if (Array.isArray(saved))
-    for (const item of saved.slice(0, count)) {
-      if (!validOfflineItem(item)) continue;
-      const valid = await Promise.all(
-        item.resources.map(async (entry) => {
-          const url = offlineUrl(ctx, entry.url);
-          if (!url.startsWith(ctx.scope)) return false;
-          const page = await pages.match(url);
-          const revision = await revisions.match(url);
-          return !!page && !!revision && (await revision.text()) === entry.revision;
-        }),
-      );
-      if (valid.every(Boolean)) complete.push({ url: item.url, title: item.title });
-    }
+  if (!validOfflineCount(count)) count = config.offline_count;
+  const selection = await readSelection(ctx);
+  const complete = (await completeItems(ctx, selection)).slice(0, count).map(({ url, title }) => ({ url, title }));
   await restoreSearch(ctx);
-  if (generation !== state.configurationGeneration) return readOfflineStatus(ctx);
+  if (generation !== state.configurationGeneration || (await readSelection(ctx)).version !== selection.version)
+    return readOfflineStatus(ctx);
   const available = count > 0 ? await catalog(ctx).catch(() => []) : [];
   const search = count ? { ...state.searchStatus } : disabledSearchStatus();
   if (count && !state.searchTask) {
@@ -107,68 +79,76 @@ export async function readOfflineStatus(ctx: WorkerContext): Promise<OfflineStat
  * rendition are written; older complete downloads within `count` survive a failed replacement;
  * everything outside the selection is dropped from the protected caches.
  */
-export async function saveOfflineArticles(
+export function saveOfflineArticles(
+  ctx: WorkerContext,
+  count: number,
+  generation?: number,
+  signal?: AbortSignal,
+): Promise<OfflineStatus> {
+  const run = () => saveSelection(ctx, count, generation, signal);
+  const task = ctx.state.offlineStoreQueue.catch(() => {}).then(() =>
+    ctx.locks ? ctx.locks.request(`${ctx.names.namespace}offline-selection`, run) : run(),
+  );
+  ctx.state.offlineStoreQueue = task;
+  return task;
+}
+
+async function saveSelection(
   ctx: WorkerContext,
   count: number,
   generation?: number,
   signal?: AbortSignal,
 ): Promise<OfflineStatus> {
   const { state, names } = ctx;
-  const superseded = () => generation !== undefined && generation !== state.offlineGeneration;
+  const superseded = () => signal?.aborted || (generation !== undefined && generation !== state.offlineGeneration);
   let selected: OfflineItem[] = [];
   let order = new Map<string, number>();
   const result: OfflineStatus = {
-    type: 'AGGR_OFFLINE_STATUS',
-    requested: count,
-    total: selected.length,
-    saved: [],
-    failed: 0,
-    downloading: true,
+    type: 'AGGR_OFFLINE_STATUS', requested: count, total: 0, saved: [], failed: 0, downloading: true,
   };
-  const wanted = new Set<string>();
   const resources = new Map<string, Promise<void>>();
   let next = 0;
   const complete: OfflineItem[] = [];
+  let previous = await readSelection(ctx);
+  let previousComplete = await completeItems(ctx, previous);
+  result.saved = previousComplete.slice(0, count).map(({ url, title }) => ({ url, title }));
   try {
+    if (superseded()) return { ...result, cancelled: true };
     if (count > 0) {
       const items = await catalog(ctx);
       selected = items.slice(0, count);
       order = new Map(items.map((item, index) => [item.url, index] as const));
       result.total = selected.length;
     }
-    for (const item of selected) for (const entry of item.resources) wanted.add(offlineUrl(ctx, entry.url));
-    const [pages, revisions] = await Promise.all([
-      ctx.caches.open(names.offlinePages),
-      ctx.caches.open(names.offlineRevisions),
-    ]);
-    // Shared images share their in-flight promise, so a resource is fetched once per run.
+    const pages = await ctx.caches.open(names.offlinePages);
+    // Shared images share their in-flight promise, keyed by revision as well as URL.
     const saveResource = (entry: ResourceEntry): Promise<void> => {
-      const url = offlineUrl(ctx, entry.url);
-      const found = resources.get(url);
+      const key = resourceKey(ctx, entry);
+      const found = resources.get(key);
       if (found) return found;
       const pending = (async () => {
-        const [page, revision] = await Promise.all([pages.match(url), revisions.match(url)]);
-        if (page && revision && (await revision.text()) === entry.revision) return;
-        const response = await fetchEntry(ctx.fetch, url, ctx.timeouts.precache, signal);
-        // Record a revision only after its body is safely written.
-        await pages.put(url, response);
-        await revisions.put(url, new Response(entry.revision));
+        if (await pages.match(key)) return;
+        const legacy = await storedResource(ctx, entry, pages);
+        const response = legacy ?? await fetchEntry(ctx.fetch, offlineUrl(ctx, entry.url), ctx.timeouts.precache, signal);
+        if (!await validPageRevision(ctx, entry, response)) throw new Error('article revision changed');
+        if (superseded()) throw new DOMException('aborted', 'AbortError');
+        await pages.put(key, response);
       })();
-      resources.set(url, pending);
+      resources.set(key, pending);
       return pending;
     };
     const saveNext = async (): Promise<void> => {
       while (next < selected.length && !superseded()) {
         const item = selected[next++];
-        // Renditions first, the page last: a stored page implies its images are already there.
+        const page = offlineUrl(ctx, item.url);
+        // Renditions first; the committed selection remains unchanged throughout staging.
         const ordered = [
-          ...item.resources.filter((entry) => entry.url !== item.url),
-          ...item.resources.filter((entry) => entry.url === item.url),
+          ...item.resources.filter((entry) => offlineUrl(ctx, entry.url) !== page),
+          ...item.resources.filter((entry) => offlineUrl(ctx, entry.url) === page),
         ];
         try {
           for (const entry of ordered) await saveResource(entry);
           complete.push(item);
-          result.saved.push({ url: item.url, title: item.title });
         } catch {
           result.failed += 1;
         }
@@ -180,74 +160,44 @@ export async function saveOfflineArticles(
     };
     await Promise.all(Array.from({ length: Math.min(DOWNLOAD_SLOTS, selected.length) }, () => saveNext()));
     if (!superseded()) {
-      const settings = await ctx.caches.open(names.offlineSettings);
-      let previous: unknown = [];
-      try {
-        const stored = await settings.match(offlineUrl(ctx, '__offline_articles'));
-        previous = stored ? await stored.json() : [];
-      } catch {
-        previous = [];
-      }
-      if (result.failed && Array.isArray(previous)) {
-        // Keep older complete downloads within N until failed newer replacements are available.
-        for (const item of previous.slice(0, 1000)) {
-          if (!validOfflineItem(item) || complete.length >= count || complete.some((entry) => entry.url === item.url))
-            continue;
-          const valid = await Promise.all(
-            item.resources.map(async (entry) => {
-              const url = offlineUrl(ctx, entry.url);
-              if (!url.startsWith(ctx.scope)) return false;
-              const [page, revision] = await Promise.all([pages.match(url), revisions.match(url)]);
-              return page && revision ? (await revision.text()) === entry.revision : false;
-            }),
-          );
-          if (!valid.length || !valid.every(Boolean)) continue;
+      if (result.failed) {
+        // Legacy bodies are copied into the new cache before committing, so an overlapping
+        // previous worker cannot prune resources the new selection depends on.
+        for (const item of previousComplete) {
+          if (complete.length >= count || complete.some((entry) => entry.url === item.url)) continue;
+          for (const entry of item.resources) await saveResource(entry);
           complete.push(item);
-          result.saved.push({ url: item.url, title: item.title });
-          for (const entry of item.resources) wanted.add(offlineUrl(ctx, entry.url));
         }
       }
-      if (!superseded())
+      if (!superseded()) {
         complete.sort((a, b) => (order.get(a.url) ?? Infinity) - (order.get(b.url) ?? Infinity));
-      if (!superseded())
-        await settings.put(offlineUrl(ctx, '__offline_articles'), new Response(JSON.stringify(complete))).catch(() => {});
+        await commitSelection(ctx, complete);
+        result.saved = complete.map(({ url, title }) => ({ url, title }));
+      }
     }
-    if (!superseded())
-      await Promise.all(
-        [pages, revisions].map(async (cache) => {
-          const keys = await cache.keys();
-          await Promise.all(keys.filter((key) => !wanted.has(key.url)).map((key) => cache.delete(key)));
-        }),
-      );
   } catch {
-    // A catalogue that never arrived is a failed request, and it must not wipe what is already saved.
-    const expected = selected.length > 0 ? selected.length : count;
-    result.failed = Math.max(result.failed, expected - result.saved.length);
+    // A failed metadata commit keeps the previous pointer and all of its resource revisions.
+    previous = await readSelection(ctx);
+    previousComplete = await completeItems(ctx, previous);
+    result.saved = previousComplete.slice(0, count).map(({ url, title }) => ({ url, title }));
+    result.failed = Math.max(result.failed, selected.length || count || 1);
+  } finally {
+    // All download promises have settled; the next queued transaction cannot stage files yet.
+    await pruneSelection(ctx).catch(() => {});
   }
-  if (!superseded()) {
-    // A refreshed protected page must not be shadowed by a visited copy from an older build.
-    const saved = new Set(result.saved.map((item) => offlineUrl(ctx, item.url)));
-    try {
-      const cache = await ctx.caches.open(names.pages);
-      const keys = await cache.keys();
-      await Promise.all(
-        keys
-          .filter((key) => {
-            const url = new URL(key.url);
-            url.search = '';
-            return saved.has(url.href);
-          })
-          .map((key) => cache.delete(key)),
-      );
-    } catch {
-      // The visited copy stays; the protected one still answers first.
+  if (superseded()) return { ...result, cancelled: true };
+  // A refreshed protected page must not be shadowed by a visited copy from an older build.
+  const saved = new Set(result.saved.map((item) => offlineUrl(ctx, item.url)));
+  try {
+    const cache = await ctx.caches.open(names.pages);
+    for (const key of await cache.keys()) {
+      const url = new URL(key.url);
+      url.search = '';
+      if (saved.has(url.href)) await cache.delete(key);
     }
+  } catch {
+    // The protected one still answers first.
   }
-  if (superseded()) {
-    result.cancelled = true;
-    return result;
-  }
-  result.saved.sort((a, b) => (order.get(a.url) ?? Infinity) - (order.get(b.url) ?? Infinity));
   result.total = Math.max(result.total, result.saved.length);
   result.downloading = false;
   state.offlineStatus = result;

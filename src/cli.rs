@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+#[cfg(debug_assertions)]
+use clap::{CommandFactory as _, FromArgMatches as _};
 
 const ABOUT: &str =
     "Git-native feed reader and readable web archive: aggr.toml in, static site out.";
@@ -14,7 +16,6 @@ Typical loop:
 
     aggr init --github   # write aggr.toml and the GitHub workflow
     aggr build           # sync, then render the site into _site/
-    aggr dev             # local sync + lazy rendering + live reload
 
 Everything the site shows comes from the data branch, so a pinned data commit can be rendered
 without refetching its sources. The storage engine uses ordinary Git; GitHub is the turnkey host,
@@ -22,6 +23,12 @@ not a requirement. A run that finds nothing new leaves no trace.";
 
 #[derive(Debug, Parser)]
 #[command(name = "aggr", version, about = ABOUT, long_about = LONG_ABOUT)]
+#[cfg_attr(
+    debug_assertions,
+    command(
+        after_help = "Contributor development: cargo run -- dev starts Vite, Rust restarts and a local reader. Run make setup first."
+    )
+)]
 pub struct Cli {
     /// Path to the configuration file.
     #[arg(long, global = true, default_value = crate::config::DEFAULT_FILE, env = "AGGR_CONFIG")]
@@ -35,6 +42,44 @@ pub struct Cli {
     pub command: Command,
 }
 
+impl Cli {
+    pub fn parse_for_run() -> Self {
+        #[cfg(debug_assertions)]
+        {
+            match Self::try_development_from(
+                std::env::args_os(),
+                std::path::Path::new(crate::config::DEFAULT_FILE).is_file(),
+            ) {
+                Ok(cli) => cli,
+                Err(error) => error.exit(),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        Self::parse()
+    }
+
+    #[cfg(debug_assertions)]
+    fn try_development_from<I, T>(
+        arguments: I,
+        local_config_exists: bool,
+    ) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString>,
+    {
+        let arguments: Vec<std::ffi::OsString> = arguments.into_iter().map(Into::into).collect();
+        let matches = Self::command().try_get_matches_from(arguments)?;
+        let default_config =
+            matches.value_source("config") == Some(clap::parser::ValueSource::DefaultValue);
+        let mut cli = Self::from_arg_matches(&matches)?;
+        if matches!(&cli.command, Command::Dev(_)) && default_config && !local_config_exists {
+            cli.config =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/aggr.toml");
+        }
+        Ok(cli)
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Write a commented aggr.toml (and optionally the GitHub workflow) in the current directory.
@@ -44,6 +89,7 @@ pub enum Command {
     /// Sync and render, or render a pinned data ref without syncing.
     Build(BuildArgs),
     /// Sync in an isolated cache and render pages on demand with live reload.
+    #[cfg(debug_assertions)]
     Dev(DevArgs),
     /// Remove disposable local caches and owned generated output; preserve archived articles.
     Clean(CleanArgs),
@@ -79,9 +125,8 @@ pub struct FetchArgs {
     /// Rewrite items that already exist (hand edits are lost).
     #[arg(long)]
     pub refresh: bool,
-    /// Re-derive stored article bodies from the HTML retained beside them, so cleanup added since
-    /// an item was captured reaches it (hand edits are lost).
-    #[arg(long)]
+    /// Force local reprocessing even when the extraction code and retained inputs are unchanged.
+    #[arg(long, hide = true)]
     pub reprocess: bool,
     /// Fill opted-in media without rewriting retained article bodies.
     #[arg(long, conflicts_with_all = ["refresh", "reprocess"])]
@@ -163,6 +208,7 @@ pub struct BuildArgs {
 }
 
 #[derive(Debug, Args, Default)]
+#[cfg(debug_assertions)]
 pub struct DevArgs {
     /// Clean this project's disposable caches and dev data before starting; keep the archive.
     #[arg(long, conflicts_with = "dry_run")]
@@ -180,6 +226,7 @@ pub struct DevArgs {
     pub port: u16,
 }
 
+#[cfg(debug_assertions)]
 impl DevArgs {
     pub(crate) fn build_args(&self) -> BuildArgs {
         BuildArgs {
@@ -211,6 +258,30 @@ mod tests {
     }
 
     #[test]
+    fn explicit_reprocessing_remains_compatible_but_is_not_required_in_help() {
+        #[cfg(not(debug_assertions))]
+        let commands = ["sync"];
+        #[cfg(debug_assertions)]
+        let commands = ["sync", "dev"];
+        for command in commands {
+            let cli = Cli::try_parse_from(["aggr", command, "--reprocess"]).unwrap();
+            assert!(match cli.command {
+                Command::Sync(args) => args.fetch.reprocess,
+                #[cfg(debug_assertions)]
+                Command::Dev(args) => args.fetch.reprocess,
+                _ => false,
+            });
+            let mut cli = Cli::command();
+            let help = cli
+                .find_subcommand_mut(command)
+                .unwrap()
+                .render_long_help()
+                .to_string();
+            assert!(!help.contains("--reprocess"));
+        }
+    }
+
+    #[test]
     fn completions_are_generated_for_every_supported_shell() {
         use clap_complete::Shell;
         for shell in [
@@ -232,6 +303,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     fn dev_has_local_defaults() {
         let dev = Cli::try_parse_from(["aggr", "dev", "--release"]).unwrap();
         let Command::Dev(dev) = dev.command else {
@@ -251,6 +323,41 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
+    fn contributor_startup_requires_a_command_and_respects_explicit_configuration() {
+        for local_config_exists in [false, true] {
+            assert!(Cli::try_development_from(["aggr"], local_config_exists).is_err());
+            assert!(Cli::try_development_from(["aggr", "-v"], local_config_exists).is_err());
+        }
+        let demo = Cli::try_development_from(["aggr", "dev"], false).unwrap();
+        assert!(matches!(demo.command, Command::Dev(_)));
+        assert_eq!(
+            demo.config,
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/aggr.toml")
+        );
+        let local = Cli::try_development_from(["aggr", "dev"], true).unwrap();
+        assert_eq!(local.config, PathBuf::from("aggr.toml"));
+        for arguments in [
+            vec!["aggr", "--config", "reader with spaces.toml", "dev"],
+            vec!["aggr", "dev", "--config", "reader with spaces.toml"],
+        ] {
+            let explicit = Cli::try_development_from(arguments, false).unwrap();
+            assert_eq!(explicit.config, PathBuf::from("reader with spaces.toml"));
+        }
+        let build = Cli::try_development_from(["aggr", "build"], false).unwrap();
+        assert_eq!(build.config, PathBuf::from("aggr.toml"));
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn production_cli_has_no_development_entrypoint() {
+        assert!(Cli::try_parse_from(["aggr", "dev"]).is_err());
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("live reload"));
+        assert!(!help.contains("Contributor development"));
+    }
+
+    #[test]
     fn fetch_is_a_sync_mode_instead_of_a_command() {
         let cli = Cli::try_parse_from(["aggr", "sync", "--fetch-only", "--refresh"]).unwrap();
         let Command::Sync(sync) = cli.command else {
@@ -263,11 +370,19 @@ mod tests {
 
     #[test]
     fn cleanup_is_explicit_and_never_combined_with_a_fetch_dry_run() {
-        for command in ["sync", "build", "dev"] {
+        #[cfg(not(debug_assertions))]
+        let commands = ["sync", "build"];
+        #[cfg(debug_assertions)]
+        let commands = ["sync", "build", "dev"];
+        for command in commands {
             assert!(Cli::try_parse_from(["aggr", command, "--clean"]).is_ok());
         }
         assert!(Cli::try_parse_from(["aggr", "clean", "--dry-run"]).is_ok());
-        for command in ["sync", "dev"] {
+        #[cfg(not(debug_assertions))]
+        let commands = ["sync"];
+        #[cfg(debug_assertions)]
+        let commands = ["sync", "dev"];
+        for command in commands {
             assert!(Cli::try_parse_from(["aggr", command, "--clean", "--dry-run"]).is_err());
         }
     }

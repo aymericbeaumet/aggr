@@ -1,16 +1,16 @@
 {
   "src/main.ts": {
-    "file": "app-CXc35H62.js",
+    "file": "app-C8jPcODu.js",
     "name": "main",
     "src": "src/main.ts",
     "isEntry": true,
     "dynamicImports": [
-      "src/search/index.ts",
-      "src/media/index.ts"
+      "src/media/index.ts",
+      "src/search/index.ts"
     ]
   },
   "src/media/index.ts": {
-    "file": "media-81MRORY5.js",
+    "file": "media-yK557Ub2.js",
     "name": "media",
     "src": "src/media/index.ts",
     "isDynamicEntry": true,
@@ -19,7 +19,7 @@
     ]
   },
   "src/search/index.ts": {
-    "file": "search-BCA-wRfG.js",
+    "file": "search-JLBzkGu1.js",
     "name": "search",
     "src": "src/search/index.ts",
     "isDynamicEntry": true,

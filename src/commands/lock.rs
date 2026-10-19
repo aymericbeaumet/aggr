@@ -93,6 +93,29 @@ impl Guard {
     }
 }
 
+/// A development snapshot has one writer, including while cleanup inspects old caches.
+#[derive(Debug)]
+pub(super) struct DevLock {
+    _guard: Guard,
+}
+
+impl DevLock {
+    pub(super) fn acquire(cache: &Path, config: &Path) -> Result<Self> {
+        super::clean::validate_dev_lock(cache)?;
+        std::fs::create_dir_all(cache)
+            .with_context(|| format!("creating dev cache {}", cache.display()))?;
+        Ok(Self {
+            _guard: Guard::acquire(&cache.join("dev.lock"), "dev", config)?,
+        })
+    }
+
+    pub(super) fn inspect(cache: &Path, config: &Path) -> Result<Option<Self>> {
+        super::clean::validate_dev_lock(cache)?;
+        Ok(Guard::inspect(&cache.join("dev.lock"), "dev", config)?
+            .map(|guard| Self { _guard: guard }))
+    }
+}
+
 /// `aggr.lock.holder` beside `aggr.lock`.
 fn record_path(path: &Path) -> PathBuf {
     let mut record = path.as_os_str().to_owned();
@@ -121,6 +144,63 @@ fn conflict_message(recorded: &str, subject: &str, target: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_dev_process_owns_a_project_cache() {
+        if !alone("one_dev_process_owns_a_project_cache") {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().canonicalize().unwrap().join("dev-v1/project");
+        let first = DevLock::acquire(&dir, Path::new("aggr.toml")).unwrap();
+        let error = DevLock::acquire(&dir, Path::new("aggr.toml")).unwrap_err();
+        assert!(format!("{error:#}").contains("another `aggr dev` is already running"));
+        drop(first);
+        DevLock::acquire(&dir, Path::new("aggr.toml")).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_archive_preparation_retains_dev_lock_until_its_write_finishes() {
+        if !alone("cancelled_archive_preparation_retains_dev_lock_until_its_write_finishes") {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().canonicalize().unwrap().join("dev-v1/project");
+        let ownership =
+            std::sync::Arc::new(DevLock::acquire(&cache, Path::new("aggr.toml")).unwrap());
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let writer = tokio::spawn({
+            let ownership = ownership.clone();
+            let path = cache.join("data/items/prepared.md");
+            async move {
+                super::super::fetch::blocking_write(
+                    "preparing archive",
+                    Some(ownership),
+                    move || {
+                        let _ = entered.send(());
+                        released.recv().context("releasing the archive write")?;
+                        crate::cache::write(&path, b"prepared")
+                    },
+                )
+                .await
+            }
+        });
+        started.await.unwrap();
+        writer.abort();
+        drop(ownership);
+        let competing = DevLock::acquire(&cache, Path::new("aggr.toml"));
+        let held_during_write = competing.is_err();
+        drop(competing);
+        // Always release the worker before asserting so a failed regression cannot hang runtime shutdown.
+        release.send(()).unwrap();
+        assert!(writer.await.unwrap_err().is_cancelled());
+        assert!(
+            held_during_write,
+            "cache ownership was released before the cancelled archive write finished"
+        );
+        DevLock::acquire(&cache, Path::new("aggr.toml")).unwrap();
+    }
 
     /// Run the calling test again in a process of its own, where nothing else is running.
     ///

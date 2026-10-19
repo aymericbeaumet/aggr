@@ -55,7 +55,7 @@
             <button aria-label="Clear search" class="search-clear" hidden="" type="button">×</button>
           </div>
         </form>
-        <ul aria-label="Search suggestions" class="search-completions" hidden="" id="search-completions" role="listbox"></ul>
+        <div data-search-completions-root=""></div>
       </div>
       <div class="search-query-help" id="search-query-help" role="tooltip">
         <span>Use <code>source:</code>, <code>category:</code>, <code>tag:</code>, <code>type:</code>, <code>date:</code>, <code>sort:</code>, <code>"exact phrases"</code> or <code>-exclude</code>.</span>
@@ -65,16 +65,7 @@
     <noscript>&lt;p class="search-offline"&gt;Full-text search needs JavaScript. Without it, browse by &lt;a href="../../../../browse/"&gt;category, source or tag&lt;/a&gt;.&lt;/p&gt;</noscript>
   </div>
 </div>
-<div data-nosnippet="" data-search-results="">
-  <p aria-live="polite" hidden="" id="search-status" role="status"></p>
-  <ol aria-busy="false" class="rows search-results" hidden="" id="list" role="list"></ol>
-  <p hidden="" id="empty">No articles match this search. Try fewer filters or different words.</p>
-  <nav aria-label="Search results pages" class="pager search-pager" hidden="">
-    <span class="pager-side"><a data-search-page-previous="" hidden="" href="#">newer</a></span>
-    <span data-search-page-status=""></span>
-    <span class="pager-side"><a data-search-page-next="" hidden="" href="#">older</a></span>
-  </nav>
-</div><div data-static-feed="">
+<div data-search-results-root=""></div><div data-static-feed="">
 <ol class="rows" role="list" start="4" style="--rank-indent: 0ch">
 <li class="row h-entry age-h3" data-age="h3" data-link="https://blog.example/many-3" data-path="items/blog/2026/09/many-3" data-url="items/blog/many-3/">
   <a class="u-uid" hidden="" href="../../../../items/blog/many-3/"></a>
@@ -136,3 +127,4 @@
 </div>
 </main>
 <footer class="footer" data-nosnippet=""><a href="https://github.com/aymericbeaumet/aggr" rel="noopener noreferrer" target="_blank">built with aggr</a></footer>
+<div id="now-playing-root"></div>

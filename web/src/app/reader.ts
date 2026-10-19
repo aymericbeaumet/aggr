@@ -77,11 +77,6 @@ export function startReader(doc: Document = document, win: Window = window): voi
     updateWorker();
   });
   win.addEventListener('pageshow', () => void poller?.check());
-  // The development server's rebuild: a check that insists, even over one in flight.
-  win.addEventListener('aggr:build', (event) => {
-    event.preventDefault();
-    void poller?.check(true);
-  });
   poller.start();
   void poller.check();
   const pwa = model.site.pwa;

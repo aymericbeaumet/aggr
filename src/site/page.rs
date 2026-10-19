@@ -2,7 +2,7 @@
 //! context every theme sees. `Pages` holds what all pages of one build share so list pages and
 //! standalone documents render through the same path.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -11,7 +11,7 @@ use serde::Serialize;
 use super::client;
 use super::context::{BuildCtx, CategoryCtx, ItemCtx, PageCtx, SiteCtx, SourceCtx};
 use super::render::Renderer;
-use super::{outputs, paginate, relative_root, write};
+use super::{PreparedSite, outputs, paginate, relative_root, write};
 use crate::content;
 
 /// Archive-wide template values prepared once per build. MiniJinja values retain their prepared
@@ -100,7 +100,12 @@ pub(super) struct SimplePage<'a> {
 }
 
 impl<'a> SimplePage<'a> {
-    pub(super) fn new(kind: &'a str, title: &'a str, path: &'a str, template: &'a str) -> Self {
+    pub(super) const fn new(
+        kind: &'a str,
+        title: &'a str,
+        path: &'a str,
+        template: &'a str,
+    ) -> Self {
         Self {
             kind,
             title,
@@ -108,6 +113,134 @@ impl<'a> SimplePage<'a> {
             template,
             item: None,
             page_items: None,
+        }
+    }
+}
+
+/// Fixed HTML routes and whether each belongs in the sitemap.
+pub(super) const FIXED_PAGES: [(SimplePage<'static>, bool); 6] = [
+    (
+        SimplePage::new("browse", "Browse", "browse/", "browse.html"),
+        true,
+    ),
+    (
+        SimplePage::new("sources", "Sources", "sources/", "browse.html"),
+        true,
+    ),
+    (
+        SimplePage::new("categories", "Categories", "categories/", "browse.html"),
+        true,
+    ),
+    (
+        SimplePage::new("tags", "Tags", "tags/", "browse.html"),
+        true,
+    ),
+    (
+        SimplePage::new(
+            "preferences",
+            "Preferences",
+            "preferences/",
+            "preferences.html",
+        ),
+        false,
+    ),
+    (
+        SimplePage::new("404", "Not found", "404.html", "404.html"),
+        false,
+    ),
+];
+
+impl SimplePage<'_> {
+    pub(super) fn output_path(&self) -> PathBuf {
+        if self.path.ends_with('/') {
+            Path::new(self.path).join("index.html")
+        } else {
+            PathBuf::from(self.path)
+        }
+    }
+}
+
+/// The collection inventory shared by publication and request-driven development. Indices keep
+/// it independent of rendered media, so preparing routes never materializes article companions.
+pub(super) struct Collection {
+    pub(super) indices: Vec<usize>,
+    pub(super) prefix: String,
+    pub(super) title: String,
+    kind: &'static str,
+    source: Option<usize>,
+    category: Option<(bool, usize)>,
+}
+
+impl PreparedSite {
+    pub(super) fn collections(&self) -> Vec<Collection> {
+        let articles: std::collections::BTreeMap<_, _> = self
+            .archive_items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| (item.url.as_str(), i))
+            .collect();
+        let mut collections = vec![Collection {
+            kind: "river",
+            title: self.site.title.clone(),
+            prefix: String::new(),
+            indices: self
+                .river_items
+                .iter()
+                .filter_map(|item| articles.get(item.url.as_str()).copied())
+                .collect(),
+            source: None,
+            category: None,
+        }];
+        for (i, source) in self.source_ctxs.iter().enumerate() {
+            collections.push(Collection {
+                kind: "source",
+                title: source.name.clone(),
+                prefix: source.page.clone(),
+                indices: self
+                    .source_members
+                    .get(&source.slug)
+                    .cloned()
+                    .unwrap_or_default(),
+                source: Some(i),
+                category: None,
+            });
+        }
+        for (is_tag, terms, members) in [
+            (false, &self.categories, &self.category_members),
+            (true, &self.tags, &self.tag_members),
+        ] {
+            for (i, term) in terms.iter().enumerate() {
+                collections.push(Collection {
+                    kind: if is_tag { "tag" } else { "category" },
+                    title: term.name.clone(),
+                    prefix: term.page.clone(),
+                    indices: members.get(&term.slug).cloned().unwrap_or_default(),
+                    source: None,
+                    category: Some((is_tag, i)),
+                });
+            }
+        }
+        collections
+    }
+}
+
+impl Collection {
+    pub(super) fn page<'a>(
+        &'a self,
+        items: &'a [ItemCtx],
+        sources: &'a [SourceCtx],
+        categories: &'a [CategoryCtx],
+        tags: &'a [CategoryCtx],
+    ) -> ListPage<'a> {
+        ListPage {
+            kind: self.kind,
+            title: &self.title,
+            prefix: &self.prefix,
+            list: items,
+            source: self.source.map(|i| &sources[i]),
+            category: self
+                .category
+                .map(|(is_tag, i)| if is_tag { &tags[i] } else { &categories[i] }),
         }
     }
 }

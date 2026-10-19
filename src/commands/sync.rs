@@ -1,12 +1,15 @@
 //! `aggr sync`: fetch, commit with trailers, push, move `refs/aggr/last-good`. What CI runs.
 
+#[cfg(debug_assertions)]
 use std::path::Path;
 
 use anyhow::{Result, bail};
 
 use super::Project;
 use super::fetch::{self, Report};
-use crate::cli::{FetchArgs, SyncArgs};
+#[cfg(debug_assertions)]
+use crate::cli::FetchArgs;
+use crate::cli::SyncArgs;
 use crate::discussions::ResolutionSet;
 use crate::git::{CommitMessage, PushOutcome};
 use crate::store::Outcome;
@@ -17,6 +20,14 @@ pub const LAST_GOOD: &str = "refs/aggr/last-good";
 /// succeeded, so a build following the sync does not have to resolve them a second time.
 /// `--clean` is handled by the dispatcher before the project is loaded.
 pub async fn run(project: &Project, args: &SyncArgs) -> Result<Option<ResolutionSet>> {
+    let result = run_sync(project, args).await;
+    if !args.fetch.dry_run {
+        trim_cache(project);
+    }
+    result
+}
+
+async fn run_sync(project: &Project, args: &SyncArgs) -> Result<Option<ResolutionSet>> {
     let worktree = project.worktree()?;
     if !args.fetch.dry_run {
         sweep_cache(project);
@@ -88,7 +99,6 @@ pub async fn run(project: &Project, args: &SyncArgs) -> Result<Option<Resolution
         println!("{head}");
     }
     finish(&report)?;
-    trim_cache(project);
     Ok(discussions)
 }
 
@@ -104,20 +114,55 @@ fn trim_cache(project: &Project) {
 /// The same required synchronization stage for dev, redirected to its private cache and stopped
 /// before git commit/push. Keeping this here prevents build and dev from growing different fetch
 /// semantics over time.
-pub async fn run_dev(
+#[cfg(debug_assertions)]
+pub(super) async fn run_dev(
     project: &Project,
     worktree: &crate::git::Worktree,
     args: &FetchArgs,
     cache: &Path,
+    ownership: Option<std::sync::Arc<super::lock::DevLock>>,
 ) -> Result<Report> {
-    let report =
-        fetch::run_with_cache(project, worktree, args, cache, fetch::StatePolicy::DevCache).await?;
-    finish(&report)?;
+    run_dev_observed(project, worktree, args, cache, None, ownership).await
+}
+
+#[cfg(debug_assertions)]
+pub(super) async fn run_dev_with_progress(
+    project: &Project,
+    worktree: &crate::git::Worktree,
+    args: &FetchArgs,
+    cache: &Path,
+    progress: tokio::sync::mpsc::Sender<fetch::Progress>,
+    ownership: Option<std::sync::Arc<super::lock::DevLock>>,
+) -> Result<Report> {
+    run_dev_observed(project, worktree, args, cache, Some(progress), ownership).await
+}
+
+#[cfg(debug_assertions)]
+async fn run_dev_observed(
+    project: &Project,
+    worktree: &crate::git::Worktree,
+    args: &FetchArgs,
+    cache: &Path,
+    progress: Option<tokio::sync::mpsc::Sender<fetch::Progress>>,
+    ownership: Option<std::sync::Arc<super::lock::DevLock>>,
+) -> Result<Report> {
+    let report = fetch::run_with_cache_progress(
+        project,
+        worktree,
+        args,
+        cache,
+        fetch::StatePolicy::DevCache,
+        progress,
+        ownership,
+    )
+    .await;
     if !args.dry_run
         && let Err(err) = crate::cache::enforce_limits(cache, &project.config.cache)
     {
         log::warn!("cache limit cleanup skipped: {err:#}");
     }
+    let report = report?;
+    finish(&report)?;
     Ok(report)
 }
 
@@ -154,6 +199,8 @@ pub fn commit_message(
         "aggr: init".to_string()
     } else if added > 0 {
         format!("aggr: +{added} item{}", if added == 1 { "" } else { "s" })
+    } else if report.reprocessed > 0 {
+        format!("aggr: reprocess {} items", report.reprocessed)
     } else if report.status_changed {
         "aggr: status".to_string()
     } else {
@@ -218,6 +265,62 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn fetch_only_and_failed_syncs_enforce_cache_limits_but_dry_runs_do_not() {
+        crate::http::install_crypto_provider();
+        let origin = httpmock::MockServer::start_async().await;
+        origin
+            .mock_async(|_, then| {
+                then.status(404);
+            })
+            .await;
+        for (dry_run, failing) in [(false, false), (false, true), (true, false)] {
+            let root = tempfile::tempdir().unwrap();
+            assert!(
+                std::process::Command::new("git")
+                    .args(["init", "--quiet"])
+                    .arg(root.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let config = root.path().join("aggr.toml");
+            let sources = if failing {
+                format!("[[sources]]\nurl='{}/feed.xml'\n", origin.base_url())
+            } else {
+                String::new()
+            };
+            std::fs::write(&config, format!(
+                "[defaults]\ndiscussions=[]\n[fetch]\nretries=0\n[cache]\nresponse_max_bytes=1\n{sources}"
+            )).unwrap();
+            let project = Project::load(&config).await.unwrap();
+            let cache = project.build_cache_dir().unwrap();
+            let entry = crate::cache::Namespace::Articles
+                .dir(&cache)
+                .join("old-entry");
+            crate::cache::write(&entry, b"disposable response cache").unwrap();
+            let args = SyncArgs {
+                fetch: crate::cli::FetchArgs {
+                    dry_run,
+                    ..Default::default()
+                },
+                fetch_only: true,
+                ..Default::default()
+            };
+            let result = run(&project, &args).await;
+            if failing {
+                assert!(format!("{:#}", result.unwrap_err()).contains("every source failed"));
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(
+                entry.exists(),
+                dry_run,
+                "dry_run={dry_run}, failing={failing}"
+            );
+        }
+    }
+
     #[test]
     fn reprocessed_bodies_are_reported_without_masking_failed_sources() {
         let mut r = report(
@@ -225,13 +328,13 @@ mod tests {
             false,
         );
         r.reprocessed = 3;
-        assert_eq!(r.added(), 3);
+        assert_eq!(r.added(), 0);
         assert_eq!(r.ok(), 0);
         assert_eq!(r.errors(), 1);
         assert!(r.all_failed());
         assert!(finish(&r).is_err());
         let message = commit_message(&r, false, "1", None);
-        assert_eq!(message.subject, "aggr: +3 items");
+        assert_eq!(message.subject, "aggr: reprocess 3 items");
         assert_eq!(
             message.body,
             [

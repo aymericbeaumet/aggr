@@ -19,10 +19,8 @@ mod threads;
 
 use std::process::ExitCode;
 
-use clap::Parser;
-
 fn main() -> ExitCode {
-    let cli = cli::Cli::parse();
+    let cli = cli::Cli::parse_for_run();
     let level = match cli.verbose {
         0 => "warn",
         1 => "info",

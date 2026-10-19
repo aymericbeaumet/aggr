@@ -8,8 +8,10 @@ import type { ClientPage } from '../generated/ClientPage';
 import { row } from '../search/fixture';
 import { fresh } from '../state/fresh.svelte';
 import { page } from '../state/page.svelte';
+import { selection } from '../state/selection.svelte';
+import { cursorRow } from '../selection/cursor';
 import { badges } from './badges';
-import { FeedUpdater, applyFreshList } from './feed';
+import { FeedUpdater, applyFreshList, type RenderedList } from './feed';
 
 const directory = resolve(process.cwd(), 'test/parity');
 
@@ -26,15 +28,28 @@ function load(name: string): ClientPage {
 }
 
 /** The river fixture as a newer build would render it: one more row on top. */
-function newer(model: ClientPage): ClientPage {
+function newer(model: ClientPage): RenderedList {
   if (model.page.view !== 'list') throw new Error('not a list');
   const arrival = { ...row, path: 'items/blog/2026/09/arrival', url: 'items/blog/2026/09/arrival/', title: 'Just arrived' };
-  return {
+  const next: ClientPage = {
     ...model,
     build: { ...model.build, content: 'content-next' },
     site: { ...model.site, entries: [arrival.url, ...model.site.entries] },
     page: { view: 'list', data: { ...model.page.data, rows: [arrival, ...model.page.data.rows] } },
   };
+  const content = document.querySelector('main#content')?.cloneNode(true) as HTMLElement;
+  const item = content.querySelector<HTMLElement>('ol.rows:not(.search-results) .row')?.cloneNode(true) as HTMLElement;
+  item.dataset.path = arrival.path;
+  item.dataset.url = arrival.url;
+  const title = item.querySelector<HTMLAnchorElement>('[data-row-open]')!;
+  title.href = arrival.url;
+  title.textContent = arrival.title;
+  item.dataset.rustTemplate = 'new-row';
+  content.querySelector('ol.rows:not(.search-results)')?.prepend(item);
+  for (const [index, node] of [...content.querySelectorAll(`${FEED} .row`)].entries()) {
+    node.querySelector('.rank')!.textContent = `${model.page.data.paginator.offset + index + 1}.`;
+  }
+  return { model: next, content };
 }
 
 const FEED = 'ol.rows:not(.search-results)';
@@ -67,6 +82,7 @@ describe('the live feed', () => {
     expect(after).toHaveLength(before.length + 1);
     expect(after[0].dataset.path).toBe('items/blog/2026/09/arrival');
     expect(after[0].querySelector('.title')?.textContent).toBe('Just arrived');
+    expect(after[0].dataset.rustTemplate).toBe('new-row');
     // Untouched rows are the same elements; the chrome around the list never moved.
     expect(after.slice(1)).toEqual(before);
     expect(document.querySelector('header.top')).toBe(header);
@@ -78,7 +94,64 @@ describe('the live feed', () => {
   it('has nothing to swap on a page that is not a list', () => {
     const model = load('page-river');
     mountApp(document);
-    expect(applyFreshList({ ...model, page: { view: 'static' } })).toBeNull();
+    expect(applyFreshList({ model: { ...model, page: { view: 'static' } }, content: document.querySelector('main')! })).toBeNull();
+  });
+
+  it('updates ranks when a new row shifts retained nodes down the list', () => {
+    const model = load('page-river');
+    mountApp(document);
+    const before = rows();
+    applyFreshList(newer(model));
+    const after = rows();
+    expect(after.slice(1)).toEqual(before);
+    expect(after.map((node) => node.querySelector('.rank')?.textContent)).toEqual(
+      after.map((_, index) => `${index + 1}.`),
+    );
+  });
+
+  it('updates a source warning through recovery and failure without replacing search or selection', () => {
+    const model = load('page-source-error');
+    if (model.page.view !== 'list') throw new Error('not a list');
+    mountApp(document);
+    selection.configure(new URL(page.root).pathname, sessionStorage);
+    const toolbar = document.querySelector('.feed-toolbar');
+    const input = document.querySelector<HTMLInputElement>('#q')!;
+    input.setSelectionRange(2, 5);
+    const selected = rows()[1];
+    selection.select(cursorRow(model.page.data.rows[1], page.root), page.href!);
+    flushSync();
+    selected.querySelector<HTMLAnchorElement>('[data-row-open]')!.focus();
+    const warning = document.querySelector('.listhead .error')!.cloneNode(true) as HTMLElement;
+    const recovered = structuredClone(model);
+    if (recovered.page.view !== 'list') throw new Error('not a list');
+    recovered.page.data.error = null;
+    recovered.build.content = 'recovered';
+    const recoveredContent = document.querySelector('main')!.cloneNode(true) as HTMLElement;
+    recoveredContent.querySelector('.listhead .error')!.remove();
+    recoveredContent.querySelector<HTMLElement>('.listhead')!.dataset.rustState = 'recovered';
+    applyFreshList({ model: recovered, content: recoveredContent });
+    expect(document.querySelector('.listhead .error')).toBeNull();
+    expect(document.querySelector<HTMLElement>('.listhead')?.dataset.rustState).toBe('recovered');
+    expect(document.querySelector('.feed-toolbar')).toBe(toolbar);
+    expect(document.querySelector('#q')).toBe(input);
+    expect([input.selectionStart, input.selectionEnd]).toEqual([2, 5]);
+    expect(document.querySelector('.row.is-selected')).toBe(selected);
+    expect(document.activeElement).toBe(selected.querySelector('[data-row-open]'));
+
+    const failed = structuredClone(recovered);
+    if (failed.page.view !== 'list') throw new Error('not a list');
+    failed.page.data.error = { message: 'HTTP 429', since: '2026-10-19T00:00:00Z' };
+    failed.build.content = 'failed-again';
+    const failedContent = document.querySelector('main')!.cloneNode(true) as HTMLElement;
+    warning.title = 'HTTP 429';
+    warning.textContent = '⚠ HTTP 429';
+    failedContent.querySelector('.listhead .listtools')!.append(warning);
+    applyFreshList({ model: failed, content: failedContent });
+    expect(document.querySelector('.listhead .error')?.textContent).toBe('⚠ HTTP 429');
+    expect(document.querySelector('.feed-toolbar')).toBe(toolbar);
+    expect(document.querySelector('#q')).toBe(input);
+    expect([input.selectionStart, input.selectionEnd]).toEqual([2, 5]);
+    expect(document.querySelector('.row.is-selected')).toBe(selected);
   });
 
   it('lights the pending entries that are on screen', async () => {

@@ -1,7 +1,6 @@
-//! Parity fixtures: the markup the minijinja partials render for known models, written to
-//! `web/test/parity/` so the Svelte components can prove they render the same thing. Run
-//! `AGGR_UPDATE_PARITY=1 cargo test --bin aggr parity` after changing a partial or the model;
-//! without the variable the test fails when the committed fixtures are stale.
+//! Static Rust page fixtures for client DOM behavior tests. These preserve the markup and typed
+//! model together; no browser component reimplements their templates. Refresh with
+//! `AGGR_UPDATE_PARITY=1 cargo test --bin aggr parity` after changing a template or model.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -9,7 +8,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, TimeZone as _, Utc};
 use scraper::{ElementRef, Html, Selector};
 
-use super::{ClientPage, ClientRow, ClientSite, ClientView, Shared};
+use super::{ClientPage, ClientRow, Shared};
 use crate::config::preferences::ReaderPreferences;
 use crate::content;
 use crate::model::{ContentKind, FrontMatter, Item};
@@ -23,7 +22,6 @@ use crate::site::{outputs, paginate};
 
 struct Fixture {
     name: &'static str,
-    component: &'static str,
     props: serde_json::Value,
     html: String,
 }
@@ -187,50 +185,7 @@ fn rows() -> Vec<(&'static str, ItemCtx)> {
     full.extra.insert("num_comments".into(), 42.into());
     refresh(&mut full);
 
-    let mut podcast = context(
-        &item("podcast", "An episode", 30, BODY),
-        None,
-        "Show notes.",
-    );
-    podcast.item_type = crate::site::item_type::ItemType::Podcast;
-    podcast.extra.insert("duration_seconds".into(), 3725.into());
-    podcast.preview = Some(preview(None));
-    refresh(&mut podcast);
-
-    let mut video = context(&item("video", "A recording", 200, ""), None, "");
-    video.item_type = crate::site::item_type::ItemType::Video;
-    refresh(&mut video);
-
-    let mut comments_only = context(
-        &item("comments", "Comments without a count or points", 0, BODY),
-        None,
-        "",
-    );
-    comments_only
-        .extra
-        .insert("comments_url".into(), "https://lobste.rs/s/fixture".into());
-    refresh(&mut comments_only);
-
-    let mut escaped = context(
-        &item(
-            "escaped",
-            "Title with </script> & <b>markup</b> \"quotes\"",
-            8,
-            BODY,
-        ),
-        None,
-        "Excerpt with </script> & <i>markup</i>",
-    );
-    refresh(&mut escaped);
-
-    vec![
-        ("row-plain", plain),
-        ("row-full", full),
-        ("row-podcast", podcast),
-        ("row-video", video),
-        ("row-comments", comments_only),
-        ("row-escaped", escaped),
-    ]
+    vec![("row-plain", plain), ("row-full", full)]
 }
 
 fn source(error: bool) -> SourceCtx {
@@ -255,20 +210,9 @@ fn source(error: bool) -> SourceCtx {
     }
 }
 
-fn category() -> CategoryCtx {
-    CategoryCtx {
-        name: "Engineering".into(),
-        slug: "engineering".into(),
-        count: 1,
-        latest: Some(now()),
-        page: "categories/engineering/".into(),
-    }
-}
-
 struct Rendered {
     document: Html,
     model: ClientPage,
-    client_site: ClientSite,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -313,7 +257,6 @@ fn render_list(
     Rendered {
         document: Html::parse_document(&html),
         model,
-        client_site: client.site,
     }
 }
 
@@ -332,7 +275,6 @@ fn render_article(site: &SiteCtx, item: &ItemCtx) -> Rendered {
     Rendered {
         document: Html::parse_document(&html),
         model,
-        client_site: client.site,
     }
 }
 
@@ -342,55 +284,16 @@ fn select<'a>(document: &'a Html, selector: &str) -> Vec<ElementRef<'a>> {
         .collect()
 }
 
-/// The markup inside the client's root: what `App` renders (boot creates the root itself).
+/// The static markup inside the root the client enhances.
 fn inner(document: &Html, selector: &str) -> String {
     let matches = select(document, selector);
     assert_eq!(matches.len(), 1, "exactly one element matches {selector}");
     matches[0].inner_html()
 }
 
-fn outer(document: &Html, selector: &str) -> String {
-    let matches = select(document, selector);
-    assert!(!matches.is_empty(), "no element matches {selector}");
-    matches
-        .iter()
-        .map(|element| element.html())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// The article's chrome above its content: everything before the media figure or the body.
-fn article_head(document: &Html) -> String {
-    let article = select(document, "article.item")[0];
-    let content = [
-        "document-reader",
-        "video-player",
-        "native-video",
-        "native-audio",
-        "interactive-reader",
-        "article-lead",
-        "body",
-    ];
-    let mut parts = Vec::new();
-    for child in article.children() {
-        let Some(element) = ElementRef::wrap(child) else {
-            continue;
-        };
-        let classes: Vec<_> = element.value().classes().collect();
-        if element.value().attr("data-article-content").is_some()
-            || classes.iter().any(|class| content.contains(class))
-        {
-            break;
-        }
-        parts.push(element.html());
-    }
-    parts.join("\n")
-}
-
 /// `html` with the children of the first element whose start tag begins with `open` removed,
 /// keeping the element itself. Only `tag` is tracked for nesting, which is enough for the two
-/// regions the client adopts rather than renders: they are `div`s and `main`s holding markup that
-/// the server renderer never sees.
+/// fixture placeholders, both `div` and `main` elements.
 fn strip_children(html: &str, open: &str, tag: &str) -> String {
     let Some(start) = html.find(open) else {
         panic!("no element starts with {open}");
@@ -434,43 +337,11 @@ fn render_static(site: &SiteCtx, kind: &str, title: &str, path: &str, template: 
     Rendered {
         document: Html::parse_document(&html),
         model,
-        client_site: client.site,
     }
 }
 
 fn fixtures() -> Vec<Fixture> {
     let site = site();
-    let mut out = Vec::new();
-
-    for (name, row) in rows() {
-        let rendered = render_list(
-            &site,
-            "river",
-            "Reader",
-            "",
-            std::slice::from_ref(&row),
-            None,
-            None,
-            50,
-            0,
-        );
-        let ClientView::List(list) = &rendered.model.page else {
-            unreachable!()
-        };
-        out.push(Fixture {
-            name,
-            component: "Row",
-            props: serde_json::json!({
-                "row": list.rows[0],
-                "rank": 1,
-                "base": rendered.model.base,
-                "language": rendered.client_site.language,
-            }),
-            html: outer(&rendered.document, "ol.rows > li.row"),
-        });
-    }
-
-    // A long river: the pager on the first, a middle and the last page.
     let many: Vec<_> = (0..7)
         .map(|index| {
             let mut ctx = context(
@@ -487,145 +358,9 @@ fn fixtures() -> Vec<Fixture> {
             ctx
         })
         .collect();
-    for (name, index) in [("pager-first", 0), ("pager-middle", 1), ("pager-last", 3)] {
-        let rendered = render_list(&site, "river", "Reader", "", &many, None, None, 2, index);
-        let ClientView::List(list) = &rendered.model.page else {
-            unreachable!()
-        };
-        out.push(Fixture {
-            name,
-            component: "Pager",
-            props: serde_json::json!({
-                "paginator": list.paginator,
-                "kind": rendered.model.kind,
-                "base": rendered.model.base,
-            }),
-            html: outer(&rendered.document, "[data-static-feed] > nav.pager"),
-        });
-    }
-    let rendered = render_list(&site, "river", "Reader", "", &many[..1], None, None, 50, 0);
-    let ClientView::List(list) = &rendered.model.page else {
-        unreachable!()
-    };
-    out.push(Fixture {
-        name: "pager-single",
-        component: "Pager",
-        props: serde_json::json!({
-            "paginator": list.paginator,
-            "kind": rendered.model.kind,
-            "base": rendered.model.base,
-        }),
-        html: outer(&rendered.document, "[data-static-feed] > nav.pager"),
-    });
-
-    // Scoped lists: their heading, error notice, toolbar and pager.
-    let scoped = [
-        ("source", "Blog", "sources/blog/", Some(source(false)), None),
-        (
-            "source-error",
-            "Blog",
-            "sources/blog/",
-            Some(source(true)),
-            None,
-        ),
-        (
-            "category",
-            "Engineering",
-            "categories/engineering/",
-            None,
-            Some(category()),
-        ),
-        (
-            "tag",
-            "Engineering",
-            "tags/engineering/",
-            None,
-            Some(category()),
-        ),
-    ];
-    for (name, title, prefix, source, category) in scoped {
-        let kind = name.split('-').next().unwrap();
-        let rendered = render_list(
-            &site,
-            kind,
-            title,
-            prefix,
-            &many,
-            source.as_ref(),
-            category.as_ref(),
-            3,
-            1,
-        );
-        let ClientView::List(list) = &rendered.model.page else {
-            unreachable!()
-        };
-        out.push(Fixture {
-            name: Box::leak(format!("listhead-{name}").into_boxed_str()),
-            component: "ListHead",
-            props: serde_json::json!({
-                "kind": rendered.model.kind,
-                "scope": list.scope,
-                "error": list.error,
-            }),
-            html: outer(&rendered.document, ".listhead"),
-        });
-        out.push(Fixture {
-            name: Box::leak(format!("toolbar-{name}").into_boxed_str()),
-            component: "Toolbar",
-            props: serde_json::json!({
-                "kind": rendered.model.kind,
-                "scope": list.scope,
-                "base": rendered.model.base,
-            }),
-            html: outer(&rendered.document, ".feed-toolbar, [data-search-results]"),
-        });
-        out.push(Fixture {
-            name: Box::leak(format!("pager-{name}").into_boxed_str()),
-            component: "Pager",
-            props: serde_json::json!({
-                "paginator": list.paginator,
-                "kind": rendered.model.kind,
-                "base": rendered.model.base,
-            }),
-            html: outer(&rendered.document, "[data-static-feed] > nav.pager"),
-        });
-        out.push(Fixture {
-            name: Box::leak(format!("header-{name}").into_boxed_str()),
-            component: "Header",
-            props: serde_json::json!({
-                "kind": rendered.model.kind,
-                "base": rendered.model.base,
-                "site": rendered.client_site,
-            }),
-            html: outer(&rendered.document, "header.top, nav.mobile-tabs"),
-        });
-    }
-    let rendered = render_list(&site, "river", "Reader", "", &many, None, None, 50, 0);
-    out.push(Fixture {
-        name: "toolbar-river",
-        component: "Toolbar",
-        props: serde_json::json!({
-            "kind": rendered.model.kind,
-            "scope": null,
-            "base": rendered.model.base,
-        }),
-        html: outer(&rendered.document, ".feed-toolbar, [data-search-results]"),
-    });
-    out.push(Fixture {
-        name: "header-river",
-        component: "Header",
-        props: serde_json::json!({
-            "kind": rendered.model.kind,
-            "base": rendered.model.base,
-            "site": rendered.client_site,
-        }),
-        html: outer(&rendered.document, "header.top, nav.mobile-tabs"),
-    });
-
-    // Articles: the header chrome and the footer cards.
-    let (_, full) = rows().into_iter().nth(1).unwrap();
-    let (_, plain) = rows().into_iter().next().unwrap();
-    let mut article = full.clone();
+    let mut rows = rows().into_iter();
+    let (_, plain) = rows.next().unwrap();
+    let (_, mut article) = rows.next().unwrap();
     article.body_html = Some("<p>Body</p>".into());
     article.authors = vec!["Ada".into(), "Grace".into()];
     article.resources = vec![
@@ -642,71 +377,10 @@ fn fixtures() -> Vec<Fixture> {
     article.next_article = Some(ClientRow::from(&plain));
     article.recommended_articles = vec![ClientRow::from(&many[0]), ClientRow::from(&many[1])];
     refresh(&mut article);
-    let mut titles_only = context(&item("titles", "Titles only", 3, ""), None, "");
-    refresh(&mut titles_only);
-    let mut missing = context(
-        &item("missing", "Article text not captured", 1, ""),
-        None,
-        "",
-    );
-    missing.content = ContentKind::Feed;
-    refresh(&mut missing);
-    let mut subscription = context(&item("wall", "Behind a paywall", 4, BODY), None, "");
-    subscription.body_html = Some("<p>Teaser</p>".into());
-    subscription
-        .extra
-        .insert("subscription_required".into(), true.into());
-    subscription.extra.insert(
-        "archive_lookup_url".into(),
-        "https://archive.example/search?q=wall".into(),
-    );
-    refresh(&mut subscription);
-    let mut bare = plain.clone();
-    bare.body_html = Some("<p>Body</p>".into());
-    refresh(&mut bare);
-    for (name, item) in [
-        ("article-full", &article),
-        ("article-titles-only", &titles_only),
-        ("article-missing", &missing),
-        ("article-subscription", &subscription),
-        ("article-bare", &bare),
-    ] {
-        let rendered = render_article(&site, item);
-        let ClientView::Article(model) = &rendered.model.page else {
-            unreachable!()
-        };
-        out.push(Fixture {
-            name,
-            component: "ArticleHeader",
-            props: serde_json::json!({
-                "article": model,
-                "base": rendered.model.base,
-                "language": rendered.client_site.language,
-            }),
-            html: article_head(&rendered.document),
-        });
-        if item.next_article.is_some() || !item.recommended_articles.is_empty() {
-            out.push(Fixture {
-                name: Box::leak(format!("{name}-footer").into_boxed_str()),
-                component: "ArticleFooter",
-                props: serde_json::json!({
-                    "next": model.next,
-                    "recommended": model.recommended,
-                    "base": rendered.model.base,
-                }),
-                html: outer(&rendered.document, "footer.article-footer"),
-            });
-        }
-    }
-
-    // Whole pages: what `App` renders inside `#app` (boot creates that root) for each
-    // client-rendered or adopted kind.
-    // Adopted regions (the article's content, a static page's main) are emptied on the fixture
-    // side because the server renderer has no DOM to adopt them from.
+    let mut out = Vec::new();
     let rendered = render_list(&site, "river", "Reader", "", &many, None, None, 3, 0);
     out.push(Fixture {
         name: "page-river",
-        component: "App",
         props: serde_json::json!({ "page": rendered.model }),
         html: inner(&rendered.document, "#app"),
     });
@@ -723,14 +397,12 @@ fn fixtures() -> Vec<Fixture> {
     );
     out.push(Fixture {
         name: "page-source-error",
-        component: "App",
         props: serde_json::json!({ "page": rendered.model }),
         html: inner(&rendered.document, "#app"),
     });
     let rendered = render_article(&site, &article);
     out.push(Fixture {
         name: "page-article",
-        component: "App",
         props: serde_json::json!({ "page": rendered.model }),
         html: strip_children(
             &inner(&rendered.document, "#app"),
@@ -741,7 +413,6 @@ fn fixtures() -> Vec<Fixture> {
     let rendered = render_static(&site, "browse", "Browse", "browse/", "browse.html");
     out.push(Fixture {
         name: "page-browse",
-        component: "App",
         props: serde_json::json!({ "page": rendered.model }),
         html: strip_children(&inner(&rendered.document, "#app"), "<main", "main"),
     });
@@ -766,7 +437,6 @@ fn parity_fixtures_match_the_templates() {
             fixture.name
         );
         let json = serde_json::to_string_pretty(&serde_json::json!({
-            "component": fixture.component,
             "props": fixture.props,
         }))
         .unwrap()

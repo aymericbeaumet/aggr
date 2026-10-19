@@ -1,8 +1,8 @@
-import type { ClientRow } from '../generated/ClientRow';
+import type { ClientSearchRow } from '../generated/ClientSearchRow';
 import type { Completion } from '../search/completion';
 
 /** One page of results, as the list draws them. */
-export type ResultPage = { rows: ClientRow[]; total: number; page: number; pages: number; size: number };
+export type ResultPage = { rows: ClientSearchRow[]; total: number; page: number; pages: number; size: number };
 
 export type Scope = { kind: string; slug: string } | null;
 

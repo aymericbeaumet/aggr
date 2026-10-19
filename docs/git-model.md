@@ -56,13 +56,13 @@ status.toml                                            sources currently failing
   alternate representations key on the path. The date is the upstream publication time, otherwise
   its update time, otherwise the time of first sight; the file is never moved. File names use
   lowercase ASCII slugs of at most 60 characters, with a stable item-derived hash on collision.
-- **Bodies are written once.** A normal sync never rewrites an item's Markdown body and never
-  moves its path. Enrichment fills in place and never removes existing content: a publisher feed
+- **Item paths and history are stable.** Sync never moves an item's path. Enrichment fills in place and never removes existing content: a publisher feed
   can supply a missing audio URL or duration, and missing image and preview companions are
   repaired beside the item. A feed-only capture is upgraded to the original article when the page
   becomes available, keeping its path and dates. Hand edits to `hidden`, `labels`, `authors`, and
-  `first_seen` win over all of these. `aggr sync --refresh` and `--reprocess` are the explicit
-  exceptions that replace bodies, and the previous version remains in Git history.
+  `first_seen` win over all of these. `aggr sync --refresh` replaces bodies from remote pages. Sync also re-derives bodies from complete
+  retained HTML when extraction code or inputs change; unchanged conversions are skipped. These
+  updates can replace body edits, and previous versions remain in Git history.
 - **State is regenerated.** `sources/<source>/state.toml` holds what the next fetch needs:
   `identity` is a hash of the unexpanded fetch inputs (credentials and `${ENV}` values never enter
   history) that invalidates the discovered `resolved_url` when the config changes, alongside the

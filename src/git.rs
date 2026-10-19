@@ -52,6 +52,7 @@ impl Worktree {
     }
 
     /// A non-git store used by `aggr dev`; its owner controls the temporary directory lifetime.
+    #[cfg(any(debug_assertions, test))]
     pub fn ephemeral(dir: PathBuf) -> Self {
         Self {
             dir,

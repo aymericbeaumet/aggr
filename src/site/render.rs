@@ -58,6 +58,7 @@ impl Theme {
     }
 
     /// Read `templates/` and `static/` under `dir` before the embedded copy.
+    #[cfg(any(debug_assertions, test))]
     pub(crate) fn from_source_tree(dir: impl Into<PathBuf>) -> Self {
         Self {
             source: Some(dir.into()),
@@ -324,6 +325,7 @@ impl Renderer {
     /// Copy every static file into `<out>/assets/`.
     /// Freeze every effective template before exposing a lazy dev generation. A later edit may
     /// create a new generation, but cannot change an in-flight page from this one.
+    #[cfg(any(debug_assertions, test))]
     pub(crate) fn freeze_templates(&self) -> Result<()> {
         for name in self.theme.template_names()? {
             self.env.get_template(&name)?;
@@ -938,10 +940,11 @@ mod tests {
         assert!(!preferences.contains("preferences-config"));
         assert!(!preferences.contains(">aggr.toml <span aria-hidden=\"true\">↗</span></a>"));
         assert!(preferences.contains("<noscript>"));
-        // The client renders every control from the schema the page embeds; the template ships
-        // only the shell and its no-JavaScript note.
-        assert!(!preferences.contains("<select"));
-        assert!(!preferences.contains("data-preference="));
+        // Rust owns the form; the browser enables it after applying stored values.
+        assert!(preferences.contains("site.preference_schema.groups"));
+        assert!(preferences.contains("<select"));
+        assert!(preferences.contains("data-preference="));
+        assert!(preferences.contains("disabled hidden"));
 
         let base_file = DefaultTheme::get("templates/base.html").unwrap();
         let base = std::str::from_utf8(base_file.data.as_ref()).unwrap();

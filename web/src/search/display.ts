@@ -1,4 +1,5 @@
 import type { ClientRow } from '../generated/ClientRow';
+import type { ClientSearchRow } from '../generated/ClientSearchRow';
 import type { PagefindResult } from './types';
 
 /**
@@ -28,22 +29,32 @@ export function isClientRow(value: unknown): value is ClientRow {
   return Array.isArray(metadata.feed_sources) && Array.isArray(metadata.discussions);
 }
 
-function decode(result: PagefindResult): ClientRow | null {
+export function isSearchRow(value: unknown): value is ClientSearchRow {
+  return isClientRow(value) && 'html' in value && typeof value.html === 'string';
+}
+
+export class SearchIndexUpgrade extends Error {
+  constructor() { super('This saved search index needs updating. Reconnect and refresh the offline download to search it.'); }
+}
+
+function decode(result: PagefindResult): ClientSearchRow | null {
   try {
     const hex = result.meta?.aggr_display || '';
     if (!/^(?:[0-9a-f]{2})+$/i.test(hex)) return null;
     const bytes = Uint8Array.from(hex.match(/../g) || [], (part) => Number.parseInt(part, 16));
     const value: unknown = JSON.parse(new TextDecoder().decode(bytes));
-    return isClientRow(value) ? value : null;
-  } catch {
+    if (isClientRow(value) && !isSearchRow(value)) throw new SearchIndexUpgrade();
+    return isSearchRow(value) ? value : null;
+  } catch (error) {
+    if (error instanceof SearchIndexUpgrade) throw error;
     return null;
   }
 }
 
-const rows = new WeakMap<PagefindResult, ClientRow | null>();
+const rows = new WeakMap<PagefindResult, ClientSearchRow | null>();
 
 /** The row of a hydrated result, decoded once per result snapshot. */
-export function displayRow(result: PagefindResult): ClientRow | null {
+export function displayRow(result: PagefindResult): ClientSearchRow | null {
   let row = rows.get(result);
   if (row === undefined) rows.set(result, (row = decode(result)));
   return row;
@@ -71,7 +82,7 @@ export function excerptText(html: string): string {
  * highlights nothing (a query of filters alone, or one that matched the metadata) says less
  * than the article's summary, which the feed row shows too.
  */
-export function resultRow(result: PagefindResult): ClientRow | null {
+export function resultRow(result: PagefindResult): ClientSearchRow | null {
   const row = displayRow(result);
   if (!row) return null;
   const excerpt = result.excerpt;

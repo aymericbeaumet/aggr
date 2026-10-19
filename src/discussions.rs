@@ -116,6 +116,7 @@ fn providers_for<'a>(
 }
 
 /// Reuse previous matches while dev refreshes its sources, without waiting for providers.
+#[cfg(any(debug_assertions, test))]
 pub fn cached(
     defaults: &[NetworkConfig],
     by_source: &BTreeMap<String, Vec<NetworkConfig>>,

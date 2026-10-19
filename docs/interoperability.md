@@ -476,9 +476,9 @@ original-page capture.
 Consecutive numbered citations stay inline, as does prose following a link. Intentional HTML
 line breaks remain intact; action-link layout rules must not split citations or ordinary prose.
 
-`--reprocess` can recover these semantics when the retained HTML still contains them. Language
+Automatic reprocessing during sync can recover these semantics when the retained HTML still contains them. Language
 metadata discarded by an older extraction needs an original-page extraction; it cannot be reliably
-reconstructed from the stored code alone. Extraction cache versions change with these rules.
+reconstructed from the stored code alone. Extraction fingerprints track implementation changes automatically.
 Reprocessing covers articles the current config still retains and runs before source fetching.
 A source removed from the config is dropped by retention first.
 

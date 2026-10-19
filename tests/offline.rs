@@ -161,6 +161,60 @@ fn failed_hermetic_build_preserves_previous_output() {
 }
 
 #[test]
+fn build_reuses_output_without_a_duplicate_and_budget_failure_preserves_it() {
+    let tmp = archive("Article text must remain available when publication exceeds its budget.");
+    let root = tmp.path();
+    for cached in [false, true] {
+        aggr_command(root)
+            .env("SOURCE_DATE_EPOCH", "1790856000")
+            .args(["build", "--offline", "--report", "report.json"])
+            .assert()
+            .success();
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("report.json")).unwrap()).unwrap();
+        assert_eq!(report["render_cache_hit"], cached);
+        let receipt = root.join(".aggr/cache/build-v1/render-v1");
+        assert!(receipt.join("manifest.toml").is_file());
+        assert!(!receipt.join("site").exists());
+    }
+    for temporary in [
+        ".aggr-build-in-progress/site/index.html",
+        ".aggr-publish-in-progress/previous/index.html",
+    ] {
+        assert!(!git(root, &["check-ignore", temporary]).unwrap().is_empty());
+    }
+    let previous = std::fs::read(root.join("_site/index.html")).unwrap();
+    let config = root.join("aggr.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        text.replace("[site]", "[site]\nbuild_max_bytes = 1"),
+    )
+    .unwrap();
+    for arguments in [
+        vec!["build", "--offline"],
+        vec!["build", "--offline", "--release"],
+    ] {
+        aggr_command(root)
+            .env("SOURCE_DATE_EPOCH", "1790856000")
+            .args(arguments)
+            .assert()
+            .failure();
+        assert_eq!(
+            std::fs::read(root.join("_site/index.html")).unwrap(),
+            previous
+        );
+    }
+    assert!(!std::fs::read_dir(root).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".aggr-build-")
+    }));
+}
+
+#[test]
 fn hermetic_build_uses_retained_images_and_a_pinned_clock() {
     use sha1::{Digest as _, Sha1};
     let tmp = archive("A preserved ![diagram](https://example.com/image.png).");

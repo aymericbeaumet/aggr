@@ -6,7 +6,7 @@ use std::process::Command;
 
 use anyhow::{Context as _, Result, bail};
 
-use super::{Project, dev::DevLock};
+use super::{Project, lock::DevLock};
 use crate::cli::CleanArgs;
 use crate::config::Config;
 

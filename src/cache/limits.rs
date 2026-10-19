@@ -36,6 +36,17 @@ impl std::fmt::Display for LimitReport {
 }
 
 const MAX_RECENT_ENTRIES: usize = 65_536;
+const MAX_RESPONSE_ENTRIES: usize = 65_536;
+const RESPONSE_NAMESPACES: [Namespace; 8] = [
+    Namespace::Articles,
+    Namespace::Discussions,
+    Namespace::ValidatedImages,
+    Namespace::ImageFailures,
+    Namespace::CaptureRetries,
+    Namespace::RecordingDuration,
+    Namespace::FeedParsing,
+    Namespace::Budget,
+];
 static RECENT: OnceLock<Mutex<BTreeMap<PathBuf, SystemTime>>> = OnceLock::new();
 
 /// Usage is process-local: a hit neither rewrites a cached byte nor changes a file timestamp.
@@ -71,8 +82,9 @@ fn take_recent(root: &Path) -> BTreeSet<PathBuf> {
 }
 
 /// Enforce configured caps after workers finish. Failure only concerns disposable state; callers
-/// may warn and retain an otherwise successful sync/build. No directory outside these two
-/// namespaces is considered, and symlinked namespaces or entries are refused before any removal.
+/// may warn and retain an otherwise successful sync/build. Publication images have their own
+/// allowance; page responses and small derived state share one byte and file-count allowance.
+/// Only registered namespaces are considered; symlinked roots and entries are refused.
 pub fn enforce_limits(root: &Path, limits: &crate::config::CacheConfig) -> Result<LimitReport> {
     ensure!(
         !std::fs::symlink_metadata(root)?.file_type().is_symlink(),
@@ -84,7 +96,11 @@ pub fn enforce_limits(root: &Path, limits: &crate::config::CacheConfig) -> Resul
             limits.media_max_bytes,
             crate::site::compressed_media::implementation_key(),
         )?,
-        responses: enforce_responses(&Namespace::Articles.dir(root), limits.response_max_bytes)?,
+        responses: enforce_responses(
+            &RESPONSE_NAMESPACES.map(|namespace| namespace.dir(root)),
+            limits.response_max_bytes,
+            MAX_RESPONSE_ENTRIES,
+        )?,
     })
 }
 
@@ -206,9 +222,14 @@ fn enforce_media(root: &Path, limit: u64, generation: &str) -> Result<Usage> {
     Ok(usage)
 }
 
-fn enforce_responses(root: &Path, limit: u64) -> Result<Usage> {
-    let recent = take_recent(root);
-    let mut files = files(root)?;
+fn enforce_responses(roots: &[PathBuf], limit: u64, max_entries: usize) -> Result<Usage> {
+    let mut recent = BTreeSet::new();
+    let mut files = Vec::new();
+    for root in roots {
+        recent.extend(take_recent(root));
+        files.extend(self::files(root)?);
+    }
+    let mut remaining = files.len();
     let before_bytes = files.iter().map(|file| file.bytes).sum();
     let mut usage = Usage {
         before_bytes,
@@ -223,10 +244,11 @@ fn enforce_responses(root: &Path, limit: u64) -> Result<Usage> {
         )
     });
     for file in files {
-        if usage.after_bytes <= limit {
+        if usage.after_bytes <= limit && remaining <= max_entries {
             break;
         }
         remove(&file, &mut usage)?;
+        remaining = remaining.saturating_sub(1);
     }
     Ok(usage)
 }
@@ -283,6 +305,85 @@ mod tests {
     }
 
     #[test]
+    fn response_budget_covers_lookup_and_validation_state_without_touching_archive_or_outputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cache");
+        let namespaces = [
+            Namespace::Articles,
+            Namespace::Discussions,
+            Namespace::ValidatedImages,
+            Namespace::ImageFailures,
+            Namespace::CaptureRetries,
+            Namespace::RecordingDuration,
+            Namespace::FeedParsing,
+            Namespace::Budget,
+        ];
+        let state: Vec<_> = namespaces
+            .into_iter()
+            .map(|namespace| put(&namespace.dir(&root), "old-state", &[1; 10]))
+            .collect();
+        let active = &state[1];
+        mark_used(active);
+        let protected = [
+            put(temp.path(), "data/items/master.png", &[2; 40]),
+            put(&Namespace::Render.dir(&root), "manifest.toml", &[3; 40]),
+            put(
+                &Namespace::Pagefind.dir(&root),
+                "site/pagefind.js",
+                &[4; 40],
+            ),
+        ];
+        let report = enforce_limits(
+            &root,
+            &crate::config::CacheConfig {
+                media_max_bytes: 100,
+                response_max_bytes: 20,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.responses.before_bytes, 80);
+        assert_eq!(report.responses.after_bytes, 20);
+        assert_eq!(report.responses.removed_files, 6);
+        assert!(
+            active.exists(),
+            "recently used lookup state is preferred to inactive responses"
+        );
+        assert!(
+            protected
+                .iter()
+                .all(|path| path.metadata().unwrap().len() == 40)
+        );
+    }
+
+    #[test]
+    fn response_namespaces_cover_every_cache_except_single_generation_output_and_media() {
+        let mut classified = BTreeSet::from([
+            Namespace::Render,
+            Namespace::Pagefind,
+            Namespace::DeploymentMedia,
+        ]);
+        classified.extend(RESPONSE_NAMESPACES);
+        assert_eq!(classified, Namespace::ALL.into_iter().collect());
+    }
+
+    #[test]
+    fn entry_count_bounds_small_file_overhead_even_below_the_byte_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let articles = Namespace::Articles.dir(temp.path());
+        let lookups = Namespace::Discussions.dir(temp.path());
+        let old = put(&articles, "old", b"");
+        let later = put(&articles, "later", b"");
+        let active = put(&lookups, "active", b"");
+        mark_used(&active);
+        let report = enforce_responses(&[articles, lookups], 100, 2).unwrap();
+        assert_eq!(report.before_bytes, 0);
+        assert_eq!(report.after_bytes, 0);
+        assert_eq!(report.removed_files, 1);
+        assert!(active.exists());
+        assert_eq!([old, later].iter().filter(|path| path.exists()).count(), 1);
+    }
+
+    #[test]
     fn response_cap_is_exact_and_does_not_touch_adjacent_archive() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("cache");
@@ -291,12 +392,18 @@ mod tests {
         let active = put(&responses, "bodies/live.html", &[2; 15]);
         let archive = put(temp.path(), "data/items/master.png", &[3; 30]);
         mark_used(&active);
-        let report = enforce_responses(&responses, 15).unwrap();
+        let report =
+            enforce_responses(std::slice::from_ref(&responses), 15, MAX_RESPONSE_ENTRIES).unwrap();
         assert_eq!(report.after_bytes, 15);
         assert!(!inactive.exists());
         assert!(active.exists());
         assert_eq!(std::fs::read(archive).unwrap(), [3; 30]);
-        assert_eq!(enforce_responses(&responses, 15).unwrap().removed_files, 0);
+        assert_eq!(
+            enforce_responses(&[responses], 15, MAX_RESPONSE_ENTRIES)
+                .unwrap()
+                .removed_files,
+            0
+        );
     }
 
     #[cfg(unix)]
@@ -308,7 +415,32 @@ mod tests {
         let root = temp.path().join("cache");
         std::fs::create_dir_all(&root).unwrap();
         std::os::unix::fs::symlink(&archive, Namespace::Articles.dir(&root)).unwrap();
-        assert!(enforce_responses(&Namespace::Articles.dir(&root), 1).is_err());
+        assert!(
+            enforce_responses(&[Namespace::Articles.dir(&root)], 1, MAX_RESPONSE_ENTRIES).is_err()
+        );
         assert!(original.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn redirected_lookup_namespaces_abort_before_evicting_any_response() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("archive");
+        let original = put(&archive, "master.png", &[3; 30]);
+        let root = temp.path().join("cache");
+        let response = put(&Namespace::Articles.dir(&root), "response", &[1; 10]);
+        std::os::unix::fs::symlink(&archive, Namespace::Discussions.dir(&root)).unwrap();
+        assert!(
+            enforce_limits(
+                &root,
+                &crate::config::CacheConfig {
+                    media_max_bytes: 100,
+                    response_max_bytes: 1,
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(original).unwrap(), [3; 30]);
+        assert_eq!(std::fs::read(response).unwrap(), [1; 10]);
     }
 }

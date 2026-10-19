@@ -1,4 +1,5 @@
 import { flushSync } from 'svelte';
+import { enhancePage, releasePage } from '../app/content';
 import { extract, parseDocument } from '../model/extract';
 import { sitePath } from '../model/urls';
 import { page } from '../state/page.svelte';
@@ -141,7 +142,7 @@ function prefetch(href: string, guess = false): void {
   const store = pages();
   if (guess && (frugal(navigator.connection) || !speculation.admit(store.has(key)))) return;
   if (!guess) intent.add(key);
-  const record = store.load(url.href);
+  const record = store.load(key);
   const parse = () => parseNow(key, record);
   if (record.fetched) {
     if (guess) enqueueParse(parse);
@@ -257,7 +258,7 @@ async function go(href: string, { replace = false, traverse = false, from = null
   phase = 'fetching';
   acknowledge(from);
   intent.add(address(url.href));
-  const record = pages().load(url.href);
+  const record = pages().load(address(url.href));
   // A page already in memory is on screen before the click handler returns. Waiting would
   // cost a frame, which is the whole of the delay a reader can feel.
   const show = (fetched: Fetched): void => {
@@ -267,6 +268,12 @@ async function go(href: string, { replace = false, traverse = false, from = null
     tabIntent.route = null;
     pending = false;
     waiting(false);
+    const destination = new URL(fetched.url, url.href);
+    if (!routable(destination, root())) {
+      fallback(url.href, traverse);
+      return;
+    }
+    destination.hash = url.hash;
     const doc = record.parsed ?? parseDocument(fetched.html);
     // The parsed page is taken apart by the swap; the next visit parses its own copy.
     record.parsed = null;
@@ -277,17 +284,29 @@ async function go(href: string, { replace = false, traverse = false, from = null
     }
     phase = 'rendering';
     if (!traverse) {
+      const nextEntry = newKey();
+      try {
+        if (replace) history.replaceState({ aggr: { key: nextEntry } }, '', destination.href);
+        else history.pushState({ aggr: { key: nextEntry } }, '', destination.href);
+      } catch {
+        fallback(url.href, traverse);
+        return;
+      }
       leave();
-      const destination = new URL(fetched.url);
-      destination.hash = url.hash;
-      entry = newKey();
-      if (replace) history.replaceState({ aggr: { key: entry } }, '', destination.href);
-      else history.pushState({ aggr: { key: entry } }, '', destination.href);
+      entry = nextEntry;
     }
     current = address(location.href);
     patchHead(document, doc);
     syncBody(extracted.body);
+    const main = document.querySelector('main#content');
+    if (!(extracted.content instanceof HTMLElement) || !main) {
+      fallback(url.href, traverse);
+      return;
+    }
+    releasePage();
+    main.replaceWith(extracted.content);
     page.show({ model: extracted.model, content: extracted.content, href: location.href });
+    enhancePage(extracted.content, extracted.model);
     flushSync();
     opening = null;
     const saved = traverse
@@ -480,6 +499,8 @@ function installTabActivation(): void {
         return;
       }
       event.preventDefault();
+      // Scrolling may have canceled the pointer, so no pointerup remains to clear its feedback.
+      for (const pressed of gesture.bar.querySelectorAll('[data-pressed]')) pressed.removeAttribute('data-pressed');
       link.click();
     },
     { passive: false },

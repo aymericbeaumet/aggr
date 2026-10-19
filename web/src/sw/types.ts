@@ -87,6 +87,8 @@ export interface WorkerEnv {
   clients: ClientsLike;
   skipWaiting(): Promise<void>;
   navigationPreload?: { enable(): Promise<void> } | null;
+  /** Shared by overlapping worker generations where Web Locks are available. */
+  locks?: Pick<LockManager, 'request'> | null;
   config: SwConfig;
   /** Test hook; production uses the defaults from `caches.ts`. */
   timeouts?: Partial<Timeouts>;

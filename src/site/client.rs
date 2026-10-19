@@ -1,5 +1,5 @@
 //! The typed page model the reader boots from. Every HTML page embeds one `ClientPage` as JSON
-//! (`<script id="aggr-model">`); the Svelte client mounts from it instead of reading the DOM, and
+//! (`<script id="aggr-page">`); the client enhances the Rust-rendered document from this model, and
 //! `ts-rs` exports these structs to `web/src/generated/` so both sides share one contract. Field
 //! names stay snake_case, matching the templates and the other JSON outputs. Every URL is a site
 //! path (relative to the site root), which the client joins onto `base` once.
@@ -71,8 +71,8 @@ pub struct ClientBuild {
     pub content: String,
 }
 
-/// What the page shows. Lists and articles are client-rendered; preferences and the offline page
-/// are client-only; everything else is static markup the client adopts whole.
+/// The behavior available on a Rust-rendered page. Navigation adopts its static markup;
+/// interactive islands use these typed values without duplicating page templates.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[serde(tag = "view", content = "data", rename_all = "snake_case")]
@@ -131,6 +131,38 @@ pub struct ClientRow {
     pub labels: Vec<ClientLabel>,
     pub preview: Option<ClientPreview>,
     pub metadata: Metadata,
+}
+
+/// A search result carries the same Rust-rendered row as a static feed. The fragment's local
+/// URLs are relative to the site root; the client resolves them before inserting it on any page.
+/// Initial page models omit this HTML because their rows already exist in the document.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct ClientSearchRow {
+    #[serde(flatten)]
+    pub row: ClientRow,
+    pub html: String,
+}
+
+impl ClientSearchRow {
+    pub(super) fn render(
+        renderer: &super::render::Renderer,
+        site: &SiteCtx,
+        item: &ItemCtx,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            row: ClientRow::from(item),
+            html: renderer.render(
+                "_item.html",
+                minijinja::context! {
+                    site => site,
+                    item => item,
+                    page => minijinja::context! { root => "" },
+                    rank => 1,
+                },
+            )?,
+        })
+    }
 }
 
 /// A topic label with the slug its tag page and query use.

@@ -7,7 +7,7 @@ import { mountApp } from '../app/boot';
 import type { ClientRow } from '../generated/ClientRow';
 import { search } from '../state/search.svelte';
 import { selection } from '../state/selection.svelte';
-import { hex, row } from './fixture';
+import { hex, row, searchRow } from './fixture';
 import type { Index, SearchPage, Session } from './engine';
 import type { Catalog } from './types';
 
@@ -27,7 +27,7 @@ vi.mock('./engine', () => {
       fake.runs.push(query.raw);
       const results = fake.results.map(({ url, title }) => ({
         url,
-        meta: { title, aggr_display: hex({ ...row, url, path: url.replace(/\/$/, ''), title } satisfies ClientRow) },
+        meta: { title, aggr_display: hex(searchRow({ ...row, url, path: url.replace(/\/$/, ''), title } satisfies ClientRow)) },
       }));
       return { results, total: results.length, page: 1, pages: 1, size: 50 };
     },
@@ -80,6 +80,32 @@ describe('search on the feed', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('accepts a change-only clear before focus and subsequent typing', () => {
+    type('article');
+    const input = field();
+    input.value = '';
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.focus();
+    flushSync();
+    expect(input.value).toBe('');
+    expect(search.text).toBe('');
+    input.value += 'j';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(input.value).toBe('j');
+    expect(search.text).toBe('j');
+  });
+
+  it('does not rewrite a native field edit when only suggestion visibility changes', () => {
+    type('article');
+    const input = field();
+    input.value = '';
+    search.open = !search.open;
+    search.revealed = !search.revealed;
+    flushSync();
+    expect(input.value).toBe('');
   });
 
   it('hides the static feed as soon as a query is typed and shows the results in its place', async () => {

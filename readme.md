@@ -32,13 +32,16 @@ GitHub setup publishes the reader and its archive publicly. See [sources](docs/s
 To try it on your machine:
 
 ```sh
-mise use -g github:aymericbeaumet/aggr   # or download a binary from Releases
+mise use -g github:aymericbeaumet/aggr@2.0.0  # or download a binary from Releases
 mkdir reads && cd reads && git init
 aggr init
-aggr dev                             # http://127.0.0.1:7319
+aggr build                          # saves the archive and writes _site/
 ```
 
-`dev` does not commit or push.
+The build records articles on a local `aggr` branch. It pushes that branch when an `origin`
+remote is configured. Serve `_site/` with any static HTTP server.
+For the contributor preview with Vite HMR and automatic Rust restarts, use
+`cargo run -- dev` from this repository; see [client development](docs/client.md).
 
 ## How is it different?
 

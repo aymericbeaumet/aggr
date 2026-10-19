@@ -3,6 +3,7 @@
 
 import { ASSET_LIMIT, PAGE_LIMIT, trim } from './caches';
 import type { WorkerContext } from './context';
+import { protectedResponse } from './protected';
 import type { FetchEventLike } from './types';
 
 export type Route = 'page' | 'asset' | 'mutable';
@@ -44,12 +45,22 @@ async function fromNetwork(ctx: WorkerContext, request: Request, timeout: number
 
 /** The last good copy of this page, else the page that explains why there is none. */
 async function lastKnown(ctx: WorkerContext, request: Request): Promise<Response | undefined> {
-  const protectedPages = await ctx.caches.open(ctx.names.offlinePages);
   return (
-    (await protectedPages.match(request, { ignoreSearch: true })) ||
-    (await ctx.caches.match(request, { ignoreSearch: true })) ||
-    (await ctx.caches.match(ctx.offlinePage))
+    (await protectedResponse(ctx, request, true)) ||
+    (await runtimeResponse(ctx, request, { ignoreSearch: true })) ||
+    (await runtimeResponse(ctx, ctx.offlinePage))
   );
+}
+
+/** Protected caches contain staged revisions too, so only their committed lookup may read them. */
+async function runtimeResponse(ctx: WorkerContext, request: RequestInfo, options?: CacheQueryOptions): Promise<Response | undefined> {
+  const names = [ctx.names.shell, ctx.names.pages, ctx.names.assets,
+    ...(await ctx.caches.keys()).filter((name) => name.startsWith(ctx.names.offlineSearchPrefix))];
+  for (const name of names) {
+    const response = await (await ctx.caches.open(name)).match(request, options);
+    if (response) return response;
+  }
+  return undefined;
 }
 
 /** A promise held to the same deadline a fetch of our own would get; `null` when it passes. */
@@ -100,8 +111,7 @@ export async function assetResponse(
   name: string,
   limit: number,
 ): Promise<Response> {
-  const protectedPages = await ctx.caches.open(ctx.names.offlinePages);
-  const cached = (await protectedPages.match(request)) || (await ctx.caches.match(request));
+  const cached = (await protectedResponse(ctx, request)) || (await runtimeResponse(ctx, request));
   if (cached) return cached;
   const response = await ctx.fetch(request);
   if (response.ok) {
@@ -114,7 +124,7 @@ export async function assetResponse(
 
 /** Mutable files: current when possible, any cached copy otherwise, and a network error last. */
 export function mutableResponse(ctx: WorkerContext, request: Request): Promise<Response> {
-  return pageResponse(ctx, request).catch(async () => (await ctx.caches.match(request)) || Response.error());
+  return pageResponse(ctx, request).catch(async () => (await runtimeResponse(ctx, request)) || Response.error());
 }
 
 export function handleFetch(ctx: WorkerContext, event: FetchEventLike): void {

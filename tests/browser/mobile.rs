@@ -741,24 +741,31 @@ async fn mobile_feed_search_stays_below_header_while_articles_and_results_scroll
             client.goto(&fixture.base).await?;
             wait_booted_with(&client,"document.querySelectorAll('[data-static-feed] .row').length>=20").await?;
             client.execute("window.__feedToolbarTop=document.querySelector('.feed-toolbar').getBoundingClientRect().top",vec![]).await?;
-            client.execute("scrollTo(0,700)",vec![]).await?;
-            wait_for(&client,"scrollY>=600 && Math.abs(document.querySelector('.feed-toolbar').getBoundingClientRect().top-document.querySelector('.top').getBoundingClientRect().bottom)<1").await?;
+            client.execute(r#"
+              window.__focusScrollCalls=[];
+              window.addEventListener('keydown',event=>{if(event.key==='/')window.__focusScrollCalls.push({method:'keydown',key:event.key,scroll:scrollY,field:document.querySelector('#q').getBoundingClientRect().toJSON(),height:document.documentElement.scrollHeight})},true);
+              const originalScrollTo=window.scrollTo,originalScrollIntoView=Element.prototype.scrollIntoView;
+              window.scrollTo=function(...args){window.__focusScrollCalls.push({method:'scrollTo',args,stack:new Error().stack});return originalScrollTo.apply(this,args)};
+              Element.prototype.scrollIntoView=function(...args){window.__focusScrollCalls.push({method:'scrollIntoView',element:this.outerHTML.slice(0,180),top:this.getBoundingClientRect().top,args,stack:new Error().stack});return originalScrollIntoView.apply(this,args)};
+            "#,vec![]).await?;
+            client.execute("scrollTo({top:700,behavior:'instant'})",vec![]).await?;
+            wait_for(&client,"Math.abs(scrollY-700)<1 && Math.abs(document.querySelector('.feed-toolbar').getBoundingClientRect().top-document.querySelector('.top').getBoundingClientRect().bottom)<1").await?;
             let pinned=client.execute(r#"
               const toolbar=document.querySelector('.feed-toolbar'),input=document.querySelector('#q'),box=input.getBoundingClientRect();
               const top=toolbar.getBoundingClientRect().top;
               return {position:getComputedStyle(toolbar).position,visible:document.elementFromPoint(box.x+box.width/2,box.y+box.height/2)===input,
-                separateResults:!toolbar.querySelector('[data-search-results]'),tabs:[...document.querySelectorAll('.mobile-tabs a')].map(a=>a.textContent.trim()),scroll:scrollY,
+                separateResults:!toolbar.querySelector('[data-search-results]'),tabs:[...document.querySelectorAll('.mobile-tabs a')].map(a=>a.textContent.trim()),scroll:scrollY,field:box.toJSON(),height:document.documentElement.scrollHeight,fonts:document.fonts.status,
                 still:Math.abs(top-window.__feedToolbarTop)<1};
             "#,vec![]).await?;
             anyhow::ensure!(pinned["position"]=="sticky" && pinned["visible"]==true && pinned["separateResults"]==true && pinned["still"]==true && pinned["tabs"]==json!(["feed","browse","preferences"]),"the search field stays where it loaded, pinned below the header: {pinned}");
             key(&client,"/").await?;
             wait_for(&client,"document.activeElement?.id==='q'").await?;
-            let focused_scroll=client.execute("return scrollY",vec![]).await?;
-            anyhow::ensure!((focused_scroll.as_f64().unwrap()-pinned["scroll"].as_f64().unwrap()).abs()<1.0,"focusing an already visible pinned search keeps the reading position");
+            let focused=client.execute("return {scroll:scrollY,width:innerWidth,height:document.documentElement.scrollHeight,fonts:document.fonts.status,field:document.querySelector('#q').getBoundingClientRect().toJSON(),header:document.querySelector('.top').getBoundingClientRect().toJSON(),calls:window.__focusScrollCalls}",vec![]).await?;
+            anyhow::ensure!((focused["scroll"].as_f64().unwrap()-pinned["scroll"].as_f64().unwrap()).abs()<1.0,"focusing an already visible pinned search keeps the reading position; before={pinned}, after={focused}");
             client.find(Locator::Css("#q")).await?.send_keys("source:\"publisher.invalid\"").await?;
             wait_for(&client,"document.querySelectorAll('[data-search-results] .row').length>=20").await?;
-            client.execute("document.querySelector('#q').blur();scrollTo(0,700)",vec![]).await?;
-            wait_for(&client,"scrollY>=600 && Math.abs(document.querySelector('.feed-toolbar').getBoundingClientRect().top-document.querySelector('.top').getBoundingClientRect().bottom)<1").await?;
+            client.execute("document.querySelector('#q').blur();scrollTo({top:700,behavior:'instant'})",vec![]).await?;
+            wait_for(&client,"Math.abs(scrollY-700)<1 && Math.abs(document.querySelector('.feed-toolbar').getBoundingClientRect().top-document.querySelector('.top').getBoundingClientRect().bottom)<1").await?;
             let results=client.execute("return {query:document.querySelector('#q').value,active:document.querySelector('.mobile-tabs [aria-current]')?.dataset.route,resultsTop:document.querySelector('[data-search-results]').getBoundingClientRect().top,fieldBottom:document.querySelector('.feed-toolbar').getBoundingClientRect().bottom,fieldTop:document.querySelector('.feed-toolbar').getBoundingClientRect().top,resting:window.__feedToolbarTop}",vec![]).await?;
             anyhow::ensure!(results["query"]=="source:\"publisher.invalid\"" && results["active"]=="" && results["resultsTop"].as_f64().unwrap()<results["fieldBottom"].as_f64().unwrap() && (results["fieldTop"].as_f64().unwrap()-results["resting"].as_f64().unwrap()).abs()<1.0,"results scroll independently under the field while Feed stays active: {results}");
             if width<640 {

@@ -94,7 +94,11 @@ describe('pageResponse', () => {
     const { ctx, state, storage } = harness();
     const url = `${scope}items/a/`;
     await (await storage.open(ctx.names.pages)).put(url, new Response('visited'));
-    await (await storage.open(ctx.names.offlinePages)).put(url, new Response('protected'));
+    await (await storage.open(ctx.names.legacyOfflinePages)).put(url, new Response('protected'));
+    await (await storage.open(ctx.names.offlineRevisions)).put(url, new Response('r'));
+    await (await storage.open(ctx.names.offlineSettings)).put(`${scope}__offline_articles`, Response.json([
+      { url: 'items/a/', title: 'Legacy article', resources: [{ url: 'items/a/', revision: 'r' }] },
+    ]));
     state.offline = true;
     expect(await (await pageResponse(ctx, new Request(url))).text()).toBe('protected');
   });
@@ -119,7 +123,7 @@ describe('assetResponse and trim', () => {
   it('answers from any cache before the network and remembers new assets within the bound', async () => {
     const { ctx, requests, storage } = harness();
     const url = `${scope}assets/images/${sha1}.webp`;
-    await (await storage.open(ctx.names.offlinePages)).put(url, new Response('protected image'));
+    await (await storage.open(ctx.names.assets)).put(url, new Response('protected image'));
     expect(await (await assetResponse(ctx, new Request(url), ctx.names.assets, 2)).text()).toBe('protected image');
     expect(requests).toHaveLength(0);
     for (const name of ['one', 'two', 'three']) {

@@ -17,7 +17,24 @@ pub(super) async fn with_test_endpoints<T>(
     lookup: Url,
     future: impl std::future::Future<Output = T>,
 ) -> T {
-    TEST_ENDPOINTS.scope((api, lookup), future).await
+    // Callers hold the mock servers throughout this scope. Reset only their origins because
+    // httpmock reuses pooled servers whose previous fixture may have left a provider cooldown.
+    let origins = [
+        api.origin().ascii_serialization(),
+        lookup.origin().ascii_serialization(),
+    ];
+    clear_test_provider_backoff(&origins).await;
+    let result = TEST_ENDPOINTS.scope((api, lookup), future).await;
+    clear_test_provider_backoff(&origins).await;
+    result
+}
+
+#[cfg(test)]
+async fn clear_test_provider_backoff(origins: &[String]) {
+    let mut providers = PROVIDERS.lock().await;
+    for origin in origins {
+        providers.remove(origin);
+    }
 }
 
 const DEADLINE: Duration = Duration::from_secs(15);

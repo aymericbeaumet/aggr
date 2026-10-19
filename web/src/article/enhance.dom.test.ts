@@ -1,23 +1,15 @@
 /// <reference types="node" />
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { ClientArticle } from '../generated/ClientArticle';
 import type { ClientPage } from '../generated/ClientPage';
-import Article from '../pages/Article.svelte';
+import { enhancePage, releasePage } from '../app/content';
 import { page } from '../state/page.svelte';
 
 type Fixture = { component: string; props: { page: ClientPage } };
 
 // Under jsdom `import.meta.url` is the page's address, so the fixture is found from the root.
 const fixture = JSON.parse(readFileSync(resolve(process.cwd(), 'test/parity/page-article.json'), 'utf8')) as Fixture;
-
-function article(): ClientArticle {
-  const view = fixture.props.page.page;
-  if (view.view !== 'article') throw new Error('not an article fixture');
-  return view.data;
-}
 
 const BODY = `<figure class="article-lead media-frame"><img src="lead.jpg" alt=""></figure>
 <div class="body e-content">
@@ -47,10 +39,11 @@ describe('Article', () => {
   it('enhances the adopted region after moving it in, and ends it all with the page', () => {
     const target = document.createElement('div');
     document.body.append(target);
+    target.innerHTML = '<article class="item"></article>';
     const region = content();
+    target.querySelector('article')?.append(region);
     const heading = region.querySelector('h2');
-    const app = mount(Article, { target, props: { page: fixture.props.page, article: article(), content: region } });
-    flushSync();
+    enhancePage(target, fixture.props.page);
     const root = target.querySelector('article.item');
     expect(root?.hasAttribute('data-swipe-navigation')).toBe(true);
     // The very same nodes, not a copy, and the enhancements found them there.
@@ -62,18 +55,17 @@ describe('Article', () => {
     const toolbar = document.querySelector<HTMLElement>('.selection-share');
     expect(toolbar).not.toBeNull();
     expect(toolbar?.hidden).toBe(true);
-    unmount(app);
+    releasePage();
     expect(document.querySelector('.selection-share')).toBeNull();
     expect(root?.hasAttribute('data-swipe-navigation')).toBe(false);
   });
 
-  it('renders the same chrome without content, as the server does', () => {
+  it('does not invent page markup when the server supplied none', () => {
     const target = document.createElement('div');
     document.body.append(target);
-    const app = mount(Article, { target, props: { page: fixture.props.page, article: article(), content: null } });
-    flushSync();
-    expect(target.querySelector('[data-article-content]')?.childElementCount).toBe(0);
+    enhancePage(target, fixture.props.page);
+    expect(target.childElementCount).toBe(0);
     expect(document.querySelector('.selection-share')).toBeNull();
-    unmount(app);
+    releasePage();
   });
 });

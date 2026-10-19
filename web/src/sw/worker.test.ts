@@ -37,7 +37,7 @@ describe('cache names', () => {
     expect(stale(names, 'aggr:%2Farchive%2F:shell-v0')).toBe(true);
     expect(stale(names, 'aggr:%2Farchive%2F:legacy')).toBe(true);
     expect(stale(names, 'aggr:%2Fother%2F:shell-v0')).toBe(false);
-    for (const name of [names.shell, names.pages, names.assets, names.offlinePages, names.offlineRevisions, names.offlineSettings, `${names.offlineSearchPrefix}${'a'.repeat(64)}`]) {
+    for (const name of [names.shell, names.pages, names.assets, names.offlinePages, names.legacyOfflinePages, names.offlineRevisions, names.offlineSettings, `${names.offlineSearchPrefix}${'a'.repeat(64)}`]) {
       expect(stale(names, name)).toBe(false);
     }
   });
@@ -93,6 +93,56 @@ describe('messages', () => {
 });
 
 describe('activation', () => {
+  it('activates without optional navigation preload when the browser rejects it', async () => {
+    const { env, claims } = harness();
+    env.navigationPreload = { enable: async () => { throw new Error('unsupported'); } };
+    const ctx = createWorker(env).context;
+    const waited: Promise<unknown>[] = [];
+    lifecycle(ctx).activate({ waitUntil: (promise) => waited.push(promise) });
+    await expect(Promise.all(waited)).resolves.toBeDefined();
+    expect(claims()).toBe(1);
+    expect(ctx.state.configurationCount).toBe(0);
+  });
+
+  it('uses the configured default when the persisted offline count is corrupt', async () => {
+    const { ctx, storage } = harness({ config: { offline_count: 1 } });
+    await (await storage.open(ctx.names.offlineSettings)).put(`${scope}__offline_count`, new Response('not a count'));
+    const waited: Promise<unknown>[] = [];
+    lifecycle(ctx).activate({ waitUntil: (promise) => waited.push(promise) });
+    await Promise.all(waited);
+    expect(ctx.state.configurationCount).toBe(1);
+  });
+
+  it('removes a failed install cache while preserving the previous working shell', async () => {
+    const { ctx, storage, state } = harness({ config: { precache: [
+      { url: 'offline.html', revision: 'new', required: true },
+      { url: 'missing.css', revision: 'new', required: true },
+    ] } });
+    const previous = `${ctx.names.namespace}shell-previous`;
+    await (await storage.open(previous)).put(`${scope}offline.html`, new Response('working shell'));
+    state.network = async (url) => url.endsWith('missing.css') ? new Response('missing', { status: 404 }) : new Response(url);
+    const waited: Promise<unknown>[] = [];
+    lifecycle(ctx).install({ waitUntil: (promise) => waited.push(promise) });
+    await expect(Promise.all(waited)).rejects.toThrow();
+    expect(await storage.keys()).not.toContain(ctx.names.shell);
+    expect(await (await (await storage.open(previous)).match(`${scope}offline.html`))?.text()).toBe('working shell');
+  });
+
+  it('preserves a pre-existing shell when installation of that same version is retried', async () => {
+    const { ctx, storage, state } = harness({ config: { precache: [
+      { url: 'offline.html', revision: 'same', required: true },
+      { url: 'missing.css', revision: 'same', required: true },
+    ] } });
+    await (await storage.open(ctx.names.shell)).put(`${scope}offline.html`, new Response('working shell', {
+      headers: { [SHELL_REVISION]: 'same' },
+    }));
+    state.offline = true;
+    const waited: Promise<unknown>[] = [];
+    lifecycle(ctx).install({ waitUntil: (promise) => waited.push(promise) });
+    await expect(Promise.all(waited)).rejects.toThrow();
+    expect(await (await (await storage.open(ctx.names.shell)).match(`${scope}offline.html`))?.text()).toBe('working shell');
+  });
+
   it('enables preload, drops stale caches, claims clients and restores the persisted count', async () => {
     const { ctx, storage, claims, preloadEnabled, messages } = harness();
     const handlers = lifecycle(ctx);

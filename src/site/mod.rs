@@ -48,8 +48,10 @@ use directory::{
 };
 use output_dir::MARKER;
 pub(crate) use output_dir::prepare_out_dir;
-pub(crate) use output_dir::promote as promote_output;
-use page::{ListPage, Pages, SharedCtx, SimplePage, archive_modified_at, default_site_description};
+pub(crate) use output_dir::{promote as promote_output, staging as stage_output};
+use page::{
+    FIXED_PAGES, Pages, SharedCtx, SimplePage, archive_modified_at, default_site_description,
+};
 use render::{Renderer, Theme};
 
 const EXCERPT_CHARS: usize = 240;
@@ -976,6 +978,16 @@ fn build_once(
         phases.push((name, elapsed));
         phase_started = now;
     };
+    let prepared = prepare_site(
+        config,
+        sources,
+        store,
+        project_root,
+        info,
+        media_budget,
+        None,
+    )?;
+    let collections = prepared.collections();
     let PreparedSite {
         site,
         build_ctx,
@@ -989,22 +1001,12 @@ fn build_once(
         subscriptions,
         duplicate_redirects,
         river_items,
-        source_members,
         categories,
-        category_members,
         tags,
-        tag_members,
         written_assets,
         per_page,
-    } = prepare_site(
-        config,
-        sources,
-        store,
-        project_root,
-        info,
-        media_budget,
-        None,
-    )?;
+        ..
+    } = prepared;
     phase("archive preparation and media");
     let out = &info.out;
     let prepared_by_path: BTreeMap<_, _> = all_items
@@ -1025,146 +1027,37 @@ fn build_once(
         per_page,
     );
     let mut sitemap_urls: Vec<outputs::SitemapUrl> = Vec::new();
-    pages += pages_ctx.write_list(
-        out,
-        ListPage {
-            kind: "river",
-            title: &config.site.title,
-            prefix: "",
-            list: &river_items,
-            source: None,
-            category: None,
-        },
-        &mut sitemap_urls,
-    )?;
-    for source in &source_ctxs {
-        let list = indexed_items(
-            &archive_items,
-            source_members.get(&source.slug).map(Vec::as_slice),
-        );
+    for collection in &collections {
+        let list = indexed_items(&archive_items, Some(&collection.indices));
         pages += pages_ctx.write_list(
             out,
-            ListPage {
-                kind: "source",
-                title: &source.name,
-                prefix: &source.page,
-                list: &list,
-                source: Some(source),
-                category: None,
-            },
+            collection.page(&list, &source_ctxs, &categories, &tags),
             &mut sitemap_urls,
         )?;
-        let feed_items = feed_items(&list, &prepared_by_path, per_page);
-        write_collection_feeds(
-            out,
-            &site,
-            &build_ctx,
-            &source.name,
-            &source.page,
-            &feed_items,
-        )?;
-    }
-    for category in &categories {
-        let list = indexed_items(
-            &archive_items,
-            category_members.get(&category.slug).map(Vec::as_slice),
-        );
-        pages += pages_ctx.write_list(
-            out,
-            ListPage {
-                kind: "category",
-                title: &category.name,
-                prefix: &category.page,
-                list: &list,
-                source: None,
-                category: Some(category),
-            },
-            &mut sitemap_urls,
-        )?;
-        let feed_items = feed_items(&list, &prepared_by_path, per_page);
-        write_collection_feeds(
-            out,
-            &site,
-            &build_ctx,
-            &category.name,
-            &category.page,
-            &feed_items,
-        )?;
-    }
-    for tag in &tags {
-        let list = indexed_items(
-            &archive_items,
-            tag_members.get(&tag.slug).map(Vec::as_slice),
-        );
-        pages += pages_ctx.write_list(
-            out,
-            ListPage {
-                kind: "tag",
-                title: &tag.name,
-                prefix: &tag.page,
-                list: &list,
-                source: None,
-                category: Some(tag),
-            },
-            &mut sitemap_urls,
-        )?;
-        let feed_items = feed_items(&list, &prepared_by_path, per_page);
-        write_collection_feeds(out, &site, &build_ctx, &tag.name, &tag.page, &feed_items)?;
-    }
-
-    let archive_updated = archive_items.iter().map(archive_modified_at).max();
-    for path in ["browse/", "sources/", "categories/", "tags/"] {
-        if let Some(url) = site.absolute(path) {
-            sitemap_urls.push(outputs::SitemapUrl::new(url, archive_updated));
+        if !collection.prefix.is_empty() {
+            let feed_items = feed_items(&list, &prepared_by_path, per_page);
+            write_collection_feeds(
+                out,
+                &site,
+                &build_ctx,
+                &collection.title,
+                &collection.prefix,
+                &feed_items,
+            )?;
         }
     }
 
-    write(
-        &out.join("browse/index.html"),
-        pages_ctx
-            .simple(SimplePage::new(
-                "browse",
-                "Browse",
-                "browse/",
-                "browse.html",
-            ))?
-            .as_bytes(),
-    )?;
-    for (kind, title) in [
-        ("categories", "Categories"),
-        ("sources", "Sources"),
-        ("tags", "Tags"),
-    ] {
+    let archive_updated = archive_items.iter().map(archive_modified_at).max();
+    for (page, in_sitemap) in FIXED_PAGES {
+        if in_sitemap && let Some(url) = site.absolute(page.path) {
+            sitemap_urls.push(outputs::SitemapUrl::new(url, archive_updated));
+        }
         write(
-            &out.join(kind).join("index.html"),
-            pages_ctx
-                .simple(SimplePage::new(
-                    kind,
-                    title,
-                    &format!("{kind}/"),
-                    "browse.html",
-                ))?
-                .as_bytes(),
+            &out.join(page.output_path()),
+            pages_ctx.simple(page)?.as_bytes(),
         )?;
+        pages += 1;
     }
-    write(
-        &out.join("preferences/index.html"),
-        pages_ctx
-            .simple(SimplePage::new(
-                "preferences",
-                "Preferences",
-                "preferences/",
-                "preferences.html",
-            ))?
-            .as_bytes(),
-    )?;
-    write(
-        &out.join("404.html"),
-        pages_ctx
-            .simple(SimplePage::new("404", "Not found", "404.html", "404.html"))?
-            .as_bytes(),
-    )?;
-    pages += 6;
     phase("feed and directory pages");
 
     let article_pairs: Vec<_> = archive_items.iter().zip(&all_items).collect();
@@ -1196,8 +1089,15 @@ fn build_once(
     let search_documents: Vec<_> = archive_items
         .iter()
         .zip(&prepared_bodies)
-        .map(|(item, prepared)| pagefind::SearchDocument::new(item, prepared.plain_text()))
-        .collect();
+        .map(|(item, prepared)| {
+            pagefind::SearchDocument::with_rendered_row(
+                &renderer,
+                &site,
+                item,
+                prepared.plain_text(),
+            )
+        })
+        .collect::<Result<_>>()?;
 
     let stubs = 4;
 
@@ -2178,7 +2078,7 @@ mod tests {
         let (config, sources, store) = fixture(
             dir.path(),
             3,
-            "max_age_days = 30\nitems_per_page = 1\npwa = false\n",
+            "max_age_days = 30\nitems_per_page = 1\npwa = true\n",
         );
         let out = dir.path().join("lazy");
         let mut build_info = info(out.clone());
@@ -2218,55 +2118,104 @@ mod tests {
         assert!(site.response(&runtime).unwrap().is_some());
         assert!(out.join("pagefind").is_dir());
         assert!(site.response("../data/items.md").unwrap().is_none());
+        for path in ["offline.html", "manifest.webmanifest", "sw.js"] {
+            assert!(site.response(path).unwrap().is_none(), "{path}");
+        }
     }
 
     #[test]
     fn lazy_dev_uses_the_publication_page_and_export_contracts() {
-        let dir = tempfile::tempdir().unwrap();
-        let (config, sources, store) = fixture(
-            dir.path(),
-            3,
-            "max_age_days = 30\nitems_per_page = 1\npwa = false\n",
-        );
-        let eager = dir.path().join("eager");
-        let mut eager_info = info(eager.clone());
-        eager_info.development = true;
-        build(&config, &sources, &store, dir.path(), &eager_info).unwrap();
-        let mut lazy_info = info(dir.path().join("lazy"));
-        lazy_info.development = true;
-        let lazy = dev::Site::prepare(
-            &config,
-            &sources,
-            store,
-            dir.path(),
-            lazy_info,
-            &dev::PreparationCache::default(),
-        )
-        .unwrap();
-        for path in [
-            "index.html",
-            "page/2/index.html",
-            "sources/blog.example/index.html",
-            "browse/index.html",
-            "preferences/index.html",
-            "items/blog/2026-09-01-post-0/index.html",
-            "items/blog/2026-09-01-post-0.md",
-            "items/blog/2026-09-01-post-0.json",
-            "items/blog/2026-09-01-post-0.txt",
-            "items/blog/2026-09-01-post-0.rst",
-            "feed.xml",
-            "atom.xml",
-            "rss.xml",
-            "feed.json",
-            "aggr.json",
-            "sources.opml",
-            "llms.txt",
-        ] {
-            assert_eq!(
-                lazy.response(path).unwrap().unwrap(),
-                std::fs::read(eager.join(path)).unwrap(),
-                "{path}"
+        for count in [0, 3] {
+            let dir = tempfile::tempdir().unwrap();
+            let (config, mut sources, store) = fixture(
+                dir.path(),
+                count,
+                "max_age_days = 30\nitems_per_page = 1\npwa = false\n",
             );
+            sources[0].category = Some("Research".into());
+            for mut item in store.items().unwrap() {
+                item.front.labels = vec!["Rust".into()];
+                let (directory, stem) = item.path.rsplit_once('/').unwrap();
+                store
+                    .write_item(crate::store::NewItem {
+                        dir: directory,
+                        stem,
+                        front: &item.front,
+                        body: &item.body,
+                        html: None,
+                        preview: None,
+                        images: &[],
+                    })
+                    .unwrap();
+            }
+            let eager = dir.path().join("eager");
+            let mut eager_info = info(eager.clone());
+            eager_info.development = true;
+            let summary = build(&config, &sources, &store, dir.path(), &eager_info).unwrap();
+            let mut lazy_info = info(dir.path().join("lazy"));
+            lazy_info.development = true;
+            let lazy = dev::Site::prepare(
+                &config,
+                &sources,
+                store,
+                dir.path(),
+                lazy_info,
+                &dev::PreparationCache::default(),
+            )
+            .unwrap();
+            let mut paths = vec![
+                "index.html",
+                "browse/index.html",
+                "sources/index.html",
+                "categories/index.html",
+                "tags/index.html",
+                "preferences/index.html",
+                "404.html",
+                "feed.xml",
+                "atom.xml",
+                "rss.xml",
+                "feed.json",
+                "aggr.json",
+                "sources.opml",
+                "llms.txt",
+            ];
+            if count > 0 {
+                paths.extend([
+                    "page/2/index.html",
+                    "page/3/index.html",
+                    "sources/blog.example/index.html",
+                    "sources/blog.example/page/2/index.html",
+                    "sources/blog.example/atom.xml",
+                    "sources/blog.example/rss.xml",
+                    "sources/blog.example/feed.json",
+                    "categories/research/index.html",
+                    "categories/research/page/2/index.html",
+                    "categories/research/atom.xml",
+                    "categories/research/rss.xml",
+                    "categories/research/feed.json",
+                    "tags/rust/index.html",
+                    "tags/rust/page/2/index.html",
+                    "tags/rust/atom.xml",
+                    "tags/rust/rss.xml",
+                    "tags/rust/feed.json",
+                    "items/blog/2026-09-01-post-0/index.html",
+                    "items/blog/2026-09-01-post-0.md",
+                    "items/blog/2026-09-01-post-0.json",
+                    "items/blog/2026-09-01-post-0.txt",
+                    "items/blog/2026-09-01-post-0.rst",
+                ]);
+                assert_eq!(summary.pages, 18);
+            }
+            for path in paths {
+                assert_eq!(
+                    lazy.response(path).unwrap().unwrap(),
+                    std::fs::read(eager.join(path)).unwrap(),
+                    "{path} with {count} articles"
+                );
+            }
+            for path in ["offline.html", "manifest.webmanifest", "sw.js"] {
+                assert!(lazy.response(path).unwrap().is_none(), "{path}");
+            }
         }
     }
 
@@ -2426,14 +2375,14 @@ mod tests {
         let exact = budget::output_bytes(&build_info.out).unwrap();
         config.site.build_max_bytes = exact;
         let summary = build(&config, &sources, &store, dir.path(), &build_info).unwrap();
-        crate::cache::store_render(
+        crate::cache::record_render(
             build_info.pagefind_cache.as_ref().unwrap(),
             build_info.render_cache_key.as_ref().unwrap(),
             &build_info.out,
             summary,
         )
         .unwrap();
-        crate::cache::restore_render(
+        crate::cache::cached_render(
             build_info.pagefind_cache.as_ref().unwrap(),
             build_info.render_cache_key.as_ref().unwrap(),
             &build_info.out,
@@ -4167,7 +4116,8 @@ category = "Science"
         }));
 
         let offline = std::fs::read_to_string(out.join("offline.html")).unwrap();
-        assert!(offline.contains("id=\"offline-articles\""));
+        assert!(offline.contains("data-offline-root"));
+        assert!(offline.contains("id=\"offline-empty\""));
         assert!(offline.contains("<link rel=\"manifest\" href=\"/repo/manifest.webmanifest\">"));
         assert!(offline.contains("\"pwa\":true"));
         assert!(offline.contains("href=\"/repo/browse/\""), "{offline}");
@@ -4281,6 +4231,12 @@ category = "Science"
             "{opensearch}"
         );
         let sitemap = std::fs::read_to_string(out.join("sitemap.xml")).unwrap();
+        for path in ["browse/", "sources/", "categories/", "tags/"] {
+            assert!(sitemap.contains(&format!("<loc>https://u.github.io/repo/{path}</loc>")));
+        }
+        for path in ["preferences/", "404.html"] {
+            assert!(!sitemap.contains(&format!("<loc>https://u.github.io/repo/{path}</loc>")));
+        }
         assert!(
             sitemap.contains("https://u.github.io/repo/browse/"),
             "{sitemap}"

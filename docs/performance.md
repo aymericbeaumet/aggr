@@ -86,9 +86,9 @@ refuses as before. On a 3,000-item instance this took a release build from 239.6
 single 294.9 s pass, publishing 39 fewer media groups out of 12,210.
 
 `build_max_bytes` is what a host will accept for a published site, so only a publishing build
-measures it. A development snapshot (`aggr dev` without `--release`) is served from a local cache
+measures it. A development snapshot (`cargo run -- dev` without `--release`) is served from a local cache
 and skips the check: when an archive is larger than the limit, measuring it costs a second complete
-build, which on a 3,000-item instance was 205 s followed by 319 s. `aggr dev --release` still
+build, which on a 3,000-item instance was 205 s followed by 319 s. `cargo run -- dev --release` still
 applies the budget and prepares the complete published site.
 
 Every stage that is CPU-bound runs on the machine's parallelism rather than a fixed slot count.
@@ -99,7 +99,8 @@ half and leaves the rest to the build a reader is waiting for. Sizing both to th
 measured worse on an eight-core machine: the background sync and the rebuild oversubscribed it and
 the build phase grew from 167 s to 322 s.
 
-Re-deriving stored bodies (`--reprocess`) reads each retained HTML companion and converts it again.
+Automatic reprocessing compares retained inputs with disposable receipts and converts only changed
+items. A changed extraction fingerprint rechecks all retained HTML companions.
 The conversion is pure CPU per item and runs on the shared worker pool; applying the results stays
 on the calling thread in archive order, so the transaction and the written bytes never depend on
 scheduling. On a 3,318-item archive the conversion alone measured 48 s of single-threaded work.
@@ -182,10 +183,14 @@ contents, and retained snapshots consume the repository's cache quota. Separatin
 copying it merely because a small backoff marker changed. The before/after fingerprints inspect paths and sizes; cache transfer and encoding should be measured separately.
 
 `articles-v1` holds raw original-page responses. It is private to the machine that fetched it and is
-never uploaded. `render-v1` is not cached on Actions either: the fingerprint folds each item's age
-band (1 h, 3 h, 24 h) into the generation, so any item under a day old changes it, and a full site
-of a 1,100-item instance is about 2.4 GB per entry. Uploading one per run exhausted the 10 GB
-repository cache quota for entries that almost never hit.
+never uploaded. `render-v1` contains only a receipt for the published output: its generation,
+relative file paths, sizes and SHA-1 digests. The output itself is reused when that inventory matches;
+missing, changed or unexpected files trigger a fresh staged build. Verification streams file contents
+through a fixed 64 KiB buffer, including large media, without keeping another site or loading whole
+files into memory. Older size-only receipts are cache misses.
+A successful build removes full render-cache copies left by older versions. Builds stage beside
+the destination so publication uses renames even when the OS cache is on another filesystem.
+Render receipts are not cached on Actions because runners do not retain the published directory.
 
 In addition to the byte caps described in [storage](storage.md), `aggr sync` sweeps the build
 cache at most once a day (`cache::sweep`, remembered in `.aggr/cache/build-v1/.last-sweep`; a dry

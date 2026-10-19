@@ -236,11 +236,12 @@ to its `[[sources]]` table. This flag is not inherited by the contained sources.
 
 Two different things can be out of date. Items the source still lists are re-fetched by
 `sync --refresh` using the current content and media policies. Items the source has stopped listing
-can still be improved from what aggr already retained: `sync --reprocess` re-derives every stored body
-from its retained HTML companion, so content cleanup added in a later release reaches the archive
-without a single extra request. Both discard hand edits, and both write ordinary commits.
+are improved automatically during sync: changed extraction code or inputs re-derive bodies from
+complete retained HTML companions, so cleanup added in a later release reaches the archive
+without extra requests. Both paths can replace body edits and write ordinary commits only when
+archive bytes change.
 
-`--reprocess` recovers anything still present in the retained HTML. It cannot recover content that
+Automatic reprocessing recovers anything still present in the retained HTML. It cannot recover content that
 article extraction discarded before storing — that needs the original page, and so needs the item
 to be listed again.
 
@@ -272,7 +273,7 @@ Extraction retains article images, figure captions, inline links, footnotes, tab
 indentation, with syntax colors for recognized code languages. A code block whose language cannot
 be determined is left unlabelled rather than guessed at. Cleanup that only needs the stored
 Markdown is reapplied on every build, so an archive written by an older release reads correctly;
-cleanup that needs the original HTML reaches an existing item through `--reprocess`. Custom source
+cleanup that needs the original HTML reaches an existing item through automatic reprocessing during sync. Custom source
 headers stay on the configured origin; redirected or linked article and image requests on other
 origins do not receive those headers.
 

@@ -895,6 +895,67 @@ fn previews_mirror_local_bytes_and_retention_preserves_historical_blobs() {
 }
 
 #[test]
+fn fresh_local_repository_builds_without_an_origin_or_a_primary_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    support::git(&root, &["init", "-q", "-b", "main"]).unwrap();
+    aggr_command(&root)
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("`aggr build`"))
+        .stdout(predicate::str::contains("`aggr dev`").not());
+    std::fs::write(
+        root.join("rss.xml"),
+        r#"<rss version="2.0"><channel><title>Local reader</title><link>https://local.example/</link>
+<item><title>First local article</title><link>https://local.example/article</link><guid>first</guid>
+<description>A complete local article for the first build, without remote resources or a configured origin.</description>
+</item></channel></rss>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("aggr.toml"),
+        "[site]\npwa = false\n[defaults]\ncontent_download_strategy = \"feed\"\nmedia_download_strategy = \"remote\"\ndiscussions = []\n[[sources]]\nurl = \"rss.xml\"\n",
+    )
+    .unwrap();
+    aggr_command(&root).arg("build").assert().success();
+    assert!(
+        std::fs::read_to_string(root.join("_site/index.html"))
+            .unwrap()
+            .contains("First local article")
+    );
+    support::git(&root, &["rev-parse", "refs/heads/aggr"]).unwrap();
+    let status = support::git(&root, &["status", "--porcelain"]).unwrap();
+    assert!(
+        status.contains("aggr.toml"),
+        "the primary checkout stays uncommitted: {status}"
+    );
+    let head = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        !head.status.success(),
+        "building must not commit to the primary branch"
+    );
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn contributor_dev_rejects_invalid_config_before_starting_tools() {
+    let repo = TestRepo::new();
+    repo.write_raw_config("[site]\ntitle = [\n");
+    repo.aggr()
+        .env_remove("AGGR_DEV_INTERNAL_WORKER")
+        .arg("dev")
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("parsing"));
+}
+
+#[test]
 fn init_writes_config_and_workflow() {
     let repo = TestRepo::new();
     repo.aggr()

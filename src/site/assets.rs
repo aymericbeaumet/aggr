@@ -264,6 +264,7 @@ impl ItemMedia {
     }
 
     /// List pages need only a tiny preview, never every full-sized image in each visible article.
+    #[cfg(any(debug_assertions, test))]
     pub(super) fn gather_preview(
         store: &Store,
         item: &Item,

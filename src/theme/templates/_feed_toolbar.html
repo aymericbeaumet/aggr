@@ -11,7 +11,7 @@
             <button type="button" class="search-clear" aria-label="Clear search" hidden>×</button>
           </div>
         </form>
-        <ul id="search-completions" class="search-completions" role="listbox" aria-label="Search suggestions" hidden></ul>
+        <div data-search-completions-root></div>
       </div>
       <div id="search-query-help" class="search-query-help" role="tooltip">
         <span>Use <code>source:</code>, <code>category:</code>, <code>tag:</code>, <code>type:</code>, <code>date:</code>, <code>sort:</code>, <code>"exact phrases"</code> or <code>-exclude</code>.</span>
@@ -21,13 +21,4 @@
     <noscript><p class="search-offline">Full-text search needs JavaScript. Without it, browse by <a href="{{ 'browse/' | url_for }}">category, source or tag</a>.</p></noscript>
   </div>
 </div>
-<div data-search-results data-nosnippet>
-  <p id="search-status" role="status" aria-live="polite" hidden></p>
-  <ol id="list" class="rows search-results" role="list" aria-busy="false" hidden></ol>
-  <p id="empty" hidden>No articles match this search. Try fewer filters or different words.</p>
-  <nav class="pager search-pager" aria-label="Search results pages" hidden>
-    <span class="pager-side"><a data-search-page-previous href="#" hidden>newer</a></span>
-    <span data-search-page-status></span>
-    <span class="pager-side"><a data-search-page-next href="#" hidden>older</a></span>
-  </nav>
-</div>
+<div data-search-results-root></div>

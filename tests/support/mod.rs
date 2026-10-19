@@ -21,6 +21,9 @@ pub const SCRUBBED_ENV: &[&str] = &[
     "AGGR_CONFIG",
     "AGGR_CACHE_DIR",
     "AGGR_CLEAN_UNSET",
+    "AGGR_VITE_URL",
+    "AGGR_DEV_CONTEXT",
+    "AGGR_DEV_INTERNAL_WORKER",
 ];
 
 /// The git environment every test process runs with: no global or system configuration (hooks,
@@ -74,6 +77,7 @@ pub fn aggr_command(dir: &Path) -> Command {
     let mut command = Command::cargo_bin("aggr").expect("the aggr binary is built for tests");
     command.current_dir(dir);
     isolate(&mut command);
+    command.env("AGGR_DEV_INTERNAL_WORKER", "1");
     command
 }
 

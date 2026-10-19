@@ -218,6 +218,7 @@ async fn mirrored_companions_respect_source_media_options() {
 
 pub(super) fn options() -> Options {
     Options {
+        ownership: None,
         archived_links: Arc::default(),
         existing_paths: Arc::default(),
         dry_run: false,
@@ -1278,6 +1279,29 @@ async fn known_subscription_wall_tries_archives_after_publisher_denies_a_fresh_c
         summary: Some("A meaningful publisher summary.".into()),
         ..Default::default()
     };
+    // httpmock pools origins: an earlier test can leave this provider backed off even though
+    // this test has its own fresh article cache and mock responses.
+    let mut previous_attempt = archives.mock(|when, then| {
+        when.method(GET).path("/previous-test");
+        then.status(429);
+    });
+    let previous_cache = tempfile::tempdir().unwrap();
+    assert!(
+        super::archive::with_test_endpoints(
+            archives.url("/previous-test").parse().unwrap(),
+            archives.url("/previous-test").parse().unwrap(),
+            super::archive::recover(
+                &raw.link.parse().unwrap(),
+                &raw.title,
+                &client,
+                &crate::cache::ArticleCache::new(previous_cache.path()),
+            ),
+        )
+        .await
+        .is_none()
+    );
+    previous_attempt.assert_calls(1);
+    previous_attempt.delete();
     let (_, kind) = heavy_content(&raw, &configured, &client, cache.path(), &failures).await;
     assert_eq!(kind, ContentKind::None);
     available.assert_calls(0);

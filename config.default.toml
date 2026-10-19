@@ -147,6 +147,8 @@ allow_remote_source_chains = false
 [cache]
 # Disposable caches are bounded independently of the append-only archive and published site.
 media_max_bytes = 2147483648
+# Shared by cached page responses, extractions, lookup/backoff state, and image-validation receipts.
+# This shared cache also keeps at most 65536 files to bound small-file overhead.
 response_max_bytes = 268435456
 
 # Each table's `url` names one or more resources: websites, RSS/Atom/JSON feeds, aggr TOML,

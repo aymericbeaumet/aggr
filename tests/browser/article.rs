@@ -1,5 +1,7 @@
 //! Reading an article: layout, folding header, reading progress and keyboard navigation.
 
+use std::sync::atomic::Ordering;
+
 use anyhow::{Context as _, Result};
 use fantoccini::{Client, Locator};
 use serde_json::{Value, json};
@@ -877,7 +879,7 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
     client
         .goto(first.as_str().context("selected article URL")?)
         .await?;
-    wait_for(client, "!!document.querySelector('article.item')").await?;
+    wait_booted_with(client, "!!document.querySelector('article.item')").await?;
     client
         .execute(
             "window.__aggrOpened=[];window.open=function(url){window.__aggrOpened.push(url);return {};};",
@@ -956,10 +958,17 @@ async fn article_keyboard_contracts(client: &Client, fixture: &Fixture) -> Resul
         .as_f64()
         .context("reading line height")?;
     assert_eq!(
-        scroll_shortcuts["movements"],
-        json!([
+        scroll_shortcuts["movements"]
+            .as_array()
+            .context("reading keyboard scroll movements")?
+            .iter()
+            .map(|movement| movement
+                .as_f64()
+                .context("reading keyboard scroll distance"))
+            .collect::<Result<Vec<_>>>()?,
+        vec![
             half_page, half_page, -half_page, -half_page, line, -line, half_page
-        ])
+        ]
     );
     for name in ["d", "ctrlD", "u", "ctrlU", "ctrlE", "ctrlY", "enabledCtrlD"] {
         assert_eq!(
@@ -1334,6 +1343,83 @@ async fn recommendation_cards_and_navigation_layout() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires a local Chrome WebDriver"]
+async fn consumption_metadata_has_natural_spacing_before_original() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fixture = Fixture::with_pwa(false)?;
+    let archive = fixture.directory.path().join(".aggr/data");
+    for (index, extra) in [
+        (44, "extra:\n  duration_seconds: 2040\n"),
+        (
+            34,
+            "extra:\n  audio_url: https://publisher.invalid/known.mp3\n  duration_seconds: 2040\n",
+        ),
+        (
+            33,
+            "extra:\n  audio_url: https://publisher.invalid/unknown.mp3\n",
+        ),
+    ] {
+        let path = archive.join(format!("items/example/2026/09/2026-09-01-story-{index}.md"));
+        let text = std::fs::read_to_string(&path)?;
+        std::fs::write(
+            path,
+            text.replace("content: feed\n", &format!("content: feed\n{extra}")),
+        )?;
+    }
+    git(&archive, &["add", "items"])?;
+    git(&archive, &["commit", "-qm", "fixture recording metadata"])?;
+    fixture.build()?;
+    let client = browser_client().await?;
+    let result = async {
+        for scripts_blocked in [true, false] {
+            fixture.scripts_blocked.store(scripts_blocked, Ordering::Relaxed);
+            for width in [1280, 390, 360] {
+                emulate(
+                    &client,
+                    "Emulation.setDeviceMetricsOverride",
+                    json!({"width":width,"height":844,"deviceScaleFactor":1,"mobile":width<600}),
+                )
+                .await?;
+                for (index, action, text) in [
+                    (45, "read", None),
+                    (44, "watch", Some("34 min watch")),
+                    (34, "listen", Some("34 min listen")),
+                    (43, "watch", Some("Watch")),
+                    (33, "listen", Some("Listen")),
+                ] {
+                    client.goto(&format!("{}items/example/2026-09-01-story-{index}/?scripts={scripts_blocked}", fixture.base)).await?;
+                    if !scripts_blocked {
+                        wait_booted(&client).await?;
+                    }
+                    let layout = client.execute(r#"
+                      const stats=document.querySelector('.itemhead .reading-stats');
+                      const range=document.createRange();range.selectNodeContents(stats);
+                      const text=range.getBoundingClientRect(),box=stats.getBoundingClientRect();
+                      const original=document.querySelector('.itemhead .u-bookmark-of');
+                      const link=original.getBoundingClientRect();
+                      return {action:stats.dataset.consumption,text:stats.textContent.trim(),
+                        trailingSpace:box.right-text.right,
+                        originalNext:stats.parentElement.nextElementSibling===original.parentElement,
+                        gap:Math.abs(text.top-link.top)<2 ? link.left-text.right : null,
+                        fontSize:parseFloat(getComputedStyle(stats).fontSize),
+                        booted:document.documentElement.dataset.aggrReady==='true'};
+                    "#, vec![]).await?;
+                    anyhow::ensure!(layout["action"] == action && text.is_none_or(|text| layout["text"] == text), "recording metadata retains its meaning: {layout}");
+                    anyhow::ensure!(layout["booted"] == !scripts_blocked, "spacing is checked with and without application scripts: {layout}");
+                    anyhow::ensure!(layout["originalNext"] == true && layout["trailingSpace"].as_f64().is_some_and(|space| space.abs() <= 1.0), "{action} metadata reserves unused width at {width}px (scripts blocked: {scripts_blocked}): {layout}");
+                    if let Some(gap) = layout["gap"].as_f64() {
+                        anyhow::ensure!((0.0..=layout["fontSize"].as_f64().unwrap_or_default() * 1.5).contains(&gap), "{action}-to-original gap is excessive at {width}px (scripts blocked: {scripts_blocked}): {layout}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }.await;
+    report_failure(&client, "consumption-metadata-spacing", &result).await;
+    finish(client, result).await
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome WebDriver"]
 async fn title_metadata_matches_feed_search_and_article() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fixture = Fixture::with_pwa(false)?;
@@ -1410,8 +1496,8 @@ async fn metadata_layout(client: &Client, selector: &str) -> Result<Value> {
         source:{resolved:resolved ? getComputedStyle(resolved).color:null,via:via ? getComputedStyle(via).color:null,warm,muted},
         typography:style(meta),
         fields:fields.map((field,index)=>{
-          const css=getComputedStyle(field),separator=getComputedStyle(field,'::before');
-          return {typography:style(field),display:css.display,height:field.getBoundingClientRect().height,
+          const separator=getComputedStyle(field,'::before');
+          return {typography:style(field),height:field.getBoundingClientRect().height,
             separator:index ? {content:separator.content,left:separator.marginLeft,right:separator.marginRight}:null};
         }),
         date:{text:date.textContent.trim(),trailingSpace:date.getBoundingClientRect().right-dateText.right,

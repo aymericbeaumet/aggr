@@ -28,8 +28,6 @@
   });
 </script>
 
-<div class="listhead"><h1>Offline</h1></div>
-<p>This page has not been saved. Open one of your downloaded articles below, or reconnect and try again.</p>
 <p id="offline-download-status">{summary}</p>
 <p id="offline-empty" hidden={articles.length > 0}>No complete articles are available yet.</p>
 <ul id="offline-articles">{#each articles as article (article.href)}<li><a href={article.href}>{article.title}</a></li>{/each}</ul>

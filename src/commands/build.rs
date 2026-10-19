@@ -110,11 +110,11 @@ async fn run_prevalidated(
             .then_some(now.timestamp())
     ));
     let metrics = Arc::new(std::sync::Mutex::new(site::BuildMetrics::default()));
-    // Ephemeral runners never restore full rendered trees, so retaining another one wastes disk.
+    // Ephemeral runners do not reuse an already-published local output.
     let retain_render = std::env::var_os("GITHUB_ACTIONS").is_none();
     if !args.hermetic
         && retain_render
-        && let Some(summary) = crate::cache::restore_render(&cache_dir, &fingerprint, &out)?
+        && let Some(summary) = crate::cache::cached_render(&cache_dir, &fingerprint, &out)?
     {
         site::verify_output_budget(&out, project.config.site.build_max_bytes)?;
         print_summary(summary, &out, base_url.as_deref(), true);
@@ -133,10 +133,11 @@ async fn run_prevalidated(
         return Ok(summary);
     }
 
-    let scratch = tempfile::Builder::new()
-        .prefix("aggr-build-")
-        .tempdir_in(&cache_dir)
-        .context("creating render cache staging directory")?;
+    let scratch = site::stage_output(&out)?;
+    let parent = scratch.path().parent().context("output staging parent")?;
+    for pattern in [".aggr-build-*", ".aggr-publish-*"] {
+        project.repo.exclude(&parent.join(pattern))?;
+    }
     let rendered = scratch.path().join("site");
     let info = BuildInfo {
         hermetic: args.hermetic,
@@ -164,14 +165,14 @@ async fn run_prevalidated(
     if args.hermetic {
         site::hermetic::verify(&rendered, base_url.as_deref())?;
     }
-    if retain_render && !args.hermetic {
-        crate::cache::store_render(&cache_dir, &fingerprint, &rendered, summary)?;
-        crate::cache::restore_render(&cache_dir, &fingerprint, &out)?
-            .context("the rendered site disappeared from its cache")?;
-    } else {
-        site::promote_output(&rendered, &out)?;
+    site::verify_output_budget(&rendered, project.config.site.build_max_bytes)?;
+    site::promote_output(&rendered, &out)?;
+    if retain_render
+        && !args.hermetic
+        && let Err(error) = crate::cache::record_render(&cache_dir, &fingerprint, &out, summary)
+    {
+        log::warn!("render cache receipt skipped: {error:#}");
     }
-    site::verify_output_budget(&out, project.config.site.build_max_bytes)?;
     print_summary(summary, &out, base_url.as_deref(), false);
     write_report(
         project,
@@ -314,6 +315,7 @@ fn write_report(
 }
 
 /// Render dev's isolated store into staging before the server swaps its in-memory snapshot.
+#[cfg(any(debug_assertions, test))]
 pub fn run_ephemeral(
     project: &Project,
     args: &BuildArgs,

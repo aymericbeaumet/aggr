@@ -3,9 +3,9 @@
 | Command | Purpose |
 |---|---|
 | `aggr init [--github] [--defaults]` | Write the small starter config, optionally the GitHub workflow; `--defaults` copies the full reference config instead. |
-| `aggr sync [--fetch-only] [--dry-run] [--refresh] [--reprocess]` | Fetch new items. Normally commit and push them; `--fetch-only` writes locally without either, while `--dry-run` writes nothing. |
+| `aggr sync [--fetch-only] [--dry-run] [--refresh]` | Fetch new items. Normally commit and push them; `--fetch-only` writes locally without either, while `--dry-run` writes nothing. |
 | `aggr build [--release] [--out DIR] [--data-ref REF]` | Sync and render, or render a pinned data ref without fetches, commits, or pushes. |
-| `aggr dev [--release] [--port 7319]` | Sync into an isolated cache, render requested pages, watch, and live-reload. Never commits or pushes. |
+| `cargo run -- dev [--release] [--port 7319]` | Start the Node-managed contributor stack, sync into an isolated cache, and preview pages. Debug builds only; never commits or pushes. |
 | `aggr clean [--dry-run] [--out DIR]` | Remove disposable dev state, build cache, and owned output. `--dry-run` lists exact targets. |
 | `aggr storage inspect [--json]` | Report current archive, local media, generated output, cache and Git object bytes without changing them. |
 | `aggr storage prune-renditions [--dry-run\|--apply]` | Verify originals, then explicitly remove optional archived renditions in an ordinary commit. Dry run is the default. |
@@ -35,30 +35,36 @@ and [storage measurements](benchmarks.md).
 and fills missing media companions. It can replace stored bodies and discard hand edits; use
 `--backfill-media` when only media should change.
 
-`--reprocess` re-derives stored bodies from the HTML retained beside them, so content cleanup added
-since capture reaches the archive without refetching. This pass covers every article the current
-config still retains, and skips truncated HTML. A source removed from the config is dropped by
-retention before this pass. It runs once before the normal
-configured-source sync; repeating
-it without content changes writes nothing. Hand-edited bodies are replaced. Use it after upgrading
-when you want those extraction changes applied.
+Sync automatically re-derives retained article bodies from their complete local HTML when the
+extraction implementation, dependencies, or stored inputs change. This includes the sync before
+ordinary builds and development runs, and requires no additional requests. It skips missing or
+truncated HTML. Reprocessing can replace hand-edited bodies; unchanged extraction inputs and
+outputs write nothing. Disposable cache receipts remember processed inputs without adding metadata
+or commits to the data branch. Pinned and offline builds only render their existing stored bodies.
 
 ## Local development
 
-`aggr dev` prepares the archive's shared display metadata, then renders each page only when it is
+`cargo run -- dev` starts Vite HMR and automatic Rust restarts. With no local configuration it uses
+`examples/aggr.toml`; set `AGGR_CONFIG=/path/to/aggr.toml` to preview another instance.
+Node and npm are development tools only: release binaries exclude the dev command, server,
+watchers and reload clients, and production builds use the committed client assets.
+
+The Rust preview backend prepares the archive's shared display metadata, then renders each page only when it is
 requested. Opening the feed reads its thumbnails; opening an article loads that article's media.
 Completion uses a small metadata catalogue; the full-text index is built only when a search needs
 its runtime, and reuses the persistent Pagefind cache.
-Template, CSS and JavaScript edits reuse normalized bodies and parsed Markdown, replace the current
-snapshot atomically, and trigger a browser reload. A template syntax error keeps the last working
+Vite handles Svelte, TypeScript and frontend CSS updates. Template and theme CSS edits reuse
+normalized bodies and parsed Markdown, replace the snapshot atomically, and reload the browser.
+Completed sources become visible while slower remote sources continue; local reprocessing also
+publishes before network refresh completes. Each preview owns immutable archive inputs. A template syntax error keeps the last working
 snapshot available. Requested output lives in disposable per-generation directories; the archive
 and fetch caches survive restart, and nothing is committed or pushed.
 
-Use `aggr dev --release` to exercise the complete publication build, including its media budget
+Use `cargo run -- dev --release` to exercise the complete publication build, including its media budget
 and PWA outputs. Ordinary lazy dev omits PWA outputs; the dev server unregisters its scoped worker
 to keep browser caches from hiding edits.
-For client code, run `make client-dev` alongside dev with `AGGR_VITE_URL` set; `make check` runs
-the Rust and frontend checks. See [client development](client.md).
+`make dev` is a shortcut for the same contributor stack.
+`make check` runs the Rust and frontend checks. See [client development](client.md).
 
 ## Cache and cleanup
 

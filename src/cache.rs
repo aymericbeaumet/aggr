@@ -5,7 +5,7 @@ mod limits;
 pub use limits::LimitReport;
 pub(crate) use limits::mark_used;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -32,7 +32,7 @@ pub enum Namespace {
     /// Raw original-page responses and their extractions. Private to the machine that fetched
     /// them: never uploaded to a shared cache.
     Articles,
-    /// The last rendered site, keyed by [`render_fingerprint`].
+    /// The published output receipt, keyed by [`render_fingerprint`].
     Render,
     /// Discussion lookups with timestamped backoff.
     Discussions,
@@ -92,7 +92,7 @@ impl Namespace {
 
     /// Whether the reusable workflow may persist this namespace between runners. Derived state
     /// about already-published bytes is safe and self-invalidating; raw upstream responses are
-    /// private, and the rendered site is too large and too short-lived to be worth uploading.
+    /// private, and render receipts refer to local output that runners do not retain.
     #[cfg(test)]
     pub fn ci_cached(&self) -> bool {
         !matches!(self, Namespace::Articles | Namespace::Render)
@@ -110,11 +110,55 @@ pub fn ci_cached_paths() -> Vec<String> {
         .collect()
 }
 
-/// Bump when article extraction semantics change. Raw responses remain reusable across bumps.
-const EXTRACTOR_VERSION: &str = "dom-smoothie-0.18-aggr-18";
 const MAX_ARTICLE_METADATA_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_ARTICLE_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXTRACTED_ARTICLE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Content-code and dependency changes invalidate derived bodies automatically. Embedded sources
+/// make the key independent of checkout paths, build times, and the machine running the binary.
+pub(crate) fn extractor_fingerprint() -> &'static str {
+    static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        extractor_implementation_fingerprint(
+            render_implementation_sources(),
+            include_str!("../Cargo.lock"),
+        )
+    })
+}
+
+fn extractor_implementation_fingerprint(
+    sources: &[(&str, &str, &str)],
+    dependencies: &str,
+) -> String {
+    let mut hash = Sha1::new();
+    hash_field(&mut hash, b"schema", b"extractor-v1");
+    hash_field(&mut hash, b"dependencies", dependencies.as_bytes());
+    hash_field(&mut hash, b"http-decoding", include_bytes!("http.rs"));
+    hash_field(
+        &mut hash,
+        b"local-reprocessing",
+        include_bytes!("commands/fetch/repair.rs"),
+    );
+    for (_, path, source) in sources {
+        if *path == "content.rs"
+            || path.starts_with("content/")
+            || path.starts_with("threads/")
+            || matches!(
+                *path,
+                "model.rs"
+                    | "media.rs"
+                    | "media/srcset.rs"
+                    | "sources/youtube.rs"
+                    | "platform.rs"
+                    | "platform/reserved.rs"
+                    | "threads.rs"
+            )
+        {
+            hash_field(&mut hash, path.as_bytes(), source.as_bytes());
+        }
+    }
+    hex::encode(hash.finalize())
+}
 
 /// Persistent cache used by `aggr build` and `aggr sync`, safely scoped to one repository.
 pub fn build(repo_root: &Path) -> PathBuf {
@@ -352,9 +396,17 @@ const RENDER_INDEPENDENT_SOURCES: &[&str] = &[
     "store/evictions.rs",
 ];
 
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+struct RenderFile {
+    bytes: u64,
+    sha1: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct RenderManifest {
     fingerprint: String,
+    #[serde(default)]
+    files: BTreeMap<String, RenderFile>,
     pages: usize,
     items: usize,
     stubs: usize,
@@ -396,88 +448,121 @@ pub fn store_budget_allowance(cache_root: &Path, receipt: &BudgetReceipt) -> Res
     )
 }
 
-/// Restore a matching site into `out`. If `out` already carries this key the operation is an
-/// O(1) no-op; otherwise it copies plain files so Pages artifacts never contain hardlinks.
-pub fn restore_render(
+/// Reuse the published output only while its generation and complete file inventory match.
+/// The output itself is the cache; missing, changed or unexpected files trigger a staged build.
+pub fn cached_render(
     cache_root: &Path,
     fingerprint: &str,
     out: &Path,
 ) -> Result<Option<crate::site::Summary>> {
-    let root = Namespace::Render.dir(cache_root);
-    let manifest_path = root.join("manifest.toml");
+    let manifest_path = Namespace::Render.dir(cache_root).join("manifest.toml");
     let manifest = match std::fs::read_to_string(&manifest_path)
         .ok()
         .and_then(|text| toml::from_str::<RenderManifest>(&text).ok())
     {
-        Some(manifest) if manifest.fingerprint == fingerprint => manifest,
+        Some(manifest) if manifest.fingerprint == fingerprint && !manifest.files.is_empty() => {
+            manifest
+        }
         _ => return Ok(None),
     };
-    let cached = root.join("site");
-    if !cached.join(".aggr-site").is_file() {
-        return Ok(None);
-    }
-    if std::fs::read_to_string(cached.join(RENDER_KEY_FILE))
-        .ok()
-        .is_none_or(|key| key != fingerprint)
-    {
-        return Ok(None);
-    }
     if std::fs::read_to_string(out.join(RENDER_KEY_FILE))
         .ok()
-        .is_some_and(|key| key == fingerprint)
-        && out.join(".aggr-site").is_file()
+        .is_none_or(|key| key != fingerprint)
+        || render_files(out).ok().as_ref() != Some(&manifest.files)
     {
-        return Ok(Some(manifest.summary()));
+        return Ok(None);
     }
-
-    crate::site::prepare_out_dir(out)?;
-    copy_tree(&cached, out)?;
-    write(&out.join(RENDER_KEY_FILE), fingerprint.as_bytes())?;
     Ok(Some(manifest.summary()))
 }
 
-/// Promote a freshly rendered temporary directory to the single current cache entry.
-pub fn store_render(
+/// Remember a successful publication without retaining a second complete copy of the site.
+pub fn record_render(
     cache_root: &Path,
     fingerprint: &str,
-    rendered: &Path,
+    out: &Path,
     summary: crate::site::Summary,
 ) -> Result<()> {
-    write(&rendered.join(RENDER_KEY_FILE), fingerprint.as_bytes())?;
-    let root = Namespace::Render.dir(cache_root);
-    std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
-    let current = root.join("site");
-    let previous = root.join("previous");
-    if previous.exists() {
-        std::fs::remove_dir_all(&previous)
-            .with_context(|| format!("clearing {}", previous.display()))?;
-    }
-    if current.exists() {
-        std::fs::rename(&current, &previous)
-            .with_context(|| format!("moving cached site {} aside", current.display()))?;
-    }
-    if let Err(err) = std::fs::rename(rendered, &current) {
-        if previous.exists() {
-            let _ = std::fs::rename(&previous, &current);
-        }
-        return Err(err).with_context(|| format!("caching rendered site at {}", current.display()));
-    }
-    if previous.exists() {
-        std::fs::remove_dir_all(&previous)
-            .with_context(|| format!("clearing {}", previous.display()))?;
-    }
+    write(&out.join(RENDER_KEY_FILE), fingerprint.as_bytes())?;
     let manifest = RenderManifest {
         fingerprint: fingerprint.to_string(),
+        files: render_files(out)?,
         pages: summary.pages,
         items: summary.items,
         stubs: summary.stubs,
     };
+    let root = Namespace::Render.dir(cache_root);
     write(
         &root.join("manifest.toml"),
         toml::to_string(&manifest)
             .context("serializing render cache metadata")?
             .as_bytes(),
-    )
+    )?;
+    // Older versions kept full output trees here. These names belong only to this disposable cache.
+    for name in ["site", "previous"] {
+        let path = root.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                std::fs::remove_dir_all(&path).with_context(|| {
+                    format!("removing obsolete render cache {}", path.display())
+                })?;
+            }
+            Ok(_) => anyhow::bail!("refusing non-directory render cache {}", path.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspecting obsolete render cache"),
+        }
+    }
+    Ok(())
+}
+
+fn render_files(root: &Path) -> Result<BTreeMap<String, RenderFile>> {
+    if !std::fs::symlink_metadata(root)?.is_dir() {
+        anyhow::bail!("rendered output is not a regular directory");
+    }
+    let mut files = BTreeMap::new();
+    for entry in walkdir::WalkDir::new(root).min_depth(1).follow_links(false) {
+        let entry = entry?;
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        if !entry.file_type().is_file() {
+            anyhow::bail!(
+                "rendered output contains a non-file entry: {}",
+                entry.path().display()
+            );
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(root)?
+            .to_str()
+            .context("rendered output path is not UTF-8")?
+            .replace('\\', "/");
+        let mut file = std::fs::File::open(entry.path())
+            .with_context(|| format!("reading rendered output {}", entry.path().display()))?;
+        let mut hash = Sha1::new();
+        let mut buffer = [0; 64 * 1024];
+        let mut bytes = 0;
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .with_context(|| format!("hashing rendered output {}", entry.path().display()))?;
+            if read == 0 {
+                break;
+            }
+            bytes += read as u64;
+            hash.update(&buffer[..read]);
+        }
+        files.insert(
+            relative,
+            RenderFile {
+                bytes,
+                sha1: hex::encode(hash.finalize()),
+            },
+        );
+    }
+    if !files.contains_key(".aggr-site") || !files.contains_key("index.html") {
+        anyhow::bail!("rendered output is missing its marker or entry page");
+    }
+    Ok(files)
 }
 
 impl RenderManifest {
@@ -782,12 +867,12 @@ impl ArticleCache {
     fn extracted_path(&self, body_hash: &str, final_url: &Url) -> PathBuf {
         self.root
             .join("extracted")
-            .join(EXTRACTOR_VERSION)
+            .join(extractor_fingerprint())
             .join(format!("{body_hash}-{}.json", article_key(final_url, &[])))
     }
 }
 
-fn read_bounded_regular(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+pub(crate) fn read_bounded_regular(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -878,7 +963,7 @@ impl std::fmt::Display for SweepReport {
 }
 
 /// Remove cache files nothing can read any more: article bodies no `entries/*.toml` references,
-/// extractions of a previous [`EXTRACTOR_VERSION`] and, when the caller passes the current media
+/// extractions of a previous [`extractor_fingerprint`] and, when the caller passes the current media
 /// generation, image-failure markers of a previous one. Bodies have no age limit: an entry that
 /// still points at one keeps it, however old. Runs at most once a day, remembered in
 /// `<cache_root>/.last-sweep`. Best-effort: a path that cannot be removed is logged at debug and
@@ -922,7 +1007,7 @@ fn sweep_at(
     }
     report.extractor_versions_removed = remove_stale_directories(
         &articles.join("extracted"),
-        EXTRACTOR_VERSION,
+        extractor_fingerprint(),
         &mut report.failures,
     )?;
     if let Some(current) = image_generation {
@@ -1030,6 +1115,46 @@ mod tests {
     use super::*;
     use crate::http::Body;
     use tempfile::tempdir;
+
+    #[test]
+    fn extractor_generation_tracks_content_helpers_and_dependencies() {
+        let original = [
+            ("content", "content.rs", "original conversion"),
+            ("markdown", "content/markdown.rs", "original markdown"),
+            ("page", "site/page.rs", "original page"),
+        ];
+        let key = extractor_implementation_fingerprint(&original, "locked dependencies");
+        assert_eq!(
+            key,
+            extractor_implementation_fingerprint(&original, "locked dependencies")
+        );
+        let mut changed = original;
+        changed[1].2 = "new markdown cleanup";
+        assert_ne!(
+            key,
+            extractor_implementation_fingerprint(&changed, "locked dependencies")
+        );
+        assert_ne!(
+            key,
+            extractor_implementation_fingerprint(&original, "updated dependencies")
+        );
+        let mut added = original.to_vec();
+        added.push((
+            "new-cleanup",
+            "content/new_cleanup.rs",
+            "a new conversion rule",
+        ));
+        assert_ne!(
+            key,
+            extractor_implementation_fingerprint(&added, "locked dependencies")
+        );
+        changed = original;
+        changed[2].2 = "a different page layout";
+        assert_eq!(
+            key,
+            extractor_implementation_fingerprint(&changed, "locked dependencies")
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1226,7 +1351,31 @@ mod tests {
     }
 
     #[test]
-    fn rendered_sites_restore_and_short_circuit_matching_output() {
+    fn render_cache_keeps_the_published_output_without_a_duplicate_tree() {
+        let root = tempdir().unwrap();
+        let cache_root = root.path().join("cache");
+        let out = root.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(".aggr-site"), "1").unwrap();
+        std::fs::write(out.join("index.html"), "published article").unwrap();
+        let summary = crate::site::Summary {
+            pages: 1,
+            items: 1,
+            stubs: 0,
+        };
+        record_render(&cache_root, "generation", &out, summary).unwrap();
+        assert!(
+            out.join("index.html").is_file(),
+            "recording a render must keep its output"
+        );
+        assert!(
+            !Namespace::Render.dir(&cache_root).join("site").exists(),
+            "a cache receipt must not duplicate the site"
+        );
+    }
+
+    #[test]
+    fn rendered_sites_reuse_matching_output_and_rebuild_missing_files() {
         let root = tempdir().unwrap();
         let cache_root = root.path().join("cache");
         let rendered = root.path().join("staging");
@@ -1238,58 +1387,107 @@ mod tests {
             items: 2,
             stubs: 1,
         };
-        store_render(&cache_root, "abc", &rendered, summary).unwrap();
+        record_render(&cache_root, "abc", &rendered, summary).unwrap();
 
-        let out = root.path().join("out");
+        let out = rendered;
         assert_eq!(
-            restore_render(&cache_root, "abc", &out).unwrap(),
+            cached_render(&cache_root, "abc", &out).unwrap(),
             Some(summary)
         );
+        assert!(
+            cached_render(&cache_root, "different", &out)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cached_render(&cache_root, "abc", &root.path().join("missing"))
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(out.join("unexpected"), "extra").unwrap();
+        assert!(cached_render(&cache_root, "abc", &out).unwrap().is_none());
+        std::fs::remove_file(out.join("unexpected")).unwrap();
+        std::fs::write(out.join("index.html"), "other").unwrap();
+        assert!(
+            cached_render(&cache_root, "abc", &out).unwrap().is_none(),
+            "equal-length changed bytes must invalidate the render receipt"
+        );
+        std::fs::write(out.join("index.html"), "first").unwrap();
+        assert_eq!(
+            cached_render(&cache_root, "abc", &out).unwrap(),
+            Some(summary)
+        );
+        std::fs::write(out.join("index.html"), "truncated output").unwrap();
+        assert!(cached_render(&cache_root, "abc", &out).unwrap().is_none());
+        std::fs::remove_file(out.join("index.html")).unwrap();
+        assert!(cached_render(&cache_root, "abc", &out).unwrap().is_none());
+    }
+
+    #[test]
+    fn render_inventory_hashes_media_beyond_one_buffer() {
+        let root = tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let out = root.path().join("out");
+        std::fs::create_dir_all(out.join("assets")).unwrap();
+        std::fs::write(out.join(".aggr-site"), "1").unwrap();
+        std::fs::write(out.join("index.html"), "reader").unwrap();
+        let mut media = vec![42; 64 * 1024 + 3];
+        let path = out.join("assets/image.bin");
+        std::fs::write(&path, &media).unwrap();
+        let summary = crate::site::Summary {
+            pages: 1,
+            items: 0,
+            stubs: 0,
+        };
+        record_render(&cache, "generation", &out, summary).unwrap();
+        assert_eq!(
+            cached_render(&cache, "generation", &out).unwrap(),
+            Some(summary)
+        );
+        *media.last_mut().unwrap() = 43;
+        std::fs::write(&path, media).unwrap();
+        assert!(cached_render(&cache, "generation", &out).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_size_only_render_receipts_are_a_safe_cache_miss() {
+        let root = tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let out = root.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(".aggr-site"), "1").unwrap();
+        std::fs::write(out.join(RENDER_KEY_FILE), "abc").unwrap();
+        std::fs::write(out.join("index.html"), "first").unwrap();
+        let receipt = Namespace::Render.dir(&cache).join("manifest.toml");
+        write(&receipt, b"fingerprint = 'abc'\npages = 1\nitems = 0\nstubs = 0\n[files]\n'.aggr-site' = 1\n'.aggr-build-key' = 3\n'index.html' = 5\n").unwrap();
+        assert!(cached_render(&cache, "abc", &out).unwrap().is_none());
         assert_eq!(
             std::fs::read_to_string(out.join("index.html")).unwrap(),
             "first"
         );
-        assert_eq!(
-            restore_render(&cache_root, "abc", &out).unwrap(),
-            Some(summary)
-        );
-        assert!(
-            restore_render(&cache_root, "different", &out)
-                .unwrap()
-                .is_none()
-        );
     }
 
     #[test]
-    fn render_restore_rejects_a_manifest_and_site_from_different_generations() {
+    fn render_receipt_rejects_a_different_generation_without_changing_output() {
         let root = tempdir().unwrap();
         let cache_root = root.path().join("cache");
-        let rendered = root.path().join("staging");
-        std::fs::create_dir_all(&rendered).unwrap();
-        std::fs::write(rendered.join(".aggr-site"), "1").unwrap();
-        std::fs::write(rendered.join("index.html"), "cached generation").unwrap();
+        let out = root.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(".aggr-site"), "1").unwrap();
+        std::fs::write(out.join("index.html"), "untouched output").unwrap();
         let summary = crate::site::Summary {
             pages: 1,
             items: 1,
             stubs: 0,
         };
-        store_render(&cache_root, "manifest-generation", &rendered, summary).unwrap();
-        std::fs::write(
-            Namespace::Render
-                .dir(&cache_root)
-                .join("site")
-                .join(RENDER_KEY_FILE),
-            "site-generation",
-        )
-        .unwrap();
-
-        let out = root.path().join("out");
-        std::fs::create_dir_all(&out).unwrap();
-        std::fs::write(out.join(".aggr-site"), "1").unwrap();
-        std::fs::write(out.join("index.html"), "untouched output").unwrap();
-
+        let legacy = Namespace::Render.dir(&cache_root).join("site");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("old"), "obsolete duplicate").unwrap();
+        record_render(&cache_root, "manifest-generation", &out, summary).unwrap();
+        assert!(!legacy.exists());
+        std::fs::write(out.join(RENDER_KEY_FILE), "site-generation").unwrap();
         assert!(
-            restore_render(&cache_root, "manifest-generation", &out)
+            cached_render(&cache_root, "manifest-generation", &out)
                 .unwrap()
                 .is_none()
         );
@@ -1673,7 +1871,7 @@ mod tests {
         assert!(!orphan.exists());
         assert!(bodies.join("notes.txt").is_file());
         assert!(!extracted.join("dom-smoothie-0.17-aggr-1").exists());
-        assert!(extracted.join(EXTRACTOR_VERSION).is_dir());
+        assert!(extracted.join(extractor_fingerprint()).is_dir());
         assert!(extracted.join("README").is_file());
         assert!(!failures.join("previous-generation").exists());
         assert!(failures.join("current-generation").join("marker").is_file());

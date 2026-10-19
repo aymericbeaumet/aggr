@@ -1,47 +1,9 @@
-<script lang="ts" module>
-  import { search } from '../state/search.svelte';
-
-  /**
-   * The keys the suggestion list answers from the field: Escape closes what is open and, with
-   * nothing open, leaves the field (never clearing it: `type="search"` would); Enter and Tab
-   * accept the highlighted option by its stable identity; the arrows walk the list. Returns
-   * whether the key was taken.
-   */
-  export function completionKeydown(event: KeyboardEvent): boolean {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      const wasOpen = search.driver ? search.driver.close() : search.suggesting;
-      search.open = false;
-      if (!wasOpen && event.currentTarget instanceof HTMLElement) event.currentTarget.blur();
-      return true;
-    }
-    if (!search.suggesting) return false;
-    if (event.key === 'Enter' || (event.key === 'Tab' && !event.shiftKey)) {
-      event.preventDefault();
-      event.stopPropagation();
-      const choice = search.completions[search.highlighted] ?? search.completions[0];
-      search.driver?.choose(choice);
-      return true;
-    }
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault();
-      event.stopPropagation();
-      const length = search.completions.length;
-      const next = (search.highlighted + (event.key === 'ArrowDown' ? 1 : -1) + length) % length;
-      if (search.driver) search.driver.highlight(next);
-      else search.highlighted = next;
-      return true;
-    }
-    return false;
-  }
-</script>
-
 <script lang="ts">
   // The `#search-completions` listbox: empty and hidden on the static page, filled from the
   // state. The field keeps the keyboard (`aria-activedescendant` names the highlight); a pointer
   // chooses on press so the field is never blurred on the way.
   import type { Completion } from './completion';
+  import { search } from '../state/search.svelte';
 
   const shown = $derived(search.suggesting ? search.completions : []);
   let list: HTMLUListElement | undefined = $state();

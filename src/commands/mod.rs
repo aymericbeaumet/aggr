@@ -4,11 +4,13 @@
 pub mod build;
 pub mod check;
 pub mod clean;
+#[cfg(debug_assertions)]
 pub mod dev;
 pub mod fetch;
 pub mod init;
 pub mod lock;
 mod offline;
+#[cfg(debug_assertions)]
 pub mod server;
 pub mod storage;
 pub mod sync;
@@ -57,7 +59,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             let _guard = project.lock("build")?;
             build::sync_and_run(&project, &args).await
         }
-        Command::Dev(args) => dev::run(&cli.config, &args).await,
+        #[cfg(debug_assertions)]
+        Command::Dev(args) => dev::run(&cli.config, &args, cli.verbose).await,
         Command::Clean(args) => clean::run(&cli.config, &args),
         Command::Storage(args) => {
             let mut config = Config::load_offline(&cli.config).await?;
@@ -93,6 +96,7 @@ impl Project {
         Ok(project)
     }
 
+    #[cfg(debug_assertions)]
     async fn load_offline(config_path: &Path) -> Result<Self> {
         let mut config = Config::load_offline(config_path).await?;
         for source in &mut config.sources {
@@ -183,6 +187,7 @@ impl Project {
     }
 
     /// OS-standard, project-isolated cache for dev. It never touches this repository's worktree.
+    #[cfg(debug_assertions)]
     pub fn dev_cache_dir(&self) -> Result<PathBuf> {
         let requested = crate::cache::dev(&self.config_path)?;
         let dir = clean::validate_dev_cache(self, &requested)?;

@@ -1,11 +1,12 @@
 # Client development and search
 
-Rust and MiniJinja render the complete static reader. The browser client is a Svelte 5 +
-TypeScript application in `web/`, compiled ahead of time by Vite and committed under
+Rust and MiniJinja own the reader's page markup in development and release. Svelte 5 and
+TypeScript in `web/` add interactive controls and enhance that HTML, compiled ahead of time by Vite and committed under
 `src/theme/static/app/`, where the binary embeds it like any other static file. Site
-generation never executes JavaScript or invokes a frontend compiler, so `cargo build`, `aggr sync`,
-`aggr build` and `aggr dev` need no Node. Search is a build-time Pagefind index; there is no
-search service.
+generation never executes JavaScript or invokes a frontend compiler, so `cargo build`, `aggr sync`
+and `aggr build` need no Node. Contributor development uses Node; release binaries omit the
+development command, launcher and live-reload server entirely. Search is a build-time Pagefind
+index; there is no search service.
 
 ## The page model
 
@@ -15,8 +16,8 @@ and one of five views: `list` (rows, paginator, scope), `article` (header row, a
 access notice, neighbours and recommendations), `preferences`, `offline` and `static`. Field
 names are snake_case like the templates, URLs are site paths the client joins onto `base`, and
 `cargo test` exports the TypeScript types with ts-rs into `web/src/generated/` (CI fails when
-they are stale). The article body is not in the model: it stays in the HTML as
-`<div data-article-content>`, together with the media figure.
+they are stale). Rendered content stays in the HTML; the model supplies behavior and identity,
+not a second set of page templates.
 
 ## Boot and navigation
 
@@ -24,15 +25,14 @@ The static page is the first paint. The stylesheet and the entry's modulepreload
 before the blocking bootstrap script, so that first paint does not wait to discover them;
 `#aggr-preferences` stays immediately above the script, which still applies stored settings
 before paint. Feed rows use `content-visibility` at every width, so off-screen entries skip
-layout and stay addressable; printing lays them out. The deferred module reads the model, captures the article
-content (or a static page's `<main>`), mounts `App` into a detached `<div id="app">`, swaps it
-over the rendered one in the same task and flushes effects, so nothing paints in between; the
-captured element is moved into the new tree, never re-parsed. Lists and articles are rendered by
-components; browse and error pages are adopted whole; preferences and offline pages exist only in
-the client. If `#aggr-page` is missing or malformed the page stays static.
+layout and stay addressable; printing lays them out. The deferred module reads the model and
+binds behavior to the existing `#app` and `<main>` without replacing the template's nodes.
+The preferences form is rendered by Rust from the same typed settings schema, then enabled
+after browser-local values are applied. Interactive-only widgets mount into dedicated slots.
+If `#aggr-page` is missing or malformed the page stays static.
 
 Navigation fetches the target page, extracts its model, its content element and its `<head>`
-metadata with `DOMParser`, and re-renders `<main>` from state while the header and tab bar
+metadata with `DOMParser`, and adopts its complete `<main>` while the header and tab bar
 persist. A link inside the archive is fetched as soon as it is pressed or hovered, and a page
 already in memory is swapped in that same turn. The three tabs are fetched as soon as the reader
 starts. After paint, the reader warms the first three rows already on screen. An article's
@@ -53,17 +53,23 @@ and previous and next skip 15 and 30 seconds. Parked audio can be muted from the
 the keys it draws itself. Dismissing the bar or leaving the site stops it. Media that never
 started is released with the page.
 
-## Components and parity
+## One source for page markup
 
-Components that mirror a MiniJinja partial (`Header`, `ListHead`, `Toolbar`, `Row`, `Metadata`,
-`Pager`, `RelatedCard`, `ArticleHeader`, `ArticleFooter`, and `App` for whole pages) must render
-exactly what the partial renders. `cargo test` writes fixtures to `web/test/parity/` (a props
-JSON and the partial's HTML per case; `AGGR_UPDATE_PARITY=1 cargo test --bin aggr parity`
-refreshes them after a template or model change) and vitest renders each component with
-`svelte/server`, normalises both sides (comments, attribute order, whitespace, hashed asset
-names) and compares. These components carry no `<style>`: `style.css` is the only stylesheet,
-so class names stay identical on both sides. Search results reuse `Row` from Pagefind's opaque
-per-document metadata, which is the same `ClientRow` JSON.
+Static pages, headers, metadata, feed rows and preferences controls have one implementation:
+the Rust templates under `src/theme/templates/`. The browser retains that HTML on startup,
+adopts fetched HTML during navigation and binds only the behavior it needs. Template edits
+therefore remain visible after the client starts; there is no mirrored Svelte page to overwrite them.
+
+Search results carry a rendered `_item.html` fragment alongside their typed row data in Pagefind's
+existing opaque display metadata. They use the same partial as ordinary feed rows, without
+per-result requests or another renderer. The client rebases links against the archive root and
+updates rank, selection and browser-local state. Full page HTML is not duplicated in page models.
+
+`cargo test` maintains the Rust page fixtures under `web/test/parity/`; DOM tests use those
+documents to verify enhancement and preservation rather than comparing two template engines.
+`AGGR_UPDATE_PARITY=1 cargo test --bin aggr parity` refreshes them after a template or model
+change. `style.css` remains the shared stylesheet. Svelte owns only interactive widgets and
+reactive behavior, and Vite supplies their development HMR.
 
 Everything else is the platform. The reading progress bar and the folding article header are
 scroll-driven animations, with a small script standing in where scroll timelines or `calc-size()`
@@ -74,20 +80,54 @@ sits behind `@supports` or a feature check and degrades to plain HTML.
 ## Development
 
 ```sh
-make setup                       # mise tools and locked client packages
-make client-check                 # svelte-check + vitest
+make setup                        # mise tools and locked client packages
+cargo run -- dev                  # local config, or the demo when no config exists
+make dev                          # demo archive, Vite HMR and automatic Rust restarts
+AGGR_CONFIG=/path/to/aggr.toml make dev  # use your own instance
+make client-check                 # type checks, vitest and development launcher tests
 make client-build                 # rebuild the committed bundle under src/theme/static/app/
-make client-dev                   # Vite dev server with HMR
-AGGR_VITE_URL=http://127.0.0.1:5173 make run ARGS="dev"
 ```
+
+In a debug build, `cargo run -- dev` starts the Node development tools.
+The CLI requires a subcommand; bare `cargo run` displays usage and exits with an error.
+Configuration comes from an explicit `--config`, then `AGGR_CONFIG`, then the current
+`aggr.toml`; when none exists, the demo configuration is used. `make dev` selects the demo unless
+`AGGR_CONFIG` is already set. Existing flags work through `cargo run -- dev --port 3000` or
+`make dev ARGS="--port 3000"`.
+
+Vite's API provides the frontend server and Svelte HMR in the same Node process that supervises
+the Rust watcher. It selects an available frontend port before the backend starts, so separate
+readers can run together. An explicit `AGGR_VITE_URL` reserves that exact origin and fails clearly
+when the port is occupied. Concurrently handles the watcher's lifecycle; execa passes structured
+arguments to watchexec, which rebuilds and restarts Rust when source or Cargo inputs change.
+Shared handlers live in ordinary TypeScript modules: importing named exports from a Svelte
+component into those modules prevents component HMR and makes Vite reload the page instead.
+Restarts use SIGINT; the previous process retains its cache lock until in-flight disk writes
+and snapshot jobs finish. Templates and the shared stylesheet use the debug backend's snapshot reload path.
+Client sources, generated bindings and build artifacts never restart Rust. Ctrl-C stops the stack.
+Normal startup checks configuration, local imports and existing cache ownership before starting
+the development tools, so invalid configuration or an already running reader fails immediately.
+
+Cached articles appear first. During a cold sync, completed sources become visible while slower
+sources continue fetching. Local HTML reprocessing is detected automatically and published before
+remote requests finish; Node remains a contributor tool, outside the installed CLI's runtime.
 
 `mise.toml` and `mise.lock` pin the development tools. `Cargo.lock` and
 `web/package-lock.json` pin the Rust and client packages. Run `make setup` after
 changing any of those files.
 
-With `AGGR_VITE_URL` set, the development server replaces the compiled module tag in its HTML
-with Vite's client and the source entry, so component edits hot-swap; static HTML, media and data
-stay served by aggr. The setting accepts a local HTTP origin only and has no effect on builds.
+For frontend-only work, `make client-dev` runs Vite separately. To attach a Rust worker to it,
+run `AGGR_DEV_INTERNAL_WORKER=1 AGGR_VITE_URL=http://127.0.0.1:5173 make run ARGS="dev"` in
+another terminal. The internal worker switch is also used by Rust integration tests so they do
+not depend on Node. With `AGGR_VITE_URL` enabled, the debug backend
+replaces the compiled app module, app stylesheet and modulepreloads in served HTML with Vite's
+client and source entry. The existing classic bootstrap, static HTML, media and data stay served
+by aggr. `AGGR_VITE_URL` accepts a loopback HTTP origin only, without credentials, a path,
+query or fragment, and affects development HTTP responses only. The release CLI contains no
+development command or reload mechanism, never invokes Node and serves the committed reader assets
+through ordinary static publication. After `make release`, run
+`mise exec -- npm --prefix web run verify:release` to verify that boundary.
+
 Hashed assets — `assets/app` bundles, Rust `url_for` names, content-addressed media and Pagefind
 fragments — are served `Cache-Control: public, max-age=31536000, immutable`. HTML stays
 `no-store` and does not send `Clear-Site-Data`: the reload script already drops the reader's own
@@ -126,7 +166,13 @@ script carries the app shell, not the article catalogue: `offline-catalog.json` 
 when a download count is set, and individual collection pages are cached when opened. A new
 worker copies shell files whose revision matches instead of downloading them again. The
 offline preference saves complete article pages and their retained image renditions; readiness
-requires every retained file. Partial and quota failures remain visible. Any positive download
+requires every retained file. Updates stage immutable resource revisions, then publish the complete
+selection in one cache write. A failed or cancelled update keeps the previous complete downloads;
+partial and quota failures remain visible. Uncommitted files are never served, and unused revisions
+are removed after each update. Downloads made by older workers remain readable and move locally
+into the revisioned cache on a successful update, without downloading unchanged files again.
+Overlapping updates and clearing downloads share a queue and, where available, a browser Web Lock.
+Any positive download
 limit also saves the complete archive search manifest, including its versioned catalogue, runtime
 and fragments. Only a fully committed index becomes active, and a previous complete index remains
 available during an update. Online/offline transitions select the matching catalogue and runtime;
@@ -262,8 +308,8 @@ while the manifest loads must not discard the vocabulary needed to complete that
 The vocabulary comes from `search-catalog.json`, which contains only the index version, base,
 document count, and facets. Focusing the
 field or completing an unresolved qualifier does not initialize Pagefind or fetch its index chunks.
-`make client-test` exercises the query and session contracts with Node’s built-in test runner;
-no runtime dependency or browser bundle is introduced.
+`make client-check` exercises the query and session contracts with vitest and runs the Node
+development launcher tests alongside them.
 Once a valid query is entered, runtime initialization overlaps the existing typing delay. Fully
 resolved filter queries also use Pagefind's supported preload API; partial text does not speculate
 on potentially broad prefix matches. Clearing, replacing, or abandoning the query cancels pending

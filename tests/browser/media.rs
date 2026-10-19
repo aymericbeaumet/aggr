@@ -131,20 +131,37 @@ async fn media_box(client: &Client, selector: &str) -> Result<Value> {
       const media=document.querySelector(arguments[0]), box=media.getBoundingClientRect();
       const following=document.querySelector('[data-media-following]') || media.nextElementSibling || media.parentElement.nextElementSibling;
       return {width:box.width,height:box.height,top:box.top+scrollY,
-        following:following ? following.getBoundingClientRect().top+scrollY : null,scroll:scrollY};
+        following:following ? following.getBoundingClientRect().top+scrollY : null,scroll:scrollY,
+        metadataHeight:document.querySelector('.itemhead .meta').getBoundingClientRect().height};
     "#,
             vec![json!(selector)],
         )
         .await?)
 }
 
-fn ensure_media_box_stable(before: &Value, after: &Value, label: &str) -> Result<()> {
+fn ensure_media_box_stable(
+    before: &Value,
+    after: &Value,
+    label: &str,
+    duration_changed: bool,
+) -> Result<()> {
+    let metadata_delta = if duration_changed {
+        after["metadataHeight"].as_f64().unwrap_or_default()
+            - before["metadataHeight"].as_f64().unwrap_or_default()
+    } else {
+        0.0
+    };
     for field in ["width", "height", "top", "following", "scroll"] {
         if let (Some(before_value), Some(after_value)) =
             (before[field].as_f64(), after[field].as_f64())
         {
+            let allowed_delta = if matches!(field, "top" | "following") {
+                metadata_delta
+            } else {
+                0.0
+            };
             anyhow::ensure!(
-                (after_value - before_value).abs() <= 0.05,
+                (after_value - before_value - allowed_delta).abs() <= 0.05,
                 "{label} changed {field}: before={before}, after={after}"
             );
         }
@@ -234,7 +251,7 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
         fixture.out.join("media-player.html"),
         "<!doctype html><html><body style=\"background:#315d76;color:white\">Local video player</body></html>",
     )?;
-    for width in [390, 650, 1280] {
+    for width in [360, 390, 650, 1280] {
         emulate(
             client,
             "Emulation.setDeviceMetricsOverride",
@@ -296,7 +313,7 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                         fixture.base
                     ))
                     .await?;
-                wait_for(client, &format!("location.search === '?media={width}-{failed}' && !!document.querySelector('{selector}') && !!document.querySelector('article.item') && getComputedStyle(document.querySelector('.top')).position === 'sticky'")).await?;
+                wait_for(client, &format!("location.pathname.endsWith('/2026-09-01-story-{index}/') && location.search === '?media={width}-{failed}' && !!document.querySelector('{selector}') && !!document.querySelector('article.item') && getComputedStyle(document.querySelector('.top')).position === 'sticky'")).await?;
                 let before_scripts = media_box(client, selector).await?;
                 if matches!(label, "PDF" | "lead image" | "archived image") {
                     let placeholder=client.execute("const frame=document.querySelector('.document-frame,.article-lead,.article-picture');const background=getComputedStyle(frame,'::before').backgroundImage;const matched=background.match(/url\\([\"']?(.*?)[\"']?\\)/);window.expectedPlaceholderHref=matched?.[1];return window.expectedPlaceholderHref||null",vec![]).await?;
@@ -329,6 +346,7 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                     &before_scripts,
                     &before_media,
                     &format!("{label} enhancement at {width}px"),
+                    false,
                 )?;
                 if label == "PDF" {
                     client.execute_async("const done=arguments[arguments.length-1];scrollTo(0,250);setTimeout(()=>requestAnimationFrame(()=>done(true)),350)",vec![]).await?;
@@ -381,6 +399,7 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                         "{label} {} at {width}px",
                         if failed { "failure" } else { "load" }
                     ),
+                    !failed && matches!(label, "direct video" | "podcast audio"),
                 )?;
                 if !failed && label == "direct video" {
                     // The timing line is written directly; the header's length is rendered from
@@ -402,9 +421,14 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                         Object.defineProperty(media,'paused',{configurable:true,value:true});
                         media.dispatchEvent(new Event('pause'));
                         const after=document.querySelector('.body').getBoundingClientRect().top;
-                        done({playing,paused:host.textContent,metadata,stable:Math.abs(after-before)<=1,
+                        const afterHeights=heights();
+                        const metadataDelta=afterHeights['.itemhead .meta']-beforeHeights['.itemhead .meta'];
+                        done({playing,paused:host.textContent,metadata,stable:Math.abs(after-before-metadataDelta)<=1
+                            && Math.abs(scrollY-beforeScroll)<=1
+                            && Math.abs(afterHeights['.native-video']-beforeHeights['.native-video'])<=1
+                            && Math.abs(host.getBoundingClientRect().height-beforeTiming)<=1,
                           bodyDelta:after-before,scrollDelta:scrollY-beforeScroll,timingBefore:beforeTiming,
-                          timingAfter:host.getBoundingClientRect().height,beforeHeights,afterHeights:heights()});
+                          timingAfter:host.getBoundingClientRect().height,metadataDelta,beforeHeights,afterHeights});
                       });
                     "#,vec![]).await?;
                     anyhow::ensure!(
@@ -417,7 +441,7 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                                 .contains("Ends at")
                             && timing["metadata"] == "10 min watch"
                             && timing["stable"] == true,
-                        "native video timing is accurate and does not move content: {timing}"
+                        "native video timing is accurate and preserves player geometry as metadata wraps: {timing}"
                     );
                 }
                 fixture.media.failed.store(false, Ordering::Relaxed);
@@ -485,6 +509,7 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                     &before,
                     &after,
                     &format!("{provider} activation at {width}px"),
+                    false,
                 )?;
                 let pending = client.execute(r#"
               const player=document.querySelector('.video-player'), preview=player.querySelector('.video-preview'), frame=document.querySelector('#now-playing-picture iframe'), style=getComputedStyle(frame);
@@ -505,6 +530,7 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                     &before,
                     &loaded,
                     &format!("{provider} ready at {width}px with motion={motion}"),
+                    false,
                 )?;
             }
         }

@@ -1,5 +1,4 @@
 {
-  "component": "App",
   "props": {
     "page": {
       "base": "./",

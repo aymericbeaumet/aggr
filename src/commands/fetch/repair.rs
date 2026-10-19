@@ -1,13 +1,14 @@
 //! Local archive reprocessing and repairs for items feeds may no longer list: missing media,
 //! feed-only captures, recording durations, and podcast episodes whose enclosure moved.
-//! Explicit reprocessing precedes all source fetches; other repairs follow each source's pass.
+//! Local reprocessing precedes all source fetches; other repairs follow each source's pass.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use futures_util::{StreamExt as _, stream};
+use serde::{Deserialize, Serialize};
 
 use super::plan::{Planned, merge_image_metadata, persist_item, prepare_item, use_existing_path};
 use super::transaction::SourceTransaction;
@@ -21,20 +22,70 @@ use crate::preview;
 use crate::sources;
 use crate::store::{NewItem, Store};
 
-/// Re-derive every retained body from complete local HTML before source fetching begins. Source
-/// membership and dedupe keys cannot enumerate the archive: sources may be retired or renamed,
-/// and distinct retained paths can share a key. Roll back the pass if any write fails.
+#[derive(Default, PartialEq, Eq, Serialize, Deserialize)]
+struct ReprocessingReceipt {
+    generation: String,
+    inputs: BTreeMap<String, String>,
+}
+
+struct ReprocessedBody {
+    input: String,
+    changed: Option<(String, Vec<String>)>,
+}
+
+/// Apply changed extraction rules to complete retained HTML before fetching. Source membership
+/// and dedupe keys cannot enumerate the archive: sources may be retired or renamed, and retained
+/// paths can share a key. Receipts are disposable and never become archive metadata.
 pub(super) fn reprocess_stored_bodies(
     store: &Store,
     args: &FetchArgs,
     store_root: &Path,
+    cache_root: &Path,
 ) -> Result<usize> {
-    if !args.reprocess || args.dry_run {
+    reprocess_stored_bodies_with(
+        store,
+        args,
+        store_root,
+        cache_root,
+        crate::cache::extractor_fingerprint(),
+        derive_stored_body,
+    )
+}
+
+fn derive_stored_body(existing: &Item, html: &str) -> (String, Vec<String>) {
+    let base = url::Url::parse(&existing.front.link).ok();
+    content::normalize_article_body(
+        &content::to_markdown(html, base.as_ref()),
+        &existing.front.title,
+        existing.front.published,
+        &existing.front.source,
+    )
+}
+
+fn reprocess_stored_bodies_with(
+    store: &Store,
+    args: &FetchArgs,
+    store_root: &Path,
+    cache_root: &Path,
+    generation: &str,
+    derive: impl Fn(&Item, &str) -> (String, Vec<String>) + Sync,
+) -> Result<usize> {
+    if args.dry_run || args.backfill_media {
         return Ok(0);
     }
+    let receipt_path = crate::cache::Namespace::Articles
+        .dir(cache_root)
+        .join("reprocessed.json");
+    let previous: Option<ReprocessingReceipt> =
+        crate::cache::read_bounded_regular(&receipt_path, 64 * 1024 * 1024)?
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
     let mut transaction = SourceTransaction::new(store_root)?;
     let result = (|| -> Result<usize> {
         let mut rewritten = 0;
+        let mut receipt = ReprocessingReceipt {
+            generation: generation.into(),
+            inputs: BTreeMap::new(),
+        };
         let items = store.items()?;
         // Re-deriving a body is pure CPU and every item is independent, so the archive is worked
         // through on the shared pool. Applying stays on this thread in archive order: the
@@ -46,18 +97,20 @@ pub(super) fn reprocess_stored_bodies(
             let Some(html) = store.read_html(existing)? else {
                 return Ok(None);
             };
-            let base = url::Url::parse(&existing.front.link).ok();
-            Ok(Some(content::normalize_article_body(
-                &content::to_markdown(&html, base.as_ref()),
-                &existing.front.title,
-                existing.front.published,
-                &existing.front.source,
-            )))
-        })?;
-        for (existing, derived) in items.into_iter().zip(derived) {
-            let Some((body, boundary_labels)) = derived else {
-                continue;
-            };
+            let input =
+                reprocessing_input(existing, &html, &existing.body, &existing.front.labels)?;
+            if !args.reprocess
+                && previous.as_ref().is_some_and(|receipt| {
+                    receipt.generation == generation
+                        && receipt.inputs.get(&existing.path) == Some(&input)
+                })
+            {
+                return Ok(Some(ReprocessedBody {
+                    input,
+                    changed: None,
+                }));
+            }
+            let (body, boundary_labels) = derive(existing, &html);
             let labels = if boundary_labels.is_empty() {
                 existing.front.labels.clone()
             } else {
@@ -65,8 +118,24 @@ pub(super) fn reprocess_stored_bodies(
             };
             if (body == existing.body && labels == existing.front.labels) || body.trim().is_empty()
             {
-                continue;
+                return Ok(Some(ReprocessedBody {
+                    input,
+                    changed: None,
+                }));
             }
+            Ok(Some(ReprocessedBody {
+                input: reprocessing_input(existing, &html, &body, &labels)?,
+                changed: Some((body, labels)),
+            }))
+        })?;
+        for (existing, derived) in items.into_iter().zip(derived) {
+            let Some(derived) = derived else {
+                continue;
+            };
+            receipt.inputs.insert(existing.path.clone(), derived.input);
+            let Some((body, labels)) = derived.changed else {
+                continue;
+            };
             let path = existing.path.clone();
             let mut existing = existing;
             existing.front.labels = labels;
@@ -84,6 +153,12 @@ pub(super) fn reprocess_stored_bodies(
             log::debug!("re-derived the stored body for {path}");
             rewritten += 1;
         }
+        // Publish only after every item write succeeds. A failed transaction cannot leave a
+        // receipt that would suppress its next attempt; unchanged hits never touch the file.
+        if !receipt.inputs.is_empty() && previous.as_ref() != Some(&receipt) {
+            crate::cache::write(&receipt_path, &serde_json::to_vec(&receipt)?)?;
+        }
+        crate::cache::mark_used(&receipt_path);
         Ok(rewritten)
     })();
     match result {
@@ -100,6 +175,18 @@ pub(super) fn reprocess_stored_bodies(
             Err(error)
         }
     }
+}
+
+fn reprocessing_input(item: &Item, html: &str, body: &str, labels: &[String]) -> Result<String> {
+    Ok(crate::model::sha1_hex(serde_json::to_vec(&(
+        html,
+        &item.front.link,
+        &item.front.title,
+        item.front.published,
+        &item.front.source,
+        body,
+        labels,
+    ))?))
 }
 
 /// Explicit media backfill never fetches a feed or replaces article prose.
@@ -1443,10 +1530,236 @@ mod tests {
     }
 
     #[test]
+    fn automatic_reprocessing_receipts_track_code_html_and_body_changes_without_noop_writes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path());
+        let front = FrontMatter {
+            source: "blog".into(),
+            title: "An archived post".into(),
+            link: "https://publisher.invalid/post".into(),
+            html: Some("post.html".into()),
+            ..Default::default()
+        };
+        store
+            .write_item(NewItem {
+                dir: "items/blog",
+                stem: "post",
+                front: &front,
+                body: "An older extraction.\n",
+                html: Some("<p>Current article text.</p>"),
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        let conversions = AtomicUsize::new(0);
+        let derive = |item: &Item, html: &str| {
+            conversions.fetch_add(1, Ordering::Relaxed);
+            derive_stored_body(item, html)
+        };
+        let idle = FetchArgs::default();
+        let dry_run = FetchArgs {
+            dry_run: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            reprocess_stored_bodies_with(
+                &store,
+                &dry_run,
+                root.path(),
+                cache.path(),
+                "first",
+                derive
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(conversions.load(Ordering::Relaxed), 0);
+        assert_eq!(fs::read_dir(cache.path()).unwrap().count(), 0);
+        let media_only = FetchArgs {
+            backfill_media: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            reprocess_stored_bodies_with(
+                &store,
+                &media_only,
+                root.path(),
+                cache.path(),
+                "first",
+                derive
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(conversions.load(Ordering::Relaxed), 0);
+        assert_eq!(fs::read_dir(cache.path()).unwrap().count(), 0);
+
+        assert_eq!(
+            reprocess_stored_bodies_with(&store, &idle, root.path(), cache.path(), "first", derive)
+                .unwrap(),
+            1
+        );
+        let path = root.path().join("items/blog/post.md");
+        let receipt = crate::cache::Namespace::Articles
+            .dir(cache.path())
+            .join("reprocessed.json");
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let receipt_modified = fs::metadata(&receipt).unwrap().modified().unwrap();
+        assert_eq!(
+            reprocess_stored_bodies_with(&store, &idle, root.path(), cache.path(), "first", derive)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conversions.load(Ordering::Relaxed),
+            1,
+            "unchanged inputs skip conversion"
+        );
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        assert_eq!(
+            fs::metadata(&receipt).unwrap().modified().unwrap(),
+            receipt_modified
+        );
+
+        assert_eq!(
+            reprocess_stored_bodies_with(
+                &store,
+                &idle,
+                root.path(),
+                cache.path(),
+                "changed code",
+                derive
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conversions.load(Ordering::Relaxed),
+            2,
+            "code changes rerun conversion"
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            modified,
+            "receipts alone never rewrite archive files"
+        );
+
+        fs::write(
+            root.path().join("items/blog/post.html"),
+            "<p>The retained HTML changed.</p>",
+        )
+        .unwrap();
+        assert_eq!(
+            reprocess_stored_bodies_with(
+                &store,
+                &idle,
+                root.path(),
+                cache.path(),
+                "changed code",
+                derive
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(conversions.load(Ordering::Relaxed), 3);
+        let item = store.read_item("items/blog/post").unwrap();
+        assert_eq!(item.body, "The retained HTML changed.\n");
+
+        fs::write(
+            &path,
+            crate::store::frontmatter::render(&item.front, "A discarded checkout's body.\n")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            reprocess_stored_bodies_with(
+                &store,
+                &idle,
+                root.path(),
+                cache.path(),
+                "changed code",
+                derive
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conversions.load(Ordering::Relaxed),
+            4,
+            "a receipt cannot hide a different stored body"
+        );
+        assert_eq!(store.read_item("items/blog/post").unwrap().body, item.body);
+
+        let mut labeled = store.read_item("items/blog/post").unwrap();
+        labeled.front.labels = vec!["curated".into()];
+        fs::write(
+            &path,
+            crate::store::frontmatter::render(&labeled.front, &labeled.body).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            reprocess_stored_bodies_with(
+                &store,
+                &idle,
+                root.path(),
+                cache.path(),
+                "changed code",
+                derive
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conversions.load(Ordering::Relaxed),
+            5,
+            "label inputs invalidate the receipt without rewriting unchanged output"
+        );
+        assert_eq!(
+            store.read_item("items/blog/post").unwrap().front.labels,
+            ["curated"]
+        );
+
+        let forced = FetchArgs {
+            reprocess: true,
+            ..Default::default()
+        };
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let receipt_modified = fs::metadata(&receipt).unwrap().modified().unwrap();
+        assert_eq!(
+            reprocess_stored_bodies_with(
+                &store,
+                &forced,
+                root.path(),
+                cache.path(),
+                "changed code",
+                derive
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conversions.load(Ordering::Relaxed),
+            6,
+            "the old flag still forces conversion"
+        );
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        assert_eq!(
+            fs::metadata(&receipt).unwrap().modified().unwrap(),
+            receipt_modified
+        );
+        assert!(!root.path().join("sources").exists());
+        assert!(!root.path().join("status.toml").exists());
+    }
+
+    #[test]
     fn reprocess_re_derives_stored_bodies_from_retained_html() {
         // An item captured before a cleanup rule existed: blog.google's audio player survived into
         // the stored body, and the source has long since stopped listing the article.
         let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(root.path()));
         let html = "<div data-component=\"uni-audio-player-tts\"><p><audio title=\"Listen\"><source src=\"https://cdn.example/a.mp3\" type=\"audio/mpeg\"><p>Your browser does not support the audio element.</p></audio></p><div><p>Listen to article</p><p>[[duration]] minutes</p></div></div><p>Today, we are launching the app.</p><p>#Jev #AI #programming #coding</p>";
         let stale = "Your browser does not support the audio element.\n\nListen to article\n\n\\[\\[duration\\]\\] minutes\n\nToday, we are launching the app.\n";
@@ -1471,19 +1784,9 @@ mod tests {
             .unwrap();
 
         let idle = FetchArgs::default();
-        // Without the flag nothing is touched, however stale the body is.
+        // Older captures pick up current extraction rules without an explicit flag.
         assert_eq!(
-            reprocess_stored_bodies(&store, &idle, root.path()).unwrap(),
-            0
-        );
-        assert_eq!(store.read_item("items/blog/launch").unwrap().body, stale);
-
-        let reprocessing = FetchArgs {
-            reprocess: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            reprocess_stored_bodies(&store, &reprocessing, root.path()).unwrap(),
+            reprocess_stored_bodies(&store, &idle, root.path(), cache.path()).unwrap(),
             1
         );
         let repaired = store.read_item("items/blog/launch").unwrap();
@@ -1503,7 +1806,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            reprocess_stored_bodies(&store, &again, root.path()).unwrap(),
+            reprocess_stored_bodies(&store, &again, root.path(), cache.path()).unwrap(),
             0
         );
     }
@@ -1511,6 +1814,7 @@ mod tests {
     #[test]
     fn reprocess_includes_retired_sources_and_every_retained_path() {
         let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
         let store = Store::open(root.path());
         let html = "<p>Fresh body from the retained HTML.</p>";
         let paths = [
@@ -1549,14 +1853,14 @@ mod tests {
             ..reprocessing.clone()
         };
         assert_eq!(
-            reprocess_stored_bodies(&store, &dry_run, root.path()).unwrap(),
+            reprocess_stored_bodies(&store, &dry_run, root.path(), cache.path()).unwrap(),
             0
         );
         for path in paths {
             assert_eq!(store.read_item(path).unwrap().body, "Old body.\n");
         }
         assert_eq!(
-            reprocess_stored_bodies(&store, &reprocessing, root.path()).unwrap(),
+            reprocess_stored_bodies(&store, &reprocessing, root.path(), cache.path()).unwrap(),
             3
         );
         let mut after = Vec::new();
@@ -1574,7 +1878,7 @@ mod tests {
             ));
         }
         assert_eq!(
-            reprocess_stored_bodies(&store, &reprocessing, root.path()).unwrap(),
+            reprocess_stored_bodies(&store, &reprocessing, root.path(), cache.path()).unwrap(),
             0
         );
         for (file, bytes, modified) in after {
@@ -1588,6 +1892,7 @@ mod tests {
     #[test]
     fn reprocess_rolls_back_earlier_bodies_when_a_later_write_fails() {
         let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
         let store = Store::open(root.path());
         for stem in ["a", "z"] {
             let front = FrontMatter {
@@ -1629,8 +1934,15 @@ mod tests {
             reprocess: true,
             ..Default::default()
         };
-        let error = reprocess_stored_bodies(&store, &reprocessing, root.path()).unwrap_err();
+        let error =
+            reprocess_stored_bodies(&store, &reprocessing, root.path(), cache.path()).unwrap_err();
         assert!(format!("{error:#}").contains("preview companion is missing"));
+        assert!(
+            !crate::cache::Namespace::Articles
+                .dir(cache.path())
+                .join("reprocessed.json")
+                .exists()
+        );
         for (stem, bytes) in ["a", "z"].into_iter().zip(before) {
             assert_eq!(
                 fs::read(root.path().join(format!("items/blog/{stem}.md"))).unwrap(),
@@ -1642,6 +1954,7 @@ mod tests {
     #[test]
     fn reprocess_never_shortens_an_item_whose_retained_html_was_truncated() {
         let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(root.path()));
         let body = "The complete article body, longer than what was retained.\n";
         let front = FrontMatter {
@@ -1664,15 +1977,37 @@ mod tests {
                 images: &[],
             })
             .unwrap();
-        let reprocessing = FetchArgs {
-            reprocess: true,
-            ..Default::default()
+        let missing_front = FrontMatter {
+            html: Some("missing.html".into()),
+            html_truncated: false,
+            ..front
         };
-        assert_eq!(
-            reprocess_stored_bodies(&store, &reprocessing, root.path()).unwrap(),
-            0
-        );
-        assert_eq!(store.read_item("items/blog/long").unwrap().body, body);
+        store
+            .write_item(NewItem {
+                dir: "items/blog",
+                stem: "missing",
+                front: &missing_front,
+                body,
+                html: Some("<p>A missing companion must not replace the current body.</p>"),
+                preview: None,
+                images: &[],
+            })
+            .unwrap();
+        fs::remove_file(root.path().join("items/blog/missing.html")).unwrap();
+        for reprocess in [false, true] {
+            let args = FetchArgs {
+                reprocess,
+                ..Default::default()
+            };
+            assert_eq!(
+                reprocess_stored_bodies(&store, &args, root.path(), cache.path()).unwrap(),
+                0
+            );
+            for path in ["items/blog/long", "items/blog/missing"] {
+                assert_eq!(store.read_item(path).unwrap().body, body);
+            }
+        }
+        assert_eq!(fs::read_dir(cache.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]

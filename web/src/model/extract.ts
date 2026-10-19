@@ -16,18 +16,10 @@ export function parseDocument(html: string): Document {
 }
 
 /**
- * The element a view adopts rather than renders: an article's content region (the media figure
- * and the body), or a static page's whole `<main>`. Lists are rendered from the model alone.
+ * Rust renders every page. The client adopts its complete main region and adds behavior.
  */
-export function contentElement(root: ParentNode, model: ClientPage): Element | null {
-  switch (model.page.view) {
-    case 'article':
-      return root.querySelector('[data-article-content]');
-    case 'list':
-      return null;
-    default:
-      return root.querySelector('main#content');
-  }
+export function contentElement(root: ParentNode, _model: ClientPage): Element | null {
+  return root.querySelector('main#content');
 }
 
 /**

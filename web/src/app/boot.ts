@@ -1,4 +1,4 @@
-import { flushSync, mount } from 'svelte';
+import { flushSync, mount, unmount } from 'svelte';
 import { contentElement } from '../model/extract';
 import { readModel } from '../model/page';
 import { navigation } from '../navigation';
@@ -11,7 +11,9 @@ import { startClock } from '../state/clock.svelte';
 import { page, type Shown } from '../state/page.svelte';
 import { loadPreferences } from '../state/preferences.svelte';
 import { selection } from '../state/selection.svelte';
-import App from './App.svelte';
+import NowPlaying from './NowPlaying.svelte';
+import { enhancePage, releasePage } from './content';
+import { installChrome } from './chrome.svelte';
 import {
   installFeedChrome,
   installKeyboardInset,
@@ -23,36 +25,28 @@ import {
 } from './platform';
 import { pageArrived, startReader } from './reader';
 
-/**
- * Take the rendered page over: read its model, capture the region a view adopts, mount `App`
- * into a detached `<div id="app">`, swap it over the rendered one in the same task and flush,
- * so nothing paints in between. Returns what is shown, or null when the page has no usable
- * model and stays static.
- */
+const persistent = new WeakMap<Document, () => void>();
+
+/** Keep Rust's page intact and install stateful behavior plus the client-only media island. */
 export function mountApp(doc: Document = document): Shown | null {
   const model = readModel(doc.getElementById('aggr-page')?.textContent);
   const existing = doc.getElementById('app');
   if (!model || !existing) return null;
+  const content = contentElement(existing, model);
+  if (!(content instanceof HTMLElement)) return null;
+  persistent.get(doc)?.();
+  releasePage(doc);
   page.root = new URL(model.base, doc.baseURI).href;
   page.icon = doc.querySelector('link[rel="icon"]')?.getAttribute('href') ?? null;
   if (page.icon) page.icon = new URL(page.icon, doc.baseURI).href;
-  const content = contentElement(existing, model);
   const shown: Shown = { model, content, href: doc.location.href };
   page.show(shown);
-  const target = doc.createElement('div');
-  target.id = 'app';
-  mount(App, {
-    target,
-    props: {
-      get page() {
-        return page.model ?? model;
-      },
-      get content() {
-        return page.content;
-      },
-    },
-  });
-  existing.replaceWith(target);
+  const target = doc.getElementById('now-playing-root');
+  if (target) {
+    const instance = mount(NowPlaying, { target });
+    persistent.set(doc, () => { void unmount(instance); });
+  }
+  enhancePage(content, model);
   flushSync();
   return shown;
 }
@@ -75,6 +69,7 @@ export function boot(): void {
   safely('clock', () => startClock());
   safely('selection', () => selection.configure(root.pathname, sessionStorage));
   if (!mountApp()) return;
+  safely('chrome', installChrome);
   safely('platform', markPlatform);
   safely('shift-hover', installShiftHover);
   safely('tap-feedback', installTapFeedback);
@@ -99,5 +94,6 @@ export function boot(): void {
   );
   // One readiness signal, for styles that only apply once enhancement is in place and for the
   // browser contract suite.
+  flushSync();
   document.documentElement.dataset.aggrReady = 'true';
 }

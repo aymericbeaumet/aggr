@@ -85,23 +85,31 @@ pub(super) async fn persist_item(
         .await
         .context("article persistence was closed")?;
     let store = Arc::clone(store);
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        store.write_item_with_document(
-            NewItem {
-                dir: &planned.dir,
-                stem: &planned.stem,
-                front: &planned.front,
-                body: &planned.body,
-                html: planned.html.as_deref(),
-                preview: raw.preview.as_ref().map(|preview| preview.bytes.as_slice()),
-                images: &raw.images,
-            },
-            raw.document.as_ref(),
-        )
-    })
+    super::blocking_write(
+        "persisting article content",
+        options.ownership.clone(),
+        move || {
+            let _permit = permit;
+            store.write_item_with_document(
+                NewItem {
+                    dir: &planned.dir,
+                    stem: &planned.stem,
+                    front: &planned.front,
+                    body: &planned.body,
+                    html: planned.html.as_deref(),
+                    preview: raw.preview.as_ref().map(|preview| preview.bytes.as_slice()),
+                    images: &raw.images,
+                },
+                raw.document.as_ref(),
+            )
+        },
+    )
     .await
-    .context("persisting article content")?
+}
+
+#[cfg(test)]
+async fn persist_in_background(write: impl FnOnce() -> Result<()> + Send + 'static) -> Result<()> {
+    super::blocking_write("persisting article content", None, write).await
 }
 
 pub(super) fn plan(
@@ -341,6 +349,68 @@ mod tests {
         assert_eq!(
             planned.front.extra,
             std::collections::BTreeMap::from([("kept".into(), "value".into())])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_persistence_finishes_before_source_rollback() {
+        use super::super::transaction::SourceTransaction;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(root.path()));
+        store.bootstrap().unwrap();
+        let raw = RawItem {
+            title: "Canceled article".into(),
+            link: "https://example.test/canceled".into(),
+            ..Default::default()
+        };
+        let planned = plan(&raw, &source(), &options(), ContentKind::Feed);
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let (written, finished) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn({
+            let store = Arc::clone(&store);
+            let root = root.path().to_owned();
+            async move {
+                let mut transaction = SourceTransaction::new(&root).unwrap();
+                transaction.track_item(&planned, &raw).unwrap();
+                persist_in_background(move || {
+                    let _ = entered.send(());
+                    released.recv().unwrap();
+                    store.write_item(NewItem {
+                        dir: &planned.dir,
+                        stem: &planned.stem,
+                        front: &planned.front,
+                        body: &planned.body,
+                        html: None,
+                        preview: None,
+                        images: &[],
+                    })?;
+                    let _ = written.send(());
+                    Ok(())
+                })
+                .await
+                .unwrap();
+                transaction.commit();
+            }
+        });
+        started.await.unwrap();
+        writer.abort();
+        let (canceled, cancellation) = std::sync::mpsc::channel();
+        let release_write = std::thread::spawn(move || {
+            // A detached write lets the aborted source report completion before it writes. A
+            // cancellation-safe write holds that source until this worker is allowed to finish.
+            let _ = cancellation.recv_timeout(Duration::from_secs(1));
+            release.send(()).unwrap();
+        });
+        let cancellation = writer.await.unwrap_err();
+        assert!(cancellation.is_cancelled());
+        let _ = canceled.send(());
+        finished.await.unwrap();
+        release_write.join().unwrap();
+        assert!(
+            store.items().unwrap().is_empty(),
+            "the canceled write must not resurrect an item after rollback"
         );
     }
 

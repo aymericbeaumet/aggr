@@ -17,6 +17,17 @@ pub(crate) fn prepare_out_dir(out: &Path) -> Result<()> {
     std::fs::create_dir_all(&resolved).with_context(|| format!("creating {}", resolved.display()))
 }
 
+/// Stage beside the destination so publication can rename without duplicating the tree.
+pub(crate) fn staging(out: &Path) -> Result<tempfile::TempDir> {
+    let out = validate_replaceable_output(out)?;
+    let parent = out.parent().context("output parent")?;
+    std::fs::create_dir_all(parent)?;
+    tempfile::Builder::new()
+        .prefix(".aggr-build-")
+        .tempdir_in(parent)
+        .context("creating output staging directory")
+}
+
 /// Promote a verified staged tree and retain the previous tree until replacement succeeds.
 pub(crate) fn promote(staging: &Path, out: &Path) -> Result<()> {
     let out = validate_replaceable_output(out)?;
@@ -48,8 +59,14 @@ pub(crate) fn promote(staging: &Path, out: &Path) -> Result<()> {
         std::fs::rename(&out, &previous)?;
     }
     if let Err(error) = std::fs::rename(&next, &out) {
-        if previous.exists() {
-            std::fs::rename(&previous, &out).context("restoring previous output")?;
+        if previous.exists()
+            && let Err(restore_error) = std::fs::rename(&previous, &out)
+        {
+            let recovery = transaction.keep();
+            bail!(
+                "promoting generated output failed: {error}; restoring previous output failed: {restore_error}; previous output preserved at {}",
+                recovery.join("previous").display()
+            );
         }
         return Err(error).context("promoting generated output");
     }
@@ -148,6 +165,34 @@ fn resolve_output_path(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staging_and_promotion_preserve_the_previous_output_until_ready() {
+        let root = tempfile::tempdir().unwrap();
+        let out = root.path().join("site");
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join(MARKER), "1").unwrap();
+        std::fs::write(out.join("index.html"), "old").unwrap();
+        let scratch = staging(&out).unwrap();
+        assert_eq!(
+            scratch.path().parent().unwrap(),
+            root.path().canonicalize().unwrap()
+        );
+        let next = scratch.path().join("site");
+        std::fs::create_dir(&next).unwrap();
+        std::fs::write(next.join(MARKER), "1").unwrap();
+        std::fs::write(next.join("index.html"), "new").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(out.join("index.html")).unwrap(),
+            "old"
+        );
+        promote(&next, &out).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(out.join("index.html")).unwrap(),
+            "new"
+        );
+        assert!(!next.exists());
+    }
 
     #[test]
     fn refuses_to_clear_foreign_directories() {

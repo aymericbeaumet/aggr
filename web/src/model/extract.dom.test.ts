@@ -16,19 +16,21 @@ const html = (script: string, main: string) =>
   `<!doctype html><html><head><title>T</title><link rel="canonical" href="https://x/">${script}</head><body><div id="app"><main id="content">${main}</main></div></body></html>`;
 
 describe('extract', () => {
-  it('returns the model, the head and no content for a list', () => {
+  it('returns the model, the head and Rust-rendered main for a list', () => {
     const doc = parseDocument(html(`<script id="aggr-page" type="application/json">${model({ view: 'list', data: {} })}</script>`, '<ol></ol>'));
     const extracted = extract(doc, document);
     expect(extracted?.model.kind).toBe('river');
-    expect(extracted?.content).toBeNull();
+    expect(extracted?.content?.querySelector('ol')).not.toBeNull();
     expect(extracted?.title).toBe('T');
     expect(extracted?.head.querySelector('link[rel=canonical]')).not.toBeNull();
   });
 
-  it('adopts the article content region into the current document', () => {
+  it('adopts the complete article including Rust-owned chrome into the current document', () => {
     const doc = parseDocument(html(`<script id="aggr-page" type="application/json">${model({ view: 'article', data: {} }, 'item')}</script>`, '<article><div data-article-content><p>Body</p></div></article>'));
     const extracted = extract(doc, document);
     expect(extracted?.content?.ownerDocument).toBe(document);
+    expect(extracted?.content?.localName).toBe('main');
+    expect(extracted?.content?.querySelector('article')).not.toBeNull();
     expect(extracted?.content?.querySelector('p')?.textContent).toBe('Body');
     expect(doc.querySelector('[data-article-content]')).toBeNull();
   });
@@ -49,8 +51,8 @@ describe('extract', () => {
   it('finds the region by view', () => {
     const doc = parseDocument(html('', '<div data-article-content></div>'));
     const page = JSON.parse(model({ view: 'article' }, 'item'));
-    expect(contentElement(doc, page)?.hasAttribute('data-article-content')).toBe(true);
-    expect(contentElement(doc, { ...page, page: { view: 'list' } })).toBeNull();
+    expect(contentElement(doc, page)?.localName).toBe('main');
+    expect(contentElement(doc, { ...page, page: { view: 'list' } })?.localName).toBe('main');
     expect(contentElement(doc, { ...page, page: { view: 'offline' } })?.localName).toBe('main');
   });
 });

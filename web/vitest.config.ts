@@ -33,17 +33,6 @@ export default defineConfig({
           include: ['src/sw/**/*.test.ts'],
         },
       },
-      {
-        // Server renders of the components, compared with the minijinja fixtures. A node
-        // environment makes vitest transform modules in SSR mode, so the Svelte plugin compiles
-        // `generate: 'server'` and `render` from `svelte/server` works without extra options.
-        plugins: [svelte()],
-        test: {
-          name: 'parity',
-          environment: 'node',
-          include: ['test/parity/**/*.test.ts'],
-        },
-      },
     ],
   },
 });

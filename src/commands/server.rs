@@ -3,26 +3,43 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
+use axum::Router;
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{StatusCode, Uri, header};
+use axum::response::{IntoResponse as _, Response, Sse, sse::Event};
+use axum::routing::get;
 use chrono::Utc;
+use futures_util::StreamExt as _;
 use notify::{RecursiveMode, Watcher as _};
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::net::TcpListener;
+use tokio::sync::{RwLock, broadcast, mpsc, oneshot, watch};
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Duration, sleep};
 
+use super::dev::snapshot::ArchiveSnapshot;
 use super::{Project, build, sync};
 use crate::cli::{BuildArgs, DevArgs, FetchArgs};
 use crate::git::Worktree;
+
+mod vite;
+
+pub(super) fn vite_origin() -> Result<String> {
+    Ok(vite::Client::from_env()?
+        .map(|client| client.origin().to_owned())
+        .unwrap_or_else(|| "http://127.0.0.1:5173".into()))
+}
 
 const DEV_KEY_FILE: &str = ".aggr-dev-key";
 
 type SiteFiles = BTreeMap<String, Arc<Vec<u8>>>;
 
 enum Snapshot {
+    Pending(Arc<Vec<u8>>),
     Files(SiteFiles),
     Lazy(Arc<crate::site::dev::Site>),
 }
@@ -30,6 +47,8 @@ enum Snapshot {
 #[derive(Clone)]
 struct MemorySite {
     snapshot: Arc<RwLock<Snapshot>>,
+    revision: Arc<AtomicU64>,
+    ownership: Option<Arc<super::lock::DevLock>>,
 }
 
 impl MemorySite {
@@ -37,11 +56,29 @@ impl MemorySite {
         let page = b"<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>aggr dev</title><style>body{font:16px system-ui;margin:3rem;max-width:40rem}body:before{content:'';display:inline-block;width:.75rem;height:.75rem;margin-right:.6rem;border:2px solid #8ea1ff;border-top-color:transparent;border-radius:50%;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style><p>Preparing the archive; pages render on request&hellip;</p>".to_vec();
         let page = Arc::new(page);
         Self {
-            snapshot: Arc::new(RwLock::new(Snapshot::Files(BTreeMap::from([
-                ("index.html".to_string(), page.clone()),
-                ("404.html".to_string(), page),
-            ])))),
+            ownership: None,
+            revision: Arc::default(),
+            snapshot: Arc::new(RwLock::new(Snapshot::Pending(page))),
         }
+    }
+
+    /// A failed first build must stop looking busy. A usable generation always wins over an
+    /// error page, including an earlier successful preview from the same synchronization pass.
+    async fn fail_startup(&self, error: &anyhow::Error) -> bool {
+        let mut snapshot = self.snapshot.write().await;
+        let Snapshot::Pending(previous) = &*snapshot else {
+            return false;
+        };
+        let message = crate::content::escape_html(&format!("{error:#}"));
+        let page = format!(
+            "<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>aggr dev: preparation failed</title><style>body{{font:16px system-ui;margin:3rem;max-width:40rem}}pre{{white-space:pre-wrap;overflow-wrap:anywhere}}</style><h1>The archive could not be prepared</h1><p>Fix the source or configuration error below. Development will retry when files change or sources refresh.</p><pre>{message}</pre>"
+        ).into_bytes();
+        if previous.as_slice() == page.as_slice() {
+            return false;
+        }
+        *snapshot = Snapshot::Pending(Arc::new(page));
+        self.revision.fetch_add(1, Ordering::SeqCst);
+        true
     }
 
     /// The snapshot the previous `aggr dev` promoted, or nothing when there is none. A snapshot
@@ -53,6 +90,8 @@ impl MemorySite {
         }
         match read_site(root, None) {
             Ok(files) => Some(Self {
+                ownership: None,
+                revision: Arc::default(),
                 snapshot: Arc::new(RwLock::new(Snapshot::Files(files))),
             }),
             Err(err) => {
@@ -70,18 +109,22 @@ impl MemorySite {
         let files = read_site(staging, None)?;
         remove_build(staging)?;
         Ok(Self {
+            ownership: None,
+            revision: Arc::default(),
             snapshot: Arc::new(RwLock::new(Snapshot::Files(files))),
         })
     }
 
     async fn replace_from(&self, staging: &Path, cached: &Path) -> Result<()> {
+        let ownership = self.ownership.clone();
         let retained = match &*self.snapshot.read().await {
             Snapshot::Files(files) => files.clone(),
-            Snapshot::Lazy(_) => BTreeMap::new(),
+            Snapshot::Lazy(_) | Snapshot::Pending(_) => BTreeMap::new(),
         };
         let staging = staging.to_owned();
         let cached = cached.to_owned();
         let files = tokio::task::spawn_blocking(move || -> Result<_> {
+            let _ownership = ownership;
             let files = read_site(&staging, Some(&retained))?;
             let previous = cached.with_extension("previous");
             if previous.exists() {
@@ -116,30 +159,39 @@ impl MemorySite {
         .await
         .context("loading and promoting the dev snapshot")??;
         *self.snapshot.write().await = Snapshot::Files(files);
+        self.revision.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
     async fn lazy_root(&self) -> Option<PathBuf> {
         match &*self.snapshot.read().await {
             Snapshot::Lazy(site) => Some(site.root().to_owned()),
-            Snapshot::Files(_) => None,
+            Snapshot::Files(_) | Snapshot::Pending(_) => None,
         }
     }
 
     async fn replace_lazy(&self, site: crate::site::dev::Site) {
         *self.snapshot.write().await = Snapshot::Lazy(Arc::new(site));
+        self.revision.fetch_add(1, Ordering::SeqCst);
     }
 
     async fn body(&self, key: &str) -> Result<Option<Arc<Vec<u8>>>> {
         let site = match &*self.snapshot.read().await {
+            Snapshot::Pending(page) => {
+                return Ok(matches!(key, "index.html" | "404.html").then(|| Arc::clone(page)));
+            }
             Snapshot::Files(files) => return Ok(files.get(key).cloned()),
             Snapshot::Lazy(site) => Arc::clone(site),
         };
         let key = key.to_owned();
+        let ownership = self.ownership.clone();
         // The snapshot owns its scratch directory until the last in-flight request ends.
-        tokio::task::spawn_blocking(move || site.response(&key).map(|body| body.map(Arc::new)))
-            .await
-            .context("rendering dev response")?
+        tokio::task::spawn_blocking(move || {
+            let _ownership = ownership;
+            site.response(&key).map(|body| body.map(Arc::new))
+        })
+        .await
+        .context("rendering dev response")?
     }
 
     async fn resolve_response(
@@ -297,14 +349,16 @@ fn remove_build(root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_with_reload(
+pub(super) async fn run_with_reload(
     project: Project,
     args: &DevArgs,
     data: PathBuf,
     cache: PathBuf,
     cached: PathBuf,
     staging: PathBuf,
+    ownership: Arc<super::lock::DevLock>,
 ) -> Result<()> {
+    let vite = vite::Client::from_env()?;
     let project = Arc::new(project);
     // Install the process signal handler before the listener becomes visible. This makes even an
     // immediate Ctrl-C (common when a command was started by mistake) a graceful shutdown.
@@ -322,15 +376,25 @@ pub async fn run_with_reload(
         "syncing {} source(s) in the background…",
         project.sources.len()
     );
-    let site = match args.release.then(|| MemorySite::cached(&cached)).flatten() {
+    let mut site = match args.release.then(|| MemorySite::cached(&cached)).flatten() {
         Some(site) => {
             println!("restored the previous dev build from cache");
             site
         }
         None => MemorySite::loading(),
     };
+    site.ownership = Some(ownership);
     let (reload, _) = broadcast::channel(16);
-    let serving = host(listener, site.clone(), &base, reload.clone());
+    let (stop_http, http_shutdown) = watch::channel(false);
+    let serving = host(
+        listener,
+        site.clone(),
+        &base,
+        reload.clone(),
+        vite,
+        http_shutdown,
+    );
+    tokio::pin!(serving);
     let state = DevState {
         data,
         cache,
@@ -345,9 +409,19 @@ pub async fn run_with_reload(
     // manual edit.
     let pending_watcher = prepare_watch(&project, &state)?;
     let initializing = async {
-        match refresh(project.clone(), &args.fetch, &build_args, &state, false).await {
-            Ok(_) => println!("cached articles ready: {url}"),
-            Err(err) => eprintln!("cached build failed: {err:#}"),
+        let data = state.data.clone();
+        let has_cached_items = tokio::task::spawn_blocking(move || {
+            crate::store::Store::open(data)
+                .items()
+                .map(|items| !items.is_empty())
+        })
+        .await
+        .context("reading cached dev articles")??;
+        if has_cached_items {
+            match refresh(project.clone(), &args.fetch, &build_args, &state, false).await {
+                Ok(_) => println!("cached articles ready: {url}"),
+                Err(err) => eprintln!("cached build failed: {err:#}"),
+            }
         }
         let project = match Project::load(&project.config_path).await {
             Ok(resolved) => {
@@ -360,20 +434,32 @@ pub async fn run_with_reload(
             }
             Err(err) => {
                 eprintln!("initial source resolution failed: {err:#}");
+                if state.site.fail_startup(&err).await {
+                    let _ = state.reload.send(());
+                }
                 project.clone()
             }
         };
         let _watcher = pending_watcher.start(project, args, state)?;
         std::future::pending::<Result<()>>().await
     };
-    let result = tokio::select! {
-        result = serving => result,
-        result = initializing => result,
+    let (result, http_finished) = tokio::select! {
+        result = &mut serving => (result, true),
+        result = initializing => (result, false),
         signal = &mut shutdown_rx => {
-            signal.context("Ctrl-C task stopped")?.context("listening for Ctrl-C")?;
-            println!("stopping");
-            Ok(())
+            let result = signal.context("Ctrl-C task stopped")
+                .and_then(|signal| signal.context("listening for Ctrl-C"));
+            if result.is_ok() {
+                println!("stopping");
+            }
+            (result, false)
         }
+    };
+    stop_http.send_replace(true);
+    let result = if http_finished {
+        result
+    } else {
+        result.and(serving.await)
     };
     shutdown_task.abort();
     result
@@ -386,14 +472,49 @@ async fn refresh(
     state: &DevState,
     sync_sources: bool,
 ) -> Result<bool> {
+    let result = refresh_inner(project, fetch_args, build_args, state, sync_sources).await;
+    if let Err(error) = &result
+        && state.site.fail_startup(error).await
+    {
+        let _ = state.reload.send(());
+    }
+    result
+}
+
+async fn refresh_inner(
+    project: Arc<Project>,
+    fetch_args: &FetchArgs,
+    build_args: &BuildArgs,
+    state: &DevState,
+    sync_sources: bool,
+) -> Result<bool> {
     let worktree = Worktree::ephemeral(state.data.clone());
     let visible_change = if sync_sources {
-        let report = sync::run_dev(&project, &worktree, fetch_args, &state.cache).await?;
+        let report = if build_args.release {
+            sync::run_dev(
+                &project,
+                &worktree,
+                fetch_args,
+                &state.cache,
+                state.site.ownership.clone(),
+            )
+            .await?
+        } else {
+            sync_with_previews(
+                project.clone(),
+                worktree,
+                fetch_args.clone(),
+                build_args,
+                state,
+            )
+            .await?
+        };
         println!(
             "dev data: {} new item(s) in the isolated system cache (never committed or pushed)",
             report.added()
         );
         report.added() > 0
+            || report.reprocessed > 0
             || report.removed > 0
             || report.status_changed
             || report
@@ -423,6 +544,123 @@ async fn refresh(
         .await
     } else {
         render_snapshot(project, build_args, state, discussions, visible_change).await
+    }
+}
+
+async fn capture_archive(state: &DevState) -> Result<Arc<ArchiveSnapshot>> {
+    let data = state.data.clone();
+    let ownership = state.site.ownership.clone();
+    let scratch = state.staging.with_extension("archives");
+    tokio::task::spawn_blocking(move || {
+        let _ownership = ownership;
+        std::fs::create_dir_all(&scratch).context("creating dev archive staging directory")?;
+        ArchiveSnapshot::capture(&data.canonicalize()?, &scratch.canonicalize()?).map(Arc::new)
+    })
+    .await
+    .context("capturing stable dev archive")?
+}
+
+async fn sync_with_previews(
+    project: Arc<Project>,
+    worktree: Worktree,
+    fetch_args: FetchArgs,
+    build_args: &BuildArgs,
+    state: &DevState,
+) -> Result<super::fetch::Report> {
+    let mut archive = capture_archive(state).await?;
+    let (completed, mut sources) = mpsc::channel(1);
+    let mut syncing = JoinSet::new();
+    let fetch_project = project.clone();
+    let cache = state.cache.clone();
+    let ownership = state.site.ownership.clone();
+    syncing.spawn(async move {
+        sync::run_dev_with_progress(
+            &fetch_project,
+            &worktree,
+            &fetch_args,
+            &cache,
+            completed,
+            ownership,
+        )
+        .await
+    });
+    let mut pending = None;
+    let mut updates = tokio::time::interval(Duration::from_millis(250));
+    loop {
+        let event = tokio::select! {
+            result = syncing.join_next() => {
+                if let Some(archive) = pending.take() {
+                    publish_preview(&project, build_args, state, archive).await;
+                }
+                return result.context("dev sync worker stopped")?.context("dev sync worker panicked")?;
+            }
+            Some(event) = sources.recv() => event,
+            _ = updates.tick(), if pending.is_some() => {
+                if let Some(archive) = pending.take() {
+                    publish_preview(&project, build_args, state, archive).await;
+                }
+                continue;
+            }
+        };
+        let updated = match event {
+            super::fetch::Progress::Prepared(resume) => {
+                let captured = capture_archive(state).await;
+                let _ = resume.send(());
+                captured
+            }
+            super::fetch::Progress::Source { slug, captured } => {
+                let previous = Arc::clone(&archive);
+                let data = state.data.canonicalize()?;
+                let ownership = state.site.ownership.clone();
+                let updated = tokio::task::spawn_blocking(move || {
+                    let _ownership = ownership;
+                    previous.completed(&data, &slug).map(Arc::new)
+                })
+                .await
+                .context("capturing completed dev source")?;
+                let _ = captured.send(());
+                updated
+            }
+        };
+        match updated {
+            Ok(snapshot) => {
+                archive = snapshot;
+                pending = Some(Arc::clone(&archive));
+            }
+            Err(error) => {
+                log::warn!("dev preview update: {error:#}");
+                continue;
+            }
+        }
+    }
+}
+
+async fn publish_preview(
+    project: &Arc<Project>,
+    build_args: &BuildArgs,
+    state: &DevState,
+    archive: Arc<ArchiveSnapshot>,
+) {
+    let result = async {
+        let discussions = crate::discussions::cached(
+            &project.config.defaults.discussions,
+            &crate::discussions::by_source(&project.sources),
+            &crate::store::Store::open(archive.root()).items()?,
+            &state.cache,
+        );
+        render_snapshot_from_archive(
+            project.clone(),
+            build_args,
+            state,
+            discussions,
+            true,
+            Some(archive),
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = result {
+        log::warn!("dev preview render: {error:#}");
     }
 }
 
@@ -462,10 +700,36 @@ async fn render_snapshot(
     discussions: crate::discussions::ResolutionSet,
     visible_change: bool,
 ) -> Result<bool> {
+    let archive = if build_args.release {
+        None
+    } else {
+        Some(capture_archive(state).await?)
+    };
+    render_snapshot_from_archive(
+        project,
+        build_args,
+        state,
+        discussions,
+        visible_change,
+        archive,
+    )
+    .await
+}
+
+async fn render_snapshot_from_archive(
+    project: Arc<Project>,
+    build_args: &BuildArgs,
+    state: &DevState,
+    discussions: crate::discussions::ResolutionSet,
+    visible_change: bool,
+    archive: Option<Arc<ArchiveSnapshot>>,
+) -> Result<bool> {
     let base_url = build::base_url(&project, build_args)?;
     let now = Utc::now();
     let build_args = build_args.clone();
-    let data = state.data.clone();
+    let data = archive
+        .as_ref()
+        .map_or_else(|| state.data.clone(), |archive| archive.root().to_owned());
     let cache = state.cache.clone();
     let cached = if build_args.release {
         state.cached.clone()
@@ -474,6 +738,7 @@ async fn render_snapshot(
     };
     let staging = state.staging.clone();
     let preparation = Arc::clone(&state.preparation);
+    let ownership = state.site.ownership.clone();
     let (rendered, finished) = oneshot::channel();
     // A dedicated thread keeps template rendering from blocking the signal future. Unlike
     // `spawn_blocking`, it also cannot make Tokio wait for a long render while shutting down;
@@ -481,6 +746,7 @@ async fn render_snapshot(
     std::thread::Builder::new()
         .name("aggr-dev-render".to_string())
         .spawn(move || {
+            let _ownership = ownership;
             let result = render_refresh(
                 &project,
                 &build_args,
@@ -494,6 +760,12 @@ async fn render_snapshot(
                 visible_change,
                 &preparation,
             );
+            let result = result.map(|rendered| match (rendered, archive) {
+                (RenderedSnapshot::Lazy(site), Some(archive)) => {
+                    RenderedSnapshot::Lazy(Box::new((*site).own_archive(archive.directory())))
+                }
+                (rendered, _) => rendered,
+            });
             let _ = rendered.send(result);
         })
         .context("starting dev render worker")?;
@@ -622,25 +894,30 @@ async fn host(
     site: MemorySite,
     base: &str,
     reload: broadcast::Sender<()>,
+    vite: Option<vite::Client>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let base = base.to_string();
-    let run = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .to_string();
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let site = site.clone();
-        let base = base.clone();
-        let run = run.clone();
-        let reload = reload.clone();
-        tokio::spawn(async move {
-            if let Err(err) = handle(stream, &site, &base, &run, &reload).await {
-                log::debug!("dev server: {err:#}");
-            }
-        });
-    }
+    let state = Arc::new(HttpState {
+        site,
+        base: base.to_owned(),
+        run: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_string(),
+        reload,
+        vite,
+        shutdown: shutdown.clone(),
+    });
+    axum::serve(
+        listener,
+        Router::new().fallback(get(handle)).with_state(state),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown.wait_for(|stopping| *stopping).await;
+    })
+    .await
+    .context("serving development HTTP")
 }
 
 /// Prefer the stable dev port, but never make iteration fail because another project owns it.
@@ -874,48 +1151,68 @@ fn watched(path: &Path, configs: &[PathBuf], themes: &[PathBuf], excluded: &[Pat
             .any(|part| matches!(part.as_os_str().to_str(), Some(".git" | ".aggr" | "target")))
 }
 
-async fn handle(
-    stream: TcpStream,
-    site: &MemorySite,
-    base: &str,
-    run: &str,
-    reload: &broadcast::Sender<()>,
-) -> Result<()> {
-    let mut reader = BufReader::new(stream);
-    let mut request_line = String::new();
-    reader.read_line(&mut request_line).await?;
-    // Drain the headers; we never need them.
-    let mut line = String::new();
-    while reader.read_line(&mut line).await? > 0 && line != "\r\n" && line != "\n" {
-        line.clear();
-    }
+struct HttpState {
+    site: MemorySite,
+    base: String,
+    run: String,
+    reload: broadcast::Sender<()>,
+    vite: Option<vite::Client>,
+    shutdown: watch::Receiver<bool>,
+}
 
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default();
-    let target = parts.next().unwrap_or("/");
-    let path = target.split(['?', '#']).next().unwrap_or("/");
-    if path == format!("{base}__aggr/reload") {
-        let stream = reader.get_mut();
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\n")
-            .await?;
-        let mut updates = reload.subscribe();
-        while updates.recv().await.is_ok() {
-            stream.write_all(b"data: reload\n\n").await?;
-            stream.flush().await?;
-        }
-        return Ok(());
+async fn handle(State(state): State<Arc<HttpState>>, uri: Uri) -> Response {
+    let path = uri.path();
+    if path == format!("{}__aggr/reload", state.base) {
+        // Subscribe before comparing generations so a concurrent promotion cannot be missed.
+        let updates = state.reload.subscribe();
+        let previous_run = url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
+            .any(|(key, value)| match key.as_ref() {
+                "run" => value != state.run,
+                "revision" => value
+                    .parse::<u64>()
+                    .ok()
+                    .is_some_and(|revision| revision != state.site.revision.load(Ordering::SeqCst)),
+                _ => false,
+            });
+        let mut shutdown = state.shutdown.clone();
+        let events = futures_util::stream::unfold(
+            (updates, previous_run),
+            |(mut updates, reconnect)| async move {
+                if !reconnect
+                    && matches!(
+                        updates.recv().await,
+                        Err(broadcast::error::RecvError::Closed)
+                    )
+                {
+                    return None;
+                }
+                Some((
+                    Ok::<_, std::convert::Infallible>(Event::default().data("reload")),
+                    (updates, false),
+                ))
+            },
+        )
+        .take_until(async move {
+            let _ = shutdown.wait_for(|stopping| *stopping).await;
+        });
+        return (
+            [(header::CACHE_CONTROL, "no-store")],
+            Sse::new(events).keep_alive(axum::response::sse::KeepAlive::default()),
+        )
+            .into_response();
     }
-    let (status, key, mut body) = match site.resolve_response(base, path).await {
-        Ok(Some((file, body))) => ("200 OK", file, body),
+    // An older revision on a newer body causes a harmless retry; the reverse could miss an update.
+    let revision = state.site.revision.load(Ordering::SeqCst);
+    let (status, key, mut body) = match state.site.resolve_response(&state.base, path).await {
+        Ok(Some((file, body))) => (StatusCode::OK, file, body),
         Ok(None) => {
-            let (file, body) = site.not_found().await;
-            ("404 Not Found", file, body)
+            let (file, body) = state.site.not_found().await;
+            (StatusCode::NOT_FOUND, file, body)
         }
         Err(error) => {
             log::error!("could not render dev route {path}: {error:#}");
             (
-                "500 Internal Server Error",
+                StatusCode::INTERNAL_SERVER_ERROR,
                 "error.txt".to_string(),
                 Arc::new(b"Could not render this page. See the development server log.".to_vec()),
             )
@@ -926,27 +1223,44 @@ async fn handle(
         .extension()
         .is_some_and(|extension| extension == "html")
     {
-        body = Arc::new(inject_reload(&body, base, run));
+        if let Some(client) = &state.vite {
+            body = Arc::new(client.inject(&body));
+        }
+        body = Arc::new(inject_reload(&body, &state.base, &state.run, revision));
     }
-    let cache_headers = cache_control(&key);
-    let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{cache_headers}Connection: close\r\n\r\n",
-        content_type(file),
-        body.len()
+    let mut response = Response::new(Body::from(bytes::Bytes::from_owner(SharedBody(body))));
+    *response.status_mut() = status;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        content_type(file).parse().expect("static content type"),
     );
-    let stream = reader.get_mut();
-    stream.write_all(head.as_bytes()).await?;
-    if method != "HEAD" {
-        stream.write_all(&body).await?;
+    headers.insert(
+        header::CACHE_CONTROL,
+        cache_control(&key).parse().expect("static cache policy"),
+    );
+    if file
+        .extension()
+        .is_some_and(|extension| extension == "html")
+    {
+        headers.insert(header::PRAGMA, "no-cache".parse().expect("static pragma"));
+        headers.insert(header::EXPIRES, "0".parse().expect("static expiry"));
     }
-    stream.shutdown().await?;
-    Ok(())
+    response
 }
 
-fn inject_reload(body: &[u8], base: &str, run: &str) -> Vec<u8> {
+struct SharedBody(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for SharedBody {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+fn inject_reload(body: &[u8], base: &str, run: &str, revision: u64) -> Vec<u8> {
     let script = format!(
-        "<script>(function(){{var b=new URL({0:?},location.origin),u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistration(b).then(function(r){{if(r)r.unregister()}});if('caches'in window){{var p='aggr:'+encodeURIComponent(b.pathname)+':';caches.keys().then(function(k){{k.filter(function(x){{return x.indexOf(p)===0}}).forEach(function(x){{caches.delete(x)}})}})}}new EventSource('{0}__aggr/reload?run={1}').onmessage=function(){{var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();</script>",
-        base, run
+        "<script>(function(){{var b=new URL({0:?},location.origin),u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistration(b).then(function(r){{if(r)r.unregister()}});if('caches'in window){{var p='aggr:'+encodeURIComponent(b.pathname)+':';caches.keys().then(function(k){{k.filter(function(x){{return x.indexOf(p)===0}}).forEach(function(x){{caches.delete(x)}})}})}}new EventSource('{0}__aggr/reload?run={1}&revision={2}').onmessage=function(){{var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();</script>",
+        base, run, revision
     );
     let html = String::from_utf8_lossy(body);
     if let Some(at) = html.rfind("</body>") {
@@ -961,6 +1275,9 @@ fn inject_reload(body: &[u8], base: &str, run: &str) -> Vec<u8> {
 fn resolve_key(base: &str, path: &str) -> Option<String> {
     let decoded = percent_decode(path);
     let rest = decoded.strip_prefix(base.trim_end_matches('/'))?;
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return None;
+    }
     let mut parts = Vec::new();
     for segment in rest.split('/').filter(|s| !s.is_empty()) {
         match Path::new(segment).components().next() {
@@ -1000,9 +1317,9 @@ fn percent_decode(path: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-const PAGE_CACHE: &str = "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\nPragma: no-cache\r\nExpires: 0\r\n";
-const ASSET_CACHE: &str = "Cache-Control: public, max-age=31536000, immutable\r\n";
-const FRESH_CACHE: &str = "Cache-Control: no-store\r\n";
+const PAGE_CACHE: &str = "no-store, no-cache, must-revalidate, max-age=0";
+const ASSET_CACHE: &str = "public, max-age=31536000, immutable";
+const FRESH_CACHE: &str = "no-store";
 
 /// How one development response may be stored. HTML stays uncached so a reload shows the
 /// snapshot just written, without `Clear-Site-Data`: that header dumps the HTTP cache on every
@@ -1116,6 +1433,417 @@ pub fn content_type(path: &Path) -> &'static str {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn cold_failure_shows_an_escaped_retry_page_and_preserves_later_success() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let config = root.path().join("aggr.toml");
+        std::fs::write(&config, "[defaults]\ndiscussions=[]\n").unwrap();
+        let project = Arc::new(Project::load_offline(&config).await.unwrap());
+        let (reload, mut changes) = broadcast::channel(16);
+        let state = DevState {
+            data: root.path().join("missing-archive"),
+            cache: root.path().join("cache"),
+            cached: root.path().join("cached"),
+            staging: root.path().join("scratch/site"),
+            site: MemorySite::loading(),
+            reload,
+            preparation: Arc::default(),
+        };
+        assert!(
+            refresh(
+                project.clone(),
+                &FetchArgs::default(),
+                &BuildArgs::default(),
+                &state,
+                false
+            )
+            .await
+            .is_err()
+        );
+        changes.try_recv().unwrap();
+        let body = state.site.body("index.html").await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("The archive could not be prepared"));
+        assert!(!String::from_utf8_lossy(&body).contains("Preparing the archive"));
+
+        let error = anyhow::anyhow!("upstream <script>alert('oops')</script> & retry");
+        assert!(state.site.fail_startup(&error).await);
+        let revision = state.site.revision.load(Ordering::SeqCst);
+        assert!(!state.site.fail_startup(&error).await);
+        assert_eq!(state.site.revision.load(Ordering::SeqCst), revision);
+        let response = handle(
+            State(Arc::new(HttpState {
+                site: state.site.clone(),
+                base: "/".into(),
+                run: "test".into(),
+                reload: state.reload.clone(),
+                vite: None,
+                shutdown: watch::channel(false).1,
+            })),
+            "/".parse().unwrap(),
+        )
+        .await;
+        let html = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&html);
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("&amp; retry"));
+        assert!(!html.contains("<script>alert"));
+        assert!(
+            html.contains("new EventSource("),
+            "failed startup keeps the recovery bridge"
+        );
+
+        let staging = root.path().join("recovered");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("index.html"), "<body>Recovered reader</body>").unwrap();
+        std::fs::write(staging.join(".aggr-site"), "fixture").unwrap();
+        state
+            .site
+            .replace_from(&staging, &state.cached)
+            .await
+            .unwrap();
+        assert!(
+            refresh(
+                project,
+                &FetchArgs::default(),
+                &BuildArgs::default(),
+                &state,
+                false
+            )
+            .await
+            .is_err()
+        );
+        let body = state.site.body("index.html").await.unwrap().unwrap();
+        assert_eq!(body.as_slice(), b"<body>Recovered reader</body>");
+        assert!(
+            changes.try_recv().is_err(),
+            "a failed refresh never replaces a good generation"
+        );
+    }
+
+    async fn test_http_server() -> (
+        String,
+        broadcast::Sender<()>,
+        watch::Sender<bool>,
+        JoinHandle<Result<()>>,
+    ) {
+        crate::http::install_crypto_provider();
+        let listener = bind(0).await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let site = MemorySite {
+            ownership: None,
+            revision: Arc::default(),
+            snapshot: Arc::new(RwLock::new(Snapshot::Files(BTreeMap::from([
+                (
+                    "index.html".into(),
+                    Arc::new(b"<body>reader</body>".to_vec()),
+                ),
+                (
+                    "404.html".into(),
+                    Arc::new(b"<body>missing</body>".to_vec()),
+                ),
+                (
+                    "assets/app/app-abcdefgh.js".into(),
+                    Arc::new(b"export {}".to_vec()),
+                ),
+                ("paper.pdf".into(), Arc::new(b"%PDF-fixture".to_vec())),
+                (
+                    "sitory/index.html".into(),
+                    Arc::new(b"outside base".to_vec()),
+                ),
+            ])))),
+        };
+        let (reload, _) = broadcast::channel(16);
+        let (shutdown, stopped) = watch::channel(false);
+        let sender = reload.clone();
+        let task =
+            tokio::spawn(
+                async move { host(listener, site, "/repo/", sender, None, stopped).await },
+            );
+        (origin, reload, shutdown, task)
+    }
+
+    #[tokio::test]
+    async fn http_contract_preserves_documents_assets_and_head() {
+        let (origin, _, _shutdown, task) = test_http_server().await;
+        let client = reqwest::Client::new();
+        let page = client.get(format!("{origin}/repo/")).send().await.unwrap();
+        assert_eq!(page.status(), 200);
+        assert_eq!(page.headers()["content-type"], "text/html; charset=utf-8");
+        assert!(
+            page.headers()["cache-control"]
+                .to_str()
+                .unwrap()
+                .contains("no-store")
+        );
+        let body = page.bytes().await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("/repo/__aggr/reload"));
+        let head = client.head(format!("{origin}/repo/")).send().await.unwrap();
+        assert_eq!(head.status(), 200);
+        assert_eq!(head.headers()["content-length"], body.len().to_string());
+        assert!(head.bytes().await.unwrap().is_empty());
+        let asset = client
+            .get(format!("{origin}/repo/assets/app/app-abcdefgh.js"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            asset.headers()["cache-control"],
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(asset.text().await.unwrap(), "export {}");
+        let pdf = client
+            .get(format!("{origin}/repo/paper.pdf"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(pdf.headers()["content-type"], "application/pdf");
+        for path in ["/repo/missing", "/repository/", "/repo/%2e%2e%2fpaper.pdf"] {
+            let response = client.get(format!("{origin}{path}")).send().await.unwrap();
+            assert_eq!(response.status(), 404, "{path}");
+        }
+        assert_eq!(
+            client
+                .post(format!("{origin}/repo/"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            405
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn reload_stream_notifies_changes_and_reconnected_old_processes() {
+        use futures_util::StreamExt as _;
+        let (origin, reload, _shutdown, task) = test_http_server().await;
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("{origin}/repo/__aggr/reload"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        let mut stream = response.bytes_stream();
+        reload.send(()).unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&event).contains("data: reload"));
+        drop(stream);
+        let response = client
+            .get(format!("{origin}/repo/__aggr/reload?run=previous-process"))
+            .send()
+            .await
+            .unwrap();
+        let mut stream = response.bytes_stream();
+        let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&event).contains("data: reload"));
+        drop(stream);
+        let response = client
+            .get(format!("{origin}/repo/__aggr/reload?revision=99"))
+            .send()
+            .await
+            .unwrap();
+        let mut stream = response.bytes_stream();
+        let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&event).contains("data: reload"));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_finishes_open_reload_streams_without_truncating_http() {
+        let (origin, _, shutdown, task) = test_http_server().await;
+        let response = reqwest::get(format!("{origin}/repo/__aggr/reload"))
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        shutdown.send_replace(true);
+        let body = tokio::time::timeout(Duration::from_secs(2), response.bytes())
+            .await
+            .unwrap()
+            .expect("a restarting worker must finish the HTTP body cleanly");
+        assert!(body.is_empty());
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_sources_are_visible_before_a_slow_source_finishes() {
+        crate::http::install_crypto_provider();
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(tmp.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let origin = httpmock::MockServer::start_async().await;
+        for (path, title, delay) in [
+            ("/fast", "Fast article", 0),
+            ("/slow", "Slow article", 5000),
+        ] {
+            origin.mock_async(|when, then| {
+                when.path(path);
+                then.status(200).delay(Duration::from_millis(delay)).body(format!(
+                    "<rss version=\"2.0\"><channel><title>{title}</title><link>https://example.test/</link><item><title>{title}</title><link>https://example.test{path}</link><description>{title} has its own distinct body.</description></item></channel></rss>"
+                ));
+            }).await;
+        }
+        let config_path = tmp.path().join("aggr.toml");
+        std::fs::write(&config_path, format!(
+            "[defaults]\ndiscussions=[]\n[site]\npwa=false\n[[sources]]\nslug='fast'\nurl='{0}/fast'\n[[sources]]\nslug='slow'\nurl='{0}/slow'\n", origin.base_url()
+        )).unwrap();
+        let project = Arc::new(Project::load_offline(&config_path).await.unwrap());
+        let (reload, _) = broadcast::channel(16);
+        let state = DevState {
+            data: tmp.path().join("data"),
+            cache: tmp.path().join("cache"),
+            cached: tmp.path().join("site"),
+            staging: tmp.path().join("scratch/site"),
+            site: MemorySite::loading(),
+            reload,
+            preparation: Arc::default(),
+        };
+        crate::store::Store::open(&state.data).bootstrap().unwrap();
+        let site = state.site.clone();
+        let syncing = tokio::spawn(async move {
+            refresh(
+                project,
+                &FetchArgs::default(),
+                &BuildArgs::default(),
+                &state,
+                true,
+            )
+            .await
+        });
+        let first = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let body = site.body("index.html").await.unwrap().unwrap();
+                let html = String::from_utf8_lossy(&body);
+                if html.contains("Fast article") {
+                    assert!(!html.contains("Slow article"));
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if first.is_err() {
+            syncing.abort();
+        }
+        assert!(
+            first.is_ok(),
+            "a completed source must be served before the slow source finishes"
+        );
+        syncing.await.unwrap().unwrap();
+        let body = site.body("index.html").await.unwrap().unwrap();
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Fast article") && html.contains("Slow article"));
+    }
+
+    #[tokio::test]
+    async fn automatic_local_reprocessing_is_visible_before_remote_refresh() {
+        crate::http::install_crypto_provider();
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(tmp.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let origin = httpmock::MockServer::start_async().await;
+        origin.mock_async(|when, then| {
+            when.path("/slow");
+            then.status(200).delay(Duration::from_secs(5)).body("<rss version=\"2.0\"><channel><title>Feed</title><link>https://example.test/</link></channel></rss>");
+        }).await;
+        let config_path = tmp.path().join("aggr.toml");
+        std::fs::write(&config_path, format!("[defaults]\ndiscussions=[]\n[site]\npwa=false\n[[sources]]\nslug='blog'\nurl='{}/slow'\n", origin.base_url())).unwrap();
+        let project = Arc::new(Project::load_offline(&config_path).await.unwrap());
+        let (reload, _) = broadcast::channel(16);
+        let state = DevState {
+            data: tmp.path().join("data"),
+            cache: tmp.path().join("cache"),
+            cached: tmp.path().join("site"),
+            staging: tmp.path().join("scratch/site"),
+            site: MemorySite::loading(),
+            reload,
+            preparation: Arc::default(),
+        };
+        let store = crate::store::Store::open(&state.data);
+        store.bootstrap().unwrap();
+        store.write_item(crate::store::NewItem {
+            dir: "items/blog", stem: "retained",
+            front: &crate::model::FrontMatter {
+                source: "blog".into(), title: "Retained article".into(),
+                link: "https://example.test/retained".into(), first_seen: Utc::now(),
+                content: crate::model::ContentKind::Extracted,
+                html: Some("retained.html".into()), ..Default::default()
+            },
+            body: "Stale local conversion.", html: Some("<p>Updated locally from the complete retained HTML companion, without waiting for the remote feed.</p>"),
+            preview: None, images: &[],
+        }).unwrap();
+        let site = state.site.clone();
+        let syncing = tokio::spawn(async move {
+            refresh(
+                project,
+                &FetchArgs::default(),
+                &BuildArgs::default(),
+                &state,
+                true,
+            )
+            .await
+        });
+        let first = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(body) = site.body("items/blog/retained/index.html").await.unwrap() {
+                    let html = String::from_utf8_lossy(&body);
+                    if html.contains("Updated locally from the complete retained HTML") {
+                        assert!(!html.contains("Stale local conversion"));
+                        break;
+                    }
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if first.is_err() {
+            syncing.abort();
+        }
+        assert!(
+            first.is_ok(),
+            "local reprocessing must be published before waiting for remote sources"
+        );
+        syncing.await.unwrap().unwrap();
+    }
 
     #[tokio::test]
     async fn readable_cached_snapshots_are_restored_and_kept() {
@@ -1471,7 +2199,7 @@ mod tests {
         let root = state.site.lazy_root().await.unwrap();
         let retained_snapshot = match &*state.site.snapshot.read().await {
             Snapshot::Lazy(site) => Arc::clone(site),
-            Snapshot::Files(_) => panic!("ordinary dev must be lazy"),
+            Snapshot::Files(_) | Snapshot::Pending(_) => panic!("ordinary dev must be lazy"),
         };
         assert!(
             !root.join("index.html").exists(),
@@ -1736,9 +2464,9 @@ mod tests {
 
     #[test]
     fn injects_reload_client_without_touching_the_build() {
-        let html = inject_reload(b"<body>Hello</body>", "/repo/", "run-1");
+        let html = inject_reload(b"<body>Hello</body>", "/repo/", "run-1", 3);
         let html = String::from_utf8(html).unwrap();
-        assert!(html.contains("new EventSource('/repo/__aggr/reload?run=run-1')"));
+        assert!(html.contains("new EventSource('/repo/__aggr/reload?run=run-1&revision=3')"));
         assert!(html.contains("caches.delete"));
         assert!(html.contains("__aggr_dev"));
         assert!(!html.contains("window.AGGR"));

@@ -40,7 +40,9 @@ pub fn run(config_path: &Path, args: &InitArgs) -> Result<()> {
         write(&workflow, WORKFLOW, args.force)?;
         println!("next: commit both files and push; the workflow builds the site on every run");
     } else {
-        println!("next: `aggr init --github` for the workflow, or `aggr dev`");
+        println!(
+            "next: edit your sources, then run `aggr build` to save the archive and write _site/"
+        );
     }
     Ok(())
 }

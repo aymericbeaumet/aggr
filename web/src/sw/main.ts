@@ -21,6 +21,7 @@ const worker = createWorker({
   clients: self.clients,
   skipWaiting: () => self.skipWaiting(),
   navigationPreload: self.registration.navigationPreload,
+  locks: self.navigator.locks,
   config,
 });
 

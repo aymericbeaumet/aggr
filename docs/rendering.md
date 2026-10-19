@@ -3,9 +3,14 @@
 aggr renders its reader from the MiniJinja templates and static files under `src/theme/`,
 compiled into the binary. There is one design: no theme setting, no template override, and no
 `[site.params]` (that table is rejected). Changing the reader means changing this repository.
-A development binary reads those files from the source tree, so `aggr dev` picks up template,
+A development binary reads those files from the source tree, so `cargo run -- dev` picks up template,
 CSS and client edits without recompiling. Feed rows show the title and its metadata. An item's
 excerpt still feeds descriptions, collection feeds, and search documents.
+
+Publication and lazy development share archive preparation, page rendering, and one inventory of
+fixed pages and collections. Publication writes the complete site; ordinary dev resolves those
+same routes on request and defers article media and search until needed. Its Axum HTTP adapter
+serves atomic snapshots, keeping the last good generation when preparation fails.
 
 ## Template data and URLs
 
@@ -51,11 +56,17 @@ paragraph; plain-text and reStructuredText exports also list their destinations 
 Stored Markdown and publisher metadata remain unchanged. The article template renders
 `item.resources` alongside `item.body_html`.
 
+Rendering never rewrites stored Markdown. During sync, changed extraction code or retained inputs
+automatically re-derive bodies from complete local HTML before source fetching begins. Missing or
+truncated companions preserve the current body. A disposable receipt keyed by the embedded
+implementation, locked dependencies, HTML, and article inputs skips unchanged conversions; it is
+never stored on the archive branch. See [refreshing and reprocessing](commands.md#refreshing-and-reprocessing).
+
 Every page also embeds its typed model in `<script id="aggr-page">` (`src/site/client.rs`). The
-client mounts from that model over the rendered chrome and adopts the article's content region
-and static pages' `<main>` as they are, so the HTML stays complete without JavaScript and the
-components that mirror a partial must reproduce it exactly (see the parity fixtures in
-[client development](client.md)). Site generation requires no JavaScript runtime.
+client uses that model for behavior while preserving the rendered page and chrome. Navigation
+adopts the next page's complete `<main>`; search rows use the same Rust partial as feed rows.
+There is no second client-side implementation of the static templates. See
+[client development](client.md). Site generation requires no JavaScript runtime.
 
 Article contexts also expose `item.word_count` and `item.reading_minutes`. Both are derived from
 the visible Unicode text at build time, with reading time rounded up at 225 words per minute; an
@@ -185,10 +196,10 @@ for a source table that had none is hidden. Selecting article text mounts a
 
 The client and the templates share these relationships:
 
-- `<div id="app">` wraps the header, the tab bar, `<main id="content">` and the footer; the
-  client replaces it with its own render of the same markup and keeps everything outside it (the
-  skip link, the announcer, the shortcut dialog, the scripts) static. The `#aggr-page` JSON in the
-  head is the model both the templates and the client render from.
+- `<div id="app">` wraps the header, the tab bar, `<main id="content">` and the footer. The
+  client enhances these nodes in place, keeping Rust as their markup owner. Navigation replaces
+  only `<main>` with the next page's rendered HTML. The `#aggr-page` JSON supplies typed behavior
+  and identity, while interactive-only widgets use dedicated mount points.
 - Primary navigation links use `data-route` and `data-kinds` for destination and active state.
   `browse`, `preferences`, and aggr.toml are visible in the desktop header. Mobile navigation uses
   feed, browse, and preferences in a fixed, inset rounded bar with a selected-tab surface.
@@ -275,7 +286,7 @@ visible, when returning to the app, and when reconnecting, including sites with 
 New content refreshes the feed and search index without reloading the document or showing an app
 update prompt, including while a separate application release awaits refresh. Returning to a feed
 also checks its displayed content version so stale navigation entries are replaced automatically.
-List selection and reading position are retained; an open article stays in place. Dev build events check immediately and queue another check if an earlier request is still in flight.
+List selection and reading position are retained; an open article stays in place. Development snapshot changes reload through a client injected only by the debug preview server.
 
 An application release shows a clickable, keyboard-accessible “Refresh to update” pill in browsers
 and installed apps on desktop and mobile. It reloads the same page, preserving its query, fragment,
@@ -486,7 +497,9 @@ Shared metadata uses `consumption` to distinguish reading, listening, and watchi
 recording duration produces “10 min listen” or “10 min watch”; unknown media durations use “Listen”
 or “Watch”, never the read time of show notes or a transcript. Feed-provided durations are retained
 as `extra.duration_seconds`, and loaded native media can correct the article's displayed duration.
-The article header reserves space for that correction so it does not gain a metadata row during playback.
+Recording metadata uses its text's natural width, including unknown-duration labels. A newly
+discovered or corrected duration may wrap the metadata onto another row; the player's own geometry
+stays stable.
 The Rust fetch/build path also reads matching YouTube player and primary AudioObject/VideoObject
 metadata before playback. RSS durations share a strict parser for seconds, MM:SS, HH:MM:SS, and
 ISO 8601; byte lengths, active broadcasts, and unrelated recommended videos are never durations.

@@ -19,10 +19,12 @@
 <meta name="apple-mobile-web-app-title" content="{{ site.title }}">
 {% endif %}
 <link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
+<!-- aggr:client-assets -->
 {% if client_page.site.assets.app %}
 {% for chunk in client_page.site.assets.imports %}<link rel="modulepreload" href="{{ chunk | url_for }}">{% endfor %}
 {% if client_page.site.assets.css %}<link rel="stylesheet" href="{{ client_page.site.assets.css | url_for }}">{% endif %}
 {% endif %}
+<!-- /aggr:client-assets -->
 <script id="aggr-preferences" type="application/json">{{ site.preference_schema.bootstrap | json }}</script>
 <script src="{{ 'assets/app/bootstrap.js' | url_for }}"></script>
 <meta name="aggr:network" content="{{ site.network_url }}">
@@ -178,7 +180,10 @@
 {% block content %}{% endblock %}
 </main>
 <footer class="footer" data-nosnippet><a href="https://github.com/aymericbeaumet/aggr" target="_blank" rel="noopener noreferrer">built with aggr</a></footer>
+<div id="now-playing-root"></div>
 </div>
+<!-- aggr:client-entry -->
 {% if client_page.site.assets.app %}<script type="module" src="{{ client_page.site.assets.app | url_for }}"></script>{% endif %}
+<!-- /aggr:client-entry -->
 </body>
 </html>
