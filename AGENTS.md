@@ -63,10 +63,11 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   copies separately from sync state; see `docs/build-budget.md`.
 - aggr is MIT-licensed, inbound and outbound. Preserve third-party notices and follow
   `CONTRIBUTING.md` for incoming contribution rights.
-- `VERSION` and `Cargo.toml` `version` must agree; releases are tags `vX.Y.Z`. The stable reusable
-  workflow (`@v1`) selects the greatest published binary in its major channel at run time; binary
-  releases do not move the workflow tag. Distribute binaries through GitHub Releases and mise
-  using its `github:aymericbeaumet/aggr` backend.
+- `VERSION` and `Cargo.toml` `version` must agree; releases are tags `vX.Y.Z`. A stable reusable
+  workflow `@vX` selects the greatest published binary in its own major channel at run time;
+  binary releases do not move workflow tags. Keep `@v1` on v1 binaries and publish a new `@v2`
+  workflow contract for v2. Distribute binaries through GitHub Releases and mise using its
+  `github:aymericbeaumet/aggr` backend. See [migration](docs/sources.md#upgrading-from-112-to-20).
 
 ## Layout
 
