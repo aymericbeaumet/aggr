@@ -11,6 +11,11 @@ use crate::harness::{
 
 /// The phone feed measurement shared by the layout, density and responsive header contracts.
 pub(crate) async fn mobile_feed_layout(client: &Client) -> Result<Value> {
+    // Auto-contained rows report their intrinsic estimate until the browser paints them.
+    client.execute_async(
+        "const done = arguments[arguments.length - 1]; requestAnimationFrame(() => requestAnimationFrame(() => done(null)))",
+        vec![],
+    ).await?;
     Ok(client.execute(r#"
       const nav = document.querySelector('.nav');
       const config = document.querySelector('.config-link');
@@ -188,7 +193,21 @@ async fn mobile_layout_contracts(client: &Client, fixture: &Fixture) -> Result<(
         "document.querySelector('.preview-image')?.naturalWidth === 240",
     )
     .await?;
-    // The row a tap opens has already been fetched while the reader looked at it.
+    // Merely seeing a row does not download its article; keyboard focus is explicit intent.
+    assert_eq!(
+        client.execute(
+            "return performance.getEntriesByType('resource').some(entry => entry.initiatorType === 'fetch' && entry.name === document.querySelector('.rows .row [data-row-open]').href)",
+            vec![],
+        ).await?,
+        false,
+        "visible articles wait for reader intent"
+    );
+    client
+        .execute(
+            "document.querySelector('.rows .row [data-row-open]').focus({preventScroll:true})",
+            vec![],
+        )
+        .await?;
     wait_for(
         client,
         "performance.getEntriesByType('resource').some(entry => entry.initiatorType === 'fetch' && entry.name === document.querySelector('.rows .row [data-row-open]').href)",

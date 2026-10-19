@@ -94,7 +94,6 @@ pub(crate) struct Site {
     lists: BTreeMap<String, (usize, Pager)>,
     media_memo: assets::MediaMemo,
     shared: SharedCtx,
-    archive_value: minijinja::Value,
     search: Mutex<bool>,
     catalogue: pagefind::SearchCatalogue,
     // A render can create a page plus its media. Serialize materialization, so another request
@@ -203,7 +202,6 @@ impl Site {
             &mut budget::MediaBudget::new(u64::MAX),
             Some(cache),
         )?;
-        prepared.renderer.freeze_templates()?;
         prepared.renderer.write_static(&info.out)?;
         write(&info.out.join(MARKER), env!("CARGO_PKG_VERSION").as_bytes())?;
         write(
@@ -276,11 +274,11 @@ impl Site {
             &prepared.categories,
             &prepared.tags,
         );
-        let archive_value = minijinja::Value::from_serialize(&prepared.archive_items);
         Ok(Self {
             prepared,
             store,
-            media_policy: assets::MediaPolicy::defaults(&config.defaults),
+            media_policy: assets::MediaPolicy::defaults(&config.defaults)
+                .with_image_format(config.site.media_image_format),
             full_quality_days: config.site.media_full_quality_days,
             sources: sources.to_vec(),
             info,
@@ -291,7 +289,6 @@ impl Site {
             lists,
             media_memo,
             shared,
-            archive_value,
             search: Mutex::new(false),
             catalogue,
             materialized: Mutex::default(),
@@ -316,12 +313,11 @@ impl Site {
 
     fn pages(&self) -> Pages<'_> {
         let prepared = &self.prepared;
-        Pages::prepared(
+        Pages::new(
             &prepared.site,
             &prepared.renderer,
             self.shared.clone(),
             &prepared.archive_items,
-            self.archive_value.clone(),
             prepared.per_page,
         )
     }
@@ -336,8 +332,18 @@ impl Site {
             None => {
                 let item = &self.prepared.all_items[index];
                 let policy = self.media_policy.for_item(&self.sources, item);
-                let media =
-                    assets::ItemMedia::gather_preview(&self.store, item, policy, &self.media_memo)?;
+                let compact_cache = self
+                    .info
+                    .pagefind_cache
+                    .as_deref()
+                    .map(|root| crate::cache::Namespace::DeploymentMedia.dir(root));
+                let media = assets::ItemMedia::gather_preview(
+                    &self.store,
+                    item,
+                    policy,
+                    &self.media_memo,
+                    compact_cache.as_deref(),
+                )?;
                 let (preview, _, _) = media.publish(
                     self.root(),
                     &mut state.assets,
@@ -436,12 +442,10 @@ impl Site {
         let documents = (0..self.prepared.archive_items.len())
             .map(|index| {
                 let ctx = self.with_preview(index, &mut lock(&self.materialized))?;
-                pagefind::SearchDocument::with_rendered_row(
-                    &self.prepared.renderer,
-                    &self.prepared.site,
+                Ok(pagefind::SearchDocument::new(
                     &ctx,
                     self.prepared.prepared_bodies[index].plain_text(),
-                )
+                ))
             })
             .collect::<Result<Vec<_>>>()?;
         let staging = tempfile::Builder::new()
@@ -462,7 +466,23 @@ impl Site {
         Ok(())
     }
 
-    fn materialize(&self, key: &str, state: &mut Materialized) -> Result<bool> {
+    pub(crate) fn page_model(&self, key: &str) -> Result<Option<aggr_ui_model::RenderRequest>> {
+        if key.is_empty()
+            || key.contains('\\')
+            || Path::new(key)
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return Ok(None);
+        }
+        self.page_request(key, &mut lock(&self.materialized))
+    }
+
+    fn page_request(
+        &self,
+        key: &str,
+        state: &mut Materialized,
+    ) -> Result<Option<aggr_ui_model::RenderRequest>> {
         let prepared = &self.prepared;
         if let Some((collection, pager)) = self.lists.get(key) {
             let collection = &self.collections[*collection];
@@ -480,9 +500,57 @@ impl Site {
                 &prepared.categories,
                 &prepared.tags,
             );
+            return Ok(Some(self.pages().list_request(&page, pager)));
+        }
+        if let Some(index) = key
+            .strip_suffix("index.html")
+            .and_then(|path| self.articles.get(path))
+            .copied()
+        {
+            let (ctx, images) = self.with_media(index, state)?;
+            let item = &prepared.all_items[index];
+            let hidden = images
+                .iter()
+                .filter(|image| {
+                    self.shared_images
+                        .get(&index)
+                        .is_some_and(|sources| sources.contains(&image.source))
+                })
+                .flat_map(|image| {
+                    std::iter::once(image.original.clone())
+                        .chain(image.variants.iter().map(|variant| variant.url.clone()))
+                })
+                .collect();
+            let shared = BTreeMap::from([(ctx.source.clone(), hidden)]);
+            let ctx = prepare_article(
+                &prepared.site,
+                &self.store,
+                &ctx,
+                item,
+                &prepared.prepared_bodies[index],
+                &BTreeMap::from([(item.path.clone(), images)]),
+                &shared,
+            )?;
+            return Ok(Some(self.pages().simple_request(SimplePage {
+                item: Some(&ctx),
+                ..SimplePage::new("item", &ctx.title, &ctx.url)
+            })));
+        }
+        if let Some((page, _)) = FIXED_PAGES
+            .iter()
+            .find(|(page, _)| page.output_path() == Path::new(key))
+        {
+            return Ok(Some(self.pages().simple_request(*page)));
+        }
+        Ok(None)
+    }
+
+    fn materialize(&self, key: &str, state: &mut Materialized) -> Result<bool> {
+        let prepared = &self.prepared;
+        if let Some(request) = self.page_request(key, state)? {
             write(
                 &self.root().join(key),
-                self.pages().list(&page, pager)?.as_bytes(),
+                prepared.renderer.render_page(&request)?.as_bytes(),
             )?;
             return Ok(true);
         }
@@ -536,16 +604,6 @@ impl Site {
             write(
                 &self.root().join(key),
                 outputs::redirect_stub(&prepared.site, &prepared.site.url(target)).as_bytes(),
-            )?;
-            return Ok(true);
-        }
-        if let Some((page, _)) = FIXED_PAGES
-            .iter()
-            .find(|(page, _)| page.output_path() == Path::new(key))
-        {
-            write(
-                &self.root().join(key),
-                self.pages().simple(*page)?.as_bytes(),
             )?;
             return Ok(true);
         }

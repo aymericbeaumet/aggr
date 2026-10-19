@@ -1,10 +1,9 @@
+import { load, fixture, render } from '../../test/fixtures';
 /// <reference types="node" />
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { flushSync } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mountApp } from '../app/boot';
-import type { ClientRow } from '../generated/ClientRow';
+import type { ClientRow } from '@aggr-model/ClientRow';
 import { search } from '../state/search.svelte';
 import { selection } from '../state/selection.svelte';
 import { hex, row, searchRow } from './fixture';
@@ -39,19 +38,6 @@ vi.mock('./engine', () => {
   return { createSession: () => session, isOnline: () => true };
 });
 
-const directory = resolve(process.cwd(), 'test/parity');
-
-function load(name: string): void {
-  const fixture = JSON.parse(readFileSync(resolve(directory, `${name}.json`), 'utf8')) as { props: { page: unknown } };
-  document.head.innerHTML = '';
-  const script = document.createElement('script');
-  script.id = 'aggr-page';
-  script.type = 'application/json';
-  script.textContent = JSON.stringify(fixture.props.page);
-  document.head.append(script);
-  // The fixture holds what `App` renders inside the root; boot creates the root itself.
-  document.body.innerHTML = `<div id="app">${readFileSync(resolve(directory, `${name}.html`), 'utf8')}</div>`;
-}
 
 const field = () => document.getElementById('q') as HTMLInputElement;
 const feed = () => document.querySelector('[data-static-feed]') as HTMLElement;
@@ -96,6 +82,22 @@ describe('search on the feed', () => {
     flushSync();
     expect(input.value).toBe('j');
     expect(search.text).toBe('j');
+  });
+
+  it('keeps ready results when blur commits an already handled input edit', async () => {
+    type('rust');
+    await search.load();
+    await vi.advanceTimersByTimeAsync(100);
+    flushSync();
+    const results = search.results;
+    expect(results?.rows).toHaveLength(2);
+    field().dispatchEvent(new Event('change', { bubbles: true }));
+    field().blur();
+    flushSync();
+    expect(search.results).toBe(results);
+    expect(document.getElementById('list')?.hidden).toBe(false);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fake.runs).toEqual(['rust']);
   });
 
   it('does not rewrite a native field edit when only suggestion visibility changes', () => {

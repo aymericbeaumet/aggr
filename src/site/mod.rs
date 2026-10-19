@@ -52,7 +52,7 @@ pub(crate) use output_dir::{promote as promote_output, staging as stage_output};
 use page::{
     FIXED_PAGES, Pages, SharedCtx, SimplePage, archive_modified_at, default_site_description,
 };
-use render::{Renderer, Theme};
+use render::Renderer;
 
 const EXCERPT_CHARS: usize = 240;
 
@@ -233,27 +233,12 @@ pub fn cache_version(build: &BuildCtx) -> String {
 }
 
 /// Reader releases depend on shipped code, never on values substituted while rendering it.
-fn app_version(binary_version: &str, theme: &Theme) -> Result<String> {
-    fn field(hash: &mut Sha1, bytes: &[u8]) {
-        hash.update((bytes.len() as u64).to_le_bytes());
-        hash.update(bytes);
-    }
+fn app_version(binary_version: &str) -> String {
     let mut hash = Sha1::new();
-    field(&mut hash, b"aggr-app-v1");
-    field(&mut hash, binary_version.as_bytes());
-    for (kind, names) in [
-        ("templates", theme.template_names()?),
-        ("static", theme.static_names()?),
-    ] {
-        for name in names {
-            let bytes = theme
-                .read(kind, &name)?
-                .with_context(|| format!("{kind}/{name} vanished during build"))?;
-            field(&mut hash, format!("{kind}/{name}").as_bytes());
-            field(&mut hash, &bytes);
-        }
-    }
-    Ok(hex::encode(hash.finalize()))
+    hash.update(b"aggr-app-v2");
+    hash.update(binary_version.as_bytes());
+    hash.update(render::implementation_hash().as_bytes());
+    hex::encode(hash.finalize())
 }
 
 /// Fingerprint of data that can affect rendered output, including age bands and the home-feed
@@ -655,11 +640,10 @@ fn prepare_site(
             .collect(),
         entry_shortcuts: Vec::new(),
     };
-    let theme = theme();
     let mut build_ctx = BuildCtx {
         time: info.now,
         version: env!("CARGO_PKG_VERSION").to_string(),
-        app_version: app_version(env!("CARGO_PKG_VERSION"), &theme)?,
+        app_version: app_version(env!("CARGO_PKG_VERSION")),
         content_version: String::new(),
         config_sha: info.config_sha.clone(),
         data_sha: info.data_sha.clone(),
@@ -672,7 +656,7 @@ fn prepare_site(
         data_sha: info.data_sha.as_deref(),
     });
 
-    let renderer = Renderer::new(theme)?;
+    let renderer = Renderer::new()?;
 
     // Sources: config order, enriched with stored state and counts.
     let status = store.status()?;
@@ -760,7 +744,8 @@ fn prepare_site(
             })
             .sum();
     }
-    let media_policy = assets::MediaPolicy::defaults(&config.defaults);
+    let media_policy = assets::MediaPolicy::defaults(&config.defaults)
+        .with_image_format(config.site.media_image_format);
     // Reading, validating and decoding archived media dominates this phase, so it runs on worker
     // threads one window at a time, which bounds the assets held in memory. Publishing stays on
     // this thread in item order: the dedupe map, memo state and archive order never depend on
@@ -1089,15 +1074,8 @@ fn build_once(
     let search_documents: Vec<_> = archive_items
         .iter()
         .zip(&prepared_bodies)
-        .map(|(item, prepared)| {
-            pagefind::SearchDocument::with_rendered_row(
-                &renderer,
-                &site,
-                item,
-                prepared.plain_text(),
-            )
-        })
-        .collect::<Result<_>>()?;
+        .map(|(item, prepared)| pagefind::SearchDocument::new(item, prepared.plain_text()))
+        .collect();
 
     let stubs = 4;
 
@@ -1199,26 +1177,19 @@ fn build_once(
             pages_ctx
                 .simple(SimplePage {
                     page_items: Some(offline_items),
-                    ..SimplePage::new("offline", "Offline", "offline.html", "offline.html")
+                    ..SimplePage::new("offline", "Offline", "offline.html")
                 })?
                 .as_bytes(),
         )?;
         write(
             &out.join("manifest.webmanifest"),
-            pages_ctx
-                .simple(SimplePage::new(
-                    "manifest",
-                    &config.site.title,
-                    "manifest.webmanifest",
-                    "manifest.webmanifest",
-                ))?
-                .as_bytes(),
+            pages_ctx.manifest()?.as_bytes(),
         )?;
         // The shell installs first: the reader frame and the assets that paint it. Collection
         // pages and article bodies stay out of that download and are cached when opened.
         // Eager reader chunks come from the module graph. A positive offline count fetches the
         // catalogue and then the selected article families.
-        let paths = precache::paths(&theme(), &renderer, &assets)?;
+        let paths = precache::paths(&renderer, &assets);
         let catalogue = offline::catalogue(out, &archive_items, &article_images, &written_assets)?;
         write(
             &out.join("offline-catalog.json"),
@@ -1276,19 +1247,15 @@ fn build_once(
     Ok(summary)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_article(
-    out: &Path,
-    pages_ctx: &Pages<'_>,
+fn prepare_article(
     site: &SiteCtx,
-    build_ctx: &BuildCtx,
     store: &Store,
     ctx: &ItemCtx,
     item: &Item,
     prepared_markdown: &content::PreparedMarkdown,
     article_images: &BTreeMap<String, Vec<content::LocalImage>>,
     shared_pictures: &BTreeMap<String, std::collections::BTreeSet<String>>,
-) -> Result<Option<outputs::SitemapUrl>> {
+) -> Result<ItemCtx> {
     let mut ctx = ctx.clone();
     ctx.video = video::VideoCtx::from_url(&item.front.link);
     ctx.interactive = interactive::InteractiveCtx::from_item(item);
@@ -1368,6 +1335,32 @@ fn write_article(
         body_html
     });
     ctx.has_margin_notes = has_margin_notes;
+    Ok(ctx)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_article(
+    out: &Path,
+    pages_ctx: &Pages<'_>,
+    site: &SiteCtx,
+    build_ctx: &BuildCtx,
+    store: &Store,
+    ctx: &ItemCtx,
+    item: &Item,
+    prepared_markdown: &content::PreparedMarkdown,
+    article_images: &BTreeMap<String, Vec<content::LocalImage>>,
+    shared_pictures: &BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> Result<Option<outputs::SitemapUrl>> {
+    let mut ctx = prepare_article(
+        site,
+        store,
+        ctx,
+        item,
+        prepared_markdown,
+        article_images,
+        shared_pictures,
+    )?;
+    let portable_html = prepared_markdown.portable_html();
     let dir = out.join(&ctx.url);
     let representation = out.join(ctx.url.trim_end_matches('/'));
     write(
@@ -1375,7 +1368,7 @@ fn write_article(
         pages_ctx
             .simple(SimplePage {
                 item: Some(&ctx),
-                ..SimplePage::new("item", &ctx.title, &ctx.url, "item.html")
+                ..SimplePage::new("item", &ctx.title, &ctx.url)
             })?
             .as_bytes(),
     )?;
@@ -1433,12 +1426,6 @@ fn build_report(
     )
 }
 
-/// The theme every build renders with: the embedded default, read from its source tree by a
-/// development binary so `aggr dev` picks up template and asset edits without recompiling.
-pub fn theme() -> Theme {
-    Theme::development()
-}
-
 /// The host `CNAME` should carry: a release build on a domain that is not GitHub's own.
 pub fn cname(info: &BuildInfo) -> Option<String> {
     if !info.release {
@@ -1482,6 +1469,34 @@ mod tests {
 
     fn day(d: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 9, d, 0, 0, 0).unwrap()
+    }
+
+    fn has_link(html: &str, rel: &str, href: &str) -> bool {
+        scraper::Html::parse_document(html)
+            .select(&scraper::Selector::parse("link").unwrap())
+            .any(|link| {
+                link.value().attr("rel") == Some(rel) && link.value().attr("href") == Some(href)
+            })
+    }
+
+    fn title_text(html: &str) -> String {
+        scraper::Html::parse_document(html)
+            .select(&scraper::Selector::parse("title").unwrap())
+            .next()
+            .unwrap()
+            .text()
+            .collect()
+    }
+
+    fn meta_content(html: &str, name: &str) -> String {
+        scraper::Html::parse_document(html)
+            .select(&scraper::Selector::parse(&format!("meta[name='{name}']")).unwrap())
+            .next()
+            .unwrap()
+            .value()
+            .attr("content")
+            .unwrap()
+            .to_owned()
     }
 
     #[test]
@@ -2207,11 +2222,26 @@ mod tests {
                 assert_eq!(summary.pages, 18);
             }
             for path in paths {
+                let published = std::fs::read(eager.join(path)).unwrap();
                 assert_eq!(
                     lazy.response(path).unwrap().unwrap(),
-                    std::fs::read(eager.join(path)).unwrap(),
+                    published,
                     "{path} with {count} articles"
                 );
+                if path.ends_with(".html") {
+                    let model = lazy.page_model(path).unwrap().expect("HTML route model");
+                    assert_eq!(
+                        Renderer::new()
+                            .unwrap()
+                            .render_page(&model)
+                            .unwrap()
+                            .as_bytes(),
+                        published,
+                        "development model for {path} with {count} articles"
+                    );
+                } else {
+                    assert!(lazy.page_model(path).unwrap().is_none());
+                }
             }
             for path in ["offline.html", "manifest.webmanifest", "sw.js"] {
                 assert!(lazy.response(path).unwrap().is_none(), "{path}");
@@ -2846,36 +2876,10 @@ category = "Science"
     }
 
     #[test]
-    fn application_fingerprint_tracks_effective_assets_templates_and_binary() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("theme");
-        std::fs::create_dir_all(source.join("static")).unwrap();
-        std::fs::create_dir_all(source.join("templates")).unwrap();
-        let theme = Theme::from_source_tree(source.clone());
-        let original = app_version("1.2.3", &theme).unwrap();
-        assert_eq!(
-            original,
-            app_version("1.2.3", &Theme::default()).unwrap(),
-            "an empty source tree ships the embedded theme"
-        );
-        assert_ne!(original, app_version("1.2.4", &theme).unwrap());
-
-        std::fs::write(source.join("static/style.css"), "body { color: green; }").unwrap();
-        let styled = app_version("1.2.3", &theme).unwrap();
-        assert_ne!(original, styled);
-        std::fs::write(
-            source.join("templates/custom-include.html"),
-            "<p>Custom include</p>",
-        )
-        .unwrap();
-        let template = app_version("1.2.3", &theme).unwrap();
-        assert_ne!(styled, template);
-        std::fs::write(
-            source.join("templates/sw.js"),
-            "/* worker implementation */",
-        )
-        .unwrap();
-        assert_ne!(template, app_version("1.2.3", &theme).unwrap());
+    fn application_fingerprint_tracks_embedded_ui_and_binary() {
+        assert_eq!(app_version("1.2.3"), app_version("1.2.3"));
+        assert_ne!(app_version("1.2.3"), app_version("1.2.4"));
+        assert!(!render::implementation_hash().is_empty());
     }
 
     #[test]
@@ -3000,7 +3004,7 @@ category = "Science"
             "items/blog/2026-09-19-newest-article/"
         );
         // The other direction, an asset or template change moving only `app_version`, is pinned
-        // by `application_fingerprint_tracks_effective_assets_templates_and_binary`: the theme a
+        // by `application_fingerprint_tracks_embedded_ui_and_binary`: the UI a
         // build renders is the shipped one, so no fixture can edit it here.
     }
 
@@ -3897,25 +3901,13 @@ category = "Science"
         assert!(middle.contains("data-static-next=\"page/4/\""), "{middle}");
         assert!(!middle.contains("<base "), "{middle}");
         assert!(
-            middle.contains("<link rel=\"canonical\" href=\"https://u.github.io/repo/page/3/\">"),
+            has_link(&middle, "canonical", "https://u.github.io/repo/page/3/"),
             "{middle}"
         );
-        assert!(
-            middle.contains("<link rel=\"first\" href=\"../../\">"),
-            "{middle}"
-        );
-        assert!(
-            middle.contains("<link rel=\"prev\" href=\"../../page/2/\">"),
-            "{middle}"
-        );
-        assert!(
-            middle.contains("<link rel=\"next\" href=\"../../page/4/\">"),
-            "{middle}"
-        );
-        assert!(
-            middle.contains("<link rel=\"last\" href=\"../../page/5/\">"),
-            "{middle}"
-        );
+        assert!(has_link(&middle, "first", "../../"), "{middle}");
+        assert!(has_link(&middle, "prev", "../../page/2/"), "{middle}");
+        assert!(has_link(&middle, "next", "../../page/4/"), "{middle}");
+        assert!(has_link(&middle, "last", "../../page/5/"), "{middle}");
 
         let second = std::fs::read_to_string(out.join("page/2/index.html")).unwrap();
         assert!(second.contains("href=\"../../\">first</a>"), "{second}");
@@ -4089,7 +4081,14 @@ category = "Science"
         assert_eq!(version.len(), 40);
         assert!(version.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert!(sw.contains("importScripts(\"assets/app/worker-"));
-        assert!(sw.contains("\"assets/style-"));
+        let css = Renderer::new().unwrap().client_assets().css.unwrap();
+        assert!(
+            config["precache"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["url"] == css)
+        );
         assert!(!sw.contains("\"pagefind/pagefind.js\""));
         assert!(!out.join("search-meta.json").exists());
         assert!(
@@ -4118,7 +4117,7 @@ category = "Science"
         let offline = std::fs::read_to_string(out.join("offline.html")).unwrap();
         assert!(offline.contains("data-offline-root"));
         assert!(offline.contains("id=\"offline-empty\""));
-        assert!(offline.contains("<link rel=\"manifest\" href=\"/repo/manifest.webmanifest\">"));
+        assert!(has_link(&offline, "manifest", "/repo/manifest.webmanifest"));
         assert!(offline.contains("\"pwa\":true"));
         assert!(offline.contains("href=\"/repo/browse/\""), "{offline}");
         assert!(offline.contains("\"base\":\"/repo/\""), "{offline}");
@@ -4133,25 +4132,15 @@ category = "Science"
         assert!(!not_found.contains("property=\"og:url\""));
         assert!(!not_found.contains("application/ld+json"));
         let river = std::fs::read_to_string(out.join("index.html")).unwrap();
-        assert!(
-            river.contains("<title>Demo &lt;site&gt; | aggr</title>"),
-            "{river}"
+        assert_eq!(title_text(&river), "Demo <site> | aggr");
+        assert_eq!(meta_content(&river, "application-name"), "Demo <site>");
+        assert_eq!(
+            meta_content(&river, "apple-mobile-web-app-title"),
+            "Demo <site>"
         );
-        assert!(
-            river.contains("<meta name=\"application-name\" content=\"Demo &lt;site&gt;\">"),
-            "{river}"
-        );
-        assert!(
-            river.contains(
-                "<meta name=\"apple-mobile-web-app-title\" content=\"Demo &lt;site&gt;\">"
-            ),
-            "{river}"
-        );
-        assert!(
-            river.contains(
-                "<meta name=\"description\" content=\"Browse Demo &lt;site&gt;, an independent, searchable archive of readable snapshots from followed feeds, preserved in Git with aggr.\">"
-            ),
-            "{river}"
+        assert_eq!(
+            meta_content(&river, "description"),
+            "Browse Demo <site>, an independent, searchable archive of readable snapshots from followed feeds, preserved in Git with aggr."
         );
         assert!(river.contains("type=\"application/ld+json\""), "{river}");
         assert!(!river.contains("#identity"), "{river}");
@@ -4256,15 +4245,16 @@ category = "Science"
         let item =
             std::fs::read_to_string(out.join("items/blog/2026-09-03-post-2/index.html")).unwrap();
         assert!(
-            item.contains("<link rel=\"canonical\" href=\"https://u.github.io/repo/items/blog/2026-09-03-post-2/\">"),
+            has_link(
+                &item,
+                "canonical",
+                "https://u.github.io/repo/items/blog/2026-09-03-post-2/"
+            ),
             "{item}"
         );
+        assert!(has_link(&item, "via", "https://blog.example/2"), "{item}");
         assert!(
-            item.contains("<link rel=\"via\" href=\"https://blog.example/2\">"),
-            "{item}"
-        );
-        assert!(
-            item.contains("<link rel=\"original\" href=\"https://blog.example/2\">"),
+            has_link(&item, "original", "https://blog.example/2"),
             "{item}"
         );
         assert!(!item.contains("class=\"archive-note\""), "{item}");
@@ -4404,11 +4394,10 @@ category = "Science"
             ("browse/index.html", "browse"),
         ] {
             let html = std::fs::read_to_string(out.join(path)).unwrap();
-            assert!(
-                html.contains(&format!(
-                    "<title>{title} | Demo &lt;site&gt; | aggr</title>"
-                )),
-                "{path}: {html}"
+            assert_eq!(
+                title_text(&html),
+                format!("{title} | Demo <site> | aggr"),
+                "{path}"
             );
             assert!(!html.contains("Computer SCIENCE"), "{path}");
             assert!(!html.contains("Generative AI"), "{path}");
@@ -4442,44 +4431,29 @@ same_as = ["https://social.example/@ada"]
         build(&config, &sources, &store, dir.path(), &info(out.clone())).unwrap();
 
         let home = std::fs::read_to_string(out.join("index.html")).unwrap();
-        assert!(
-            home.contains("<title>Demo &lt;site&gt; | aggr</title>"),
-            "{home}"
-        );
-        assert!(
-            home.contains(
-                "<meta name=\"description\" content=\"Independent reading notes and useful links.\">"
-            ),
-            "{home}"
+        assert_eq!(title_text(&home), "Demo <site> | aggr");
+        assert_eq!(
+            meta_content(&home, "description"),
+            "Independent reading notes and useful links."
         );
 
         let second = std::fs::read_to_string(out.join("page/2/index.html")).unwrap();
-        assert!(
-            second.contains("<title>Demo &lt;site&gt; — page 2 | aggr</title>"),
-            "{second}"
-        );
-        assert!(
-            second.contains(
-                "<meta name=\"description\" content=\"Independent reading notes and useful links Page 2.\">"
-            ),
-            "{second}"
+        assert_eq!(title_text(&second), "Demo <site> — page 2 | aggr");
+        assert_eq!(
+            meta_content(&second, "description"),
+            "Independent reading notes and useful links Page 2."
         );
         let source = std::fs::read_to_string(out.join("sources/blog.example/index.html")).unwrap();
-        assert!(
-            source.contains(
-                "<meta name=\"description\" content=\"Browse retained readable snapshots from blog.example in Demo &lt;site&gt;, with original URLs and capture dates.\">"
-            ),
-            "{source}"
+        assert_eq!(
+            meta_content(&source, "description"),
+            "Browse retained readable snapshots from blog.example in Demo <site>, with original URLs and capture dates."
         );
         let item =
             std::fs::read_to_string(out.join("items/blog/2026-09-02-post-1/index.html")).unwrap();
-        assert!(
-            item.contains("<title>Post 1 | Demo &lt;site&gt; | aggr</title>"),
-            "{item}"
-        );
-        assert!(
-            item.contains("Archived readable snapshot of Post 1 from blog.example, first captured 2026-09-02 and preserved by Demo &lt;site&gt;."),
-            "{item}"
+        assert_eq!(title_text(&item), "Post 1 | Demo <site> | aggr");
+        assert_eq!(
+            meta_content(&item, "description"),
+            "Archived readable snapshot of Post 1 from blog.example, first captured 2026-09-02 and preserved by Demo <site>. Hello"
         );
         // A link shared into a chat unfurls as the article, not as a notice about the archive:
         // crawlers keep the archival framing, a reader gets the words.

@@ -312,6 +312,34 @@ url = "https://heavy.example/feed.xml"
 media_download_strategy = { mode = "compressed", quality = 60, max_axis = 1280 }
 ```
 
+### Progressive JPEG publication
+
+Remote media remains the default. To retain originals and publish eligible images as progressive
+JPEGs, opt into both local preservation and the publication format:
+
+```toml
+[defaults]
+media_download_strategy = "original"
+
+[site]
+media_image_format = "progressive-jpeg"
+```
+
+`media_image_format` defaults to `"original"`, which keeps the existing publication encoding
+policy. The JPEG option changes published copies, never archived masters. It does not download
+remote images during rendering. Use `sync --backfill-media` to fill missing media in an existing
+archive after enabling preservation.
+
+Eligible opaque, 8-bit still images use progressive JPEG at quality 85, with responsive sizes.
+For full-resolution publication, masters above 32 megapixels keep their original bytes with
+bounded responsive JPEG copies.
+Older images eligible for publication compression retain its quality 72 and 1,600-pixel bound.
+A replacement is used only when smaller; transparency, animations, embedded color profiles,
+high-bit-depth images and AVIF keep their existing bytes. Previews use the same opt-in format.
+Derived copies live in a bounded disposable cache. Their published URLs include a content hash,
+so unchanged bytes keep their URL and changed bytes get a new one. Publisher-hosted images remain
+under the publisher's caching policy.
+
 ### Article images
 
 A compressed master is resized to fit `max_axis` with the same high-quality filter the renditions
@@ -331,7 +359,8 @@ bodies and hand edits. Per-feed limits apply before and after backfill; newly sa
 older article families to be removed when the configured byte limit is exceeded.
 
 Under `"original"`, for every accepted JPEG, PNG, GIF, or WebP image, aggr keeps the exact publisher
-response as the master. At build time, when the bounded publication budget permits it, safe static
+response as the master. With the default publication format, when the bounded publication budget
+permits it, safe static
 8-bit images also get responsive
 320, 640, 960, 1280, and 1600-pixel renditions where useful, plus a full-width rendition. These
 are resized once with a high-quality filter, encoded as lossless WebP, then decoded and

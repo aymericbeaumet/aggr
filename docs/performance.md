@@ -118,16 +118,15 @@ deterministic; all workers join before errors propagate. The existing rendered-s
 Pagefind, article-response, extraction, and dev caches remain in use. Offline catalogs hash each
 shared asset once per build. Worker downloads reuse verified revisions across deployments.
 
-Shared template data is converted to MiniJinja values once per build. Article templates still
-receive the complete archive, but rendering every article no longer
-serializes that archive again. Each article is parsed and highlighted once by bounded workers. Its prepared HTML and plain text
+Shared display contexts are prepared once per build; each page serializes only its typed model.
+Each worker reuses an isolated embedded Svelte runtime. Each article is parsed and highlighted once by bounded workers. Its prepared HTML and plain text
 serve reading metrics, excerpts, every collection feed, portable representations, article image
 substitution, and search indexing. Shared immutable image/preview paths are written once per build;
 verified asset hashes are reused instead of rereading the same bytes for naming.
 
 Ordinary dev snapshots prepare archive metadata and static assets, then materialize pages, portable
 representations, media and search on demand. Feed pages read previews rather than all body images.
-The parsed Markdown and normalized body caches survive theme reloads, and shared template values
+The parsed Markdown and normalized body caches survive data snapshot reloads, and shared display values
 are prepared once per generation. Search indexing uses a separate lock so an index build does not
 block already available page and asset responses. Media bytes are read for the response, never
 copied into a permanent archive-sized memory map. Each generation has its own disposable directory;

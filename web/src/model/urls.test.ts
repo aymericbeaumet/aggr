@@ -47,3 +47,9 @@ describe('facetUrl', () => {
     expect(facetUrl('./', 'say "hi"', 'tag')).toBe('./?q=tag%3A%22say+%5C%22hi%5C%22%22');
   });
 });
+
+import { sourceSet } from './urls';
+it('rebases generated source sets without splitting CDN URL commas', () => {
+  expect(sourceSet('../../', 'assets/small.webp 640w, https://cdn.test/image,width=1280,height=720/photo.webp 1280w'))
+    .toBe('../../assets/small.webp 640w, https://cdn.test/image,width=1280,height=720/photo.webp 1280w');
+});

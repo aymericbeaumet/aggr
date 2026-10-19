@@ -126,6 +126,7 @@ pub(super) struct MediaPolicy {
     pub previews: crate::config::PreviewPolicy,
     pub images: crate::config::ImagePolicy,
     pub documents: crate::config::DocumentPolicy,
+    image_format: crate::config::MediaImageFormat,
 }
 
 impl MediaPolicy {
@@ -134,7 +135,13 @@ impl MediaPolicy {
             previews: defaults.media.previews(),
             images: defaults.media.images(),
             documents: defaults.media.documents(),
+            image_format: crate::config::MediaImageFormat::Original,
         }
+    }
+
+    pub fn with_image_format(mut self, image_format: crate::config::MediaImageFormat) -> Self {
+        self.image_format = image_format;
+        self
     }
 
     pub fn for_item(self, sources: &[crate::config::Source], item: &Item) -> Self {
@@ -145,6 +152,7 @@ impl MediaPolicy {
                 previews: source.previews,
                 images: source.images,
                 documents: source.documents,
+                image_format: self.image_format,
             })
     }
 
@@ -181,6 +189,49 @@ struct PreparedPreview {
     ctx: PreviewCtx,
 }
 
+impl PreparedPreview {
+    fn progressive(self, cache: Option<&Path>) -> Result<Self> {
+        let extension = match image::guess_format(&self.bytes)? {
+            image::ImageFormat::Jpeg => "jpg",
+            image::ImageFormat::Png => "png",
+            image::ImageFormat::WebP => "webp",
+            image::ImageFormat::Gif => "gif",
+            image::ImageFormat::Avif => "avif",
+            _ => return Ok(self),
+        };
+        let asset = crate::media::Asset {
+            source_url: self.path.clone(),
+            source_hash: self.revision.clone(),
+            alt: self.ctx.alt.clone(),
+            master_hash: self.revision.clone(),
+            master_bytes: self.bytes.clone(),
+            master_extension: extension,
+            width: self.ctx.width,
+            height: self.ctx.height,
+            dominant_color: self.ctx.color.clone().unwrap_or_else(|| "#808080".into()),
+            placeholder: self.ctx.placeholder.clone(),
+            renditions: Vec::new(),
+        };
+        let asset = super::compressed_media::progressive_cached(asset, cache, false)?;
+        if asset.master_hash == self.revision {
+            return Ok(self);
+        }
+        let path = format!("assets/previews/{}.jpg", asset.master_hash);
+        Ok(Self {
+            ctx: PreviewCtx {
+                url: path.clone(),
+                width: asset.width,
+                height: asset.height,
+                placeholder: asset.placeholder,
+                ..self.ctx
+            },
+            path,
+            revision: asset.master_hash,
+            bytes: asset.master_bytes,
+        })
+    }
+}
+
 impl ItemMedia {
     /// The validated stored preview, the archived article images, and when the item has no
     /// stored preview and the preview policy archives one, a feed thumbnail derived from those images.
@@ -205,13 +256,22 @@ impl ItemMedia {
         if preview.is_none() && policy.previews.archives() {
             preview = derived_preview(&assets, memo)?;
         }
-        if !compact && policy.images == crate::config::ImagePolicy::Original {
+        if policy.image_format == crate::config::MediaImageFormat::ProgressiveJpeg {
+            preview = preview
+                .map(|preview| preview.progressive(compact_cache))
+                .transpose()?;
+            assets = assets
+                .into_iter()
+                .map(|asset| {
+                    super::compressed_media::progressive_cached(asset, compact_cache, compact)
+                })
+                .collect::<Result<_>>()?;
+        } else if !compact && policy.images == crate::config::ImagePolicy::Original {
             assets = assets
                 .into_iter()
                 .map(|asset| super::compressed_media::responsive_cached(asset, compact_cache))
                 .collect::<Result<_>>()?;
-        }
-        if compact {
+        } else if compact {
             assets = assets
                 .into_iter()
                 .map(|asset| super::compressed_media::compact_cached(asset, compact_cache))
@@ -270,6 +330,7 @@ impl ItemMedia {
         item: &Item,
         policy: MediaPolicy,
         memo: &MediaMemo,
+        compact_cache: Option<&Path>,
     ) -> Result<Self> {
         let mut preview = if policy.previews.archives() {
             Self::stored_preview(store, item, memo)?
@@ -278,6 +339,11 @@ impl ItemMedia {
         };
         if preview.is_none() && policy.previews.archives() && policy.images.archives() {
             preview = derived_preview(&store.read_image_assets(item)?, memo)?;
+        }
+        if policy.image_format == crate::config::MediaImageFormat::ProgressiveJpeg {
+            preview = preview
+                .map(|preview| preview.progressive(compact_cache))
+                .transpose()?;
         }
         Ok(Self {
             preview,
@@ -487,8 +553,12 @@ fn publish_article_images(
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        if asset.master_extension == "webp"
+        if matches!(asset.master_extension, "webp" | "jpg")
             && !variants.is_empty()
+            && asset
+                .renditions
+                .iter()
+                .all(|rendition| rendition.extension == asset.master_extension)
             && variants.last().map(|variant| variant.width) != Some(asset.width)
         {
             variants.push(content::LocalImageVariant {
@@ -530,6 +600,183 @@ fn publish_asset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progressive_publication_keeps_immutable_urls_previews_and_responsive_sizes() {
+        use image::ImageEncoder as _;
+        fn png(width: u32, height: u32) -> Vec<u8> {
+            let image = image::RgbaImage::from_fn(width, height, |x, y| {
+                image::Rgba([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8, 255])
+            });
+            let mut bytes = Vec::new();
+            image::codecs::png::PngEncoder::new_with_quality(
+                &mut bytes,
+                image::codecs::png::CompressionType::Uncompressed,
+                image::codecs::png::FilterType::NoFilter,
+            )
+            .write_image(
+                image.as_raw(),
+                width,
+                height,
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+            bytes
+        }
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let store = Store::open(root.path().join("archive"));
+        store.bootstrap().unwrap();
+        let original = crate::media::prepare_asset(
+            &crate::media::Candidate {
+                url: url::Url::parse("https://example.test/photo.png").unwrap(),
+                alt: None,
+            },
+            png(1000, 700),
+            &crate::media::MediaLimits::default(),
+        )
+        .unwrap();
+        let preview_image = image::RgbImage::from_fn(160, 112, |x, y| {
+            let mut noise = x + y * 160;
+            noise = (noise ^ (noise >> 16)).wrapping_mul(0x7feb_352d);
+            noise = (noise ^ (noise >> 15)).wrapping_mul(0x846c_a68b);
+            let noise = (noise ^ (noise >> 16)).to_le_bytes();
+            image::Rgb([noise[0], noise[1], noise[2]])
+        });
+        let mut preview_bytes = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut preview_bytes)
+            .write_image(
+                preview_image.as_raw(),
+                160,
+                112,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        let preview = crate::preview::Thumbnail {
+            bytes: preview_bytes,
+            extension: "webp",
+            width: 160,
+            height: 112,
+            alt: None,
+            color: "#808080".into(),
+        };
+        let stem = "2026-10-01-photo";
+        let dir = "items/blog/2026/10";
+        let front = crate::model::FrontMatter {
+            title: "Photo".into(),
+            source: "blog".into(),
+            preview: Some(preview.metadata(stem)),
+            images: vec![original.metadata(stem)],
+            ..Default::default()
+        };
+        store
+            .write_item(crate::store::NewItem {
+                dir,
+                stem,
+                front: &front,
+                body: "![Photo](https://example.test/photo.png)",
+                html: None,
+                preview: Some(&preview.bytes),
+                images: std::slice::from_ref(&original),
+            })
+            .unwrap();
+        let item = store.read_item(&format!("{dir}/{stem}")).unwrap();
+        let ordinary =
+            crate::config::Config::parse("[defaults]\nmedia_download_strategy = 'original'\n")
+                .unwrap();
+        let progressive = crate::config::Config::parse("[defaults]\nmedia_download_strategy = 'original'\n[site]\nmedia_image_format = 'progressive-jpeg'\n").unwrap();
+        let publish = |config: &crate::config::Config, output: &Path| {
+            let policy = MediaPolicy::defaults(&config.defaults)
+                .with_image_format(config.site.media_image_format);
+            let mut written = Published::new();
+            let (preview, images, _) = ItemMedia::gather(
+                &store,
+                &item,
+                policy,
+                &MediaMemo::default(),
+                false,
+                Some(&cache),
+            )
+            .unwrap()
+            .publish(
+                output,
+                &mut written,
+                &mut super::super::budget::MediaBudget::new(u64::MAX),
+            )
+            .unwrap();
+            (preview, images, written)
+        };
+        let output = root.path().join("site");
+        let (published_preview, images, written) = publish(&progressive, &output);
+        assert!(published_preview.as_ref().unwrap().url.ends_with(".jpg"));
+        assert_eq!(images.len(), 1);
+        assert!(!images[0].variants.is_empty());
+        assert!(
+            images[0]
+                .variants
+                .iter()
+                .all(|variant| variant.url.ends_with(".jpg"))
+        );
+        assert_eq!(images[0].variants.last().unwrap().width, images[0].width);
+        for (path, hash) in &written {
+            assert!(path.ends_with(".jpg"), "{path}");
+            let bytes = std::fs::read(output.join(path)).unwrap();
+            assert_eq!(*hash, crate::model::sha1_hex(&bytes));
+            assert!(path.ends_with(&format!("{hash}.jpg")));
+            assert!(
+                bytes.windows(2).any(|marker| marker == [0xff, 0xc2]),
+                "{path}"
+            );
+        }
+        let html = crate::content::PreparedMarkdown::new(&item.body).with_images(&images, &[]);
+        assert!(html.contains("<source type=\"image/jpeg\""), "{html}");
+        assert!(!html.contains("image/webp"), "{html}");
+        let cached_payloads: Vec<_> = std::fs::read_dir(&cache)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "image")
+            })
+            .collect();
+        let timestamp = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        for path in &cached_payloads {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(timestamp)
+                .unwrap();
+        }
+        let (second_preview, second_images, second_written) =
+            publish(&progressive, &root.path().join("rebuilt"));
+        assert_eq!(second_written, written);
+        assert_eq!(second_preview.unwrap().url, published_preview.unwrap().url);
+        assert_eq!(second_images[0].original, images[0].original);
+        for path in &cached_payloads {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().modified().unwrap(),
+                timestamp
+            );
+        }
+        let (plain_preview, plain_images, _) = publish(&ordinary, &root.path().join("original"));
+        assert!(plain_preview.unwrap().url.ends_with(".webp"));
+        assert_eq!(
+            std::fs::read(root.path().join("original").join(&plain_images[0].original)).unwrap(),
+            original.master_bytes
+        );
+        let remote =
+            crate::config::Config::parse("[site]\nmedia_image_format = 'progressive-jpeg'\n")
+                .unwrap();
+        let (remote_preview, remote_images, remote_written) =
+            publish(&remote, &root.path().join("remote"));
+        assert!(remote_preview.is_none() && remote_images.is_empty() && remote_written.is_empty());
+        assert_eq!(
+            store.read_image_assets(&item).unwrap()[0].master_bytes,
+            original.master_bytes
+        );
+        assert_eq!(store.read_preview(&item).unwrap().unwrap(), preview.bytes);
+    }
 
     #[test]
     fn shared_immutable_assets_are_written_once_per_build() {

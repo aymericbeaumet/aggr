@@ -46,15 +46,15 @@ or commits to the data branch. Pinned and offline builds only render their exist
 
 `cargo run -- dev` starts Vite HMR and automatic Rust restarts. With no local configuration it uses
 `examples/aggr.toml`; set `AGGR_CONFIG=/path/to/aggr.toml` to preview another instance.
-Node and npm are development tools only: release binaries exclude the dev command, server,
-watchers and reload clients, and production builds use the committed client assets.
+Node and npm are source-build tools: Cargo compiles and embeds the reader automatically.
+Installed release binaries need neither, and exclude the dev command, server, watchers and reload clients.
 
 The Rust preview backend prepares the archive's shared display metadata, then renders each page only when it is
 requested. Opening the feed reads its thumbnails; opening an article loads that article's media.
 Completion uses a small metadata catalogue; the full-text index is built only when a search needs
 its runtime, and reuses the persistent Pagefind cache.
-Vite handles Svelte, TypeScript and frontend CSS updates. Template and theme CSS edits reuse
-normalized bodies and parsed Markdown, replace the snapshot atomically, and reload the browser.
+Vite handles Svelte, TypeScript and CSS updates. Rust changes compile while the previous worker
+continues serving, then replace it and reload the browser after a successful startup.
 Completed sources become visible while slower remote sources continue; local reprocessing also
 publishes before network refresh completes. Each preview owns immutable archive inputs. A template syntax error keeps the last working
 snapshot available. Requested output lives in disposable per-generation directories; the archive

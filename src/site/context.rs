@@ -1,5 +1,4 @@
-//! The template contract: everything a rendered page can see, as plain serializable structs.
-//! Documented in `docs/rendering.md`; changing a field here changes every page.
+//! Prepared archive values used by page models and portable publication outputs.
 
 #[cfg(test)]
 use crate::content;
@@ -104,26 +103,13 @@ pub struct SiteIdentityCtx {
     pub same_as: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct DiscussionLinkCtx {
-    pub name: String,
-    pub url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub shortcut: Option<String>,
-    /// A direct link to a matching discussion rather than the provider's search page.
-    pub found: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub score: Option<i64>,
-}
+pub use aggr_ui_model::DiscussionLinkCtx;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BuildCtx {
     pub time: DateTime<Utc>,
     pub version: String,
-    /// Binary release and effective template/static bytes, independent of feed or config data.
+    /// Binary release and embedded UI bytes, independent of feed or config data.
     pub app_version: String,
     /// Semantic content and rendered configuration, independent of rebuild time and app bytes.
     pub content_version: String,
@@ -162,27 +148,7 @@ pub struct PageCtx {
     pub paginator: Option<PaginatorCtx>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct PaginatorCtx {
-    /// Maximum number of entries in one pager.
-    pub paginate_by: usize,
-    /// Route prefix for numbered pagers, e.g. `sources/rust/page/`.
-    pub base_url: String,
-    /// Number of generated pagers.
-    pub number_pagers: usize,
-    /// Routes for the two edges. These are always present, including on an edge pager.
-    pub first: String,
-    pub last: String,
-    pub previous: Option<String>,
-    pub next: Option<String>,
-    /// Current pager, 1-indexed.
-    pub current_index: usize,
-    /// Number of entries across every pager.
-    pub total_items: usize,
-    /// Rank of the first entry on this pager, 0-based.
-    pub offset: usize,
-}
+pub use aggr_ui_model::PaginatorCtx;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ItemCtx {
@@ -384,14 +350,7 @@ pub struct SourceCtx {
     pub listed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct SourceMembershipCtx {
-    pub slug: String,
-    pub query_value: String,
-    pub name: String,
-    pub display: String,
-}
+pub use aggr_ui_model::SourceMembershipCtx;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceErrorCtx {
@@ -549,18 +508,7 @@ fn url_label(url: &url::Url) -> String {
 /// A catalogue names its publishers with identifiers nobody reads, so show the publisher's own
 /// title in that slot instead. This is a label, not a destination: links keep their real URL.
 fn source_profile_label(url: &url::Url, title: &str) -> String {
-    if !crate::platform::opaque(url) {
-        return url_label(url);
-    }
-    let name = slug::slugify(title.split(['|', ':']).next().unwrap_or(title));
-    if name.is_empty() || title.contains("://") || title == source_host(url) {
-        return url_label(url);
-    }
-    let port = url
-        .port()
-        .map(|port| format!(":{port}"))
-        .unwrap_or_default();
-    format!("{}{port}/{name}", source_host(url))
+    crate::platform::display_name(url, title).unwrap_or_else(|| url_label(url))
 }
 
 pub fn profile_label(value: &str) -> String {

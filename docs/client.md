@@ -1,151 +1,69 @@
 # Client development and search
 
-Rust and MiniJinja own the reader's page markup in development and release. Svelte 5 and
-TypeScript in `web/` add interactive controls and enhance that HTML, compiled ahead of time by Vite and committed under
-`src/theme/static/app/`, where the binary embeds it like any other static file. Site
-generation never executes JavaScript or invokes a frontend compiler, so `cargo build`, `aggr sync`
-and `aggr build` need no Node. Contributor development uses Node; release binaries omit the
-development command, launcher and live-reload server entirely. Search is a build-time Pagefind
-index; there is no search service.
+Svelte 5 and TypeScript in `web/` own the complete reader: static page markup, browser hydration,
+search rows, and navigation. Rust prepares archive data and sanitizes article bodies. A single
+component tree renders both the published HTML and its interactive browser version. Every page
+works with JavaScript disabled. Search remains a build-time Pagefind index, with no search service.
 
-## The page model
+## Build and runtime
 
-Every HTML page embeds the model it was rendered from in `<script id="aggr-page">`:
-`ClientPage` in [`src/site/client.rs`](../src/site/client.rs), with the site, the build versions
-and one of five views: `list` (rows, paginator, scope), `article` (header row, authors, resources,
-access notice, neighbours and recommendations), `preferences`, `offline` and `static`. Field
-names are snake_case like the templates, URLs are site paths the client joins onto `base`, and
-`cargo test` exports the TypeScript types with ts-rs into `web/src/generated/` (CI fails when
-they are stale). Rendered content stays in the HTML; the model supplies behavior and identity,
-not a second set of page templates.
+`cargo build` exports the shared page types from `crates/aggr-ui-model` into ignored
+`web/.generated/types/`, installs locked npm dependencies when needed, and runs `web/build.ts`.
+Vite produces the browser bundles, bootstrap, service worker, and an isolated server renderer in
+Cargo's `OUT_DIR`. Generated types and bundles are not committed. `mise.toml` and `mise.lock` pin
+build tools; `Cargo.lock` and `web/package-lock.json` pin packages.
 
-## Boot and navigation
+The binary embeds that output. Installed commands need neither Node nor frontend source files:
+Rust calls the synchronous Svelte renderer in QuickJS with no network, filesystem, or process
+bindings. Each rendering thread reuses its own runtime, with memory, stack, and execution limits.
+The embedded asset fingerprint participates in publication caches and application versions.
 
-The static page is the first paint. The stylesheet and the entry's modulepreloads are linked
-before the blocking bootstrap script, so that first paint does not wait to discover them;
-`#aggr-preferences` stays immediately above the script, which still applies stored settings
-before paint. Feed rows use `content-visibility` at every width, so off-screen entries skip
-layout and stay addressable; printing lays them out. The deferred module reads the model and
-binds behavior to the existing `#app` and `<main>` without replacing the template's nodes.
-The preferences form is rendered by Rust from the same typed settings schema, then enabled
-after browser-local values are applied. Interactive-only widgets mount into dedicated slots.
-If `#aggr-page` is missing or malformed the page stays static.
+## Page model and hydration
 
-Navigation fetches the target page, extracts its model, its content element and its `<head>`
-metadata with `DOMParser`, and adopts its complete `<main>` while the header and tab bar
-persist. A link inside the archive is fetched as soon as it is pressed or hovered, and a page
-already in memory is swapped in that same turn. The three tabs are fetched as soon as the reader
-starts. After paint, the reader warms the first three rows already on screen. An article's
-neighbours carry `rel="prefetch"`. Guesses
-are bounded to 16 requests and a 24-page, five-minute cache, and off on Save-Data or slow
-connections. The search catalogue waits for an idle slice, and loads
-at once when the field is focused. Scroll positions are kept per history entry, so Back returns to the same place and
-list cursor. A non-HTML response, a page without a model or one built by another app version
-falls back to ordinary navigation, and without JavaScript every link is an ordinary link.
-A podcast, native video, or YouTube, Vimeo, or Twitch player that has started keeps playing across
-those page changes. Audio is parked outside the page. A picture is seated once, at the size it
-started, and that seat scales between the article and the now-playing bar (persistent chrome, beside
-the status bar). The provider frame keeps its parent and layout size, so the elapsed time and the
-bar's transport continue. Starting it does not move keyboard focus into the frame. A player or
-interactive viewer that takes focus is handed back to the page over the next few frames, fullscreen
-and Twitch excepted, and playback sliders and selects do not swallow reader shortcuts. System media keys play, pause, and seek a recording the bar can drive,
-and previous and next skip 15 and 30 seconds. Parked audio can be muted from the bar. Twitch keeps
-the keys it draws itself. Dismissing the bar or leaving the site stops it. Media that never
-started is released with the page.
+Every page embeds its typed model in `<script id="aggr-page">`. The contract includes head metadata,
+page identity, prepared display data, and a discriminated view. Rust prepares URLs and display
+values before the first paint. Article HTML is sanitized in Rust, passed separately to SSR, and
+appears once in the document. Hydration claims that opaque body element instead of serializing
+article text again. Browser-local preferences are applied after hydration; the small bootstrap
+still applies visual settings before paint.
 
-## One source for page markup
-
-Static pages, headers, metadata, feed rows and preferences controls have one implementation:
-the Rust templates under `src/theme/templates/`. The browser retains that HTML on startup,
-adopts fetched HTML during navigation and binds only the behavior it needs. Template edits
-therefore remain visible after the client starts; there is no mirrored Svelte page to overwrite them.
-
-Search results carry a rendered `_item.html` fragment alongside their typed row data in Pagefind's
-existing opaque display metadata. They use the same partial as ordinary feed rows, without
-per-result requests or another renderer. The client rebases links against the archive root and
-updates rank, selection and browser-local state. Full page HTML is not duplicated in page models.
-
-`cargo test` maintains the Rust page fixtures under `web/test/parity/`; DOM tests use those
-documents to verify enhancement and preservation rather than comparing two template engines.
-`AGGR_UPDATE_PARITY=1 cargo test --bin aggr parity` refreshes them after a template or model
-change. `style.css` remains the shared stylesheet. Svelte owns only interactive widgets and
-reactive behavior, and Vite supplies their development HMR.
-
-Everything else is the platform. The reading progress bar and the folding article header are
-scroll-driven animations, with a small script standing in where scroll timelines or `calc-size()`
-are missing. Rows open through a stretched link, so modifier and middle clicks behave natively.
-Keyboard help is a `<dialog>` opened by an invoker command. Anything without universal support
-sits behind `@supports` or a feature check and degrades to plain HTML.
+The browser hydrates the same components that produced the page. Navigation extracts the next
+model and sanitized article body, then updates the component tree; Svelte owns head metadata and
+page chrome. Search metadata carries typed rows, rendered with the same `Row.svelte` as feeds.
+There are no parallel Rust templates, HTML search fragments, or template parity fixtures.
+Malformed models and incompatible application versions fall back to ordinary navigation.
+Persistent playback stays outside the changing page content.
 
 ## Development
 
 ```sh
-make setup                        # mise tools and locked client packages
-cargo run -- dev                  # local config, or the demo when no config exists
-make dev                          # demo archive, Vite HMR and automatic Rust restarts
-AGGR_CONFIG=/path/to/aggr.toml make dev  # use your own instance
-make client-check                 # type checks, vitest and development launcher tests
-make client-build                 # rebuild the committed bundle under src/theme/static/app/
+make setup                         # install pinned build tools
+cargo run -- dev                   # local config, or demo when no config exists
+make dev                           # demo archive
+AGGR_CONFIG=/path/to/aggr.toml make dev
+make check                         # Rust, TypeScript, component and launcher checks
 ```
 
-In a debug build, `cargo run -- dev` starts the Node development tools.
-The CLI requires a subcommand; bare `cargo run` displays usage and exits with an error.
-Configuration comes from an explicit `--config`, then `AGGR_CONFIG`, then the current
-`aggr.toml`; when none exists, the demo configuration is used. `make dev` selects the demo unless
-`AGGR_CONFIG` is already set. Existing flags work through `cargo run -- dev --port 3000` or
-`make dev ARGS="--port 3000"`.
+`cargo run -- dev` starts one Node supervisor with a stable Vite front door. Frontend edits use
+Svelte HMR; Vite renders document requests from Rust's typed model. Rust edits compile a replacement
+worker while the last successful generation continues serving. A failed compilation leaves that
+worker available. Successful replacements retain archive snapshots safely and reload the browser.
+Configuration and archive changes use the worker's snapshot/reload stream. Ctrl-C shuts down the
+stack. `--port` selects the public port; `make dev ARGS="--port 3000"` forwards options.
 
-Vite's API provides the frontend server and Svelte HMR in the same Node process that supervises
-the Rust watcher. It selects an available frontend port before the backend starts, so separate
-readers can run together. An explicit `AGGR_VITE_URL` reserves that exact origin and fails clearly
-when the port is occupied. Concurrently handles the watcher's lifecycle; execa passes structured
-arguments to watchexec, which rebuilds and restarts Rust when source or Cargo inputs change.
-Shared handlers live in ordinary TypeScript modules: importing named exports from a Svelte
-component into those modules prevents component HMR and makes Vite reload the page instead.
-Restarts use SIGINT; the previous process retains its cache lock until in-flight disk writes
-and snapshot jobs finish. Templates and the shared stylesheet use the debug backend's snapshot reload path.
-Client sources, generated bindings and build artifacts never restart Rust. Ctrl-C stops the stack.
-Normal startup checks configuration, local imports and existing cache ownership before starting
-the development tools, so invalid configuration or an already running reader fails immediately.
+Cached articles appear first, and completed sources become visible during cold sync. Development
+uses an isolated cache and never commits or pushes the archive. `dev --release` exercises full
+publication rendering. Release binaries omit the development command and all server/watch tooling.
 
-Cached articles appear first. During a cold sync, completed sources become visible while slower
-sources continue fetching. Local HTML reprocessing is detected automatically and published before
-remote requests finish; Node remains a contributor tool, outside the installed CLI's runtime.
+`make client-check` first builds Rust to generate the contract, then runs Svelte/TypeScript checks,
+Vitest, and supervisor tests. Rust tests exercise the embedded renderer and publication behavior;
+frontend tests render the actual components. Browser contracts cover hydration and navigation.
+The TypeScript checker writes temporary files under ignored `web/.svelte-check/`.
 
-`mise.toml` and `mise.lock` pin the development tools. `Cargo.lock` and
-`web/package-lock.json` pin the Rust and client packages. Run `make setup` after
-changing any of those files.
-
-For frontend-only work, `make client-dev` runs Vite separately. To attach a Rust worker to it,
-run `AGGR_DEV_INTERNAL_WORKER=1 AGGR_VITE_URL=http://127.0.0.1:5173 make run ARGS="dev"` in
-another terminal. The internal worker switch is also used by Rust integration tests so they do
-not depend on Node. With `AGGR_VITE_URL` enabled, the debug backend
-replaces the compiled app module, app stylesheet and modulepreloads in served HTML with Vite's
-client and source entry. The existing classic bootstrap, static HTML, media and data stay served
-by aggr. `AGGR_VITE_URL` accepts a loopback HTTP origin only, without credentials, a path,
-query or fragment, and affects development HTTP responses only. The release CLI contains no
-development command or reload mechanism, never invokes Node and serves the committed reader assets
-through ordinary static publication. After `make release`, run
-`mise exec -- npm --prefix web run verify:release` to verify that boundary.
-
-Hashed assets — `assets/app` bundles, Rust `url_for` names, content-addressed media and Pagefind
-fragments — are served `Cache-Control: public, max-age=31536000, immutable`. HTML stays
-`no-store` and does not send `Clear-Site-Data`: the reload script already drops the reader's own
-caches, and wiping the HTTP cache on every document made the next paint wait on files that had
-not changed.
-`make check` runs the frontend checks alongside the Rust ones; CI also rebuilds the bundle and
-fails if the committed output or the generated types differ.
-The frontend installs TypeScript 6 for `tsc` and an aliased TypeScript 7 for Svelte's `--tsgo`
-checker; both are needed until `svelte-check` can use TypeScript 7 alone. The checker writes
-temporary files under ignored `web/.svelte-check/`.
-
-Vite content-hashes the client bundle and lists it in `static/app/.vite/manifest.json`; Rust
-publishes those files verbatim (chunk names are referenced inside the bundle) and resolves the
-entry, its stylesheet and its eager imports through the manifest. Every other static file is
-hashed by Rust. Hashed names are never rewritten inside file contents.
-
-A prerendered page runs before anyone has seen it, so the client waits for `prerenderingchange`
-before writing session state, history or a worker registration.
+Vite hashes executable assets and lists their paths in `assets.json`; Rust publishes them verbatim.
+HTML remains `no-store` in development. Navigation keeps a bounded cache and starts at most two
+prefetches after pointer, focus or touch intent; there are no startup, idle or viewport page downloads.
+A prerendered page waits for activation before changing history or registering a worker.
 
 ## Preferences
 
@@ -250,19 +168,23 @@ The parser and controller live in `web/src/search/`.
 Unqualified words search the indexed title and full text. Quoted phrases match together; a leading
 minus excludes a word, phrase, or facet. `category:`, `source:`, `tag:`, and `type:` accept stable
 identifiers or unique matching labels. Source links, completion, and canonicalized queries always
-use the hostname identifier, for example `source:"hnrss.org"`; friendly source names are presentation
-labels in source directories and optional manual aliases. Publisher and `via` labels beneath article
-titles use the same canonical hostname, never subscription paths. Other facets can insert readable unique labels. Duplicate labels
-or labels colliding with another identifier retain their stable identifiers; exact identifiers win,
-and ambiguous manual aliases produce an explanation.
+use canonical publisher identifiers, for example `source:"hnrss.org"` or
+`source:"youtube.com/@Micode"`. Friendly source names are presentation labels and optional manual
+aliases. `via` uses the same normalized label as the source directory: a resolved Spotify show
+named `Underscore_` reads as `spotify.com/underscore`, while its query and collection identity
+remains `open.spotify.com/show/<id>`. Without a resolved name, the catalogue path remains visible.
+Other facets can insert readable unique labels. Duplicate labels or labels colliding with another
+identifier retain their stable identifiers; exact identifiers win, and ambiguous manual aliases
+produce an explanation.
 Source includes both the publisher and every configured or retained feed that supplied the article.
-A canonical article has denormalized source memberships: it appears once globally and once in each
-matching hostname collection. Publisher and feed IDs both use the lowercase/punycode hostname,
-excluding trailing dots, conventional `www.`, paths, and ports. Other subdomains remain distinct;
-provider aliases do not merge actual domains. All subscriptions or accounts on one host aggregate
-into one source filter, and publisher/feed memberships collapse when their hosts match. Feed hosts
-come from configured URLs or persisted endpoint/site metadata, never archived slugs. An origin with
-no trusted HTTP(S) metadata contributes no guessed membership; a known article publisher still does.
+A canonical article appears once globally and once in each matching publisher collection.
+Ordinary publisher IDs use the lowercase/punycode hostname without trailing dots, conventional
+`www.`, or ports. Other subdomains remain distinct. Shared platforms also keep the account path;
+platform aliases resolve through `src/platform.rs`, while opaque catalogue IDs retain the host
+that issued them. Subscriptions belonging to one publisher share a source filter, and duplicate
+publisher/feed memberships collapse. Feed identities come from configured URLs or persisted
+endpoint/site metadata, never archived slugs. An origin with no trusted HTTP(S) metadata contributes
+no guessed membership; a known article publisher still does.
 Archived source IDs, article paths, original URLs, and discussion provenance remain unchanged.
 Repeated positive values
 within a facet mean any of those values; different facets combine with AND. Exclusions remove matches.

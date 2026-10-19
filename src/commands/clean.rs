@@ -172,7 +172,12 @@ pub(super) fn validate_project_layout(project: &Project) -> Result<()> {
         );
     }
     reject_any_overlap("[store] dir", &layout.store, "config", &layout.configs)?;
-    reject_any_overlap("[store] dir", &layout.store, "theme", &layout.themes)?;
+    reject_any_overlap(
+        "[store] dir",
+        &layout.store,
+        "reader source",
+        &layout.reader,
+    )?;
     reject_any_overlap("[store] dir", &layout.store, "Git metadata", &layout.git)?;
     reject_any_overlap(
         "[store] dir",
@@ -188,7 +193,12 @@ pub(super) fn validate_project_layout(project: &Project) -> Result<()> {
         &build,
     )?;
     reject_any_overlap("repository build cache", &build, "config", &layout.configs)?;
-    reject_any_overlap("repository build cache", &build, "theme", &layout.themes)?;
+    reject_any_overlap(
+        "repository build cache",
+        &build,
+        "reader source",
+        &layout.reader,
+    )?;
     reject_any_overlap(
         "repository build cache",
         &build,
@@ -241,7 +251,7 @@ fn validate_dev_cache_overlap(layout: &Layout, cache: &Path) -> Result<()> {
     }
     reject_overlap("dev cache", cache, "[store] dir", &layout.store)?;
     reject_any_overlap("dev cache", cache, "config", &layout.configs)?;
-    reject_any_overlap("dev cache", cache, "theme", &layout.themes)?;
+    reject_any_overlap("dev cache", cache, "reader source", &layout.reader)?;
     reject_any_overlap("dev cache", cache, "Git metadata", &layout.git)?;
     reject_overlap("dev cache", cache, "repository", &layout.repo)?;
     Ok(())
@@ -251,7 +261,7 @@ struct Layout {
     repo: PathBuf,
     store: PathBuf,
     configs: Vec<PathBuf>,
-    themes: Vec<PathBuf>,
+    reader: Vec<PathBuf>,
     git: Vec<PathBuf>,
     tracked: Vec<PathBuf>,
 }
@@ -270,11 +280,8 @@ impl Layout {
         }
         let configs = resolve_paths(configs)?;
 
-        // A development binary renders the theme from its source tree; nothing in the project
-        // itself is a theme input.
-        let themes = resolve_paths(vec![
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/theme"),
-        ])?;
+        // The development server reads UI sources from the checkout that built the binary.
+        let reader = resolve_paths(vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("web")])?;
 
         let mut git = vec![repo.join(".git")];
         git.extend(git_metadata_paths(&repo)?);
@@ -285,7 +292,7 @@ impl Layout {
             repo,
             store,
             configs,
-            themes,
+            reader,
             git,
             tracked,
         })
@@ -389,7 +396,7 @@ fn protected_paths(project: &Project, repo: &Path) -> Result<Vec<PathBuf>> {
         project.config_path.clone(),
     ];
     protected.extend(git_metadata_paths(repo)?);
-    protected.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/theme"));
+    protected.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("web"));
     protected.extend(project.config.loaded_files.iter().cloned());
     protect_local_sources(&project.config_path, &mut BTreeSet::new(), &mut protected)?;
     protected.extend(tracked_paths(repo)?);

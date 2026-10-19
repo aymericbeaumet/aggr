@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { PaginatorCtx } from '../generated/PaginatorCtx';
+import type { PaginatorCtx } from '@aggr-model/PaginatorCtx';
 import { feedPageUrl, sliceFeed } from './paging';
 
 const root = 'https://x.test/reads/';

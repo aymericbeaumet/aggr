@@ -46,12 +46,7 @@ pub struct ReaderPreferences {
 }
 
 /// One selectable value of a setting, as rendered in a `<select>`.
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PreferenceOption {
-    pub value: String,
-    pub label: String,
-}
+pub use aggr_ui_model::PreferenceOption;
 
 macro_rules! choices {
     ($name:ident { $($variant:ident => ($value:literal, $label:literal)),+ $(,)? }) => {
@@ -147,72 +142,18 @@ impl Default for ReaderPreferences {
 }
 
 /// How `/preferences/` renders a setting.
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Control {
-    Select,
-    Number,
-    Checkbox,
-}
+pub use aggr_ui_model::Control;
 
 /// The browser's validation rule for one setting, consumed by the pre-paint bootstrap.
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct BootstrapRule {
-    pub initial: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub values: Option<Vec<serde_json::Value>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub min: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub max: Option<i64>,
-    /// `documentElement.dataset` key this setting drives, when CSS reacts to it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub attribute: Option<&'static str>,
-}
+pub use aggr_ui_model::BootstrapRule;
 
 /// One rendered control on `/preferences/`.
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct PreferenceField {
-    pub key: &'static str,
-    pub label: &'static str,
-    pub control: Control,
-    pub value: serde_json::Value,
-    pub options: Vec<PreferenceOption>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub min: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub max: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub help: Option<&'static str>,
-}
+pub use aggr_ui_model::PreferenceField;
 
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct PreferenceGroup {
-    pub id: &'static str,
-    pub title: &'static str,
-    pub fields: Vec<PreferenceField>,
-}
+pub use aggr_ui_model::PreferenceGroup;
 
 /// Both browser-facing views of the settings, derived from one field table.
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct PreferenceSchema {
-    /// Keyed by setting name, for the inline validation bootstrap.
-    pub bootstrap: std::collections::BTreeMap<&'static str, BootstrapRule>,
-    /// Ordered groups, for the static form.
-    pub groups: Vec<PreferenceGroup>,
-}
+pub use aggr_ui_model::PreferenceSchema;
 
 /// A setting before it is split into a bootstrap rule and a form field.
 struct Setting {

@@ -1,10 +1,9 @@
-.PHONY: all setup build release test lint fmt fmt-check check check-rust timings dev client-build client-check client-dev msrv clean install run help
+.PHONY: all setup build release test lint fmt fmt-check check check-rust timings dev client-check msrv clean install run help
 
 all: check
 
 setup:
 	mise install
-	mise exec -- npm ci --prefix web
 
 build:
 	mise exec -- cargo build --locked
@@ -16,10 +15,10 @@ release:
 	mise exec -- cargo build --locked --release
 
 test:
-	mise exec -- cargo test --locked
+	mise exec -- cargo test --workspace --locked
 
 lint:
-	mise exec -- cargo clippy --locked --all-targets -- --deny warnings
+	mise exec -- cargo clippy --workspace --locked --all-targets -- --deny warnings
 
 fmt:
 	mise exec -- cargo fmt --all
@@ -35,20 +34,13 @@ check-rust:
 	$(MAKE) lint
 	$(MAKE) test
 
-# Node is pinned in mise.toml and only needed to develop the reader: its compiled bundles are
-# committed under src/theme/static/app and embedded by the Rust binary.
-client-build:
-	mise exec -- npm --prefix web run build
-
-client-check:
+# Cargo generates the shared types and compiles the embedded UI automatically.
+client-check: build
 	mise exec -- npm --prefix web run check
 	mise exec -- npm --prefix web test
 	mise exec -- npm --prefix web run test:dev
 
-client-dev:
-	mise exec -- npm --prefix web run dev
-
-# Node supervises Vite HMR and watchexec's Rust restarts.
+# Vite serves the reader while the supervisor rebuilds and replaces Rust workers.
 dev: export AGGR_CONFIG ?= examples/aggr.toml
 dev:
 	mise exec -- cargo run --locked -- dev $(ARGS)
@@ -69,7 +61,7 @@ run:
 
 help:
 	@echo "Available targets:"
-	@echo "  setup      - Install locked development tools and client packages"
+	@echo "  setup      - Install pinned build tools"
 	@echo "  build      - Build debug binary"
 	@echo "  release    - Build release binary"
 	@echo "  test       - Run all tests"
@@ -80,9 +72,7 @@ help:
 	@echo "  check-rust - Run Rust lint and tests in sequence"
 	@echo "  timings    - Build with an HTML compiler timing report"
 	@echo "  dev        - Run the demo with client HMR and automatic Rust restarts"
-	@echo "  client-build - Compile the embedded reader assets"
 	@echo "  client-check - Type-check and test the reader"
-	@echo "  client-dev - Run Vite for frontend development"
 	@echo "  msrv       - Build with the minimum supported Rust version"
 	@echo "  clean      - Remove build artifacts"
 	@echo "  install    - Install the binary locally"

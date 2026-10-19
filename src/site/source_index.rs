@@ -133,11 +133,15 @@ fn publisher_label(resolved: &str, host: &str) -> String {
 }
 
 fn membership(source: &SourceCtx) -> SourceMembershipCtx {
+    let display = url::Url::parse(&format!("https://{}", source.slug))
+        .ok()
+        .and_then(|url| crate::platform::display_name(&url, &source.name))
+        .unwrap_or_else(|| source.slug.clone());
     SourceMembershipCtx {
         query_value: source.slug.clone(),
         slug: source.slug.clone(),
         name: source.name.clone(),
-        display: source.slug.clone(),
+        display,
     }
 }
 
@@ -750,6 +754,116 @@ mod tests {
             );
             assert_eq!(item.metadata.feed_sources[0].display, expected);
             assert_eq!(item.metadata.feed_sources[0].query_value, expected);
+        }
+    }
+
+    #[test]
+    fn via_labels_use_resolved_show_names_without_changing_feed_identity() {
+        // A YouTube article captured through the Underscore Spotify subscription must name
+        // that show in its via label, not expose Spotify's opaque catalogue identifier.
+        for (url, title, display, identity) in [
+            (
+                "https://open.spotify.com/show/1sz1NhoHqbpXbzNlpOnFoz",
+                "Underscore_",
+                "spotify.com/underscore",
+                "open.spotify.com/show/1sz1NhoHqbpXbzNlpOnFoz",
+            ),
+            (
+                "https://podcasts.apple.com/us/podcast/a-show/id123456",
+                "A Show: Conversations | Technology",
+                "podcasts.apple.com/a-show",
+                "podcasts.apple.com/us/podcast/a-show/id123456",
+            ),
+            (
+                "https://pca.st/abc123",
+                "A Show",
+                "pocketcasts.com/a-show",
+                "pca.st/abc123",
+            ),
+            (
+                "https://hnrss.org/frontpage",
+                "Hacker News: Front Page",
+                "hnrss.org",
+                "hnrss.org",
+            ),
+            (
+                "https://twitter.com/alice",
+                "Alice's feed",
+                "x.com/alice",
+                "x.com/alice",
+            ),
+        ] {
+            let mut feed = source(url);
+            feed.name = title.into();
+            let mut item = article(
+                "configured",
+                "interview",
+                "https://www.youtube.com/watch?v=abc",
+            );
+            item.extra.insert(
+                crate::platform::PUBLISHER_KEY.into(),
+                "https://www.youtube.com/@Micode".into(),
+            );
+            item.set_source(&feed);
+            let original_path = item.path.clone();
+            let mut items = vec![item];
+            let mut sources = vec![feed];
+            resolve(&mut items, &mut sources, &[], &[]);
+
+            let item = &items[0];
+            assert_eq!(item.source_display, "youtube.com/@Micode", "{url}");
+            assert_eq!(item.source, "configured");
+            assert_eq!(item.path, original_path);
+            assert_eq!(item.feed_display, display, "{url}");
+            let via = &item.metadata.feed_sources[0];
+            assert_eq!(via.display, display);
+            assert_eq!(via.name, title);
+            assert_eq!(via.slug, identity);
+            assert_eq!(via.query_value, identity);
+            let source = sources
+                .iter()
+                .find(|source| source.slug == identity)
+                .unwrap();
+            assert_eq!(source.url.as_deref(), Some(url));
+            assert_eq!(source.page, format!("sources/{identity}/"));
+        }
+    }
+
+    #[test]
+    fn via_labels_without_show_metadata_keep_the_catalogue_identity() {
+        let url = "https://open.spotify.com/show/1sz1NhoHqbpXbzNlpOnFoz";
+        for title in [
+            "",
+            "open.spotify.com",
+            "spotify.com",
+            "open.spotify.com/show/1sz1NhoHqbpXbzNlpOnFoz",
+            url,
+        ] {
+            let mut feed = source(url);
+            feed.name = title.into();
+            let mut item = article(
+                "configured",
+                "interview",
+                "https://www.youtube.com/watch?v=abc",
+            );
+            item.authors = vec!["Micode".into()];
+            item.extra.insert(
+                crate::platform::PUBLISHER_KEY.into(),
+                "https://www.youtube.com/@Micode".into(),
+            );
+            item.set_source(&feed);
+            let mut items = vec![item];
+            let mut sources = vec![feed];
+            resolve(&mut items, &mut sources, &[], &[]);
+            let via = &items[0].metadata.feed_sources[0];
+            assert_eq!(
+                via.display, "spotify.com/show/1sz1NhoHqbpXbzNlpOnFoz",
+                "{title}"
+            );
+            assert_eq!(
+                via.query_value,
+                "open.spotify.com/show/1sz1NhoHqbpXbzNlpOnFoz"
+            );
         }
     }
 

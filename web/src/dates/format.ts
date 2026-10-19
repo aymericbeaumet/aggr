@@ -1,7 +1,7 @@
 /**
  * Dates as the reader shows them.
  *
- * `formatDate` is `{{ value | date }}` from the templates (`src/site/render.rs`): the calendar
+ * `formatDate` preserves the prepared calendar
  * day of an RFC 3339 timestamp in the timestamp's own offset. The archive stores every date in
  * UTC, so that is the first ten characters. Anything that is not an RFC 3339 timestamp passes
  * through unchanged, like the Rust filter. It is what a server render and a page without a

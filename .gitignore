@@ -3,4 +3,5 @@
 /.aggr
 /web/node_modules
 /web/.svelte-check
+/web/.generated
 !/mise.lock

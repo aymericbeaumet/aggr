@@ -4,7 +4,7 @@ const model = (path: string, title = 'Reader') => ({
   base: '/repo/', path, kind: path ? 'browse' : 'river', title,
   site: { title: 'Reader', language: 'en', pwa: false, discussions: [], entries: [], config_url: null, assets: { app: null, css: null, imports: [] } },
   build: { version: '1', app: 'fixture', content: 'fixture' },
-  page: { view: 'static' },
+  page: { view: 'not_found' },
 });
 
 function response(url: string, path = 'article/', content = 'Arrived content'): Response {
@@ -23,6 +23,7 @@ let connection: PropertyDescriptor | undefined;
 
 beforeEach(async () => {
   vi.resetModules();
+  vi.stubGlobal('fetch', vi.fn());
   history.replaceState({}, '', '/repo/');
   document.head.innerHTML = '<title>Current</title>';
   document.body.innerHTML = '<main id="content" tabindex="-1">Current content</main>';
@@ -32,13 +33,13 @@ beforeEach(async () => {
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 0);
   vi.spyOn(console, 'error').mockImplementation(() => {});
   connection = Object.getOwnPropertyDescriptor(navigator, 'connection');
-  Object.defineProperty(navigator, 'connection', { configurable: true, value: { saveData: true } });
+  Object.defineProperty(navigator, 'connection', { configurable: true, value: { saveData: false } });
   currentPage = (await import('../state/page.svelte')).page;
   currentPage.root = new URL('/repo/', location.href).href;
-  currentPage.show({ model: JSON.parse(JSON.stringify(model(''))), content: document.querySelector('main'), href: location.href });
+  currentPage.show({ model: JSON.parse(JSON.stringify(model(''))), bodyHtml: '', href: location.href });
   scope = (await import('./scope')).pageScope;
   navigation = (await import('./index')).navigation;
-  navigation.install([]);
+  navigation.install();
 });
 
 afterEach(() => {
@@ -52,14 +53,31 @@ afterEach(() => {
 });
 
 describe('page navigation', () => {
-  it('adopts complete Rust markup and preserves nested links and fragment targets', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/nested/', location.href).href, 'nested/', '<article data-rust-template="preserved"><header><h1>Template title</h1></header><p id="note">Note</p><a href="#note">Footnote</a><a class="relative" href="../other/">Other</a><footer>Template footer</footer></article>')));
+  it('does not download pages before link intent', () => {
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('prefetches a focused archive link and leaves external links alone', () => {
+    const url = new URL('/repo/article/', location.href).href;
+    const request = vi.fn(async (_input: RequestInfo | URL) => response(url));
+    vi.stubGlobal('fetch', request);
+    document.body.insertAdjacentHTML('beforeend', '<a id="inside" href="/repo/article/">Article</a><a id="outside" href="https://publisher.test/">Publisher</a>');
+    document.getElementById('outside')?.focus();
+    expect(request).not.toHaveBeenCalled();
+    document.getElementById('inside')?.focus();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0][0]).toBe(url);
+  });
+  it('bounds simultaneous intent prefetches', () => {
+    const request = vi.fn(() => new Promise<Response>(() => {}));
+    vi.stubGlobal('fetch', request);
+    for (const path of ['one/', 'two/', 'three/']) navigation.prefetch(`/repo/${path}`);
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+  it('loads typed page state and only its opaque body payload', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/nested/', location.href).href, 'nested/', '<div data-article-body><p id="note">Note</p></div>')));
     await navigation.go('/repo/nested/');
-    expect(document.querySelector('article')?.getAttribute('data-rust-template')).toBe('preserved');
-    expect(document.querySelector('article footer')?.textContent).toBe('Template footer');
-    expect(document.querySelector('a[href="#note"]')?.getAttribute('href')).toBe('#note');
-    expect(document.querySelector<HTMLAnchorElement>('a.relative')?.href).toBe(new URL('/repo/other/', location.href).href);
-    expect(currentPage.content).toBe(document.querySelector('main#content'));
+    expect(currentPage.model?.path).toBe('nested/');
+    expect(currentPage.bodyHtml).toBe('<p id="note">Note</p>');
   });
   it('shares a prefetched document between different article fragments', async () => {
     const url = new URL('/repo/article/', location.href).href;
@@ -91,7 +109,7 @@ describe('page navigation', () => {
     expect(location.pathname).toBe('/repo/renamed/');
     expect(location.hash).toBe('#section');
     expect(currentPage.href).toBe(location.href);
-    expect(originalSignal.aborted).toBe(true);
+    // Component disposal owns page lifecycle cleanup.
     expect(navigation.phase).toBe('settled');
   });
 

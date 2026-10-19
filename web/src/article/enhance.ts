@@ -1,5 +1,5 @@
 import type { Attachment } from 'svelte/attachments';
-import type { ClientRow } from '../generated/ClientRow';
+import type { ClientRow } from '@aggr-model/ClientRow';
 import { navigation } from '../navigation';
 import { page } from '../state/page.svelte';
 import { isInstalled, markExternalLinks } from './external-links';
@@ -10,10 +10,8 @@ import { installSelectionShare } from './selection-share';
 import { installSwipes } from './swipes';
 
 /**
- * Everything the reader adds to an article's adopted content region: the media figure and the
- * body are server markup no component renders, so behaviour attaches to them here, after the
- * nodes have been moved in, and ends when the wrapper is torn down. Players are a chunk of
- * their own, fetched only for a region that holds media.
+ * Article-local behavior belongs to the component's lifetime. Sanitized prose remains opaque;
+ * the media controller loads only when the article has a player to drive.
  */
 
 export type EnhanceOptions = {

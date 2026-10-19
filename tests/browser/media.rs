@@ -210,13 +210,12 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
             .out
             .join(format!("items/example/2026-09-01-story-{index}/index.html"));
         let html = std::fs::read_to_string(&file)?;
-        std::fs::write(
-            file,
-            html.replace(
-                "<div class=\"body e-content\">",
-                &format!("<div class=\"body e-content\">{markup}"),
-            ),
-        )?;
+        let marker = "data-article-body>";
+        anyhow::ensure!(
+            html.contains(marker),
+            "article body fixture marker is missing"
+        );
+        std::fs::write(file, html.replacen(marker, &format!("{marker}{markup}"), 1))?;
     }
     let video = client.execute_async(r#"
       const done=arguments[arguments.length-1];

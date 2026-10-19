@@ -1,31 +1,25 @@
-//! One rendered HTML page: its metadata (titles, descriptions, schema.org graph) and the template
-//! context every theme sees. `Pages` holds what all pages of one build share so list pages and
-//! standalone documents render through the same path.
+//! Prepare complete page models and document metadata from the local archive.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
 
-use super::client;
+use super::client::{
+    self, ClientDirectory, ClientDirectoryEntry, ClientDirectoryGroup, ClientHead, ClientLink,
+    ClientMeta, ClientSourceError, ClientView, RenderRequest,
+};
 use super::context::{BuildCtx, CategoryCtx, ItemCtx, PageCtx, SiteCtx, SourceCtx};
 use super::render::Renderer;
 use super::{PreparedSite, outputs, paginate, relative_root, write};
 use crate::content;
 
-/// Archive-wide template values prepared once per build. MiniJinja values retain their prepared
-/// representation across renders, so custom article templates still receive the entire archive
-/// without serializing it again for every page.
-#[derive(Clone, Serialize)]
+/// Shared prepared values; page requests only carry the directory groups they display.
+#[derive(Clone)]
 pub(super) struct SharedCtx {
-    site: minijinja::Value,
-    build: minijinja::Value,
-    sources: minijinja::Value,
-    categories: minijinja::Value,
-    tags: minijinja::Value,
-    /// The plain halves of every page's client model; not a template value.
-    #[serde(skip)]
+    sources: Vec<SourceCtx>,
+    categories: Vec<CategoryCtx>,
+    tags: Vec<CategoryCtx>,
     pub(super) client: client::Shared,
 }
 
@@ -38,46 +32,22 @@ impl SharedCtx {
         tags: &[CategoryCtx],
     ) -> Self {
         Self {
-            site: minijinja::Value::from_serialize(site),
-            build: minijinja::Value::from_serialize(build),
-            sources: minijinja::Value::from_serialize(sources),
-            categories: minijinja::Value::from_serialize(categories),
-            tags: minijinja::Value::from_serialize(tags),
+            sources: sources.to_vec(),
+            categories: categories.to_vec(),
+            tags: tags.to_vec(),
             client: client::Shared::new(site, build),
         }
     }
 }
 
-#[derive(Serialize)]
-struct Ctx<'a> {
-    #[serde(flatten)]
-    shared: &'a SharedCtx,
-    page: PageCtx,
-    items: minijinja::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    item: Option<&'a ItemCtx>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    source: Option<&'a SourceCtx>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    category: Option<&'a CategoryCtx>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    schema: Option<serde_json::Value>,
-    /// `<script id="aggr-model">`: the typed page model the client boots from.
-    client_page: minijinja::Value,
-}
-
-/// What every page of one build shares: the site, the renderer, the prepared template values and
-/// the whole archive that standalone documents expose as `items`.
 pub(super) struct Pages<'a> {
     site: &'a SiteCtx,
     renderer: &'a Renderer,
     shared: SharedCtx,
     archive: &'a [ItemCtx],
-    archive_value: minijinja::Value,
     per_page: usize,
 }
 
-/// A paginated collection: the river, or one source, category or tag archive.
 pub(super) struct ListPage<'a> {
     pub kind: &'a str,
     pub title: &'a str,
@@ -87,30 +57,21 @@ pub(super) struct ListPage<'a> {
     pub category: Option<&'a CategoryCtx>,
 }
 
-/// A standalone document: directory, utility and article pages, the offline shell and the
-/// manifest. `page_items` narrows the `items` a template sees; the default is the whole archive.
 #[derive(Clone, Copy)]
 pub(super) struct SimplePage<'a> {
     pub kind: &'a str,
     pub title: &'a str,
     pub path: &'a str,
-    pub template: &'a str,
     pub item: Option<&'a ItemCtx>,
     pub page_items: Option<&'a [ItemCtx]>,
 }
 
 impl<'a> SimplePage<'a> {
-    pub(super) const fn new(
-        kind: &'a str,
-        title: &'a str,
-        path: &'a str,
-        template: &'a str,
-    ) -> Self {
+    pub(super) const fn new(kind: &'a str, title: &'a str, path: &'a str) -> Self {
         Self {
             kind,
             title,
             path,
-            template,
             item: None,
             page_items: None,
         }
@@ -119,35 +80,18 @@ impl<'a> SimplePage<'a> {
 
 /// Fixed HTML routes and whether each belongs in the sitemap.
 pub(super) const FIXED_PAGES: [(SimplePage<'static>, bool); 6] = [
+    (SimplePage::new("browse", "Browse", "browse/"), true),
+    (SimplePage::new("sources", "Sources", "sources/"), true),
     (
-        SimplePage::new("browse", "Browse", "browse/", "browse.html"),
+        SimplePage::new("categories", "Categories", "categories/"),
         true,
     ),
+    (SimplePage::new("tags", "Tags", "tags/"), true),
     (
-        SimplePage::new("sources", "Sources", "sources/", "browse.html"),
-        true,
-    ),
-    (
-        SimplePage::new("categories", "Categories", "categories/", "browse.html"),
-        true,
-    ),
-    (
-        SimplePage::new("tags", "Tags", "tags/", "browse.html"),
-        true,
-    ),
-    (
-        SimplePage::new(
-            "preferences",
-            "Preferences",
-            "preferences/",
-            "preferences.html",
-        ),
+        SimplePage::new("preferences", "Preferences", "preferences/"),
         false,
     ),
-    (
-        SimplePage::new("404", "Not found", "404.html", "404.html"),
-        false,
-    ),
+    (SimplePage::new("404", "Not found", "404.html"), false),
 ];
 
 impl SimplePage<'_> {
@@ -249,42 +193,20 @@ impl<'a> Pages<'a> {
     pub(super) fn new(
         site: &'a SiteCtx,
         renderer: &'a Renderer,
-        shared: SharedCtx,
+        mut shared: SharedCtx,
         archive: &'a [ItemCtx],
         per_page: usize,
     ) -> Self {
-        Self::prepared(
-            site,
-            renderer,
-            shared,
-            archive,
-            minijinja::Value::from_serialize(archive),
-            per_page,
-        )
-    }
-
-    pub(super) fn prepared(
-        site: &'a SiteCtx,
-        renderer: &'a Renderer,
-        shared: SharedCtx,
-        archive: &'a [ItemCtx],
-        archive_value: minijinja::Value,
-        per_page: usize,
-    ) -> Self {
-        let mut shared = shared;
         shared.client.site.assets = renderer.client_assets();
         Self {
             site,
             renderer,
             shared,
             archive,
-            archive_value,
             per_page,
         }
     }
 
-    /// Render every pager of a list to `<out>/<pager>/index.html`, record each page in the
-    /// sitemap, and return how many pages were written.
     pub(super) fn write_list(
         &self,
         out: &Path,
@@ -308,7 +230,6 @@ impl<'a> Pages<'a> {
         Ok(pagination.len())
     }
 
-    /// The page context of one pager of a list.
     pub(super) fn list_page(&self, list: &ListPage<'_>, pager: &super::Pager) -> PageCtx {
         let site = self.site;
         let page_number = pager.context.current_index;
@@ -327,35 +248,24 @@ impl<'a> Pages<'a> {
         }
     }
 
-    pub(super) fn list(&self, list: &ListPage<'_>, pager: &super::Pager) -> Result<String> {
-        let site = self.site;
+    pub(super) fn list_request(&self, list: &ListPage<'_>, pager: &super::Pager) -> RenderRequest {
         let page = self.list_page(list, pager);
-        let page_items = &list.list[pager.range.clone()];
-        let schema = structured_data(site, &page, page_items, None);
-        let client_page = minijinja::Value::from_serialize(client::ClientPage::list(
-            &self.shared.client,
-            &page,
-            &pager.context,
-            page_items,
-            list.source,
-            list.category,
-        ));
-        self.renderer.render(
-            "index.html",
-            Ctx {
-                shared: &self.shared,
-                page,
-                items: minijinja::Value::from_serialize(page_items),
-                item: None,
-                source: list.source,
-                category: list.category,
-                schema,
-                client_page,
-            },
-        )
+        let items = &list.list[pager.range.clone()];
+        let mut model =
+            self.shared
+                .client
+                .list(&page, &pager.context, items, list.source, list.category);
+        model.head = self.head(&page, None, structured_data(self.site, &page, items, None));
+        RenderRequest {
+            page: model,
+            body_html: String::new(),
+        }
     }
 
-    /// The page context of one standalone document.
+    pub(super) fn list(&self, list: &ListPage<'_>, pager: &super::Pager) -> Result<String> {
+        self.renderer.render_page(&self.list_request(list, pager))
+    }
+
     pub(super) fn simple_page(&self, page: &SimplePage<'_>) -> PageCtx {
         let SimplePage {
             kind,
@@ -365,23 +275,18 @@ impl<'a> Pages<'a> {
             ..
         } = *page;
         let site = self.site;
-        let page_number = 1;
         let utility_fallback = matches!(kind, "404" | "offline");
-        // Error, offline and manifest documents are not reading pages; everything else
-        // advertises the root feeds so an article page is enough to subscribe from.
-        let advertises_feeds = !matches!(kind, "404" | "offline" | "manifest");
+        let advertises_feeds = !matches!(kind, "404" | "offline");
         PageCtx {
             kind: kind.to_string(),
             title: title.to_string(),
-            document_title: document_title(&site.title, title, kind, page_number),
+            document_title: document_title(&site.title, title, kind, 1),
             description: item.map_or_else(
-                || page_description(site, title, kind, page_number),
+                || page_description(site, title, kind, 1),
                 |item| item_description(site, item),
             ),
             indexable: site.indexing && !matches!(kind, "preferences" | "404" | "offline"),
             path: path.to_string(),
-            // These documents may be served for an arbitrarily deep failed navigation. An
-            // explicit scoped root keeps every asset and menu link inside the installed app.
             root: if utility_fallback {
                 site.base_path.clone()
             } else {
@@ -394,44 +299,464 @@ impl<'a> Pages<'a> {
         }
     }
 
-    /// Render one standalone document.
-    pub(super) fn simple(&self, page: SimplePage<'_>) -> Result<String> {
-        let page_ctx = self.simple_page(&page);
-        let SimplePage {
-            kind,
-            template,
-            item,
-            page_items,
-            ..
-        } = page;
-        let site = self.site;
-        let utility_fallback = matches!(kind, "404" | "offline");
-        let page = page_ctx;
-        let items = page_items.unwrap_or(self.archive);
-        let schema = (!utility_fallback)
-            .then(|| structured_data(site, &page, items, item))
+    pub(super) fn simple_request(&self, simple: SimplePage<'_>) -> RenderRequest {
+        let page = self.simple_page(&simple);
+        let items = simple.page_items.unwrap_or(self.archive);
+        let schema = (!matches!(simple.kind, "404" | "offline"))
+            .then(|| structured_data(self.site, &page, items, simple.item))
             .flatten();
-        let client_page = minijinja::Value::from_serialize(client::ClientPage::simple(
-            &self.shared.client,
-            &page,
-            item,
-            site,
-        ));
-        self.renderer.render(
-            template,
-            Ctx {
-                shared: &self.shared,
-                page,
-                items: page_items
-                    .map(minijinja::Value::from_serialize)
-                    .unwrap_or_else(|| self.archive_value.clone()),
-                item,
-                source: None,
-                category: None,
-                schema,
-                client_page,
-            },
-        )
+        let mut model = self.shared.client.simple(&page, simple.item, self.site);
+        if matches!(simple.kind, "browse" | "sources" | "categories" | "tags") {
+            model.page = ClientView::Directory(Box::new(self.directory(simple.kind)));
+        }
+        model.head = self.head(&page, simple.item, schema);
+        let body_html = simple
+            .item
+            .and_then(|item| item.body_html.as_deref())
+            .map(|html| content::rebase_site_paths(html, &page.root))
+            .unwrap_or_default();
+        RenderRequest {
+            page: model,
+            body_html,
+        }
+    }
+
+    pub(super) fn simple(&self, page: SimplePage<'_>) -> Result<String> {
+        self.renderer.render_page(&self.simple_request(page))
+    }
+
+    fn directory(&self, kind: &str) -> ClientDirectory {
+        let mut groups = Vec::new();
+        for (directory_kind, title, categories) in [
+            ("categories", "Categories", &self.shared.categories),
+            ("sources", "Sources", &self.shared.categories),
+            ("tags", "Tags", &self.shared.tags),
+        ] {
+            if kind != "browse" && kind != directory_kind {
+                continue;
+            }
+            let entries = if directory_kind == "sources" {
+                self.shared
+                    .sources
+                    .iter()
+                    .filter(|source| source.listed)
+                    .map(|source| ClientDirectoryEntry {
+                        name: source.name.clone(),
+                        url: format!(
+                            "?{}",
+                            url::form_urlencoded::Serializer::new(String::new())
+                                .append_pair(
+                                    "q",
+                                    &format!(
+                                        "source:{}",
+                                        serde_json::to_string(&source.query_value)
+                                            .unwrap_or_default()
+                                    )
+                                )
+                                .finish()
+                        ),
+                        count: source.count,
+                        latest: source.latest.map(|date| date.to_rfc3339()),
+                        site_url: source.site_url.clone(),
+                        engine: Some(source.engine.clone()),
+                        category: source.category.as_ref().map(|name| client::Category {
+                            name: name.clone(),
+                            slug: super::context::category_slug(name),
+                        }),
+                        error: source.error.as_ref().map(|error| ClientSourceError {
+                            message: error.message.clone(),
+                            since: error.since.to_rfc3339(),
+                        }),
+                    })
+                    .collect()
+            } else {
+                categories
+                    .iter()
+                    .filter(|category| category.count > 0)
+                    .map(|category| ClientDirectoryEntry {
+                        name: category.name.clone(),
+                        url: format!(
+                            "?{}",
+                            url::form_urlencoded::Serializer::new(String::new())
+                                .append_pair(
+                                    "q",
+                                    &format!(
+                                        "{}:{}",
+                                        if directory_kind == "tags" {
+                                            "tag"
+                                        } else {
+                                            "category"
+                                        },
+                                        serde_json::to_string(&category.slug).unwrap_or_default()
+                                    )
+                                )
+                                .finish()
+                        ),
+                        count: category.count,
+                        latest: category.latest.map(|date| date.to_rfc3339()),
+                        site_url: None,
+                        engine: None,
+                        category: None,
+                        error: None,
+                    })
+                    .collect()
+            };
+            groups.push(ClientDirectoryGroup {
+                kind: directory_kind.into(),
+                title: title.into(),
+                entries,
+            });
+        }
+        ClientDirectory { groups }
+    }
+
+    fn url(&self, page: &PageCtx, path: &str) -> String {
+        let asset = self.renderer.asset_site_path(path);
+        let site_path = asset.trim_start_matches('/');
+        let site_path = site_path.strip_prefix("./").unwrap_or(site_path);
+        if site_path.is_empty() {
+            page.root.clone()
+        } else {
+            content::rebase_site_url(site_path, &page.root)
+        }
+    }
+
+    pub(super) fn manifest(&self) -> Result<String> {
+        let asset = |path: &str| format!("./{}", self.renderer.asset_site_path(path));
+        let icon = asset("assets/icon-192.png");
+        Ok(serde_json::to_string(&serde_json::json!({
+            "name": self.site.title, "short_name": "aggr", "description": self.site.description,
+            "lang": self.site.language, "start_url": "./", "scope": "./", "display": "standalone",
+            "display_override": ["standalone", "minimal-ui"], "background_color": "#f5f6fa", "theme_color": "#291a1b",
+            "icons": [
+                {"src":icon,"sizes":"192x192","type":"image/png","purpose":"any"},
+                {"src":asset("assets/icon-512.png"),"sizes":"512x512","type":"image/png","purpose":"any"},
+                {"src":asset("assets/icon-maskable-512.png"),"sizes":"512x512","type":"image/png","purpose":"maskable"},
+                {"src":asset("assets/apple-touch-icon.png"),"sizes":"180x180","type":"image/png"}
+            ],
+            "shortcuts": [
+                {"name":"Feed","short_name":"Feed","url":"./","icons":[{"src":icon,"sizes":"192x192"}]},
+                {"name":"Search","short_name":"Search","url":"./","icons":[{"src":icon,"sizes":"192x192"}]},
+                {"name":"Browse","short_name":"Browse","url":"./browse/","icons":[{"src":icon,"sizes":"192x192"}]}
+            ], "categories":["news","productivity"], "prefer_related_applications":false
+        }))?)
+    }
+
+    fn head(
+        &self,
+        page: &PageCtx,
+        item: Option<&ItemCtx>,
+        schema: Option<serde_json::Value>,
+    ) -> ClientHead {
+        let site = self.site;
+        let mut head = ClientHead {
+            title: page.document_title.clone(),
+            schema,
+            bootstrap: self.url(page, "assets/app/bootstrap.js"),
+            ..ClientHead::default()
+        };
+        let mut named = |name: &str, value: String| {
+            head.meta.push(ClientMeta {
+                name: Some(name.into()),
+                content: value,
+                ..ClientMeta::default()
+            })
+        };
+        named(
+            "viewport",
+            "width=device-width, initial-scale=1, viewport-fit=cover".into(),
+        );
+        named("color-scheme", "light dark".into());
+        named("referrer", "strict-origin-when-cross-origin".into());
+        named(
+            "robots",
+            if page.indexable {
+                "index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1"
+            } else {
+                "noindex,follow"
+            }
+            .into(),
+        );
+        if !page.description.is_empty() {
+            named("description", page.description.clone());
+        }
+        named("application-name", site.title.clone());
+        named(
+            "generator",
+            format!("aggr {}", self.shared.client.build.version),
+        );
+        if site.pwa {
+            for (name, value) in [
+                ("mobile-web-app-capable", "yes"),
+                ("apple-mobile-web-app-capable", "yes"),
+                ("apple-mobile-web-app-status-bar-style", "black-translucent"),
+            ] {
+                named(name, value.into());
+            }
+            named("apple-mobile-web-app-title", site.title.clone());
+        }
+        named("aggr:network", site.network_url.into());
+        named("aggr:instance", self.url(page, "aggr.json"));
+        named(
+            "aggr:source",
+            site.config_url
+                .clone()
+                .unwrap_or_else(|| self.url(page, "aggr.toml")),
+        );
+        if let Some(repository) = &site.repository {
+            named(
+                "aggr:repository",
+                format!("https://github.com/{repository}"),
+            );
+        }
+        if let Some(item) = item {
+            for author in &item.authors {
+                named("author", author.clone());
+            }
+        }
+        head.meta.push(ClientMeta {
+            name: Some("theme-color".into()),
+            id: Some("theme-color".into()),
+            content: "#291a1b".into(),
+            ..ClientMeta::default()
+        });
+        if site.hermetic {
+            head.meta.push(ClientMeta { http_equiv:Some("Content-Security-Policy".into()), content:"default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; media-src 'self'; object-src 'self'; frame-src 'none'; base-uri 'self'; form-action 'none'".into(), ..ClientMeta::default() });
+        }
+        let mut property = |name: &str, value: String| {
+            head.meta.push(ClientMeta {
+                property: Some(name.into()),
+                content: value,
+                ..ClientMeta::default()
+            })
+        };
+        property(
+            "og:type",
+            if item.is_some() { "article" } else { "website" }.into(),
+        );
+        property("og:site_name", site.title.clone());
+        property("og:title", page.title.clone());
+        property("og:locale", site.og_locale.clone());
+        let description = item
+            .filter(|item| !item.excerpt.is_empty())
+            .map(|item| item.excerpt.clone())
+            .unwrap_or_else(|| page.description.clone());
+        if !description.is_empty() {
+            property("og:description", description.clone());
+        }
+        if let Some(canonical) = &page.canonical_url {
+            property("og:url", canonical.clone());
+        }
+        if let Some(item) = item {
+            if let Some(published) = item.published {
+                property("article:published_time", published.to_rfc3339());
+            }
+            if let Some(updated) = item.updated {
+                property("article:modified_time", updated.to_rfc3339());
+            }
+            if let Some(category) = &item.category {
+                property("article:section", category.clone());
+            }
+            for label in &item.labels {
+                property("article:tag", label.clone());
+            }
+        }
+        let lead = item.and_then(|item| item.article_preview.as_ref());
+        let image = site.base_url.as_ref().map(|root| {
+            if let Some(lead) = lead {
+                (
+                    format!("{root}{}", self.renderer.asset_site_path(&lead.url)),
+                    Some((lead.width, lead.height)),
+                    item.and_then(|item| item.preview.as_ref())
+                        .and_then(|preview| preview.alt.clone()),
+                )
+            } else if let Some(preview) = item.and_then(|item| item.preview.as_ref()) {
+                (
+                    format!("{root}{}", preview.url),
+                    Some((preview.width, preview.height)),
+                    preview.alt.clone(),
+                )
+            } else {
+                (
+                    format!(
+                        "{root}{}",
+                        self.renderer.asset_site_path("assets/icon-512.png")
+                    ),
+                    None,
+                    Some(format!("{} app icon", site.title)),
+                )
+            }
+        });
+        if let Some((url, dimensions, alt)) = &image {
+            property("og:image", url.clone());
+            if let Some((width, height)) = dimensions {
+                property("og:image:width", width.to_string());
+                property("og:image:height", height.to_string());
+            }
+            if let Some(alt) = alt {
+                property("og:image:alt", alt.clone());
+            }
+        }
+        let mut named = |name: &str, value: String| {
+            head.meta.push(ClientMeta {
+                name: Some(name.into()),
+                content: value,
+                ..ClientMeta::default()
+            })
+        };
+        named(
+            "twitter:card",
+            if lead.is_some() && site.base_url.is_some() {
+                "summary_large_image"
+            } else {
+                "summary"
+            }
+            .into(),
+        );
+        named("twitter:title", page.title.clone());
+        if !description.is_empty() {
+            named("twitter:description", description);
+        }
+        if let Some((url, _, alt)) = image {
+            named("twitter:image", url);
+            if let Some(alt) = alt {
+                named("twitter:image:alt", alt);
+            }
+        }
+        let mut link = |rel: &str,
+                        href: String,
+                        mime: Option<&str>,
+                        title: Option<String>,
+                        sizes: Option<&str>| {
+            head.links.push(ClientLink {
+                rel: rel.into(),
+                href,
+                mime_type: mime.map(str::to_string),
+                title,
+                sizes: sizes.map(str::to_string),
+            })
+        };
+        link("type", site.instance_type_url.into(), None, None, None);
+        link(
+            "service-meta",
+            self.url(page, "aggr.json"),
+            Some("application/json"),
+            Some("aggr instance metadata".into()),
+            None,
+        );
+        if site.base_url.is_some() {
+            link(
+                "linkset",
+                self.url(page, "linkset.json"),
+                Some("application/linkset+json"),
+                Some("Original URL to archived snapshot links".into()),
+                None,
+            );
+        }
+        link(
+            "via",
+            site.config_url
+                .clone()
+                .unwrap_or_else(|| self.url(page, "aggr.toml")),
+            Some("text/toml"),
+            Some("aggr source configuration".into()),
+            None,
+        );
+        if let Some(canonical) = &page.canonical_url {
+            link("canonical", canonical.clone(), None, None, None);
+        }
+        if let Some(pager) = &page.paginator {
+            link("first", self.url(page, &pager.first), None, None, None);
+            link("last", self.url(page, &pager.last), None, None, None);
+            if let Some(previous) = &pager.previous {
+                link("prev", self.url(page, previous), None, None, None);
+            }
+            if let Some(next) = &pager.next {
+                link("next", self.url(page, next), None, None, None);
+            }
+        }
+        if let Some(prefix) = &page.feed_path {
+            for (file, mime) in [
+                ("atom.xml", "application/atom+xml"),
+                ("rss.xml", "application/rss+xml"),
+                ("feed.json", "application/feed+json"),
+            ] {
+                link(
+                    "alternate",
+                    self.url(page, &format!("{prefix}{file}")),
+                    Some(mime),
+                    page.feed_title.clone(),
+                    None,
+                );
+            }
+            link(
+                "alternate",
+                self.url(page, "sources.opml"),
+                Some("text/x-opml"),
+                Some("Subscriptions".into()),
+                None,
+            );
+        }
+        if site.base_url.is_some() {
+            link(
+                "search",
+                self.url(page, "opensearch.xml"),
+                Some("application/opensearchdescription+xml"),
+                Some(site.title.clone()),
+                None,
+            );
+        }
+        link(
+            "icon",
+            self.url(page, "assets/favicon-32.png"),
+            Some("image/png"),
+            None,
+            Some("32x32"),
+        );
+        link(
+            "apple-touch-icon",
+            self.url(page, "assets/apple-touch-icon.png"),
+            None,
+            None,
+            None,
+        );
+        if site.pwa {
+            link(
+                "manifest",
+                self.url(page, "manifest.webmanifest"),
+                None,
+                None,
+                None,
+            );
+        }
+        if let Some(item) = item {
+            link("via", item.link.clone(), None, None, None);
+            link("original", item.link.clone(), None, None, None);
+            for (extension, mime, title) in [
+                ("md", "text/markdown", "Markdown"),
+                ("txt", "text/plain", "Plain text"),
+                ("rst", "text/x-rst", "reStructuredText"),
+                ("json", "application/ld+json", "JSON-LD"),
+            ] {
+                link(
+                    "alternate",
+                    self.url(
+                        page,
+                        &format!("{}.{}", item.url.trim_matches('/'), extension),
+                    ),
+                    Some(mime),
+                    Some(title.into()),
+                    None,
+                );
+            }
+            if let Some(previous) = &item.previous_article {
+                link("prev", self.url(page, &previous.url), None, None, None);
+            }
+            if let Some(next) = &item.next_article {
+                link("next", self.url(page, &next.url), None, None, None);
+            }
+        }
+        head
     }
 }
 
@@ -719,120 +1044,166 @@ mod tests {
     use super::*;
     use crate::model::Item;
     use crate::site::context::{self, ArticlePreviewCtx, ItemOptions};
-    use crate::site::render::Theme;
     use chrono::TimeZone;
 
     fn day(d: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 9, d, 0, 0, 0).unwrap()
     }
 
-    #[test]
-    fn prepared_context_preserves_custom_theme_archive_access_without_reserializing() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        struct Counted<'a>(&'a AtomicUsize);
-        impl Serialize for Counted<'_> {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                self.0.fetch_add(1, Ordering::Relaxed);
-                serde_json::json!({"title":"A <story>","preview":{"width":320}})
-                    .serialize(serializer)
-            }
+    fn request_site() -> SiteCtx {
+        SiteCtx {
+            hermetic: false,
+            title: "Reader".into(),
+            description: String::new(),
+            identity: None,
+            language: "en".into(),
+            og_locale: "en".into(),
+            base_path: "/reader/".into(),
+            base_url: Some("https://reader.test/reader/".into()),
+            indexing: false,
+            repository: None,
+            data_branch: "aggr".into(),
+            network_url: outputs::AGGR_NETWORK,
+            instance_type_url: outputs::AGGR_INSTANCE_TYPE,
+            pwa: true,
+            preferences: serde_json::json!({}),
+            preference_schema: crate::config::preferences::ReaderPreferences::default().schema(),
+            config_page_url: None,
+            config_url: None,
+            has_categories: false,
+            discussions: Vec::new(),
+            entry_shortcuts: Vec::new(),
         }
-        let visits = AtomicUsize::new(0);
-        let items = minijinja::Value::from_serialize([Counted(&visits), Counted(&visits)]);
-        let shared = SharedCtx {
-            site: minijinja::context!(title => "Reader"),
-            build: minijinja::context!(version => "1"),
-            sources: minijinja::Value::from_serialize([serde_json::json!({"name":"Publisher"})]),
-            categories: minijinja::Value::from_serialize([serde_json::json!({"name":"news"})]),
-            tags: minijinja::Value::from_serialize(["rust"]),
-            client: client::Shared::default(),
-        };
-        let mut env = minijinja::Environment::new();
-        env.add_template("custom.html", "{{ site.title }} {{ build.version }} {{ sources[0].name }} {{ categories[0].name }} {{ tags[0] }} {{ items|length }} {{ items[0].title }} {{ items[1].preview.width }} {{ page.title }} {{ item is defined }}").unwrap();
-        for _ in 0..20 {
-            let page = PageCtx {
-                kind: "item".into(),
-                title: "Page".into(),
-                document_title: "Page".into(),
-                description: String::new(),
-                indexable: true,
-                path: "items/test/".into(),
-                root: "../../".into(),
-                canonical_url: None,
-                feed_path: None,
-                feed_title: None,
-                paginator: None,
-            };
-            let ctx = Ctx {
-                shared: &shared,
-                page,
-                items: items.clone(),
-                item: None,
-                source: None,
-                category: None,
-                schema: None,
-                client_page: minijinja::Value::UNDEFINED,
-            };
-            assert_eq!(
-                env.get_template("custom.html")
-                    .unwrap()
-                    .render(ctx)
-                    .unwrap(),
-                "Reader 1 Publisher news rust 2 A &lt;story&gt; 320 Page False"
-            );
+    }
+
+    fn request_build() -> BuildCtx {
+        BuildCtx {
+            time: day(20),
+            version: "2.0.0".into(),
+            app_version: "app".into(),
+            content_version: "content".into(),
+            config_sha: None,
+            data_sha: None,
+            generation: "generation".into(),
+            release: false,
         }
-        assert_eq!(visits.load(Ordering::Relaxed), 2);
     }
 
     #[test]
-    #[ignore = "manual template preparation performance comparison"]
-    fn benchmark_prepared_template_context() {
-        let records: Vec<_> = (0..1000)
-            .map(|index| {
-                serde_json::json!({
-                    "title":format!("Article {index}"), "source":"publisher", "date":"2026-09-01",
-                    "url":format!("items/publisher/article-{index}/"), "labels":["reading","rust"],
-                    "preview":{"url":"assets/preview.jpg","width":320,"height":180},
-                    "next_article":{"title":"Next article","url":"items/next/"},
-                })
-            })
-            .collect();
-        #[derive(Serialize)]
-        struct Raw<'a> {
-            items: &'a [serde_json::Value],
-        }
-        #[derive(Serialize)]
-        struct Prepared {
-            items: minijinja::Value,
-        }
-        let mut env = minijinja::Environment::new();
-        env.add_template(
-            "item.html",
-            "{{ items|length }} {{ items[0].title }} {{ items[999].title }}",
-        )
-        .unwrap();
-        let template = env.get_template("item.html").unwrap();
-        let started = std::time::Instant::now();
-        for _ in 0..1000 {
-            assert_eq!(
-                template.render(Raw { items: &records }).unwrap(),
-                "1000 Article 0 Article 999"
-            );
-        }
-        let repeated = started.elapsed();
-        let started = std::time::Instant::now();
-        let prepared = Prepared {
-            items: minijinja::Value::from_serialize(&records),
+    fn article_request_rebases_only_site_resources_and_keeps_body_out_of_page_json() {
+        let site = request_site();
+        let renderer = Renderer::new().unwrap();
+        let item = Item {
+            path: "items/blog/2026/09/article".into(),
+            front: crate::model::FrontMatter {
+                title: "Article".into(),
+                link: "https://blog.example/article".into(),
+                source: "blog".into(),
+                first_seen: day(20),
+                ..Default::default()
+            },
+            body: "Distinct article body".into(),
         };
-        for _ in 0..1000 {
-            assert_eq!(
-                template.render(&prepared).unwrap(),
-                "1000 Article 0 Article 999"
-            );
-        }
-        println!(
-            "1000 pages × 1000 archive entries: repeated={repeated:?}, prepared={:?}",
-            started.elapsed()
+        let mut item = ItemCtx::from_item(
+            &item,
+            ItemOptions {
+                reading_metrics: content::reading_metrics(&item.body),
+                source_name: "Blog",
+                category: None,
+                links: None,
+                excerpt: String::new(),
+                discussions: &[],
+                resolutions: &crate::discussions::ResolutionSet::default(),
+                now: day(20),
+            },
+        );
+        item.body_html = Some(r##"<p>Distinct article body <a href="#note">note</a><img src="assets/picture.png"></p>"##.into());
+        let shared = SharedCtx::new(&site, &request_build(), &[], &[], &[]);
+        let pages = Pages::new(&site, &renderer, shared, &[], 25);
+        let request = pages.simple_request(SimplePage {
+            item: Some(&item),
+            ..SimplePage::new("item", &item.title, &item.url)
+        });
+        assert!(request.body_html.contains(r##"href="#note""##));
+        assert!(
+            request
+                .body_html
+                .contains(&format!(r#"src="{}assets/picture.png""#, request.page.base))
+        );
+        assert!(
+            !serde_json::to_string(&request.page)
+                .unwrap()
+                .contains("Distinct article body")
+        );
+        assert!(matches!(request.page.page, ClientView::Article(_)));
+        assert!(
+            request
+                .page
+                .head
+                .links
+                .iter()
+                .any(|link| link.rel == "alternate"
+                    && link.mime_type.as_deref() == Some("text/markdown"))
+        );
+        assert!(
+            request
+                .page
+                .head
+                .meta
+                .iter()
+                .any(|meta| meta.name.as_deref() == Some("robots")
+                    && meta.content == "noindex,follow")
+        );
+    }
+
+    #[test]
+    fn directory_requests_keep_configured_empty_sources_and_exclude_unlisted_publishers() {
+        let site = request_site();
+        let renderer = Renderer::new().unwrap();
+        let source = SourceCtx {
+            slug: "blog.example".into(),
+            query_value: "blog.example".into(),
+            name: "blog.example".into(),
+            url: Some("https://blog.example/feed".into()),
+            feed_url: None,
+            site_url: Some("https://blog.example/".into()),
+            language: None,
+            category: None,
+            engine: "feed".into(),
+            count: 0,
+            latest: None,
+            error: None,
+            page: "sources/blog.example/".into(),
+            listed: true,
+        };
+        let mut hidden = source.clone();
+        hidden.slug = "inferred.example".into();
+        hidden.listed = false;
+        let shared = SharedCtx::new(&site, &request_build(), &[source, hidden], &[], &[]);
+        let pages = Pages::new(&site, &renderer, shared, &[], 25);
+        let request = pages.simple_request(SimplePage::new("sources", "Sources", "sources/"));
+        let ClientView::Directory(directory) = request.page.page else {
+            panic!("directory model required")
+        };
+        assert_eq!(directory.groups.len(), 1);
+        assert_eq!(directory.groups[0].entries.len(), 1);
+        assert_eq!(
+            directory.groups[0].entries[0].url,
+            "?q=source%3A%22blog.example%22"
+        );
+        assert!(request.body_html.is_empty());
+        let missing = pages.simple_request(SimplePage::new("404", "Not found", "404.html"));
+        assert_eq!(missing.page.base, "/reader/");
+        let ClientView::NotFound(not_found) = missing.page.page else {
+            panic!("not-found model required")
+        };
+        assert_eq!(not_found.data_branch, site.data_branch);
+        assert_eq!(
+            not_found.archive_url,
+            site.repository.as_ref().map(|repository| format!(
+                "https://github.com/{repository}/tree/{}/items",
+                site.data_branch
+            ))
         );
     }
 
@@ -946,48 +1317,14 @@ mod tests {
                 generation: "g".into(),
                 release: false,
             };
-            let shared = SharedCtx {
-                site: minijinja::Value::from_serialize(&site),
-                build: minijinja::Value::from_serialize(&build),
-                sources: minijinja::Value::from_serialize(Vec::<SourceCtx>::new()),
-                categories: minijinja::Value::from_serialize(Vec::<CategoryCtx>::new()),
-                tags: minijinja::Value::from_serialize(Vec::<CategoryCtx>::new()),
-                client: client::Shared::new(&site, &build),
-            };
-            let page = PageCtx {
-                kind: "item".into(),
-                title: item.title.clone(),
-                document_title: item.title.clone(),
-                description: String::new(),
-                indexable: true,
-                path: item.url.clone(),
-                root: "../../".into(),
-                canonical_url: None,
-                feed_path: Some(String::new()),
-                feed_title: Some(site.title.clone()),
-                paginator: None,
-            };
-            let client_page = minijinja::Value::from_serialize(client::ClientPage::simple(
-                &shared.client,
-                &page,
-                Some(item),
-                &site,
-            ));
-            let html = Renderer::new(Theme::default())
-                .unwrap()
-                .render(
-                    "item.html",
-                    Ctx {
-                        shared: &shared,
-                        page,
-                        items: minijinja::Value::from_serialize(Vec::<ItemCtx>::new()),
-                        item: Some(item),
-                        source: None,
-                        category: None,
-                        schema: None,
-                        client_page,
-                    },
-                )
+            let renderer = Renderer::new().unwrap();
+            let shared = SharedCtx::new(&site, &build, &[], &[], &[]);
+            let pages = Pages::new(&site, &renderer, shared, &[], 25);
+            let html = pages
+                .simple(SimplePage {
+                    item: Some(item),
+                    ..SimplePage::new("item", &item.title, &item.url)
+                })
                 .unwrap();
             scraper::Html::parse_document(&html)
         };

@@ -55,114 +55,46 @@ fn unwrap_emphasis(title: &str) -> &str {
 }
 
 /// The display-only contract shared by static metadata and search result components.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct Metadata {
-    pub original: String,
-    pub date: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub updated: Option<String>,
-    pub source_slug: String,
-    pub source_query: String,
-    pub source_display: String,
-    pub source_title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub category: Option<Category>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub feed_display: Option<String>,
-    pub feed_sources: Vec<super::context::SourceMembershipCtx>,
-    pub is_aggregated: bool,
-    pub word_count: usize,
-    pub reading_minutes: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub consumption: Option<Consumption>,
-    pub discussions: Vec<Discussion>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub points: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub comments: Option<Comments>,
-}
+pub use aggr_ui_model::Metadata;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct Category {
-    pub name: String,
-    pub slug: String,
-}
+pub use aggr_ui_model::Category;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct Discussion {
-    pub name: String,
-    pub url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub score: Option<i64>,
-}
+pub use aggr_ui_model::Discussion;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct Comments {
-    pub url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub count: Option<u64>,
-}
+pub use aggr_ui_model::Comments;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct Consumption {
-    pub action: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub minutes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub seconds: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub words: Option<usize>,
-}
+pub use aggr_ui_model::Consumption;
 
-impl Consumption {
-    fn new(
-        kind: super::item_type::ItemType,
-        words: usize,
-        minutes: usize,
-        seconds: Option<u64>,
-    ) -> Option<Self> {
-        use super::item_type::ItemType;
-        let action = match kind {
-            ItemType::Podcast | ItemType::Audio => "listen",
-            ItemType::Video => "watch",
-            ItemType::Article | ItemType::Document if words > 0 => "read",
-            _ => return None,
-        };
-        let seconds = seconds.filter(|seconds| *seconds > 0 && *seconds <= 9_007_199_254_740_991);
-        Some(if action == "read" {
-            Self {
-                action,
-                minutes: Some(minutes as u64),
-                seconds: None,
-                words: Some(words),
-            }
-        } else {
-            Self {
-                action,
-                minutes: seconds.map(|seconds| seconds.div_ceil(60)),
-                seconds,
-                words: None,
-            }
-        })
-    }
+fn consumption(
+    kind: super::item_type::ItemType,
+    words: usize,
+    minutes: usize,
+    seconds: Option<u64>,
+) -> Option<Consumption> {
+    use super::item_type::ItemType;
+    let action = match kind {
+        ItemType::Podcast | ItemType::Audio => "listen",
+        ItemType::Video => "watch",
+        ItemType::Article | ItemType::Document if words > 0 => "read",
+        _ => return None,
+    };
+    let seconds = seconds.filter(|seconds| *seconds > 0 && *seconds <= 9_007_199_254_740_991);
+    Some(if action == "read" {
+        Consumption {
+            action,
+            minutes: Some(minutes as u64),
+            seconds: None,
+            words: Some(words),
+        }
+    } else {
+        Consumption {
+            action,
+            minutes: seconds.map(|seconds| seconds.div_ceil(60)),
+            seconds,
+            words: None,
+        }
+    })
 }
-
 fn public_url(value: &str) -> bool {
     url::Url::parse(value).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
 }
@@ -225,7 +157,7 @@ impl From<&super::context::ItemCtx> for Metadata {
             is_aggregated: item.is_aggregated,
             word_count: item.word_count,
             reading_minutes: item.reading_minutes,
-            consumption: Consumption::new(
+            consumption: consumption(
                 item.item_type,
                 item.word_count,
                 item.reading_minutes,
@@ -264,35 +196,35 @@ mod tests {
 
     #[test]
     fn consumption_uses_playback_duration_and_never_estimates_media_from_prose() {
-        use super::Consumption;
+        use super::consumption;
         use crate::site::item_type::ItemType;
         for (kind, action) in [
             (ItemType::Audio, "listen"),
             (ItemType::Podcast, "listen"),
             (ItemType::Video, "watch"),
         ] {
-            let known = Consumption::new(kind, 4500, 20, Some(3601)).unwrap();
+            let known = consumption(kind, 4500, 20, Some(3601)).unwrap();
             assert_eq!(known.action, action);
             assert_eq!(known.minutes, Some(61));
             assert_eq!(known.seconds, Some(3601));
             assert_eq!(known.words, None);
             assert_eq!(
-                Consumption::new(kind, 4500, 20, Some(1)).unwrap().minutes,
+                consumption(kind, 4500, 20, Some(1)).unwrap().minutes,
                 Some(1)
             );
             for seconds in [None, Some(0), Some(u64::MAX)] {
-                let unknown = Consumption::new(kind, 4500, 20, seconds).unwrap();
+                let unknown = consumption(kind, 4500, 20, seconds).unwrap();
                 assert_eq!(unknown.minutes, None);
                 assert_eq!(unknown.seconds, None);
             }
         }
-        let article = Consumption::new(ItemType::Article, 450, 2, Some(3601)).unwrap();
+        let article = consumption(ItemType::Article, 450, 2, Some(3601)).unwrap();
         assert_eq!(article.action, "read");
         assert_eq!(article.minutes, Some(2));
         assert_eq!(article.words, Some(450));
         assert_eq!(article.seconds, None);
-        assert!(Consumption::new(ItemType::Image, 450, 2, None).is_none());
-        assert!(Consumption::new(ItemType::Article, 0, 0, None).is_none());
+        assert!(consumption(ItemType::Image, 450, 2, None).is_none());
+        assert!(consumption(ItemType::Article, 0, 0, None).is_none());
     }
 
     #[test]

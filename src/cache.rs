@@ -177,12 +177,10 @@ pub fn dev(config_path: &Path) -> Result<PathBuf> {
     Ok(dev_under(&base, config_path))
 }
 
-/// Exact key for reusable rendered output. The data commit, effective config files, the theme
-/// (embedded, plus its source tree for a development binary), output URL and embedded defaults
-/// all participate; wall-clock time deliberately does not.
+/// Exact key for reusable output: archive, configuration, compiled reader, URL and defaults.
+/// Wall-clock time deliberately does not participate.
 pub struct RenderFingerprint<'a> {
     pub config: &'a crate::config::Config,
-    pub theme: &'a crate::site::render::Theme,
     /// Loaded config files are named relative to this root so a checkout elsewhere (another
     /// clone, a CI runner) shares the fingerprint of the same bytes.
     pub repo_root: &'a Path,
@@ -197,7 +195,6 @@ pub struct RenderFingerprint<'a> {
 pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     let RenderFingerprint {
         config,
-        theme,
         repo_root,
         config_sha,
         data_sha,
@@ -207,7 +204,7 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
         generation,
     } = input;
     let mut hash = Sha1::new();
-    hash_field(&mut hash, b"schema", b"render-v4");
+    hash_field(&mut hash, b"schema", b"render-v5");
     hash_field(&mut hash, b"version", env!("CARGO_PKG_VERSION").as_bytes());
     // Development builds often keep the package version while renderer code changes. Hash the
     // implementation itself so a prior binary can never make a new binary restore stale HTML.
@@ -216,8 +213,8 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     }
     hash_field(
         &mut hash,
-        b"embedded-theme",
-        crate::site::render::default_theme_hash().as_bytes(),
+        b"embedded-reader",
+        crate::site::render::implementation_hash().as_bytes(),
     );
     hash_field(
         &mut hash,
@@ -254,27 +251,8 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     for (identity, digest) in remote_configs {
         hash_field(&mut hash, identity.as_bytes(), digest.as_bytes());
     }
-    if let Some(source) = theme.source_dir() {
-        // A development binary renders from the theme's source tree, and the renderer only ever
-        // reads these two subdirectories of it; nothing else under it can change a page.
-        for kind in THEME_KINDS {
-            hash_tree(
-                &mut hash,
-                &format!("theme-source/{kind}"),
-                &source.join(kind),
-            )?;
-        }
-    }
     Ok(hex::encode(hash.finalize()))
 }
-
-/// The subdirectories of the theme source tree the renderer reads (`Theme::read` and
-/// `Theme::names`).
-const THEME_KINDS: [&str; 2] = ["templates", "static"];
-
-/// Directory names a tree hash skips wherever it meets them: the repository, aggr's own state and
-/// a previous build output are never rendered, and walking them would read every cached file.
-const UNHASHED_DIRS: [&str; 3] = [".git", ".aggr", "_site"];
 
 /// `(hash label, path relative to `src/`, contents)` for every module whose code can change
 /// rendered bytes. A unit test walks `src/` and fails on any file that is neither listed here nor
@@ -331,6 +309,7 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
         source!("offline-build", "commands/offline.rs"),
         source!("site", "site/mod.rs"),
         source!("site-client", "site/client.rs"),
+        source!("ui-model", "../crates/aggr-ui-model/src/lib.rs"),
         source!("site-dev", "site/dev.rs"),
         source!("site-offline", "site/offline.rs"),
         source!("site-hermetic", "site/hermetic.rs"),
@@ -371,13 +350,12 @@ const RENDER_INDEPENDENT_SOURCES: &[&str] = &[
     // make (output URL, release mode, pinned data ref) is an explicit fingerprint field.
     "main.rs",
     "cli.rs",
+    "dev_worker.rs",
     "commands/",
     // This module: the fingerprint, the raw-response cache and the cache layout. Changing how a
     // key is computed is deliberately versioned through the `schema` field instead.
     "cache.rs",
     "cache/",
-    // Test-only: writes the parity fixtures the frontend checks itself against.
-    "site/client/parity.rs",
     // Git plumbing decides which commit is rendered; the commit itself is the `data-sha` field.
     "git.rs",
     // HTTP fetches bytes into the data branch and the private article cache; what was fetched
@@ -601,39 +579,6 @@ fn portable_name(path: &Path, repo_root: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
-}
-
-fn hash_tree(hash: &mut Sha1, kind: &str, root: &Path) -> Result<()> {
-    if !root.is_dir() {
-        return Ok(());
-    }
-    let mut files = Vec::new();
-    let walk = walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|entry| {
-            entry.depth() == 0
-                || !entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| UNHASHED_DIRS.contains(&name))
-        });
-    for entry in walk {
-        let entry = entry.with_context(|| format!("walking {}", root.display()))?;
-        if entry.file_type().is_file() {
-            files.push(entry.path().to_path_buf());
-        }
-    }
-    files.sort();
-    for file in files {
-        let relative = file.strip_prefix(root).unwrap_or(&file);
-        hash_field(hash, kind.as_bytes(), relative.to_string_lossy().as_bytes());
-        hash_field(
-            hash,
-            b"bytes",
-            &std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?,
-        );
-    }
-    Ok(())
 }
 
 pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<()> {
@@ -1504,26 +1449,17 @@ mod tests {
         vec![root.join("aggr.toml"), root.join("sources.toml")]
     }
 
-    /// A theme source tree holding one template, as a development binary reads it.
-    fn write_theme_source(root: &Path) -> crate::site::render::Theme {
-        std::fs::create_dir_all(root.join("templates")).unwrap();
-        std::fs::write(root.join("templates/index.html"), "one").unwrap();
-        crate::site::render::Theme::from_source_tree(root)
-    }
-
     #[test]
-    fn render_fingerprint_tracks_loaded_config_and_theme_files() {
+    fn render_fingerprint_tracks_loaded_config_files() {
         let root = tempdir().unwrap();
         let config_path = root.path().join("aggr.toml");
         let mut config = crate::config::Config::parse("[site]\ntitle = \"one\"\n").unwrap();
         config.loaded_files = write_fixture(root.path());
-        let source = tempdir().unwrap();
-        let theme = write_theme_source(source.path());
         macro_rules! fingerprint {
             ($discussions:expr) => {
                 render_fingerprint(RenderFingerprint {
                     config: &config,
-                    theme: &theme,
+
                     repo_root: root.path(),
                     config_sha: Some("config"),
                     data_sha: Some("data"),
@@ -1537,13 +1473,9 @@ mod tests {
         }
         let first = fingerprint!(None);
 
-        std::fs::write(source.path().join("templates/index.html"), "two").unwrap();
-        let theme_changed = fingerprint!(None);
-        assert_ne!(first, theme_changed);
-
         std::fs::write(&config_path, "[site]\ntitle = \"two\"\n").unwrap();
         let config_changed = fingerprint!(None);
-        assert_ne!(theme_changed, config_changed);
+        assert_ne!(first, config_changed);
 
         config
             .loaded_remote
@@ -1562,7 +1494,7 @@ mod tests {
             config.loaded_files = loaded_files;
             render_fingerprint(RenderFingerprint {
                 config: &config,
-                theme: &crate::site::render::Theme::default(),
+
                 repo_root: root,
                 config_sha: Some("config"),
                 data_sha: Some("data"),
@@ -1619,6 +1551,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(names.contains(&"config"));
         assert!(names.contains(&"defaults"));
+        assert!(names.contains(&"ui-model"));
         let unique = names.iter().collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             unique.len(),
@@ -1740,56 +1673,6 @@ mod tests {
         assert!(paths.contains(&".aggr/cache/build-v1/validated-images-v2".to_string()));
         assert!(!paths.iter().any(|path| path.contains("render-v1")));
         assert!(!paths.iter().any(|path| path.contains("articles-v1")));
-    }
-
-    #[test]
-    fn render_fingerprint_hashes_only_the_theme_subdirectories_of_the_source_tree() {
-        let root = tempdir().unwrap();
-        let mut config = crate::config::Config::parse("[site]\ntitle = \"one\"\n").unwrap();
-        config.loaded_files = write_fixture(root.path());
-        let source = tempdir().unwrap();
-        let theme = write_theme_source(source.path());
-        let fingerprint = || {
-            render_fingerprint(RenderFingerprint {
-                config: &config,
-                theme: &theme,
-                repo_root: root.path(),
-                config_sha: Some("config"),
-                data_sha: Some("data"),
-                base_url: None,
-                release: false,
-                discussions: None,
-                generation: "generation",
-            })
-            .unwrap()
-        };
-        let initial = fingerprint();
-
-        // Only `templates/` and `static/` of the source tree are rendered. Anything else beside
-        // them, and repository state that strays under them, is not.
-        for unrelated in [
-            ".git/objects/pack/large.pack",
-            ".aggr/cache/build-v1/articles-v1/bodies/a.html",
-            "_site/index.html",
-            "items/demo/2026/09/post.md",
-            "notes/draft.md",
-            "templates/.git/HEAD",
-            "static/.aggr/junk",
-            "templates/_site/index.html",
-        ] {
-            let path = source.path().join(unrelated);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, format!("unrelated {unrelated}")).unwrap();
-        }
-        assert_eq!(fingerprint(), initial);
-
-        std::fs::create_dir_all(source.path().join("static")).unwrap();
-        std::fs::write(source.path().join("static/style.css"), "body{}").unwrap();
-        let static_changed = fingerprint();
-        assert_ne!(static_changed, initial);
-
-        std::fs::write(source.path().join("templates/index.html"), "two").unwrap();
-        assert_ne!(fingerprint(), static_changed);
     }
 
     /// Store one article under `url` with `body` and an extraction of the current version.

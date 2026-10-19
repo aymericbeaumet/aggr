@@ -4,7 +4,7 @@ import type { Plugin } from 'vite';
 
 /**
  * Emits `LICENSE` next to the bundle: the license text of every node_modules package whose
- * code ended up in an output chunk, so the committed assets carry their own attribution.
+ * code ended up in an output chunk, so embedded and published assets retain their dependency notices.
  */
 export function licenses(fileName = 'LICENSE'): Plugin {
   return {

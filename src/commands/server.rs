@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{StatusCode, Uri, header};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse as _, Response, Sse, sse::Event};
 use axum::routing::get;
 use chrono::Utc;
@@ -205,6 +205,34 @@ impl MemorySite {
         Ok(self.body(&key).await?.map(|body| (key, body)))
     }
 
+    async fn page_model(
+        &self,
+        base: &str,
+        path: &str,
+    ) -> Result<Option<(StatusCode, aggr_ui_model::RenderRequest)>> {
+        let Some(key) = resolve_key(base, path).filter(|key| key.ends_with(".html")) else {
+            return Ok(None);
+        };
+        let site = match &*self.snapshot.read().await {
+            Snapshot::Lazy(site) => Arc::clone(site),
+            Snapshot::Pending(_) | Snapshot::Files(_) => return Ok(None),
+        };
+        let ownership = self.ownership.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ownership = ownership;
+            if let Some(model) = site.page_model(&key)? {
+                return Ok(Some((StatusCode::OK, model)));
+            }
+            if site.response(&key)?.is_some() {
+                return Ok(None);
+            }
+            site.page_model("404.html")
+                .map(|model| model.map(|model| (StatusCode::NOT_FOUND, model)))
+        })
+        .await
+        .context("preparing development page model")?
+    }
+
     #[cfg(test)]
     async fn response(&self, base: &str, path: &str) -> Option<(String, Arc<Vec<u8>>)> {
         self.resolve_response(base, path).await.unwrap()
@@ -253,9 +281,7 @@ struct PendingWatcher {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WatchPaths {
     configs: Vec<PathBuf>,
-    themes: Vec<PathBuf>,
     excluded: Vec<PathBuf>,
-    recursive: Vec<PathBuf>,
     shallow: Vec<PathBuf>,
 }
 
@@ -358,24 +384,35 @@ pub(super) async fn run_with_reload(
     staging: PathBuf,
     ownership: Arc<super::lock::DevLock>,
 ) -> Result<()> {
-    let vite = vite::Client::from_env()?;
     let project = Arc::new(project);
     // Install the process signal handler before the listener becomes visible. This makes even an
     // immediate Ctrl-C (common when a command was started by mistake) a graceful shutdown.
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let shutdown_task = tokio::spawn(async move {
-        let _ = shutdown_tx.send(tokio::signal::ctrl_c().await);
+        let signal = tokio::select! {
+            signal = tokio::signal::ctrl_c() => signal,
+            signal = super::dev::supervisor_shutdown() => signal,
+        };
+        let _ = shutdown_tx.send(signal);
     });
     tokio::task::yield_now().await;
     let build_args = args.build_args();
     let base = crate::site::base_path(build::base_url(&project, &build_args)?.as_deref());
     let listener = bind(args.port).await?;
-    let url = format!("http://127.0.0.1:{}{base}", listener.local_addr()?.port());
-    println!("aggr dev: {url}");
-    println!(
-        "syncing {} source(s) in the background…",
-        project.sources.len()
+    let origin = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
+    let url = format!(
+        "{}{base}",
+        std::env::var("AGGR_DEV_PUBLIC_ORIGIN").unwrap_or_else(|_| origin.clone())
     );
+    if !super::dev::supervised() {
+        println!("aggr dev: {url}");
+    }
+    if !super::dev::restarted() {
+        println!(
+            "syncing {} source(s) in the background…",
+            project.sources.len()
+        );
+    }
     let mut site = match args.release.then(|| MemorySite::cached(&cached)).flatten() {
         Some(site) => {
             println!("restored the previous dev build from cache");
@@ -386,14 +423,7 @@ pub(super) async fn run_with_reload(
     site.ownership = Some(ownership);
     let (reload, _) = broadcast::channel(16);
     let (stop_http, http_shutdown) = watch::channel(false);
-    let serving = host(
-        listener,
-        site.clone(),
-        &base,
-        reload.clone(),
-        vite,
-        http_shutdown,
-    );
+    let serving = host(listener, site.clone(), &base, reload.clone(), http_shutdown);
     tokio::pin!(serving);
     let state = DevState {
         data,
@@ -405,7 +435,7 @@ pub(super) async fn run_with_reload(
         preparation: Arc::default(),
     };
     // Register filesystem watches before the first network sync/build. Editors can otherwise save
-    // a config or theme while startup is busy and leave the served snapshot stale until the next
+    // a config or local source while startup is busy and leave the served snapshot stale until the next
     // manual edit.
     let pending_watcher = prepare_watch(&project, &state)?;
     let initializing = async {
@@ -417,27 +447,33 @@ pub(super) async fn run_with_reload(
         })
         .await
         .context("reading cached dev articles")??;
-        if has_cached_items {
+        if has_cached_items || super::dev::restarted() {
             match refresh(project.clone(), &args.fetch, &build_args, &state, false).await {
                 Ok(_) => println!("cached articles ready: {url}"),
+                Err(err) if super::dev::restarted() => return Err(err),
                 Err(err) => eprintln!("cached build failed: {err:#}"),
             }
         }
-        let project = match Project::load(&project.config_path).await {
-            Ok(resolved) => {
-                let resolved = Arc::new(resolved);
-                match refresh(resolved.clone(), &args.fetch, &build_args, &state, true).await {
-                    Ok(_) => println!("ready: {url}"),
-                    Err(err) => eprintln!("initial build failed: {err:#}"),
+        super::dev::worker_ready(&origin, &base)?;
+        let project = if super::dev::restarted() {
+            project.clone()
+        } else {
+            match Project::load(&project.config_path).await {
+                Ok(resolved) => {
+                    let resolved = Arc::new(resolved);
+                    match refresh(resolved.clone(), &args.fetch, &build_args, &state, true).await {
+                        Ok(_) => println!("ready: {url}"),
+                        Err(err) => eprintln!("initial build failed: {err:#}"),
+                    }
+                    resolved
                 }
-                resolved
-            }
-            Err(err) => {
-                eprintln!("initial source resolution failed: {err:#}");
-                if state.site.fail_startup(&err).await {
-                    let _ = state.reload.send(());
+                Err(err) => {
+                    eprintln!("initial source resolution failed: {err:#}");
+                    if state.site.fail_startup(&err).await {
+                        let _ = state.reload.send(());
+                    }
+                    project.clone()
                 }
-                project.clone()
             }
         };
         let _watcher = pending_watcher.start(project, args, state)?;
@@ -816,7 +852,6 @@ fn render_refresh(
     let config_sha = project.config_sha();
     let fingerprint = crate::cache::render_fingerprint(crate::cache::RenderFingerprint {
         config: &project.config,
-        theme: &crate::site::theme(),
         repo_root: project.repo.root(),
         config_sha: config_sha.as_deref(),
         data_sha: None,
@@ -894,7 +929,6 @@ async fn host(
     site: MemorySite,
     base: &str,
     reload: broadcast::Sender<()>,
-    vite: Option<vite::Client>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let state = Arc::new(HttpState {
@@ -906,7 +940,6 @@ async fn host(
             .as_nanos()
             .to_string(),
         reload,
-        vite,
         shutdown: shutdown.clone(),
     });
     axum::serve(
@@ -1036,15 +1069,6 @@ impl WatchPaths {
         configs.sort();
         configs.dedup();
 
-        // A development binary renders the theme from its source tree, so an edit there rebuilds
-        // without recompiling; a release binary has no theme files to watch.
-        let themes = crate::site::theme()
-            .source_dir()
-            .map(|source| normalize_watch_path(source.to_path_buf()))
-            .transpose()?
-            .into_iter()
-            .collect::<Vec<_>>();
-
         let mut excluded = vec![
             state.data.clone(),
             state.cache.clone(),
@@ -1058,33 +1082,22 @@ impl WatchPaths {
         excluded.sort();
         excluded.dedup();
 
-        let mut recursive = themes
-            .iter()
-            .filter(|path| path.is_dir())
-            .cloned()
-            .collect::<Vec<_>>();
-        recursive.sort();
-        recursive.dedup();
-
         let mut shallow = configs
             .iter()
             .filter_map(|path| path.parent().map(Path::to_path_buf))
             .collect::<Vec<_>>();
-        shallow.retain(|path| !recursive.iter().any(|root| path.starts_with(root)));
         shallow.sort();
         shallow.dedup();
 
         Ok(Self {
             configs,
-            themes,
             excluded,
-            recursive,
             shallow,
         })
     }
 
     fn watched(&self, path: &Path) -> bool {
-        watched(path, &self.configs, &self.themes, &self.excluded)
+        watched(path, &self.configs, &self.excluded)
     }
 }
 
@@ -1096,12 +1109,6 @@ fn create_watcher(
     let mut watcher = notify::recommended_watcher(move |event| {
         let _ = events.send(event);
     })?;
-    for root in &paths.recursive {
-        watcher
-            .watch(root, RecursiveMode::Recursive)
-            .with_context(|| format!("watching {}", root.display()))?;
-        log::info!("watching {}", root.display());
-    }
     for root in &paths.shallow {
         watcher
             .watch(root, RecursiveMode::NonRecursive)
@@ -1109,25 +1116,6 @@ fn create_watcher(
         log::info!("watching {}", root.display());
     }
     Ok(watcher)
-}
-
-fn normalize_watch_path(path: PathBuf) -> Result<PathBuf> {
-    if path.exists() {
-        return path
-            .canonicalize()
-            .with_context(|| format!("resolving watch path {}", path.display()));
-    }
-    let mut normalized = PathBuf::new();
-    for component in std::path::absolute(path)?.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            component => normalized.push(component),
-        }
-    }
-    Ok(normalized)
 }
 
 fn rebuild_event(kind: notify::EventKind) -> bool {
@@ -1140,11 +1128,8 @@ fn rebuild_event(kind: notify::EventKind) -> bool {
     )
 }
 
-fn watched(path: &Path, configs: &[PathBuf], themes: &[PathBuf], excluded: &[PathBuf]) -> bool {
-    (configs.iter().any(|config| path == config)
-        || themes
-            .iter()
-            .any(|theme| path.starts_with(theme) || theme.starts_with(path)))
+fn watched(path: &Path, configs: &[PathBuf], excluded: &[PathBuf]) -> bool {
+    configs.iter().any(|config| path == config)
         && !excluded.iter().any(|root| path.starts_with(root))
         && !path
             .components()
@@ -1156,12 +1141,34 @@ struct HttpState {
     base: String,
     run: String,
     reload: broadcast::Sender<()>,
-    vite: Option<vite::Client>,
     shutdown: watch::Receiver<bool>,
 }
 
-async fn handle(State(state): State<Arc<HttpState>>, uri: Uri) -> Response {
+async fn handle(State(state): State<Arc<HttpState>>, uri: Uri, headers: HeaderMap) -> Response {
     let path = uri.path();
+    if path == format!("{}__aggr/dev.js", state.base) {
+        let parameters = url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
+            .collect::<BTreeMap<_, _>>();
+        let run = parameters
+            .get("run")
+            .filter(|run| {
+                run.bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+            .map_or(state.run.as_str(), |run| run.as_ref());
+        let revision = parameters
+            .get("revision")
+            .and_then(|revision| revision.parse().ok())
+            .unwrap_or_else(|| state.site.revision.load(Ordering::SeqCst));
+        return (
+            [
+                (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            reload_script(&state.base, run, revision),
+        )
+            .into_response();
+    }
     if path == format!("{}__aggr/reload", state.base) {
         // Subscribe before comparing generations so a concurrent promotion cannot be missed.
         let updates = state.reload.subscribe();
@@ -1203,6 +1210,51 @@ async fn handle(State(state): State<Arc<HttpState>>, uri: Uri) -> Response {
     }
     // An older revision on a newer body causes a harmless retry; the reverse could miss an update.
     let revision = state.site.revision.load(Ordering::SeqCst);
+    if headers
+        .get("x-aggr-page-model")
+        .is_some_and(|value| value == "1")
+    {
+        match state.site.page_model(&state.base, path).await {
+            Ok(Some((status, model))) => {
+                let body = match serde_json::to_vec(&model) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        log::error!("could not serialize dev route {path}: {error}");
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                };
+                let mut response = Response::new(Body::from(body));
+                *response.status_mut() = status;
+                let headers = response.headers_mut();
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    header::HeaderValue::from_static("application/json"),
+                );
+                headers.insert("x-aggr-page-model", header::HeaderValue::from_static("1"));
+                headers.insert(
+                    header::CACHE_CONTROL,
+                    header::HeaderValue::from_static("no-store"),
+                );
+                let client = format!(
+                    "{}__aggr/dev.js?run={}&revision={revision}",
+                    state.base, state.run,
+                );
+                if let Ok(client) = client.parse() {
+                    headers.insert("x-aggr-dev-client", client);
+                }
+                return response;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log::error!("could not prepare dev route {path}: {error:#}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not prepare this page. See the development server log.",
+                )
+                    .into_response();
+            }
+        }
+    }
     let (status, key, mut body) = match state.site.resolve_response(&state.base, path).await {
         Ok(Some((file, body))) => (StatusCode::OK, file, body),
         Ok(None) => {
@@ -1223,9 +1275,6 @@ async fn handle(State(state): State<Arc<HttpState>>, uri: Uri) -> Response {
         .extension()
         .is_some_and(|extension| extension == "html")
     {
-        if let Some(client) = &state.vite {
-            body = Arc::new(client.inject(&body));
-        }
         body = Arc::new(inject_reload(&body, &state.base, &state.run, revision));
     }
     let mut response = Response::new(Body::from(bytes::Bytes::from_owner(SharedBody(body))));
@@ -1258,16 +1307,20 @@ impl AsRef<[u8]> for SharedBody {
 }
 
 fn inject_reload(body: &[u8], base: &str, run: &str, revision: u64) -> Vec<u8> {
-    let script = format!(
-        "<script>(function(){{var b=new URL({0:?},location.origin),u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistration(b).then(function(r){{if(r)r.unregister()}});if('caches'in window){{var p='aggr:'+encodeURIComponent(b.pathname)+':';caches.keys().then(function(k){{k.filter(function(x){{return x.indexOf(p)===0}}).forEach(function(x){{caches.delete(x)}})}})}}new EventSource('{0}__aggr/reload?run={1}&revision={2}').onmessage=function(){{var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();</script>",
-        base, run, revision
-    );
+    let script = format!("<script>{}</script>", reload_script(base, run, revision));
     let html = String::from_utf8_lossy(body);
     if let Some(at) = html.rfind("</body>") {
         format!("{}{}{}", &html[..at], script, &html[at..]).into_bytes()
     } else {
         format!("{html}{script}").into_bytes()
     }
+}
+
+fn reload_script(base: &str, run: &str, revision: u64) -> String {
+    format!(
+        "(function(){{var b=new URL({0:?},location.origin),u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistration(b).then(function(r){{if(r)r.unregister()}});if('caches'in window){{var p='aggr:'+encodeURIComponent(b.pathname)+':';caches.keys().then(function(k){{k.filter(function(x){{return x.indexOf(p)===0}}).forEach(function(x){{caches.delete(x)}})}})}}new EventSource('{0}__aggr/reload?run={1}&revision={2}').onmessage=function(){{var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();",
+        base, run, revision
+    )
 }
 
 /// Map a request path to a file under `root`, honoring the base path a release build was made
@@ -1485,10 +1538,10 @@ mod tests {
                 base: "/".into(),
                 run: "test".into(),
                 reload: state.reload.clone(),
-                vite: None,
                 shutdown: watch::channel(false).1,
             })),
             "/".parse().unwrap(),
+            HeaderMap::new(),
         )
         .await;
         let html = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1567,9 +1620,7 @@ mod tests {
         let (shutdown, stopped) = watch::channel(false);
         let sender = reload.clone();
         let task =
-            tokio::spawn(
-                async move { host(listener, site, "/repo/", sender, None, stopped).await },
-            );
+            tokio::spawn(async move { host(listener, site, "/repo/", sender, stopped).await });
         (origin, reload, shutdown, task)
     }
 
@@ -2085,7 +2136,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn theme_refresh_preserves_resolved_remote_sources_without_probing() {
+    async fn cached_refresh_preserves_resolved_remote_sources_without_probing() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(
             std::process::Command::new("git")
@@ -2213,6 +2264,80 @@ mod tests {
             !root.join("pagefind").exists(),
             "search is initialized on demand"
         );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-aggr-page-model", "1".parse().unwrap());
+        let http_state = Arc::new(HttpState {
+            site: state.site.clone(),
+            base: "/".into(),
+            run: "model-test".into(),
+            reload: state.reload.clone(),
+            shutdown: watch::channel(false).1,
+        });
+        let response = handle(
+            State(http_state.clone()),
+            "/".parse().unwrap(),
+            headers.clone(),
+        )
+        .await;
+        assert_eq!(response.headers()["x-aggr-page-model"], "1");
+        assert!(
+            response.headers()["x-aggr-dev-client"]
+                .to_str()
+                .unwrap()
+                .contains("run=model-test")
+        );
+        let model = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let model: serde_json::Value = serde_json::from_slice(&model).unwrap();
+        assert_eq!(
+            model["page"]["page"]["data"]["rows"][0]["title"],
+            "Retained article"
+        );
+        assert!(
+            !root.join("index.html").exists(),
+            "source SSR requests never run the embedded renderer"
+        );
+        for route in ["/missing.html", "/missing/"] {
+            let response = handle(
+                State(http_state.clone()),
+                route.parse().unwrap(),
+                headers.clone(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(response.headers()["x-aggr-page-model"], "1");
+            let model = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let model: serde_json::Value = serde_json::from_slice(&model).unwrap();
+            assert_eq!(model["page"]["page"]["view"], "not_found");
+        }
+        assert!(!root.join("404.html").exists());
+        std::fs::write(
+            root.join("redirect.html"),
+            "<!doctype html><meta http-equiv=refresh content=\"0;url=/\">",
+        )
+        .unwrap();
+        let response = handle(
+            State(http_state.clone()),
+            "/redirect.html".parse().unwrap(),
+            headers.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key("x-aggr-page-model"));
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&body)
+                .unwrap()
+                .contains("http-equiv=refresh")
+        );
+        let response = handle(State(http_state), "/missing.png".parse().unwrap(), headers).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(!response.headers().contains_key("x-aggr-page-model"));
         let page = state.site.response("/", "/").await.unwrap().1;
         assert!(
             std::str::from_utf8(&page)
@@ -2476,47 +2601,27 @@ mod tests {
     }
 
     #[test]
-    fn ignores_generated_and_internal_changes() {
+    fn watches_config_and_local_source_documents_without_generated_or_frontend_changes() {
         let root = Path::new("/project");
-        let configs = vec![root.join("aggr.toml")];
-        let themes = vec![root.join("src/theme")];
-        let excluded = vec![root.join("src/theme/generated")];
-        assert!(watched(
-            &root.join("aggr.toml"),
-            &configs,
-            &themes,
-            &excluded
-        ));
-        assert!(watched(
-            &root.join("src/theme/templates/base.html"),
-            &configs,
-            &themes,
-            &excluded
-        ));
-        assert!(!watched(
-            &root.join("readme.md"),
-            &configs,
-            &themes,
-            &excluded
-        ));
-        assert!(!watched(
-            &root.join("src/theme/generated/index.html"),
-            &configs,
-            &themes,
-            &excluded
-        ));
-        assert!(!watched(
-            &root.join(".aggr/data/item.md"),
-            &configs,
-            &themes,
-            &excluded
-        ));
-        assert!(!watched(
-            &root.join("target/debug/aggr"),
-            &configs,
-            &themes,
-            &excluded
-        ));
+        let configs = vec![
+            root.join("aggr.toml"),
+            root.join("sources/feed.xml"),
+            root.join("cache/aggr.toml"),
+        ];
+        let excluded = vec![root.join("cache")];
+        for path in ["aggr.toml", "sources/feed.xml"] {
+            assert!(watched(&root.join(path), &configs, &excluded), "{path}");
+        }
+        for path in [
+            "readme.md",
+            "cache/aggr.toml",
+            ".aggr/data/item.md",
+            "target/debug/aggr",
+            "web/src/app/App.svelte",
+            "sources",
+        ] {
+            assert!(!watched(&root.join(path), &configs, &excluded), "{path}");
+        }
         assert!(!rebuild_event(notify::EventKind::Access(
             notify::event::AccessKind::Read
         )));
@@ -2526,12 +2631,6 @@ mod tests {
         assert!(rebuild_event(notify::EventKind::Modify(
             notify::event::ModifyKind::Any
         )));
-        assert!(watched(
-            &root.join("src/theme"),
-            &configs,
-            &themes,
-            &excluded
-        ));
     }
 
     #[test]

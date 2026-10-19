@@ -13,7 +13,7 @@ media_full_quality_days = 30
 ```
 
 `build_max_bytes` must be positive. It counts logical file lengths across the complete output:
-article pages and portable representations, feeds, search, theme assets, manifests, worker and
+article pages and portable representations, feeds, search, reader assets, manifests, worker and
 published media. It is not the compressed upload size, filesystem allocation or Git repository
 size. A successful build must fit; if article text and required assets alone exceed the limit,
 the build fails with an explanation instead of silently discarding articles.
@@ -21,7 +21,7 @@ the build fails with an explanation instead of silently discarding articles.
 ## Media priority
 
 All retained articles remain available to read and search. Media is processed in article order,
-newest first. Recent articles retain full-quality published media when it fits. Articles older
+newest first. Recent articles retain full-resolution published media when it fits. Articles older
 than `media_full_quality_days` use smaller compressed publication copies where possible. Age uses
 the article's publication time, falling back to its updated or first-seen time, so importing an
 old article does not make it recent. Setting the window to zero makes past articles eligible for
@@ -30,7 +30,10 @@ compression; future-dated articles remain recent.
 Older eligible images are resized to at most 1,600 pixels per axis. Opaque images use JPEG
 quality 72; transparent images use PNG. A replacement is kept only when it is smaller. Animation,
 embedded color profiles and high-bit-depth images keep their masters instead of being flattened;
-they can still be omitted if they do not fit. Small feed previews retain their existing encoding.
+they can still be omitted if they do not fit. Small feed previews retain their existing encoding
+unless `site.media_image_format = "progressive-jpeg"` is enabled. That option also publishes eligible
+recent images as progressive JPEGs at quality 85; older copies retain quality 72 and the size bound
+above. See [media configuration](sources.md#progressive-jpeg-publication).
 
 The budget counts shared content-addressed files once. When media does not fit, aggr leaves it
 out of the generated site and keeps the publisher URL in the article. Feed previews can also be
@@ -39,8 +42,8 @@ configured limit for recent images.
 Retained PDF companions use the same allowance and newest-first priority. Their bytes are
 preserved exactly, without lossy compression. A published copy loads from the reader's own
 origin and joins its offline resources; an omitted copy falls back to the publisher URL.
-When a recent image's master fits but its responsive copies do not, aggr publishes the exact
-master alone before considering omission. The browser scales that full-quality image itself.
+When a recent image's published master fits but its responsive copies do not, aggr publishes that
+master alone before considering omission. The browser scales that image itself.
 An oversized image family can be skipped while smaller later images still fit. This is
 newest-first admission, not a strict date cutoff that removes every older image together.
 
@@ -55,11 +58,9 @@ only the local resources the build actually publishes.
 `build --hermetic` publishes all required local resources or fails. It never falls back to
 publisher URLs to meet the budget and does not use the cached media allowance heuristic.
 
-The default theme loads one shared, minified bootstrap for preferences and dates before paint,
-instead of repeating those scripts inline. This removes about 6,445 bytes per page and adds one
-4,537-byte content-addressed asset. JavaScript and CSS files are published once and reused across
-pages. These figures describe the current bootstrap refactoring, not total page size; the budget
-measures actual output files and does not assume compressed transfers or duplicate `.gz` sidecars.
+The reader loads a shared, content-addressed bootstrap for preferences before paint. JavaScript
+and CSS assets are published once and reused across pages. The budget measures actual output
+files without assuming compressed transfers or duplicate `.gz` sidecars.
 
 The build renders the complete output and measures its logical bytes. If it is over budget, it
 reduces the media allowance and rerenders with the same captured content. Retries are bounded,

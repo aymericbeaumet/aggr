@@ -36,7 +36,7 @@ pub(crate) use stored_cache::StoredAssetCache;
 
 const MIN_AXIS: u32 = 1;
 pub(crate) const MAX_STORED_RENDITIONS: usize = 7;
-const MAX_FULL_WIDTH_PIXELS: u64 = 32_000_000;
+pub(crate) const MAX_FULL_WIDTH_PIXELS: u64 = 32_000_000;
 
 #[cfg(test)]
 thread_local! {
@@ -423,6 +423,7 @@ fn codec_fingerprint_for(lockfile: &str) -> String {
     };
     let mut wanted = BTreeSet::from([
         "image".to_owned(),
+        "jpeg-encoder".to_owned(),
         "resvg".to_owned(),
         "thumbhash".to_owned(),
     ]);

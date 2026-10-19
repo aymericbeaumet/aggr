@@ -630,8 +630,23 @@ fn render_image_tag(
             .map(|variant| format!("{} {}w", escape_html(&variant.url), variant.width))
             .collect::<Vec<_>>()
             .join(", ");
+        let kind = if local
+            .variants
+            .iter()
+            .all(|image| image.url.ends_with(".jpg") || image.url.ends_with(".jpeg"))
+        {
+            " type=\"image/jpeg\""
+        } else if local
+            .variants
+            .iter()
+            .all(|image| image.url.ends_with(".webp"))
+        {
+            " type=\"image/webp\""
+        } else {
+            ""
+        };
         format!(
-            "<source type=\"image/webp\" width=\"{}\" height=\"{}\" srcset=\"{srcset}\" sizes=\"(max-width: 56rem) calc(100vw - 2rem), 52rem\">",
+            "<source{kind} width=\"{}\" height=\"{}\" srcset=\"{srcset}\" sizes=\"(max-width: 56rem) calc(100vw - 2rem), 52rem\">",
             full.width, full.height
         )
     } else {

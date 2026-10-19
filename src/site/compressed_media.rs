@@ -327,6 +327,319 @@ struct ResponsivePart {
     height: u32,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressiveReceipt {
+    checksum: String,
+    record: ProgressiveRecord,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressiveRecord {
+    key: String,
+    implementation: String,
+    payload_sha256: String,
+    output: Option<ProgressiveOutput>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressiveOutput {
+    replacement: Option<Replacement>,
+    renditions: Vec<ResponsivePart>,
+}
+
+pub(super) fn progressive_cached(
+    asset: Asset,
+    root: Option<&Path>,
+    reduced: bool,
+) -> Result<Asset> {
+    progressive_with(asset, root, reduced, progressive)
+}
+
+fn progressive_with(
+    asset: Asset,
+    root: Option<&Path>,
+    reduced: bool,
+    encode: impl FnOnce(Asset, bool) -> Result<(Asset, bool)>,
+) -> Result<Asset> {
+    ensure!(
+        asset.master_bytes.len() <= MediaLimits::default().max_file_bytes,
+        "archived image exceeds progressive decoder byte limit"
+    );
+    let Some(root) = root else {
+        return encode(asset, reduced).map(|(asset, _)| asset);
+    };
+    let key = cache_key(
+        &asset,
+        &format!("progressive-v1\0{reduced}\0{}", implementation_key()),
+    );
+    let _guard = cache_lock(&key)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Ok(restored) = read_progressive(root, &key, &asset) {
+        COMPACT_HITS.fetch_add(1, Ordering::Relaxed);
+        crate::cache::mark_used(&root.join(format!("{key}.json")));
+        let mut asset = asset;
+        if let Some((replacement, renditions)) = restored {
+            if let Some((bytes, extension, width, height, placeholder)) = replacement {
+                asset.master_hash = crate::model::sha1_hex(&bytes);
+                asset.master_bytes = bytes;
+                asset.master_extension = extension;
+                asset.width = width;
+                asset.height = height;
+                asset.placeholder = placeholder;
+            }
+            asset.renditions = renditions;
+        }
+        return Ok(asset);
+    }
+    COMPACT_MISSES.fetch_add(1, Ordering::Relaxed);
+    let original_hash = crate::model::sha1_hex(&asset.master_bytes);
+    let (asset, eligible) = encode(asset, reduced)?;
+    if let Err(error) = save_progressive(root, &key, &original_hash, &asset, eligible) {
+        log::debug!("could not cache progressive publication image: {error:#}");
+    }
+    Ok(asset)
+}
+
+type ProgressiveImages = Option<(Option<CachedImage>, Vec<crate::media::Rendition>)>;
+
+fn read_progressive(root: &Path, key: &str, source: &Asset) -> Result<ProgressiveImages> {
+    let bytes = read_bounded(&root.join(format!("{key}.json")), MAX_RECEIPT_BYTES)?;
+    let receipt: ProgressiveReceipt = serde_json::from_slice(&bytes)?;
+    let record = receipt.record;
+    ensure!(
+        record.key == key
+            && record.implementation == implementation_key()
+            && receipt.checksum == hex::encode(Sha256::digest(serde_json::to_vec(&record)?)),
+        "stale or corrupt progressive receipt"
+    );
+    let Some(output) = record.output else {
+        return Ok(None);
+    };
+    let limits = MediaLimits::default();
+    ensure!(
+        output.renditions.len() <= crate::media::MAX_STORED_RENDITIONS,
+        "too many progressive image renditions"
+    );
+    let replacement_bytes = output.replacement.as_ref().map_or(0, |part| part.bytes);
+    let total = output
+        .renditions
+        .iter()
+        .try_fold(replacement_bytes, |total, part| {
+            total.checked_add(part.bytes)
+        })
+        .context("progressive payload overflow")?;
+    ensure!(
+        total <= limits.max_article_bytes,
+        "progressive payload exceeds byte limit"
+    );
+    let payload = if total == 0 {
+        Vec::new()
+    } else {
+        read_bounded(&root.join(format!("{key}.image")), total)?
+    };
+    ensure!(
+        payload.len() == total && hex::encode(Sha256::digest(&payload)) == record.payload_sha256,
+        "corrupt progressive payload"
+    );
+    let mut offset = 0;
+    let mut part = |size: usize, width: u32, height: u32| -> Result<Vec<u8>> {
+        ensure!(
+            size > 0
+                && size <= limits.max_file_bytes
+                && width > 0
+                && height > 0
+                && width <= source.width
+                && height <= source.height,
+            "invalid progressive image metadata"
+        );
+        let bytes = &payload[offset..offset + size];
+        ensure!(
+            image::guess_format(bytes)? == ImageFormat::Jpeg,
+            "invalid progressive image format"
+        );
+        let mut reader = ImageReader::with_format(Cursor::new(bytes), ImageFormat::Jpeg);
+        reader.limits(decoder_limits());
+        ensure!(
+            reader.into_dimensions()? == (width, height),
+            "progressive geometry mismatch"
+        );
+        offset += size;
+        Ok(bytes.to_vec())
+    };
+    let replacement = output
+        .replacement
+        .map(|replacement| {
+            ensure!(
+                replacement.extension == "jpg" && replacement.bytes < source.master_bytes.len(),
+                "invalid progressive replacement"
+            );
+            let bytes = part(replacement.bytes, replacement.width, replacement.height)?;
+            ensure!(
+                hex::encode(Sha256::digest(&bytes)) == replacement.sha256,
+                "progressive replacement identity mismatch"
+            );
+            Ok::<_, anyhow::Error>((
+                bytes,
+                "jpg",
+                replacement.width,
+                replacement.height,
+                placeholder::from_hash(&replacement.thumbhash)?,
+            ))
+        })
+        .transpose()?;
+    let mut previous = 0;
+    let mut renditions = Vec::with_capacity(output.renditions.len());
+    for rendition in output.renditions {
+        ensure!(rendition.width > previous, "unordered progressive sizes");
+        let bytes = part(rendition.bytes, rendition.width, rendition.height)?;
+        ensure!(
+            crate::model::sha1_hex(&bytes) == rendition.sha1,
+            "progressive rendition identity mismatch"
+        );
+        previous = rendition.width;
+        renditions.push(crate::media::Rendition {
+            bytes,
+            extension: "jpg",
+            hash: rendition.sha1,
+            width: rendition.width,
+            height: rendition.height,
+        });
+    }
+    Ok(Some((replacement, renditions)))
+}
+
+fn save_progressive(
+    root: &Path,
+    key: &str,
+    original_hash: &str,
+    asset: &Asset,
+    eligible: bool,
+) -> Result<()> {
+    std::fs::create_dir_all(root)?;
+    let mut payload = Vec::new();
+    let output = eligible.then(|| {
+        let replacement = (asset.master_hash != original_hash).then(|| {
+            payload.extend_from_slice(&asset.master_bytes);
+            Replacement {
+                sha256: hex::encode(Sha256::digest(&asset.master_bytes)),
+                bytes: asset.master_bytes.len(),
+                extension: "jpg".into(),
+                width: asset.width,
+                height: asset.height,
+                thumbhash: asset.placeholder.hash.clone(),
+            }
+        });
+        let renditions = asset
+            .renditions
+            .iter()
+            .map(|part| {
+                payload.extend_from_slice(&part.bytes);
+                ResponsivePart {
+                    bytes: part.bytes.len(),
+                    sha1: part.hash.clone(),
+                    width: part.width,
+                    height: part.height,
+                }
+            })
+            .collect();
+        ProgressiveOutput {
+            replacement,
+            renditions,
+        }
+    });
+    let record = ProgressiveRecord {
+        key: key.into(),
+        implementation: implementation_key().into(),
+        payload_sha256: hex::encode(Sha256::digest(&payload)),
+        output,
+    };
+    let checksum = hex::encode(Sha256::digest(serde_json::to_vec(&record)?));
+    let receipt = serde_json::to_vec(&ProgressiveReceipt { checksum, record })?;
+    ensure!(
+        receipt.len() <= MAX_RECEIPT_BYTES,
+        "progressive receipt exceeds size limit"
+    );
+    if !payload.is_empty() {
+        atomic_write(root, &format!("{key}.image"), &payload)?;
+    }
+    atomic_write(root, &format!("{key}.json"), &receipt)?;
+    crate::cache::mark_used(&root.join(format!("{key}.json")));
+    ENCODED_BYTES.fetch_add(payload.len() as u64, Ordering::Relaxed);
+    Ok(())
+}
+
+fn progressive(mut asset: Asset, reduced: bool) -> Result<(Asset, bool)> {
+    let Some(mut image) = publication_image(&asset)? else {
+        return Ok((asset, false));
+    };
+    let transparent = match &image {
+        DynamicImage::ImageRgba8(pixels) => pixels.pixels().any(|pixel| pixel.0[3] != 255),
+        DynamicImage::ImageLumaA8(pixels) => pixels.pixels().any(|pixel| pixel.0[1] != 255),
+        _ => false,
+    };
+    if transparent {
+        return Ok((asset, false));
+    }
+    let quality = if reduced {
+        DEPLOYMENT_POLICY.jpeg_quality
+    } else {
+        85
+    };
+    if reduced && (image.width() > MAX_AXIS || image.height() > MAX_AXIS) {
+        image = image.resize(MAX_AXIS, MAX_AXIS, image::imageops::FilterType::Lanczos3);
+    }
+    let limits = MediaLimits::default();
+    if u64::from(image.width()) * u64::from(image.height()) <= crate::media::MAX_FULL_WIDTH_PIXELS {
+        let encoded = compact::progressive_image(&image, quality)?;
+        if encoded.bytes.len() < asset.master_bytes.len() {
+            asset.width = encoded.decoded.width();
+            asset.height = encoded.decoded.height();
+            asset.placeholder = placeholder::from_image(&encoded.decoded)?;
+            asset.master_hash = crate::model::sha1_hex(&encoded.bytes);
+            asset.master_bytes = encoded.bytes;
+            asset.master_extension = "jpg";
+        }
+    }
+    let mut remaining = limits
+        .max_article_bytes
+        .saturating_sub(asset.master_bytes.len());
+    let mut renditions = Vec::new();
+    for width in limits
+        .rendition_widths
+        .into_iter()
+        .filter(|width| *width > 0 && *width < image.width())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let height =
+            (u64::from(image.height()) * u64::from(width)).div_ceil(u64::from(image.width()));
+        if u64::from(width) * height > crate::media::MAX_FULL_WIDTH_PIXELS {
+            continue;
+        }
+        let resized = image.resize(width, u32::MAX, image::imageops::FilterType::Lanczos3);
+        let encoded = compact::progressive_image(&resized, quality)?;
+        if encoded.bytes.len() >= asset.master_bytes.len()
+            || encoded.bytes.len() > remaining
+            || encoded.bytes.len() > limits.max_file_bytes
+        {
+            continue;
+        }
+        remaining -= encoded.bytes.len();
+        renditions.push(crate::media::Rendition {
+            hash: crate::model::sha1_hex(&encoded.bytes),
+            bytes: encoded.bytes,
+            extension: "jpg",
+            width: encoded.decoded.width(),
+            height: encoded.decoded.height(),
+        });
+    }
+    asset.renditions = renditions;
+    Ok((asset, true))
+}
+
 /// Original-image subscriptions derive responsive copies only when they publish them. Encoded
 /// copies belong to the disposable media cache, never to the append-only archive.
 pub(crate) fn responsive_cached(asset: Asset, root: Option<&Path>) -> Result<Asset> {
@@ -488,6 +801,14 @@ fn save_responsive(root: &Path, key: &str, renditions: &[crate::media::Rendition
 /// Keep source identity while replacing only the deployment bytes. Animation and color-managed
 /// or high-depth images retain their original representation rather than losing information.
 pub(super) fn compact(mut asset: Asset) -> Result<Asset> {
+    let Some(decoded) = publication_image(&asset)? else {
+        return Ok(asset);
+    };
+    compact::apply(&mut asset, &decoded, DEPLOYMENT_POLICY)?;
+    Ok(asset)
+}
+
+fn publication_image(asset: &Asset) -> Result<Option<DynamicImage>> {
     let budget = MediaLimits::default();
     ensure!(
         asset.master_bytes.len() <= budget.max_file_bytes,
@@ -497,7 +818,7 @@ pub(super) fn compact(mut asset: Asset) -> Result<Asset> {
         .context("recognizing archived image for deployment compression")?;
     // An AVIF is already compact, and there is no decoder to re-encode it with.
     if format == ImageFormat::Avif || preserve_animation(&asset.master_bytes, format)? {
-        return Ok(asset);
+        return Ok(None);
     }
     let mut reader = ImageReader::with_format(Cursor::new(&asset.master_bytes), format);
     reader.limits(decoder_limits());
@@ -510,17 +831,17 @@ pub(super) fn compact(mut asset: Asset) -> Result<Asset> {
         "archived image exceeds deployment decoder pixel limit"
     );
     if !matches!(
-        decoder.color_type(),
-        image::ColorType::L8
-            | image::ColorType::La8
-            | image::ColorType::Rgb8
-            | image::ColorType::Rgba8
+        decoder.original_color_type(),
+        image::ExtendedColorType::L8
+            | image::ExtendedColorType::La8
+            | image::ExtendedColorType::Rgb8
+            | image::ExtendedColorType::Rgba8
     ) || decoder
         .icc_profile()
         .map_or(true, |profile| profile.is_some())
     {
         drop(decoder);
-        return Ok(asset);
+        return Ok(None);
     }
     let orientation = decoder
         .orientation()
@@ -528,8 +849,7 @@ pub(super) fn compact(mut asset: Asset) -> Result<Asset> {
     let mut decoded = DynamicImage::from_decoder(decoder)
         .context("decoding archived image for deployment compression")?;
     decoded.apply_orientation(orientation);
-    compact::apply(&mut asset, &decoded, DEPLOYMENT_POLICY)?;
-    Ok(asset)
+    Ok(Some(decoded))
 }
 
 fn decoder_limits() -> image::Limits {
@@ -618,6 +938,84 @@ mod tests {
             &image,
             image::codecs::png::CompressionType::Uncompressed,
         ))
+    }
+
+    #[test]
+    fn progressive_publication_caches_complete_image_families_and_separates_age_policies() {
+        let root = tempfile::tempdir().unwrap();
+        let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(1800, 1000, |x, y| {
+            Rgba([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8, 255])
+        }));
+        let original = asset(png(
+            &image,
+            image::codecs::png::CompressionType::Uncompressed,
+        ));
+        let first = progressive_cached(original.clone(), Some(root.path()), false).unwrap();
+        assert_eq!((first.width, first.height), (1800, 1000));
+        assert_eq!(first.master_extension, "jpg");
+        assert!(!first.renditions.is_empty());
+        for bytes in std::iter::once(&first.master_bytes)
+            .chain(first.renditions.iter().map(|part| &part.bytes))
+        {
+            assert!(
+                bytes.windows(2).any(|marker| marker == [0xff, 0xc2]),
+                "progressive SOF2 marker"
+            );
+            assert!(
+                bytes
+                    .windows(2)
+                    .filter(|marker| *marker == [0xff, 0xda])
+                    .count()
+                    > 1,
+                "multiple scans"
+            );
+            image::load_from_memory(bytes).unwrap();
+        }
+        assert!(first.master_bytes.len() < original.master_bytes.len());
+        assert!(first.renditions.iter().all(|part| part.extension == "jpg"));
+        let cached = progressive_with(original.clone(), Some(root.path()), false, |_, _| {
+            anyhow::bail!("complete cache hit must not decode or encode")
+        })
+        .unwrap();
+        assert_eq!(cached, first);
+        let older = progressive_cached(original.clone(), Some(root.path()), true).unwrap();
+        assert_eq!(older.width, 1600);
+        assert_ne!(older.master_hash, first.master_hash);
+        let key = cache_key(
+            &original,
+            &format!("progressive-v1\0false\0{}", implementation_key()),
+        );
+        std::fs::write(root.path().join(format!("{key}.image")), b"corrupt").unwrap();
+        let repaired = progressive_cached(original.clone(), Some(root.path()), false).unwrap();
+        assert_eq!(repaired, first);
+        assert_eq!(original.master_extension, "png");
+        assert_eq!(
+            image::load_from_memory(&original.master_bytes)
+                .unwrap()
+                .width(),
+            1800
+        );
+    }
+
+    #[test]
+    fn progressive_cache_remembers_protected_images_without_storing_another_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let pixels =
+            DynamicImage::ImageRgba8(ImageBuffer::from_pixel(40, 32, Rgba([20, 40, 60, 128])));
+        let original = asset(png(
+            &pixels,
+            image::codecs::png::CompressionType::Uncompressed,
+        ));
+        assert_eq!(
+            progressive_cached(original.clone(), Some(root.path()), false).unwrap(),
+            original
+        );
+        let cached = progressive_with(original.clone(), Some(root.path()), false, |_, _| {
+            anyhow::bail!("protected format receipt must avoid decoding")
+        })
+        .unwrap();
+        assert_eq!(cached, original);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -882,7 +1280,7 @@ mod tests {
     }
 
     #[test]
-    fn an_avif_master_is_deployed_as_it_was_archived() {
+    fn an_avif_master_stays_exact_with_progressive_publication() {
         // Only the `ftyp` brand: nothing past it is read.
         let mut bytes = 20u32.to_be_bytes().to_vec();
         bytes.extend_from_slice(b"ftypavif\0\0\0\0avif");
@@ -895,6 +1293,7 @@ mod tests {
             ..cache_fixture()
         };
         assert_eq!(compact(original.clone()).unwrap(), original);
+        assert_eq!(progressive(original.clone(), false).unwrap().0, original);
     }
 
     #[test]
@@ -943,11 +1342,13 @@ mod tests {
     }
 
     #[test]
-    fn transparency_is_preserved_exactly_without_resizing() {
+    fn transparency_stays_exact_with_progressive_publication() {
         let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(128, 64, |x, _| {
             Rgba([200, 50, 80, (x * 2) as u8])
         }));
         let original = asset(png(&image, image::codecs::png::CompressionType::Fast));
+        assert_eq!(progressive(original.clone(), false).unwrap().0, original);
+        assert_eq!(progressive(original.clone(), true).unwrap().0, original);
         let output = compact(original.clone()).unwrap();
         assert_eq!(output.master_extension, "png");
         assert!(output.master_bytes.len() <= original.master_bytes.len());
@@ -960,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn tiny_masters_never_grow_and_obsolete_renditions_are_removed() {
+    fn tiny_masters_never_grow_in_compact_or_progressive_publication() {
         let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(1, 1, Rgba([1, 2, 3, 255])));
         let mut original = asset(png(&image, image::codecs::png::CompressionType::Best));
         original.renditions.push(crate::media::Rendition {
@@ -975,10 +1376,13 @@ mod tests {
         assert_eq!(output.master_hash, original.master_hash);
         assert_eq!(output.placeholder, original.placeholder);
         assert!(output.renditions.is_empty());
+        let output = progressive(original.clone(), false).unwrap().0;
+        assert_eq!(output.master_bytes, original.master_bytes);
+        assert!(output.renditions.is_empty());
     }
 
     #[test]
-    fn animated_gifs_and_pngs_are_retained_byte_for_byte() {
+    fn animated_gifs_and_pngs_stay_exact_with_progressive_publication() {
         let mut gif = Vec::new();
         image::codecs::gif::GifEncoder::new(&mut gif)
             .encode_frames([
@@ -1000,11 +1404,13 @@ mod tests {
         for bytes in [gif, apng] {
             let original = asset(bytes);
             assert_eq!(compact(original.clone()).unwrap(), original);
+            assert_eq!(progressive(original.clone(), false).unwrap().0, original);
+            assert_eq!(progressive(original.clone(), true).unwrap().0, original);
         }
     }
 
     #[test]
-    fn high_depth_and_color_profiles_are_preserved() {
+    fn high_depth_and_color_profiles_stay_exact_with_progressive_publication() {
         let high_depth = DynamicImage::ImageRgb16(ImageBuffer::from_fn(128, 64, |x, y| {
             image::Rgb([(x * 503 + y * 7) as u16, (y * 911 + x * 3) as u16, 65001])
         }));
@@ -1027,6 +1433,8 @@ mod tests {
         for bytes in [high_depth_bytes.into_inner(), profiled] {
             let original = asset(bytes);
             assert_eq!(compact(original.clone()).unwrap(), original);
+            assert_eq!(progressive(original.clone(), false).unwrap().0, original);
+            assert_eq!(progressive(original.clone(), true).unwrap().0, original);
         }
     }
 

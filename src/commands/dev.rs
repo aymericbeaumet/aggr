@@ -13,8 +13,49 @@ pub(super) mod snapshot;
 
 const INTERNAL_WORKER: &str = "AGGR_DEV_INTERNAL_WORKER";
 
+pub(super) fn supervised() -> bool {
+    std::env::var_os("AGGR_DEV_SUPERVISED").as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+pub(super) fn restarted() -> bool {
+    supervised()
+        && std::env::var_os("AGGR_DEV_RESTART").as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+pub(super) fn worker_ready(origin: &str, base: &str) -> Result<()> {
+    if supervised() {
+        use std::io::Write as _;
+        writeln!(
+            std::io::stdout().lock(),
+            "\u{1e}aggr-ready {}",
+            serde_json::json!({ "origin": origin, "base": base }),
+        )
+        .context("reporting development worker readiness")?;
+    }
+    Ok(())
+}
+
+pub(super) async fn supervisor_shutdown() -> std::io::Result<()> {
+    if !supervised() {
+        return std::future::pending().await;
+    }
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("aggr-dev-control".into())
+        .spawn(move || {
+            let mut command = String::new();
+            let result = std::io::stdin().read_line(&mut command).map(|_| ());
+            let _ = sender.send(result);
+        })?;
+    receiver
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+}
+
 pub async fn run(config_path: &Path, args: &DevArgs, verbose: u8) -> Result<()> {
-    if std::env::var_os(INTERNAL_WORKER).as_deref() == Some(std::ffi::OsStr::new("1")) {
+    if env!("CARGO_BIN_NAME") == "aggr-dev-worker"
+        || std::env::var_os(INTERNAL_WORKER).as_deref() == Some(std::ffi::OsStr::new("1"))
+    {
         return run_worker(config_path, args).await;
     }
     let (project, _) = prepare(config_path, args.clean).await?;
@@ -29,6 +70,7 @@ pub async fn run(config_path: &Path, args: &DevArgs, verbose: u8) -> Result<()> 
 struct Context {
     repository: std::path::PathBuf,
     cwd: std::path::PathBuf,
+    executable: std::path::PathBuf,
     worker_args: Vec<String>,
     vite_origin: String,
     strict_port: bool,
@@ -40,9 +82,9 @@ fn launch(config_path: &Path, args: &DevArgs, verbose: u8) -> Result<()> {
     ensure!(
         script.is_file()
             && repository
-                .join("web/node_modules/concurrently/package.json")
+                .join("web/node_modules/vite/package.json")
                 .is_file(),
-        "contributor development needs the source checkout and Node packages; run `make setup` in {}",
+        "contributor development needs the source checkout and Node packages; run `make build` in {}",
         repository.display()
     );
     let config = config_path
@@ -51,8 +93,13 @@ fn launch(config_path: &Path, args: &DevArgs, verbose: u8) -> Result<()> {
     let context = Context {
         repository,
         cwd: std::env::current_dir().context("resolving development directory")?,
+        executable: std::env::current_exe().context("resolving development executable")?,
         worker_args: worker_arguments(&config, args, verbose)?,
-        vite_origin: server::vite_origin()?,
+        vite_origin: if std::env::var_os("AGGR_VITE_URL").is_some() {
+            server::vite_origin()?
+        } else {
+            format!("http://127.0.0.1:{}", args.port)
+        },
         strict_port: std::env::var_os("AGGR_VITE_URL").is_some(),
     };
     let status = std::process::Command::new("mise")

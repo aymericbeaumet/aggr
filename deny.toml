@@ -20,6 +20,7 @@ allow = [
   "BSD-2-Clause",        # arrayref, comrak
   "BSD-3-Clause",        # bindgen, brotli, encoding_rs, lol_html, tiny-skia, zstd-sys
   "ISC",                 # ring (Apache-2.0 AND ISC), rustls-webpki, scraper, untrusted
+  "IJG",                 # jpeg-encoder progressive JPEG transform; notice ships with binaries
   "Zlib",                # const_format, foldhash, konst, slotmap, zlib-rs
   "Unicode-3.0",         # ICU4X (icu_*, zerovec, yoke, …) and unicode-ident
   "Unicode-DFS-2016",    # finl_unicode

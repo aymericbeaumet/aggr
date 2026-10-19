@@ -6,13 +6,12 @@
     "node": ">=26"
   },
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --strictPort",
     "test:dev": "node --test dev/*.test.mjs",
     "verify:release": "node dev/verify-release.mjs",
-    "build": "vite build && vite build --config vite.bootstrap.config.ts && vite build --config vite.worker.config.ts",
+    "build": "node build.ts",
     "check": "svelte-check --tsgo --tsconfig ./tsconfig.json && tsc --noEmit -p tsconfig.worker.json",
-    "test": "vitest run",
-    "verify": "npm run check && npm test && npm run build"
+    "test": "node build.ts && vitest run",
+    "verify": "npm run check && npm test"
   },
   "dependencies": {
     "svelte": "^5.57.2"
@@ -21,8 +20,6 @@
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@types/node": "^26.0.0",
     "@typescript/native": "npm:typescript@^7.0.2",
-    "concurrently": "10.0.6",
-    "execa": "10.2.0",
     "jsdom": "^30.1.2",
     "svelte-check": "^4.0.0",
     "typescript": "^6.0.3",

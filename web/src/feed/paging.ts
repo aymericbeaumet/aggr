@@ -1,4 +1,4 @@
-import type { PaginatorCtx } from '../generated/PaginatorCtx';
+import type { PaginatorCtx } from '@aggr-model/PaginatorCtx';
 import { sitePath } from '../model/urls';
 import { positiveInteger } from '../preferences/rules';
 

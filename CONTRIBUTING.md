@@ -2,7 +2,7 @@
 
 For development commands and client ownership, see [client development](docs/client.md)
 and [AGENTS.md](AGENTS.md). Run `make check` before submitting a change. The reader lives in
-`web/`; rebuild its committed bundle with `make client-build` after editing it.
+`web/`; Cargo builds its assets and shared types automatically using the pinned Node toolchain.
 
 ## Contribution license
 

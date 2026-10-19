@@ -3,7 +3,7 @@ import { navigation } from '../navigation';
 import { preferences } from '../state/preferences.svelte';
 import { search, type ResultPage, type SearchDriver } from '../state/search.svelte';
 import { acceptCompletion, complete, completionContext, isCompletingFacet, type Completion } from './completion';
-import { isSearchRow, resultRow, SearchIndexUpgrade } from './display';
+import { isClientRow, resultRow } from './display';
 import { createSession, type Index, type Session } from './engine';
 import { readableQuery, resolveFacet } from './facets';
 import { isFacetKind, parseQuery, QueryError, queryURL, stripSearch, type FilterKind } from './query';
@@ -190,8 +190,8 @@ function restore(): boolean {
     if (!saved || saved.query !== search.text || saved.page !== search.page || !Array.isArray(saved.results?.rows)) return false;
     const { rows, total, page, pages, size } = saved.results;
     if (![total, page, pages, size].every((value) => typeof value === 'number')) return false;
-    if (!rows.every(isSearchRow)) return false;
-    show({ rows: rows.filter(isSearchRow), total: total as number, page: page as number, pages: pages as number, size: size as number });
+    if (!rows.every(isClientRow)) return false;
+    show({ rows: rows.filter(isClientRow), total: total as number, page: page as number, pages: pages as number, size: size as number });
     return true;
   } catch {
     return false;
@@ -264,7 +264,7 @@ async function run(keepRows = false, refresh = false): Promise<void> {
     hideResults();
     search.busy = false;
     search.error =
-      failure instanceof QueryError || failure instanceof SearchIndexUpgrade
+      failure instanceof QueryError
         ? failure.message
         : navigator.onLine
           ? 'Search is unavailable right now. Try again in a moment.'

@@ -17,11 +17,6 @@ describe('display decoding', () => {
     expect(isClientRow({ ...row, preview: { url: 'p.jpg', width: 1, height: 1, alt: null, color: null, placeholder: { data_url: 'data:' } } })).toBe(true);
   });
 
-  it('reports an old complete offline index that needs upgrading instead of hiding its hits', () => {
-    const { html: _html, ...legacy } = row;
-    expect(() => displayRow({ url: '/x/', meta: { aggr_display: hex(legacy) } })).toThrow('This saved search index needs updating');
-  });
-
   it('prefers the highlighted excerpt as text, and the row summary when nothing matched', () => {
     const encoded = hex(row);
     const highlighted = resultRow({ url: '/x/', excerpt: 'the &lt;<mark>borrow</mark>&gt; checker &amp; more', meta: { aggr_display: encoded } });

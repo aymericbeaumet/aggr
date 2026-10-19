@@ -2,7 +2,7 @@
   // `offline.html`'s content block, with the worker's report: the downloads' state and the
   // saved articles, each a link under the site root. The static page carries the same ids for
   // readers without JavaScript, where the list stays empty.
-  import type { ClientPage } from '../generated/ClientPage';
+  import type { ClientPage } from '@aggr-model/ClientPage';
   import { offline } from '../state/offline.svelte';
   import { page as shown } from '../state/page.svelte';
   import { offlineSummary } from './summary';

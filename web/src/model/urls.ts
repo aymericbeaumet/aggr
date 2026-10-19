@@ -1,8 +1,4 @@
-/**
- * The link rules the templates apply through the `url_for`, `site_path`, `facet_page` and
- * `facet_url` filters (`src/site/render.rs`). `base` is the page's relative path to the site
- * root (`./`, `../`, `../../`, …) and every other path is site-relative (`items/blog/plain/`).
- */
+/** Resolve site paths against the page model's relative root. */
 
 /** A URL scheme (`https:`, `mailto:`, `data:`) means the value is not a site path. */
 const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
@@ -37,5 +33,11 @@ export function facetPage(base: string, value: string, kind: FacetKind): string 
  */
 export function facetUrl(base: string, value: string, kind: FacetKind): string {
   const q = `${kind}:${JSON.stringify(value)}`;
-  return `${base}?${new URLSearchParams({ q }).toString()}`;
+  return `${base}?q=${encodeURIComponent(q).replace(/[!'()~]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`).replace(/%20/g, '+')}`;
+}
+
+/** Generated srcsets separate candidates after a width descriptor; URL commas stay intact. */
+export function sourceSet(base: string, value: string): string {
+  return value.replace(/(^|,\s+)(\S+)(\s+\d+w)/g,
+    (_match, separator: string, url: string, descriptor: string) => separator + urlFor(base, url) + descriptor);
 }

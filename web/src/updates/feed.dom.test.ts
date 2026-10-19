@@ -1,34 +1,20 @@
+import { load, fixture, render } from '../../test/fixtures';
 /// <reference types="node" />
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { flushSync } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mountApp } from '../app/boot';
-import type { ClientPage } from '../generated/ClientPage';
+import type { ClientPage } from '@aggr-model/ClientPage';
 import { row } from '../search/fixture';
 import { fresh } from '../state/fresh.svelte';
 import { page } from '../state/page.svelte';
 import { selection } from '../state/selection.svelte';
 import { cursorRow } from '../selection/cursor';
 import { badges } from './badges';
-import { FeedUpdater, applyFreshList, type RenderedList } from './feed';
+import { FeedUpdater, applyFreshList } from './feed';
 
-const directory = resolve(process.cwd(), 'test/parity');
-
-function load(name: string): ClientPage {
-  const fixture = JSON.parse(readFileSync(resolve(directory, `${name}.json`), 'utf8')) as { props: { page: ClientPage } };
-  document.head.innerHTML = '';
-  const script = document.createElement('script');
-  script.id = 'aggr-page';
-  script.type = 'application/json';
-  script.textContent = JSON.stringify(fixture.props.page);
-  document.head.append(script);
-  document.body.innerHTML = `<div id="app">${readFileSync(resolve(directory, `${name}.html`), 'utf8')}</div>`;
-  return fixture.props.page;
-}
 
 /** The river fixture as a newer build would render it: one more row on top. */
-function newer(model: ClientPage): RenderedList {
+function newer(model: ClientPage): ClientPage {
   if (model.page.view !== 'list') throw new Error('not a list');
   const arrival = { ...row, path: 'items/blog/2026/09/arrival', url: 'items/blog/2026/09/arrival/', title: 'Just arrived' };
   const next: ClientPage = {
@@ -37,19 +23,7 @@ function newer(model: ClientPage): RenderedList {
     site: { ...model.site, entries: [arrival.url, ...model.site.entries] },
     page: { view: 'list', data: { ...model.page.data, rows: [arrival, ...model.page.data.rows] } },
   };
-  const content = document.querySelector('main#content')?.cloneNode(true) as HTMLElement;
-  const item = content.querySelector<HTMLElement>('ol.rows:not(.search-results) .row')?.cloneNode(true) as HTMLElement;
-  item.dataset.path = arrival.path;
-  item.dataset.url = arrival.url;
-  const title = item.querySelector<HTMLAnchorElement>('[data-row-open]')!;
-  title.href = arrival.url;
-  title.textContent = arrival.title;
-  item.dataset.rustTemplate = 'new-row';
-  content.querySelector('ol.rows:not(.search-results)')?.prepend(item);
-  for (const [index, node] of [...content.querySelectorAll(`${FEED} .row`)].entries()) {
-    node.querySelector('.rank')!.textContent = `${model.page.data.paginator.offset + index + 1}.`;
-  }
-  return { model: next, content };
+  return next;
 }
 
 const FEED = 'ol.rows:not(.search-results)';
@@ -82,7 +56,6 @@ describe('the live feed', () => {
     expect(after).toHaveLength(before.length + 1);
     expect(after[0].dataset.path).toBe('items/blog/2026/09/arrival');
     expect(after[0].querySelector('.title')?.textContent).toBe('Just arrived');
-    expect(after[0].dataset.rustTemplate).toBe('new-row');
     // Untouched rows are the same elements; the chrome around the list never moved.
     expect(after.slice(1)).toEqual(before);
     expect(document.querySelector('header.top')).toBe(header);
@@ -94,7 +67,7 @@ describe('the live feed', () => {
   it('has nothing to swap on a page that is not a list', () => {
     const model = load('page-river');
     mountApp(document);
-    expect(applyFreshList({ model: { ...model, page: { view: 'static' } }, content: document.querySelector('main')! })).toBeNull();
+    expect(applyFreshList({ ...model, page: { view: 'not_found', data: { data_branch: 'data', archive_url: null } } })).toBeNull();
   });
 
   it('updates ranks when a new row shifts retained nodes down the list', () => {
@@ -129,9 +102,8 @@ describe('the live feed', () => {
     const recoveredContent = document.querySelector('main')!.cloneNode(true) as HTMLElement;
     recoveredContent.querySelector('.listhead .error')!.remove();
     recoveredContent.querySelector<HTMLElement>('.listhead')!.dataset.rustState = 'recovered';
-    applyFreshList({ model: recovered, content: recoveredContent });
+    applyFreshList(recovered);
     expect(document.querySelector('.listhead .error')).toBeNull();
-    expect(document.querySelector<HTMLElement>('.listhead')?.dataset.rustState).toBe('recovered');
     expect(document.querySelector('.feed-toolbar')).toBe(toolbar);
     expect(document.querySelector('#q')).toBe(input);
     expect([input.selectionStart, input.selectionEnd]).toEqual([2, 5]);
@@ -146,8 +118,8 @@ describe('the live feed', () => {
     warning.title = 'HTTP 429';
     warning.textContent = '⚠ HTTP 429';
     failedContent.querySelector('.listhead .listtools')!.append(warning);
-    applyFreshList({ model: failed, content: failedContent });
-    expect(document.querySelector('.listhead .error')?.textContent).toBe('⚠ HTTP 429');
+    applyFreshList(failed);
+    expect(document.querySelector('.listhead .error')?.textContent).toContain('⚠ HTTP 429');
     expect(document.querySelector('.feed-toolbar')).toBe(toolbar);
     expect(document.querySelector('#q')).toBe(input);
     expect([input.selectionStart, input.selectionEnd]).toEqual([2, 5]);

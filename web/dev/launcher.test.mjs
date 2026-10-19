@@ -1,40 +1,49 @@
 import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { backendArguments, commands, readContext } from './context.mjs';
+import { buildArguments, needsBuild, readContext, workerArguments } from './context.mjs';
 
 const context = {
   repository: resolve('source checkout with spaces'),
   cwd: resolve('reader with spaces'),
-  workerArgs: ['--config', 'reader; $(touch never).toml', 'dev', '--port', '8123', '--base-url', 'https://example.com/?literal=$(touch never)&x=1'],
-  viteOrigin: 'http://127.0.0.1:5173',
+  executable: resolve('target/debug/aggr'),
+  workerArgs: ['--config', 'reader; $(touch never).toml', 'dev', '--port', '8123', '--clean', '--base-url', 'https://example.com/?literal=$(touch never)&x=1'],
+  viteOrigin: 'http://127.0.0.1:8123',
 };
 
-test('launcher transports config and flags as JSON without putting them in shell commands', () => {
+test('launcher preserves argument boundaries while keeping the public port out of the worker', () => {
   const decoded = readContext(JSON.stringify(context));
   assert.deepEqual(decoded, context);
-  for (const command of commands(decoded)) {
-    assert(!command.command.includes('touch'));
-    assert(!command.command.includes(context.cwd));
-    assert.deepEqual(JSON.parse(command.env.AGGR_DEV_CONTEXT).workerArgs, context.workerArgs);
-  }
+  const arguments_ = workerArguments(decoded, false);
+  assert.equal(arguments_[1], context.workerArgs[1]);
+  assert.equal(arguments_[arguments_.indexOf('--base-url') + 1], context.workerArgs.at(-1));
+  assert.deepEqual(arguments_.slice(-2), ['--port', '0']);
+  assert(!arguments_.includes('8123'));
+  assert(arguments_.includes('--clean'));
+  assert(!workerArguments(decoded, true).includes('--clean'));
 });
 
-test('backend preserves worker argument boundaries and watches only Rust and Cargo inputs', () => {
-  const arguments_ = backendArguments(context);
-  const cargo = arguments_.indexOf('cargo');
-  assert.deepEqual(arguments_.slice(cargo), ['cargo', 'run', '--locked', '--manifest-path', join(context.repository, 'Cargo.toml'), '--', ...context.workerArgs]);
-  assert(arguments_.includes('--shell=none'));
-  assert(arguments_.includes(join(context.repository, 'src')));
-  assert(arguments_.includes('/src/theme/**'));
-  assert(!arguments_.includes('web/src/generated'));
-  assert.equal(arguments_[arguments_.indexOf('--stop-signal') + 1], 'SIGINT');
+test('rebuilds target a different executable and exclude frontend edits in ordinary dev', () => {
+  const arguments_ = buildArguments(context);
+  assert.equal(arguments_[0], 'build');
+  assert.equal(arguments_[arguments_.indexOf('--bin') + 1], 'aggr-dev-worker');
+  assert.equal(arguments_[arguments_.indexOf('--manifest-path') + 1], join(context.repository, 'Cargo.toml'));
+  assert(!arguments_.includes('run'));
+  for (const file of ['src/site/client.rs', 'crates/aggr-ui-model/src/lib.rs', 'crates/aggr-ui-model/Cargo.toml', 'Cargo.lock', 'build.rs']) {
+    assert(needsBuild(context, join(context.repository, file)), file);
+  }
+  for (const file of ['web/src/App.svelte', 'web/.generated/types/ClientPage.ts', 'target/debug/aggr', 'aggr.toml']) {
+    assert(!needsBuild(context, join(context.repository, file)), file);
+  }
+  const release = { ...context, workerArgs: [...context.workerArgs, '--release'] };
+  assert(needsBuild(release, join(context.repository, 'web/src/App.svelte')));
+  assert(!needsBuild(release, join(context.repository, 'web/node_modules/vite/index.js')));
 });
 
 test('missing or malformed contexts fail before a subprocess starts', () => {
   assert.throws(() => readContext(''), /cargo run -- dev or make dev/);
   assert.throws(() => readContext('{'), SyntaxError);
-  for (const invalid of [{}, { ...context, cwd: 'relative' }, { ...context, workerArgs: [1] }]) {
+  for (const invalid of [{}, { ...context, cwd: 'relative' }, { ...context, executable: '' }, { ...context, workerArgs: [1] }]) {
     assert.throws(() => readContext(JSON.stringify(invalid)), /Invalid development launcher context/);
   }
 });

@@ -86,8 +86,8 @@ run takes, is in [benchmarks](docs/benchmarks.md).
 [Hosting](docs/hosting.md) · [Rendering](docs/rendering.md) · [Git model](docs/git-model.md) ·
 [Interoperability](docs/interoperability.md) · [Performance](docs/performance.md)
 
-Rust generates the site. The reader is a Svelte application compiled ahead of time and shipped
-inside the binary, so building a site never needs Node. See [contributing](CONTRIBUTING.md) and
+Rust prepares the archive and renders a shared Svelte application embedded in the binary.
+Cargo builds the UI automatically with Node; the installed binary needs no Node to generate sites. See [contributing](CONTRIBUTING.md) and
 [client development](docs/client.md).
 
 ## License

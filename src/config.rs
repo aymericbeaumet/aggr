@@ -76,8 +76,10 @@ pub struct SiteConfig {
     pub indexing: bool,
     /// Maximum logical bytes in a successful generated site, including search and assets.
     pub build_max_bytes: u64,
-    /// Publication-age window whose retained media keeps its full quality in the site.
+    /// Publication-age window whose retained media keeps its full resolution in the site.
     pub media_full_quality_days: u32,
+    /// Encoding of eligible retained images in the published site; never changes the archive.
+    pub media_image_format: MediaImageFormat,
     pub out: PathBuf,
     /// Emit install metadata and cache a bounded offline set in a secure context.
     pub pwa: bool,
@@ -118,6 +120,14 @@ where
     Err(serde::de::Error::custom("`[site.params]` has been removed"))
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MediaImageFormat {
+    #[default]
+    Original,
+    ProgressiveJpeg,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SiteIdentityConfig {
@@ -150,6 +160,7 @@ impl Default for SiteConfig {
             indexing: false,
             build_max_bytes: 1_000_000_000,
             media_full_quality_days: 30,
+            media_image_format: MediaImageFormat::Original,
             out: PathBuf::from("_site"),
             pwa: true,
             legacy_preferences: (),
@@ -1765,6 +1776,24 @@ media_download_strategy = "remote"
     }
 
     #[test]
+    fn progressive_jpeg_publication_is_an_explicit_site_option() {
+        let progressive = Config::parse("[site]\nmedia_image_format = 'progressive-jpeg'\n");
+        assert!(progressive.is_ok(), "{progressive:?}");
+        let progressive = progressive.unwrap();
+        assert_eq!(
+            progressive.site.media_image_format,
+            MediaImageFormat::ProgressiveJpeg
+        );
+        assert_eq!(progressive.defaults.media, MediaPolicy::Remote);
+        assert_eq!(
+            Config::default().site.media_image_format,
+            MediaImageFormat::Original
+        );
+        assert!(Config::parse("[site]\nmedia_image_format = 'original'\n").is_ok());
+        assert!(Config::parse("[site]\nmedia_image_format = 'jpeg'\n").is_err());
+    }
+
+    #[test]
     fn shipped_defaults_match_compiled_defaults() {
         let config = Config::parse(DEFAULTS).unwrap();
         let compiled = Config::default();
@@ -1782,6 +1811,10 @@ media_download_strategy = "remote"
         assert_eq!(
             config.site.media_full_quality_days,
             compiled.site.media_full_quality_days
+        );
+        assert_eq!(
+            config.site.media_image_format,
+            compiled.site.media_image_format
         );
         assert_eq!(config.site.out, compiled.site.out);
         assert_eq!(config.site.pwa, compiled.site.pwa);

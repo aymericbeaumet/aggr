@@ -9,7 +9,6 @@ node = "26.12.0"
 ninja = "1.13.2"
 chromedriver = { version = "155.0.8059.39", os = ["linux/x64", "macos", "windows/x64"] }
 rust = { version = "1.99.0", profile = "default" }
-watchexec = "2.8.0"
 
 # Keep the browser and driver on the same Chrome for Testing release.
 [tools."http:chrome-for-testing"]

@@ -190,6 +190,23 @@ pub fn canonical_name(url: &Url) -> Option<String> {
     })
 }
 
+/// A readable label for a publisher. Catalogue IDs keep their real destination and identity,
+/// while a resolved show title can replace the opaque path in visible text.
+pub fn display_name(url: &Url, title: &str) -> Option<String> {
+    let canonical = canonical_name(url)?;
+    if !opaque(url) {
+        return Some(canonical);
+    }
+    let name = slug::slugify(title.split(['|', ':']).next().unwrap_or(title));
+    let names_platform = Url::parse(&format!("https://{title}"))
+        .ok()
+        .is_some_and(|named| host(&named) == host(url));
+    if name.is_empty() || title.contains("://") || names_platform {
+        return Some(canonical);
+    }
+    Some(format!("{}/{name}", authority(url)?))
+}
+
 /// The channel a YouTube feed endpoint describes. Feed URLs state the transport; this is the
 /// publisher behind it.
 pub fn youtube_channel(url: &Url) -> Option<String> {

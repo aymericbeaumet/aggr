@@ -89,6 +89,29 @@ pub fn compact_image(image: &DynamicImage, policy: CompactPolicy) -> Result<Comp
     })
 }
 
+/// A progressive publication copy. Callers first exclude transparency, animation, profiles and
+/// high-depth pixels; this encoder must never silently flatten one of those representations.
+pub(crate) fn progressive_image(image: &DynamicImage, quality: u8) -> Result<Compacted> {
+    let rgb = image.to_rgb8();
+    let mut bytes = Vec::new();
+    let mut encoder = jpeg_encoder::Encoder::new(&mut bytes, quality);
+    encoder.set_progressive(true);
+    encoder
+        .encode(
+            rgb.as_raw(),
+            rgb.width().try_into().context("progressive JPEG width")?,
+            rgb.height().try_into().context("progressive JPEG height")?,
+            jpeg_encoder::ColorType::Rgb,
+        )
+        .context("encoding progressive JPEG")?;
+    let decoded = image::load_from_memory(&bytes).context("verifying progressive JPEG")?;
+    Ok(Compacted {
+        bytes,
+        extension: "jpg",
+        decoded,
+    })
+}
+
 /// Replace an asset's master with its compact copy when that copy is actually smaller, and drop
 /// the responsive companions either way: lossless copies can outweigh the bounded master they
 /// were derived from, and the browser can scale it. The source URL stays the article's key.

@@ -59,7 +59,7 @@ jobs:
       - uses: jdx/mise-action@v5
         with:
           version: 2026.10.11
-          install_args: rust cmake ninja
+          install_args: rust node cmake ninja
       - name: Install Windows x64 assembler
         if: matrix.name == 'windows-amd64'
         run: mise install http:nasm
@@ -75,11 +75,11 @@ jobs:
           ARCHIVE: aggr-${{ matrix.name }}
         run: |
           mkdir dist
-          cp LICENSE target/release/
+          cp LICENSE THIRD_PARTY_NOTICES target/release/
           if [[ "$ARCHIVE" == aggr-windows-* ]]; then
-            (cd target/release && 7z a "../../dist/$ARCHIVE.zip" aggr.exe LICENSE)
+            (cd target/release && 7z a "../../dist/$ARCHIVE.zip" aggr.exe LICENSE THIRD_PARTY_NOTICES)
           else
-            tar -C target/release -czf "dist/$ARCHIVE.tar.gz" aggr LICENSE
+            tar -C target/release -czf "dist/$ARCHIVE.tar.gz" aggr LICENSE THIRD_PARTY_NOTICES
           fi
       - uses: actions/upload-artifact@v7
         with:

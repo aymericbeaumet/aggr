@@ -1,5 +1,6 @@
 [package]
 name = "aggr"
+default-run = "aggr"
 version = "2.0.0"
 edition = "2024"
 rust-version = "1.96.0"
@@ -11,7 +12,25 @@ readme = "readme.md"
 keywords = ["rss", "atom", "feed", "reader", "static-site"]
 categories = ["command-line-utilities", "web-programming"]
 
+[workspace]
+members = ["crates/aggr-ui-model"]
+
+[features]
+dev-worker = []
+
+[[bin]]
+name = "aggr-dev-worker"
+path = "src/dev_worker.rs"
+required-features = ["dev-worker"]
+test = false
+bench = false
+
+[build-dependencies]
+aggr-ui-model = { path = "crates/aggr-ui-model", features = ["typescript"] }
+sha2 = "0.11"
+
 [dependencies]
+aggr-ui-model = { path = "crates/aggr-ui-model" }
 ammonia = "4"
 anyhow = "1"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
@@ -33,8 +52,8 @@ hayro = { version = "0.8.0", features = ["embed-fonts"] }
 hex = "0.4"
 htmd = "0.5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico", "tiff", "qoi"] }
+jpeg-encoder = "0.7.1"
 log = "0.4"
-minijinja = { version = "2", features = ["loader", "json"] }
 notify = "8"
 pagefind = { version = "1.5.2", default-features = false }
 quick-xml = "0.42"
@@ -48,7 +67,7 @@ reqwest = { version = "0.13", default-features = false, features = [
   "http2",
   "stream",
 ] }
-rust-embed = { version = "8", features = ["debug-embed"] }
+rquickjs = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 scraper = "0.27"
 serde = { version = "1", features = ["derive"] }
@@ -72,7 +91,6 @@ thumbhash = "0.1.0"
 resvg = { version = "0.48.1", default-features = false, features = ["text"] }
 
 [dev-dependencies]
-ts-rs = { version = "12", features = ["serde-json-impl"] }
 assert_cmd = "2"
 fantoccini = { version = "0.22", default-features = false }
 httpmock = "0.8"

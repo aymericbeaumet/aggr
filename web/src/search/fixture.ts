@@ -1,5 +1,4 @@
-import type { ClientRow } from '../generated/ClientRow';
-import type { ClientSearchRow } from '../generated/ClientSearchRow';
+import type { ClientRow } from '@aggr-model/ClientRow';
 
 /** One row as the build encodes it into a search document's display metadata, for tests. */
 const plain: ClientRow = {
@@ -28,14 +27,11 @@ const plain: ClientRow = {
   },
 };
 
-/** A tiny pre-rendered test fragment; production markup comes exclusively from Rust. */
-export function searchRow(value: ClientRow): ClientSearchRow {
-  const escape = (text: string) => text.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);
-  return { ...value, html: `<li class="row h-entry age-${escape(value.age_band)}" data-path="${escape(value.path)}" data-url="${escape(value.url)}" data-link="${escape(value.link)}"><span class="rank">1.</span><div class="row-copy"><a class="title" data-row-open href="${escape(value.url)}">${escape(value.title)}</a><div class="meta"><a class="u-bookmark-of" href="${escape(value.metadata.original)}">original</a></div></div></li>` };
+/** Search carries the same typed row used by feed pages. */
+export function searchRow(value: ClientRow): ClientRow {
+  return value;
 }
 
-export const row = searchRow(plain);
-
-/** `aggr_display` as Rust writes it: the JSON's UTF-8 bytes, hex-encoded. */
+export const row = plain;
 export const hex = (value: unknown): string =>
   Array.from(new TextEncoder().encode(JSON.stringify(value)), (byte) => byte.toString(16).padStart(2, '0')).join('');

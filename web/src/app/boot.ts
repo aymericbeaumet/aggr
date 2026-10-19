@@ -1,52 +1,44 @@
-import { flushSync, mount, unmount } from 'svelte';
-import { contentElement } from '../model/extract';
+import { flushSync, hydrate, unmount } from 'svelte';
+import { extract } from '../model/extract';
 import { readModel } from '../model/page';
 import { navigation } from '../navigation';
 import { installFrameFocus } from '../media/frame-focus';
 import { installShortcuts } from '../shortcuts';
 import { installShortcutHelp } from '../shortcuts/help';
-import { installSearchIntent } from '../shortcuts/search';
-import { installReadingHeader } from '../article/readingHeader';
 import { startClock } from '../state/clock.svelte';
 import { page, type Shown } from '../state/page.svelte';
 import { loadPreferences } from '../state/preferences.svelte';
 import { selection } from '../state/selection.svelte';
-import NowPlaying from './NowPlaying.svelte';
-import { enhancePage, releasePage } from './content';
-import { installChrome } from './chrome.svelte';
+import App from './App.svelte';
 import {
-  installFeedChrome,
   installKeyboardInset,
   installPictureStates,
   installShiftHover,
   installTapFeedback,
   markPlatform,
-  settlePictures,
 } from './platform';
 import { pageArrived, startReader } from './reader';
 
 const persistent = new WeakMap<Document, () => void>();
 
-/** Keep Rust's page intact and install stateful behavior plus the client-only media island. */
+/** Hydrate the rendered tree without replacing its root or article nodes. */
 export function mountApp(doc: Document = document): Shown | null {
-  const model = readModel(doc.getElementById('aggr-page')?.textContent);
+  const extracted = extract(doc);
   const existing = doc.getElementById('app');
-  if (!model || !existing) return null;
-  const content = contentElement(existing, model);
-  if (!(content instanceof HTMLElement)) return null;
+  if (!extracted || !existing) return null;
   persistent.get(doc)?.();
-  releasePage(doc);
+  const { model, bodyHtml } = extracted;
   page.root = new URL(model.base, doc.baseURI).href;
-  page.icon = doc.querySelector('link[rel="icon"]')?.getAttribute('href') ?? null;
-  if (page.icon) page.icon = new URL(page.icon, doc.baseURI).href;
-  const shown: Shown = { model, content, href: doc.location.href };
+  const shown: Shown = { model, bodyHtml, href: doc.location.href };
   page.show(shown);
-  const target = doc.getElementById('now-playing-root');
-  if (target) {
-    const instance = mount(NowPlaying, { target });
-    persistent.set(doc, () => { void unmount(instance); });
-  }
-  enhancePage(content, model);
+  const app = hydrate(App, {
+    target: existing,
+    props: {
+      get page() { return page.model ?? model; },
+      get bodyHtml() { return page.bodyHtml; },
+    },
+  });
+  persistent.set(doc, () => { void unmount(app); });
   flushSync();
   return shown;
 }
@@ -69,7 +61,6 @@ export function boot(): void {
   safely('clock', () => startClock());
   safely('selection', () => selection.configure(root.pathname, sessionStorage));
   if (!mountApp()) return;
-  safely('chrome', installChrome);
   safely('platform', markPlatform);
   safely('shift-hover', installShiftHover);
   safely('tap-feedback', installTapFeedback);
@@ -79,19 +70,8 @@ export function boot(): void {
   safely('shortcuts', installShortcuts);
   safely('frame-focus', installFrameFocus);
   // Deployment polling, the new-entry badges, pull-to-refresh and the service worker.
-  safely('reader', () => startReader());
-  // Everything that belongs to the page on screen, run when it arrives: now, and again each time
-  // another page is swapped in. What it sets up ends with the page's signal.
-  safely('navigation', () =>
-    navigation.install([
-      () => settlePictures(),
-      (signal) => installFeedChrome(signal),
-      (signal) => installReadingHeader(signal),
-      (signal) => installSearchIntent(signal),
-      (signal) => navigation.speculate(signal),
-      () => pageArrived(),
-    ]),
-  );
+  safely('reader', () => { startReader(); pageArrived(); });
+  safely('navigation', () => navigation.install());
   // One readiness signal, for styles that only apply once enhancement is in place and for the
   // browser contract suite.
   flushSync();

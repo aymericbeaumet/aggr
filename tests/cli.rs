@@ -1949,8 +1949,12 @@ fn build_renders_the_site_and_release_needs_a_url() {
     assert!(!index.contains(">Latest</a>"));
     assert!(index.contains("id=\"q\""));
     let tag = std::fs::read_to_string(site.join("tags/example/index.html")).unwrap();
-    let tag = tag.replace("\r\n", "\n");
-    assert!(tag.contains("<h1>\n      #example\n"), "{tag}");
+    let tag = scraper::Html::parse_document(&tag);
+    let heading = tag
+        .select(&scraper::Selector::parse("h1").unwrap())
+        .next()
+        .unwrap();
+    assert_eq!(heading.text().collect::<String>().trim(), "#example");
     let search_catalogue: serde_json::Value =
         serde_json::from_slice(&std::fs::read(site.join("search-catalog.json")).unwrap()).unwrap();
     assert!(
@@ -1964,7 +1968,21 @@ fn build_renders_the_site_and_release_needs_a_url() {
     // Installable and readable offline: manifest, worker precaching the newest pages, fallback.
     assert!(index.contains("rel=\"manifest\""), "{index}");
     let sw = std::fs::read_to_string(site.join("sw.js")).unwrap();
-    assert!(sw.contains("\"assets/style-"), "{sw}");
+    let document = scraper::Html::parse_document(&index);
+    let stylesheet = document
+        .select(&scraper::Selector::parse("link[rel='stylesheet']").unwrap())
+        .next()
+        .unwrap()
+        .value()
+        .attr("href")
+        .unwrap();
+    assert!(
+        worker_json(&sw, "precache")
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["url"] == stylesheet.trim_start_matches("./"))
+    );
     assert!(sw.contains("\"assets/app/app-"), "{sw}");
     // Installation caches the shell; the separate download catalogue retains article families.
     let article = "items/demo/2026-09-01-hello-there/";
@@ -2018,7 +2036,10 @@ fn build_renders_the_site_and_release_needs_a_url() {
         "github.io hosts need no CNAME"
     );
     let manifest = std::fs::read_to_string(site.join("manifest.webmanifest")).unwrap();
-    assert!(manifest.contains("\"start_url\": \"./\""), "{manifest}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&manifest).unwrap()["start_url"],
+        "./"
+    );
 
     repo.write_config(
         &server.url("/feed.xml"),

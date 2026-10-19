@@ -1,231 +1,8 @@
-//! The typed page model the reader boots from. Every HTML page embeds one `ClientPage` as JSON
-//! (`<script id="aggr-page">`); the client enhances the Rust-rendered document from this model, and
-//! `ts-rs` exports these structs to `web/src/generated/` so both sides share one contract. Field
-//! names stay snake_case, matching the templates and the other JSON outputs. Every URL is a site
-//! path (relative to the site root), which the client joins onto `base` once.
+//! Prepare the typed page contract from local archive and site values.
 
-use serde::Serialize;
-
-use super::context::{
-    BuildCtx, CategoryCtx, DiscussionLinkCtx, ItemCtx, PageCtx, PaginatorCtx, PreviewCtx, SiteCtx,
-    SourceCtx,
-};
-use super::display::Metadata;
-use crate::config::preferences::PreferenceSchema;
-use crate::content::ResourceLink;
+use super::context::{BuildCtx, CategoryCtx, ItemCtx, PageCtx, PreviewCtx, SiteCtx, SourceCtx};
 use crate::model::ContentKind;
-
-#[cfg(test)]
-mod parity;
-
-/// Everything the client needs to render and navigate one page.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientPage {
-    /// Relative path from this page to the site root (`../../`); the client resolves it once.
-    pub base: String,
-    /// Site path of this page, `""` for the root.
-    pub path: String,
-    /// `river`, `source`, `category`, `tag`, `item`, `browse`, `preferences`, `404`, `offline`, …
-    pub kind: String,
-    pub title: String,
-    pub site: ClientSite,
-    pub build: ClientBuild,
-    pub page: ClientView,
-}
-
-/// Site-wide values, identical on every page of one build.
-#[derive(Debug, Clone, Default, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientSite {
-    pub title: String,
-    pub language: String,
-    /// Whether a manifest and service worker were built.
-    pub pwa: bool,
-    pub discussions: Vec<DiscussionLinkCtx>,
-    /// The first nine feed entries, for the `g 1` … `g 9` shortcuts.
-    pub entries: Vec<String>,
-    /// Browser-facing page for the source config, when the build knows one; the header links
-    /// the site's own `aggr.toml` copy otherwise.
-    pub config_url: Option<String>,
-    pub assets: ClientAssets,
-}
-
-/// Site paths of the compiled client, resolved through Vite's manifest at build time.
-#[derive(Debug, Clone, Default, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientAssets {
-    pub app: Option<String>,
-    pub css: Option<String>,
-    /// Chunks the entry imports eagerly, for `<link rel="modulepreload">`.
-    pub imports: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientBuild {
-    pub version: String,
-    /// Binary release and effective template/static bytes, independent of feed or config data.
-    pub app: String,
-    /// Semantic content and rendered configuration, independent of rebuild time and app bytes.
-    pub content: String,
-}
-
-/// The behavior available on a Rust-rendered page. Navigation adopts its static markup;
-/// interactive islands use these typed values without duplicating page templates.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-#[serde(tag = "view", content = "data", rename_all = "snake_case")]
-pub enum ClientView {
-    List(Box<ClientList>),
-    Article(Box<ClientArticle>),
-    Preferences(Box<ClientPreferences>),
-    Offline,
-    Static,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientList {
-    pub rows: Vec<ClientRow>,
-    pub paginator: PaginatorCtx,
-    /// The source, category or tag this list is scoped to; `None` on the river.
-    pub scope: Option<ClientScope>,
-    pub error: Option<ClientSourceError>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientScope {
-    /// `source`, `category` or `tag`.
-    pub kind: String,
-    pub slug: String,
-    pub name: String,
-    pub site_url: Option<String>,
-    /// Readable profile label of the source's URL, shown beside its name.
-    pub profile: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientSourceError {
-    pub message: String,
-    /// RFC 3339.
-    pub since: String,
-}
-
-/// One row: a feed entry, a related card, an article header or a search result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientRow {
-    /// `items/<source>/<yyyy>/<mm>/<stem>`, the identity used by tab state and search.
-    pub path: String,
-    /// Site path of the item page.
-    pub url: String,
-    pub link: String,
-    pub title: String,
-    pub language: Option<String>,
-    pub excerpt: String,
-    pub age_band: String,
-    pub category: Option<String>,
-    pub labels: Vec<ClientLabel>,
-    pub preview: Option<ClientPreview>,
-    pub metadata: Metadata,
-}
-
-/// A search result carries the same Rust-rendered row as a static feed. The fragment's local
-/// URLs are relative to the site root; the client resolves them before inserting it on any page.
-/// Initial page models omit this HTML because their rows already exist in the document.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientSearchRow {
-    #[serde(flatten)]
-    pub row: ClientRow,
-    pub html: String,
-}
-
-impl ClientSearchRow {
-    pub(super) fn render(
-        renderer: &super::render::Renderer,
-        site: &SiteCtx,
-        item: &ItemCtx,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            row: ClientRow::from(item),
-            html: renderer.render(
-                "_item.html",
-                minijinja::context! {
-                    site => site,
-                    item => item,
-                    page => minijinja::context! { root => "" },
-                    rank => 1,
-                },
-            )?,
-        })
-    }
-}
-
-/// A topic label with the slug its tag page and query use.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientLabel {
-    pub name: String,
-    pub slug: String,
-}
-
-/// What a row needs to draw a thumbnail. The ThumbHash stays out: the build has already decoded
-/// it into `data_url`, and nothing in the reader reads the hash.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientPreview {
-    pub url: String,
-    pub width: u32,
-    pub height: u32,
-    pub alt: Option<String>,
-    pub color: Option<String>,
-    pub placeholder: ClientPlaceholder,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientPlaceholder {
-    pub data_url: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientArticle {
-    pub header: ClientRow,
-    pub authors: Vec<String>,
-    pub resources: Vec<ResourceLink>,
-    pub access: ClientAccess,
-    pub has_margin_notes: bool,
-    pub previous: Option<ClientRow>,
-    pub next: Option<ClientRow>,
-    pub recommended: Vec<ClientRow>,
-}
-
-/// Why an article body may be missing.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ClientAccess {
-    Normal,
-    SubscriptionRequired {
-        archive_lookup_url: Option<String>,
-    },
-    TitlesOnly,
-    /// A feed kept no article text and no media. The original link is the way to read it.
-    Missing,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-pub struct ClientPreferences {
-    pub schema: PreferenceSchema,
-    /// Typed initial browser settings, keyed like preference exports.
-    pub values: serde_json::Value,
-}
+pub use aggr_ui_model::*;
 
 /// The per-build halves of a `ClientPage`, prepared once and cloned into every page.
 #[derive(Debug, Clone, Default)]
@@ -241,6 +18,8 @@ impl Shared {
                 title: site.title.clone(),
                 language: site.language.clone(),
                 pwa: site.pwa,
+                hermetic: site.hermetic,
+                preference_rules: site.preference_schema.bootstrap.clone(),
                 discussions: site.discussions.clone(),
                 entries: site.entry_shortcuts.clone(),
                 config_url: site
@@ -258,28 +37,29 @@ impl Shared {
     }
 }
 
-impl ClientPage {
-    fn new(shared: &Shared, page: &PageCtx, view: ClientView) -> Self {
-        Self {
+impl Shared {
+    fn page(&self, page: &PageCtx, view: ClientView) -> ClientPage {
+        ClientPage {
+            head: ClientHead::default(),
             base: page.root.clone(),
             path: page.path.clone(),
             kind: page.kind.clone(),
             title: page.title.clone(),
-            site: shared.site.clone(),
-            build: shared.build.clone(),
+            site: self.site.clone(),
+            build: self.build.clone(),
             page: view,
         }
     }
 
     /// One pager of a list: the river, or a source, category or tag archive.
     pub(super) fn list(
-        shared: &Shared,
+        &self,
         page: &PageCtx,
         paginator: &PaginatorCtx,
         rows: &[ItemCtx],
         source: Option<&SourceCtx>,
         category: Option<&CategoryCtx>,
-    ) -> Self {
+    ) -> ClientPage {
         let scope = match (page.kind.as_str(), source, category) {
             ("source", Some(source), _) => Some(ClientScope {
                 kind: "source".into(),
@@ -309,8 +89,7 @@ impl ClientPage {
                     .since
                     .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
             });
-        Self::new(
-            shared,
+        self.page(
             page,
             ClientView::List(Box::new(ClientList {
                 rows: rows.iter().map(ClientRow::from).collect(),
@@ -323,11 +102,11 @@ impl ClientPage {
 
     /// A standalone document: an article, the preferences and offline pages, or static markup.
     pub(super) fn simple(
-        shared: &Shared,
+        &self,
         page: &PageCtx,
         item: Option<&ItemCtx>,
         site: &SiteCtx,
-    ) -> Self {
+    ) -> ClientPage {
         let view = match (page.kind.as_str(), item) {
             (_, Some(item)) => ClientView::Article(Box::new(ClientArticle::from(item))),
             ("preferences", None) => ClientView::Preferences(Box::new(ClientPreferences {
@@ -335,9 +114,17 @@ impl ClientPage {
                 values: site.preferences.clone(),
             })),
             ("offline", None) => ClientView::Offline,
-            _ => ClientView::Static,
+            _ => ClientView::NotFound(ClientNotFound {
+                data_branch: site.data_branch.clone(),
+                archive_url: site.repository.as_ref().map(|repository| {
+                    format!(
+                        "https://github.com/{repository}/tree/{}/items",
+                        site.data_branch
+                    )
+                }),
+            }),
         };
-        Self::new(shared, page, view)
+        self.page(page, view)
     }
 }
 
@@ -387,8 +174,20 @@ impl From<&ItemCtx> for ClientArticle {
             header: ClientRow::from(item),
             authors: item.authors.clone(),
             resources: item.resources.clone(),
-            access: ClientAccess::of(item),
+            access: access(item),
             has_margin_notes: item.has_margin_notes,
+            media: media(item),
+            lead: item.article_preview.as_ref().map(|preview| ClientLead {
+                url: preview.url.clone(),
+                srcset: preview.srcset.clone(),
+                width: preview.width,
+                height: preview.height,
+                alt: preview.alt.clone(),
+                color: Some(preview.color.clone()),
+                placeholder: ClientPlaceholder {
+                    data_url: preview.placeholder.data_url.clone(),
+                },
+            }),
             previous: item.previous_article.clone(),
             next: item.next_article.clone(),
             recommended: item.recommended_articles.clone(),
@@ -396,42 +195,70 @@ impl From<&ItemCtx> for ClientArticle {
     }
 }
 
-impl ClientAccess {
-    /// Mirrors the notices `item.html` renders above the body.
-    fn of(item: &ItemCtx) -> Self {
-        let flag = |key: &str| {
-            item.extra
-                .get(key)
-                .and_then(serde_yaml_ng::Value::as_bool)
-                .unwrap_or(false)
+fn access(item: &ItemCtx) -> ClientAccess {
+    let flag = |key: &str| {
+        item.extra
+            .get(key)
+            .and_then(serde_yaml_ng::Value::as_bool)
+            .unwrap_or(false)
+    };
+    if flag("subscription_required") {
+        return ClientAccess::SubscriptionRequired {
+            archive_lookup_url: item
+                .extra
+                .get("archive_lookup_url")
+                .and_then(serde_yaml_ng::Value::as_str)
+                .map(str::to_string),
         };
-        if flag("subscription_required") {
-            return Self::SubscriptionRequired {
-                archive_lookup_url: item
-                    .extra
-                    .get("archive_lookup_url")
-                    .and_then(serde_yaml_ng::Value::as_str)
-                    .map(str::to_string),
-            };
+    }
+    let has_media = item.video.is_some()
+        || item.document.is_some()
+        || item.native_media.is_some()
+        || item.interactive.is_some()
+        || item.article_preview.is_some();
+    let blank = item
+        .body_html
+        .as_deref()
+        .is_none_or(|html| html.trim().is_empty());
+    if blank && !has_media {
+        // Titles-only sources announce themselves. An empty feed body is an article the
+        // capture did not keep — aggregator bookkeeping that was stripped, or a page that
+        // yielded nothing — and the original link is what a reader can open.
+        if item.content == ContentKind::None {
+            return ClientAccess::TitlesOnly;
         }
-        let has_media = item.video.is_some()
-            || item.document.is_some()
-            || item.native_media.is_some()
-            || item.interactive.is_some()
-            || item.article_preview.is_some();
-        let blank = item
-            .body_html
-            .as_deref()
-            .is_none_or(|html| html.trim().is_empty());
-        if blank && !has_media {
-            // Titles-only sources announce themselves. An empty feed body is an article the
-            // capture did not keep — aggregator bookkeeping that was stripped, or a page that
-            // yielded nothing — and the original link is what a reader can open.
-            if item.content == ContentKind::None {
-                return Self::TitlesOnly;
+        return ClientAccess::Missing;
+    }
+    ClientAccess::Normal
+}
+
+fn media(item: &ItemCtx) -> Option<ClientMedia> {
+    if let Some(document) = &item.document {
+        Some(ClientMedia::Document {
+            url: document.local_url.as_ref().unwrap_or(&document.url).clone(),
+        })
+    } else if let Some(video) = &item.video {
+        Some(ClientMedia::Video {
+            provider: video.provider.into(),
+            title: video.title.into(),
+            embed_url: video.embed_url.clone(),
+            requires_parent: video.requires_parent,
+        })
+    } else if let Some(native) = &item.native_media {
+        Some(if native.kind == "video" {
+            ClientMedia::NativeVideo {
+                url: native.url.clone(),
             }
-            return Self::Missing;
-        }
-        Self::Normal
+        } else {
+            ClientMedia::NativeAudio {
+                url: native.url.clone(),
+            }
+        })
+    } else {
+        item.interactive
+            .as_ref()
+            .map(|interactive| ClientMedia::Interactive {
+                url: interactive.source_url.clone(),
+            })
     }
 }

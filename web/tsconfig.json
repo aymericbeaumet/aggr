@@ -3,15 +3,30 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "strict": true,
     "skipLibCheck": true,
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
-    "types": ["vite/client"]
+    "types": [
+      "vite/client"
+    ],
+    "paths": {
+      "@aggr-model/*": [
+        "./.generated/types/*"
+      ]
+    }
   },
-  "include": ["src", "test"],
-  // The service worker is checked against the WebWorker lib by tsconfig.worker.json.
-  "exclude": ["src/sw"]
+  "include": [
+    "src",
+    "test"
+  ],
+  "exclude": [
+    "src/sw"
+  ]
 }

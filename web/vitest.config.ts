@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { configDefaults, defineConfig } from 'vitest/config';
 
@@ -7,6 +8,7 @@ export default defineConfig({
       {
         // Pure modules. The Svelte plugin compiles the `.svelte.ts` state modules they import.
         plugins: [svelte()],
+        resolve: { alias: { '@aggr-model': fileURLToPath(new URL('./.generated/types', import.meta.url)) } },
         test: {
           name: 'unit',
           environment: 'node',
@@ -18,7 +20,7 @@ export default defineConfig({
         // Browser-side modules and the mounted app under jsdom. Svelte's client runtime is
         // behind the `browser` export condition.
         plugins: [svelte()],
-        resolve: { conditions: ['browser'] },
+        resolve: { conditions: ['browser'], alias: { '@aggr-model': fileURLToPath(new URL('./.generated/types', import.meta.url)) } },
         test: {
           name: 'dom',
           environment: 'jsdom',

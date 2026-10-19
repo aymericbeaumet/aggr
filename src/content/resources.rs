@@ -4,15 +4,9 @@
 use std::collections::HashSet;
 
 use scraper::{Html, Selector};
-use serde::Serialize;
 use url::Url;
 
-#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ResourceLink {
-    pub label: String,
-    pub url: String,
-}
+pub use aggr_ui_model::ResourceLink;
 
 pub(super) fn leading_resources(html: &str) -> Option<(Vec<ResourceLink>, std::ops::Range<usize>)> {
     let mut cursor = 0;
