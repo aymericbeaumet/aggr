@@ -217,6 +217,36 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
         );
         std::fs::write(file, html.replacen(marker, &format!("{marker}{markup}"), 1))?;
     }
+    for (index, provider) in [(43, "twitch"), (42, "vimeo")] {
+        let file = fixture
+            .out
+            .join(format!("items/example/2026-09-01-story-{index}/index.html"));
+        let mut html = std::fs::read_to_string(&file)?;
+        let marker = "<script id=\"aggr-page\" type=\"application/json\">";
+        let start = html.find(marker).context("fixture page model")? + marker.len();
+        let end = start
+            + html[start..]
+                .find("</script>")
+                .context("fixture model end")?;
+        let mut model: Value = serde_json::from_str(&html[start..end])?;
+        let embed_url = format!("{}media-player.html?provider={provider}", fixture.base);
+        *model
+            .pointer_mut("/page/data/media/embed_url")
+            .context("fixture video embed URL")? = json!(embed_url);
+        let serialized = serde_json::to_string(&model)?
+            .replace('<', "\\u003c")
+            .replace('>', "\\u003e")
+            .replace('&', "\\u0026");
+        html.replace_range(start..end, &serialized);
+
+        // The facade captures its identity while binding. Both SSR markup and the hydration
+        // model must name the local player before scripts run, rather than changing it afterward.
+        let marker = "data-video-embed=\"";
+        let start = html.find(marker).context("fixture rendered embed URL")? + marker.len();
+        let end = start + html[start..].find('"').context("fixture embed URL end")?;
+        html.replace_range(start..end, &embed_url);
+        std::fs::write(file, html)?;
+    }
     let video = client.execute_async(r#"
       const done=arguments[arguments.length-1];
       const canvas=document.createElement('canvas');canvas.width=640;canvas.height=360;
@@ -465,17 +495,6 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                 &format!("location.search === '?provider={width}-{motion}' && document.querySelector('.video-player')?.dataset.videoProvider === '{provider}' && document.querySelector('.video-player[data-video-bound=\"true\"] [data-video-embed]')"),
             )
             .await?;
-                client
-                    .execute(
-                        r#"
-              document.querySelector('[data-video-embed]').dataset.videoEmbed=arguments[0];
-            "#,
-                        vec![json!(format!(
-                            "{}media-player.html?provider={provider}&width={width}&motion={motion}",
-                            fixture.base
-                        ))],
-                    )
-                    .await?;
                 let modified = client.execute(r#"
                   const link = document.querySelector('[data-video-embed]');
                   let intercepted = false;
@@ -502,6 +521,19 @@ async fn media_layout_contracts(client: &Client, fixture: &Fixture) -> Result<()
                     "!!document.querySelector('#now-playing-picture iframe')",
                 )
                 .await?;
+                let source = client
+                    .execute(
+                        "const url=new URL(document.querySelector('#now-playing-picture iframe').src);return {origin:url.origin,path:url.pathname,provider:url.searchParams.get('provider')}",
+                        vec![],
+                    )
+                    .await?;
+                let expected = url::Url::parse(&format!("{}media-player.html", fixture.base))?;
+                anyhow::ensure!(
+                    source["origin"] == expected.origin().ascii_serialization()
+                        && source["path"] == expected.path()
+                        && source["provider"] == provider,
+                    "provider fixture must use the local player: {source}"
+                );
                 client.execute_async("const done=arguments[arguments.length-1];requestAnimationFrame(()=>requestAnimationFrame(()=>done(true)))", vec![]).await?;
                 let after = media_box(client, ".video-player").await?;
                 ensure_media_box_stable(

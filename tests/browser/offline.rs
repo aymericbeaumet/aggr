@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use fantoccini::{Client, Locator};
 use serde_json::{Value, json};
 
@@ -125,13 +125,31 @@ async fn service_worker_contracts(client: &Client, fixture: &Fixture) -> Result<
       const done = arguments[arguments.length-1];
       fetch('manifest.webmanifest').then(r=>r.json()).then(manifest=>done({id:manifest.id || null,
         one:new URL(manifest.start_url, location.origin+'/reader/manifest.webmanifest').href,
-        two:new URL(manifest.start_url, location.origin+'/other/manifest.webmanifest').href}));
+        two:new URL(manifest.start_url, location.origin+'/other/manifest.webmanifest').href,
+        search:new URL(manifest.shortcuts.find(shortcut=>shortcut.name==='Search').url, new URL('manifest.webmanifest',location.href)).href}));
     "#,
             vec![],
         )
         .await?;
     assert_eq!(identities["id"], Value::Null);
     assert_ne!(identities["one"], identities["two"]);
+    assert_eq!(
+        identities["search"],
+        json!(format!("{}?focus-search=1", fixture.base))
+    );
+    client
+        .goto(
+            identities["search"]
+                .as_str()
+                .context("search shortcut URL")?,
+        )
+        .await?;
+    wait_for(client, "document.activeElement?.id === 'q'").await?;
+    assert_eq!(
+        client.execute("return location.search", vec![]).await?,
+        json!(""),
+        "launch intent is consumed after focusing search"
+    );
     Ok(())
 }
 

@@ -15,11 +15,11 @@ const fake = vi.hoisted(() => ({
   runs: [] as string[],
 }));
 
-const catalogue: Catalog = { version: 'v1', base: 'pagefind/v1/', docs: 3, facets: { source: [{ value: 'blog.example', label: 'Blog', count: 3 }] } };
+const catalog: Catalog = { version: 'v1', base: 'pagefind/v1/', docs: 3, facets: { source: [{ value: 'blog.example', label: 'Blog', count: 3 }] } };
 
 vi.mock('./engine', () => {
   const index: Index = {
-    manifest: catalogue,
+    manifest: catalog,
     retire() {},
     async prepare() {},
     async run(query): Promise<SearchPage> {

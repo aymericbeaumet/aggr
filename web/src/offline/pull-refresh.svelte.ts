@@ -71,13 +71,25 @@ export function installPullRefresh({ enabled, refresh, doc = document, win = win
     doc.documentElement.dataset.pullState = phase;
     doc.documentElement.style.setProperty('--pull-distance', `${distance}px`);
   };
-  const editing = (target: EventTarget | null) =>
-    target instanceof Element && target.closest('input,textarea,select,[contenteditable]') !== null;
+  const selected = () => doc.getSelection()?.isCollapsed === false;
+  const ownsGesture = (target: EventTarget | null) => {
+    if (!(target instanceof Element)) return false;
+    if (target.closest('a,button,input,textarea,select,label,summary,audio,video,iframe,object,embed,canvas,pre,table,[contenteditable],[role="slider"],[data-no-pull-refresh]')) return true;
+    // A nested scroller owns the whole gesture, including overscroll at either end.
+    for (let node: Element | null = target; node && node !== doc.body && node !== doc.documentElement; node = node.parentElement) {
+      const style = win.getComputedStyle(node);
+      if ((node.scrollHeight > node.clientHeight + 1 && /^(auto|scroll)$/.test(style.overflowY)) ||
+          (node.scrollWidth > node.clientWidth + 1 && /^(auto|scroll)$/.test(style.overflowX))) return true;
+    }
+    return false;
+  };
   doc.addEventListener(
     'touchstart',
     (event) => {
+      if (pull.phase === 'refreshing') return;
+      render('idle', 0);
       if (!enabled() || win.scrollY > 0 || event.touches.length !== 1) return;
-      if (doc.querySelector('dialog[open]') || editing(event.target)) return;
+      if (doc.querySelector('dialog[open]') || selected() || ownsGesture(event.target) || (win.visualViewport?.scale ?? 1) > 1) return;
       x = event.touches[0].clientX;
       y = event.touches[0].clientY;
       render('tracking', 0);
@@ -88,7 +100,7 @@ export function installPullRefresh({ enabled, refresh, doc = document, win = win
     'touchmove',
     (event) => {
       if (!TRACKING.includes(pull.phase)) return;
-      if (event.touches.length !== 1 || win.scrollY > 0) {
+      if (event.touches.length !== 1 || win.scrollY > 0 || selected()) {
         render('idle', 0);
         return;
       }
@@ -100,8 +112,8 @@ export function installPullRefresh({ enabled, refresh, doc = document, win = win
   );
   doc.addEventListener(
     'touchend',
-    () => {
-      if (pull.phase === 'armed') {
+    (event) => {
+      if (pull.phase === 'armed' && !event.touches.length && !selected()) {
         render('refreshing', 48);
         refresh();
       } else render('idle', 0);

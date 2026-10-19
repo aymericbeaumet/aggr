@@ -34,7 +34,7 @@ export interface SearchManifest {
 
 /**
  * `self.AGGR_SW`, defined by `sw.js` before it imports this worker: the cache version, the
- * application and content versions, and the revisioned install-time lists. The article catalogue
+ * application and content versions, and the revisioned install-time lists. The article catalog
  * is a separate file, fetched only when a download count is set.
  */
 export interface SwConfig {

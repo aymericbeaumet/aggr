@@ -86,7 +86,7 @@ url = "https://www.example.com/blog/feed.xml"   # -> sources/example-com/
 Some hosts carry thousands of unrelated publishers, so there the account's path is part of who is
 publishing and stays in the name. That list lives in `src/platform.rs` and covers YouTube, X,
 GitHub, GitLab, Codeberg, Reddit, Medium, Bluesky, Twitch, Vimeo and SoundCloud, the podcast
-catalogues (Spotify, Apple Podcasts, Pocket Casts, Overcast, Castbox), and the `@handle` convention
+catalogs (Spotify, Apple Podcasts, Pocket Casts, Overcast, Castbox), and the `@handle` convention
 on any host. Each platform is named by its own domain, so a short, mobile or regional alias resolves
 to it: `youtu.be` and `m.youtube.com` are `youtube.com`, `open.spotify.com` is `spotify.com`, and
 `pca.st` is `pocketcasts.com`.
@@ -110,7 +110,7 @@ profile stays an account. `src/platform/reserved.rs` records each list's source 
 dropped from it. A route missing from those sources still reads as an account, which is the
 safer mistake: a guessed route would quietly fold a real publisher into its host.
 
-A catalogue names its shows with identifiers nobody reads, so the reader sees the show's own title
+A catalog names its shows with identifiers nobody reads, so the reader sees the show's own title
 in that slot (`spotify.com/underscore`) while the identity underneath stays the real path.
 
 Two feeds from one publisher arrive at the same name, so the path that differs is added to tell
@@ -271,7 +271,7 @@ YouTube may withhold or rate-limit captions. Feed capture does not request video
 
 Extraction retains article images, figure captions, inline links, footnotes, tables, and code
 indentation, with syntax colors for recognized code languages. A code block whose language cannot
-be determined is left unlabelled rather than guessed at. Cleanup that only needs the stored
+be determined is left unlabeled rather than guessed at. Cleanup that only needs the stored
 Markdown is reapplied on every build, so an archive written by an older release reads correctly;
 cleanup that needs the original HTML reaches an existing item through automatic reprocessing during sync. Custom source
 headers stay on the configured origin; redirected or linked article and image requests on other
@@ -384,7 +384,7 @@ longer than 400 frames are left alone rather than spend a re-encode on every fra
 Expect little from `"compressed"` on a long animation that is heavy in bytes but modest in
 dimensions; what shrinks it is a smaller `max_axis`, not a lower `quality`, which JPEG uses and
 GIF does not. The images a compressed archive cannot reduce at all, and therefore still stores as
-publisher bytes, are colour-managed and high-bit-depth originals, animated WebP and APNG, which
+publisher bytes, are color-managed and high-bit-depth originals, animated WebP and APNG, which
 aggr can decode but not write, and AVIF, which it archives without decoding.
 
 SVG diagrams become passive local PNGs with a bundled font; scripts, external images,

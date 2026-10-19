@@ -77,14 +77,14 @@ function countDays(days: readonly Facet[], clause: { from?: string; through?: st
  * Suggestions for the token under the cursor: qualifier names, facet values with their counts,
  * and date shortcuts. Articles are never suggested; they belong in the result list. `facets`
  * are the values on offer (already scoped to the rest of the query when `scoped`), while
- * `catalogue` names every value the index knows, which is what decides identities and aliases.
+ * `catalog` names every value the index knows, which is what decides identities and aliases.
  */
 export function complete(
   query: string,
   cursor: number,
   facets: Facets | undefined,
   now = Date.now(),
-  catalogue: Facets | undefined = facets,
+  catalog: Facets | undefined = facets,
   scoped = false,
 ): Completion[] {
   const { token, start, end, excluded, value } = completionToken(query, cursor);
@@ -94,7 +94,7 @@ export function complete(
   if (field) {
     const kind = field[1].toLowerCase() as FacetKind;
     const fragment = normalized(field[2]);
-    const identities = facetIndex(catalogue?.[kind] ?? EMPTY, kind);
+    const identities = facetIndex(catalog?.[kind] ?? EMPTY, kind);
     if (finished && identities.lookup(field[2])) return [];
     return facetIndex(facets?.[kind] ?? EMPTY, kind)
       .entries.filter((entry) => entry.search.includes(fragment))
@@ -212,7 +212,7 @@ export function completionContext(query: string, cursor: number, now = Date.now(
  * value yet but has candidates, so the reader is choosing rather than searching. Throws when
  * another clause is invalid, since that error takes precedence over any completion.
  */
-export function isCompletingFacet(query: string, cursor: number, catalogue: Facets, now = Date.now()): boolean {
+export function isCompletingFacet(query: string, cursor: number, catalog: Facets, now = Date.now()): boolean {
   const { token, value } = completionToken(query, cursor);
   const match = value.match(FACET_TOKEN);
   if (!token || !match) return false;
@@ -220,9 +220,9 @@ export function isCompletingFacet(query: string, cursor: number, catalogue: Face
   parseQuery(query.slice(0, token.start) + query.slice(token.end), now);
   const kind = match[1].toLowerCase();
   if (!isFacetKind(kind)) return false;
-  const values = catalogue[kind] ?? EMPTY;
+  const values = catalog[kind] ?? EMPTY;
   if (validToken(token.raw, now) && facetIndex(values, kind).lookup(match[2])) return false;
-  const candidate = complete(query, cursor, catalogue, now)[0];
+  const candidate = complete(query, cursor, catalog, now)[0];
   if (!candidate) return false;
   try {
     parseQuery(acceptCompletion(query, candidate).query, now);

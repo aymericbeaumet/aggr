@@ -5,7 +5,7 @@ import { page } from '../state/page.svelte';
 import { isInstalled, markExternalLinks } from './external-links';
 import { installFootnotes } from './footnotes';
 import { installHeadings } from './headings';
-import { neighbourDestination } from './neighbours';
+import { neighborDestination } from './neighbors';
 import { installSelectionShare } from './selection-share';
 import { installSwipes } from './swipes';
 
@@ -45,7 +45,7 @@ export function enhance(options: EnhanceOptions): Attachment<HTMLElement> {
     });
     safely('swipes', () =>
       installSwipes(node, signal, (direction) => {
-        void navigation.go(neighbourDestination(root, direction === 1 ? options.next : options.previous));
+        void navigation.go(neighborDestination(root, direction === 1 ? options.next : options.previous));
       }),
     );
     if (node.querySelector(MEDIA)) {

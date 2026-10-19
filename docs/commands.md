@@ -51,7 +51,7 @@ Installed release binaries need neither, and exclude the dev command, server, wa
 
 The Rust preview backend prepares the archive's shared display metadata, then renders each page only when it is
 requested. Opening the feed reads its thumbnails; opening an article loads that article's media.
-Completion uses a small metadata catalogue; the full-text index is built only when a search needs
+Completion uses a small metadata catalog; the full-text index is built only when a search needs
 its runtime, and reuses the persistent Pagefind cache.
 Vite handles Svelte, TypeScript and CSS updates. Rust changes compile while the previous worker
 continues serving, then replace it and reload the browser after a successful startup.

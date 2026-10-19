@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { installFeedChrome } from './platform';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { installFeedChrome, installKeyboardInset } from './platform';
 
 /** A stand-in observer: jsdom does not lay elements out, and it may not deliver resize records. */
 let observer: { observed: Element[]; disconnected: boolean; fire: () => void } | null = null;
@@ -83,5 +83,35 @@ describe('installFeedChrome', () => {
     installFeedChrome(new AbortController().signal);
     expect(document.documentElement.style.getPropertyValue('--top-nav-offset')).toBe('44px');
     expect(document.documentElement.style.getPropertyValue('--feed-heading')).toBe('0px');
+  });
+});
+
+describe('keyboard inset', () => {
+  afterEach(() => {
+    document.documentElement.classList.remove('is-keyboard-open');
+    document.body.replaceChildren();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('distinguishes pinch zoom from the keyboard and restores tabs when editing ends', () => {
+    const events = vi.spyOn(document, 'addEventListener');
+    const viewport = Object.assign(new EventTarget(), { height: 400, scale: 2 });
+    vi.stubGlobal('visualViewport', viewport);
+    vi.stubGlobal('innerHeight', 800);
+    document.body.innerHTML = '<input type="search">';
+    const input = document.querySelector('input')!;
+    input.focus();
+    installKeyboardInset();
+    try {
+      expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(false);
+      viewport.height = 200;
+      viewport.dispatchEvent(new Event('resize'));
+      expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(true);
+      input.blur();
+      expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(false);
+    } finally {
+      for (const [name, listener, options] of events.mock.calls) document.removeEventListener(name, listener, options);
+    }
   });
 });

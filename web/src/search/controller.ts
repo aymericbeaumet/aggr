@@ -12,7 +12,7 @@ import type { Catalog, Facet } from './types';
 /**
  * The search controller: what happens between a keystroke and the rows. It owns nothing in the
  * DOM; the components bind to the state and call the driver, and the driver changes the state.
- * Sessions (catalogue, runtimes) outlive pages; everything else follows the list on screen.
+ * Sessions (catalog, runtimes) outlive pages; everything else follows the list on screen.
  */
 
 /**
@@ -24,17 +24,17 @@ const SNAPSHOT_LIMIT = 512 * 1024;
 
 const sessions = new Map<string, Session>();
 let session: Session | null = null;
-let catalogue: Catalog | undefined;
+let catalog: Catalog | undefined;
 let menu: 'idle' | 'open' | 'dismissed' = 'idle';
 /** The reader chose a suggestion by hand; keep it under the highlight as the list changes. */
 let moved = false;
-/** The text has been edited on this page, so an arriving catalogue may not rewrite it. */
+/** The text has been edited on this page, so an arriving catalog may not rewrite it. */
 let edited = false;
 let debounce: ReturnType<typeof setTimeout> | undefined;
 let work: AbortController | undefined;
 let contextWork: AbortController | undefined;
 let context: { key: string; field: FilterKind; values: Facet[] } | undefined;
-let catalogueGeneration = 0;
+let catalogGeneration = 0;
 /** What the results on screen answer. */
 let shownFor: { text: string; page: number } | null = null;
 
@@ -45,7 +45,7 @@ const field = (): HTMLInputElement | null => {
 
 const now = () => Date.now();
 
-/** The session of the site on screen; a page arriving revalidates its catalogue. */
+/** The session of the site on screen; a page arriving revalidates its catalog. */
 function sessionFor(): Session {
   const root = search.root;
   let existing = sessions.get(root);
@@ -88,13 +88,13 @@ function syncLocation(): void {
 /** Suggestions for the token under the cursor, scoped to the rest of the query when it has one. */
 function suggest(): void {
   if (!search.attached || search.composing) return;
-  let facets = catalogue?.facets;
+  let facets = catalog?.facets;
   let scoped = false;
   try {
     const editing = completionContext(search.text, search.cursor, now());
-    if (catalogue && editing && editing.rest && menu === 'open' && editing.query.clauses.some((clause) => clause.kind !== 'sort')) {
+    if (catalog && editing && editing.rest && menu === 'open' && editing.query.clauses.some((clause) => clause.kind !== 'sort')) {
       scoped = true;
-      const key = JSON.stringify([catalogue.version, editing.field, editing.rest]);
+      const key = JSON.stringify([catalog.version, editing.field, editing.rest]);
       if (context?.key !== key) {
         contextWork?.abort();
         contextWork = new AbortController();
@@ -115,14 +115,14 @@ function suggest(): void {
             }
           });
       }
-      facets = { ...catalogue.facets, [editing.field]: context.values };
+      facets = { ...catalog.facets, [editing.field]: context.values };
     }
     if (!scoped) {
       contextWork?.abort();
       context = undefined;
     }
     const selected = moved ? search.completions[search.highlighted]?.id : undefined;
-    const completions = complete(search.text, search.cursor, facets, now(), catalogue?.facets, scoped);
+    const completions = complete(search.text, search.cursor, facets, now(), catalog?.facets, scoped);
     search.completions = completions;
     search.highlighted = selected ? Math.max(0, completions.findIndex((option) => option.id === selected)) : 0;
     search.open = menu === 'open';
@@ -136,17 +136,17 @@ function suggest(): void {
 
 /** Whether the reader is still choosing a facet value rather than searching. */
 function completing(): boolean {
-  return catalogue !== undefined && isCompletingFacet(search.text, search.cursor, catalogue.facets, now());
+  return catalog !== undefined && isCompletingFacet(search.text, search.cursor, catalog.facets, now());
 }
 
-async function loadCatalogue(refresh = false): Promise<Index | undefined> {
+async function loadCatalog(refresh = false): Promise<Index | undefined> {
   const engine = session ?? sessionFor();
-  const token = ++catalogueGeneration;
+  const token = ++catalogGeneration;
   const index = await engine.load(refresh);
-  if (!search.attached || token !== catalogueGeneration) return undefined;
-  catalogue = index.manifest;
+  if (!search.attached || token !== catalogGeneration) return undefined;
+  catalog = index.manifest;
   if (!edited && search.active) {
-    const readable = readableQuery(search.text, catalogue.facets);
+    const readable = readableQuery(search.text, catalog.facets);
     if (readable !== search.text) {
       search.text = readable;
       search.cursor = readable.length;
@@ -202,7 +202,7 @@ function warmQuery(): void {
   const token = search.generation;
   const request = new AbortController();
   work = request;
-  void loadCatalogue()
+  void loadCatalog()
     .then((index) => {
       if (!index || token !== search.generation || request.signal.aborted || completing()) return undefined;
       return index.prepare(parseQuery(search.text, now()), request.signal);
@@ -226,7 +226,7 @@ async function run(keepRows = false, refresh = false): Promise<void> {
   search.busy = true;
   if (!search.results) search.status = 'Searching…';
   try {
-    const index = await loadCatalogue(refresh);
+    const index = await loadCatalog(refresh);
     if (!index || token !== search.generation) return;
     if (completing()) {
       search.status = '';
@@ -329,11 +329,11 @@ function refresh(): void {
   if (!session) return;
   contextWork?.abort();
   context = undefined;
-  catalogueGeneration++;
+  catalogGeneration++;
   session.stale();
   if (!search.attached) return;
   if (search.active && !search.composing) void run(search.ready, true);
-  else void loadCatalogue(true).catch(() => {});
+  else void loadCatalog(true).catch(() => {});
 }
 
 export const driver: SearchDriver = {
@@ -353,14 +353,14 @@ export const driver: SearchDriver = {
     else {
       hideResults();
       search.address = '';
-      // The catalogue loads when the field is used. The articles on screen get the connection first.
+      // The catalog loads when the field is used. The articles on screen get the connection first.
     }
   },
   leave() {
     cancelQuery();
     contextWork?.abort();
     context = undefined;
-    catalogueGeneration++;
+    catalogGeneration++;
     menu = 'idle';
     search.open = false;
     search.busy = false;
@@ -375,7 +375,7 @@ export const driver: SearchDriver = {
     if (!search.attached || document.activeElement !== field()) return;
     if (menu === 'idle') menu = 'open';
     suggest();
-    if (!catalogue) void loadCatalogue().catch(() => {});
+    if (!catalog) void loadCatalog().catch(() => {});
   },
   blur() {
     setTimeout(() => {

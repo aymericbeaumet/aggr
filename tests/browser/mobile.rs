@@ -801,6 +801,20 @@ async fn mobile_feed_search_stays_below_header_while_articles_and_results_scroll
             client.find(Locator::Css("#q")).await?.send_keys("source:").await?;
             wait_for(&client,"document.querySelector('.search-completions')?.getBoundingClientRect().height>0").await?;
             anyhow::ensure!(client.execute("const input=document.querySelector('#q').getBoundingClientRect(),list=document.querySelector('.search-completions').getBoundingClientRect();return list.top>=input.bottom && list.bottom<=innerHeight",vec![]).await?==true,"completion remains visible below the pinned input");
+            if width < 640 {
+                let fits = client.execute_async(r#"
+                  const done=arguments[arguments.length-1],viewport=visualViewport,list=document.querySelector('.search-completions');
+                  const top=list.getBoundingClientRect().top;
+                  Object.defineProperty(viewport,'height',{configurable:true,value:top+40});
+                  viewport.dispatchEvent(new Event('resize'));
+                  requestAnimationFrame(()=>{
+                    const box=list.getBoundingClientRect();
+                    const result=box.height>0 && box.bottom<=viewport.height && list.scrollHeight>list.clientHeight;
+                    delete viewport.height;viewport.dispatchEvent(new Event('resize'));done(result);
+                  });
+                "#,vec![]).await?;
+                anyhow::ensure!(fits==true,"suggestions scroll within the space left above the keyboard");
+            }
         }
         Ok(())
     }.await;

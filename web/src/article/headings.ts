@@ -18,7 +18,7 @@ export function headingFor(target: EventTarget | null): HTMLElement | null {
   if (!(target instanceof Element)) return null;
   const heading = target.closest(HEADING);
   if (!(heading instanceof HTMLElement)) return null;
-  // Anything the publisher made clickable keeps its own behaviour; only the `#` is ours.
+  // Anything the publisher made clickable keeps its own behavior; only the `#` is ours.
   const link = target.closest('a');
   if (link && !link.classList.contains('heading-anchor')) return null;
   return heading;

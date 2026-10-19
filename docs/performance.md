@@ -204,7 +204,7 @@ and no sweep failure ever fails the sync. The marker lives in the git-excluded c
 finds nothing new still leaves no trace in the repository.
 
 A warm run on Actions therefore still renders every page, but reuses unchanged image compression,
-skips cold image validation and Pagefind indexing, fetches feeds conditionally, and honours the image, capture and duration
+skips cold image validation and Pagefind indexing, fetches feeds conditionally, and honors the image, capture and duration
 backoffs. Expect rendering to dominate the build; the cold image validation that took about seven
 minutes on a 1,120-item instance disappears once the receipt cache restores. The first run after a
 cache eviction is cold again.
@@ -228,7 +228,7 @@ downloads none of it. See [client development](client.md) for the search contrac
 Prefetching is bounded. A press or a hover fetches that page at once, and a page already in memory
 is parsed ahead of the tap and swapped in the same turn. The three tabs are fetched as soon as
 the reader starts. After paint, the reader warms the first three rows already on screen. An
-article's neighbours carry `rel="prefetch"` in the document. Guesses are at most sixteen per page,
+article's neighbors carry `rel="prefetch"` in the document. Guesses are at most sixteen per page,
 and none at all under Save-Data or on a 2G connection. Intent is not counted. Fetched pages stay
 in memory for five minutes, 24 at most. Guesses are parsed one per frame; a page the reader means
 to open is parsed as soon as it arrives.

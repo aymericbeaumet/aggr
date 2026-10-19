@@ -52,10 +52,10 @@ function buildIndex(values: readonly Facet[], kind: string): FacetIndex {
   };
 }
 
-// Catalogues are immutable and replaced whole, so an index lives exactly as long as its values.
+// Catalogs are immutable and replaced whole, so an index lives exactly as long as its values.
 const indexes = new WeakMap<readonly Facet[], FacetIndex>();
 
-/** The index of a catalogue's values for one facet, built once per catalogue. */
+/** The index of a catalog's values for one facet, built once per catalog. */
 export function facetIndex(values: readonly Facet[], kind: string): FacetIndex {
   let index = indexes.get(values);
   if (!index) indexes.set(values, (index = buildIndex(values, kind)));

@@ -11,7 +11,7 @@ import type { OfflineItem, ResourceEntry } from './types';
 /** How many articles download at once; each slot fetches one resource at a time. */
 const DOWNLOAD_SLOTS = 6;
 
-/** The published article catalogue. A zero download count never asks for it. */
+/** The published article catalog. A zero download count never asks for it. */
 async function catalog(ctx: WorkerContext): Promise<OfflineItem[]> {
   const cached = ctx.state.offlineCatalog;
   if (cached) return cached;
@@ -75,7 +75,7 @@ export async function readOfflineStatus(ctx: WorkerContext): Promise<OfflineStat
 }
 
 /**
- * Store the first `count` catalogue articles. A family counts only once its page and every
+ * Store the first `count` catalog articles. A family counts only once its page and every
  * rendition are written; older complete downloads within `count` survive a failed replacement;
  * everything outside the selection is dropped from the protected caches.
  */
@@ -205,7 +205,7 @@ async function saveSelection(
   return result;
 }
 
-/** Queue a download of `count` articles, cancelling the one in flight. */
+/** Queue a download of `count` articles, canceling the one in flight. */
 export function configureOfflineArticles(ctx: WorkerContext, count: number): Promise<OfflineStatus | void> {
   const { state } = ctx;
   if (state.offlinePendingCount === count) return state.offlineQueue;

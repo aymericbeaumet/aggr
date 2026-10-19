@@ -56,7 +56,7 @@ describe('sliceFeed', () => {
     expect(edge.next).toEqual({ href: `${root}page/2/`, visible: true });
   });
 
-  it('crosses static pages backwards onto the last slice of the previous one', () => {
+  it('crosses static pages backward onto the last slice of the previous one', () => {
     const second = sliceFeed(
       paginator({ current_index: 2, previous: './', next: 'page/3/', offset: 50 }),
       50,

@@ -166,7 +166,7 @@ with indexing disabled it still permits crawling so engines can read the page's 
 An instance under a subpath does not write `robots.txt`, since that file only governs an origin
 when served at its root. The templates keep `page.indexable` in their robots metadata.
 
-Every published article keeps its self-canonical URL and visibly labelled original URL. Original
+Every published article keeps its self-canonical URL and visibly labeled original URL. Original
 provenance also appears in structured data, feeds, portable representations, and `linkset.json`.
 The canonical identifies the local snapshot; it does not claim authorship of the upstream work.
 

@@ -43,7 +43,7 @@ describe('cursor completion', () => {
   });
 
   it('never aliases ambiguous labels or labels that are another stable identifier', () => {
-    const catalogue: Facets = {
+    const catalog: Facets = {
       ...facets,
       category: [
         { value: 'spotify-show', label: 'Underscore_', count: 4 },
@@ -51,12 +51,12 @@ describe('cursor completion', () => {
         { value: 'Underscore_', label: 'Other show', count: 1 },
       ],
     };
-    const offered = complete('category:un', 11, catalogue, now);
+    const offered = complete('category:un', 11, catalog, now);
     expect(offered.map((item) => item.insert)).toEqual(['category:spotify-show', 'category:youtube-channel', 'category:"Other show"']);
     expect(offered[0].detail).toContain('spotify-show');
-    // Identities come from the whole catalogue even when only a scoped subset is offered.
-    const scoped = { ...catalogue, category: [catalogue.category![0]] };
-    expect(complete('category:un', 11, scoped, now, catalogue)[0].insert).toBe('category:spotify-show');
+    // Identities come from the whole catalog even when only a scoped subset is offered.
+    const scoped = { ...catalog, category: [catalog.category![0]] };
+    expect(complete('category:un', 11, scoped, now, catalog)[0].insert).toBe('category:spotify-show');
   });
 
   it('offers date shortcuts and indexed days, and counts them against the other clauses when scoped', () => {

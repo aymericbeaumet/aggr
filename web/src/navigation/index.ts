@@ -4,7 +4,7 @@ import { page } from '../state/page.svelte';
 import { selection } from '../state/selection.svelte';
 import { tabIntent } from '../state/tabIntent.svelte';
 import { arrive, settle, trackScrolling } from './arrive';
-import { PageCache, type Fetched } from './cache';
+import { PageCache, type Fetched, type Priority } from './cache';
 import { address, linkIn, routable } from './routable';
 import { ScrollMemory, newKey } from './scroll';
 import { markCurrentTab, markTabForKind, tabUnder } from './tabs';
@@ -56,7 +56,7 @@ const stateWith = (fields: Record<string, unknown>) => ({
 });
 
 /**
- * The page on screen took an address of its own (a search query, canonicalised): the entry it
+ * The page on screen took an address of its own (a search query, canonicalized): the entry it
  * is shown at follows, with no navigation, so the next link or Back still measures from here.
  */
 function replaceAddress(href: string): void {
@@ -70,15 +70,23 @@ function replaceAddress(href: string): void {
   if (installed) current = address(location.href);
 }
 
-async function request(key: string): Promise<Fetched> {
-  const response = await fetch(key, {
-    headers: { accept: 'text/html' },
-    credentials: 'same-origin',
-    priority: 'high',
-  });
-  const type = response.headers.get('content-type') || '';
-  if (!response.ok || !type.includes('text/html')) throw new Error('not a page');
-  return { url: response.url || key, html: await response.text() };
+async function request(key: string, priority: Priority): Promise<Fetched> {
+  const controller = new AbortController();
+  // Keep the deadline through the body: receiving headers does not make a stalled page usable.
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(key, {
+      headers: { accept: 'text/html' },
+      credentials: 'same-origin',
+      priority,
+      signal: controller.signal,
+    });
+    const type = response.headers.get('content-type') || '';
+    if (!response.ok || !type.includes('text/html')) throw new Error('not a page');
+    return { url: response.url || key, html: await response.text() };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function pages(): PageCache {
@@ -95,6 +103,8 @@ function parseNow(key: string, record: ReturnType<PageCache['peek']>): void {
 /** Fetch and parse a page when the reader points, focuses or touches its link. */
 function prefetch(href: string): void {
   if (!installed) return;
+  const connection = navigator.connection;
+  if (connection?.saveData || ['slow-2g', '2g'].includes(connection?.effectiveType || '')) return;
   let url: URL;
   try {
     url = new URL(href, location.href);
@@ -105,7 +115,7 @@ function prefetch(href: string): void {
   if (!routable(url, root()) || key === current) return;
   const store = pages();
   if (!store.has(key) && pendingPrefetch.size >= 2) return;
-  const record = store.load(key);
+  const record = store.load(key, 'low');
   const parse = () => parseNow(key, record);
   if (record.fetched) {
     parse();
@@ -127,6 +137,9 @@ let slow: ReturnType<typeof setTimeout> | undefined;
 /** Say a page is on its way once it has taken longer than a glance, and stop saying so. */
 function waiting(on: boolean): void {
   clearTimeout(slow);
+  const content = document.getElementById('content');
+  if (on) content?.setAttribute('aria-busy', 'true');
+  else content?.removeAttribute('aria-busy');
   if (on) slow = setTimeout(() => document.documentElement.setAttribute('data-navigating', ''), 150);
   else document.documentElement.removeAttribute('data-navigating');
 }
@@ -370,7 +383,7 @@ function installTabActivation(): void {
       tabGesture = null;
       swallowed = false;
       if (!gesture && !cancel) return;
-      // Cancelling the release cancels the click the platform would have sent after it, so one
+      // Canceling the release cancels the click the platform would have sent after it, so one
       // tap stays one navigation and a drag off the bar does not land on whatever is underneath.
       if (cancel || event.touches.length || !gesture) {
         if (event.touches.length) releaseTab();

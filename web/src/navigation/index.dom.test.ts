@@ -43,6 +43,8 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
+  document.documentElement.removeAttribute('data-navigating');
   scope.abort();
   for (const [type, listener, options] of documentEvents.mock.calls) document.removeEventListener(type, listener, options);
   for (const [type, listener, options] of windowEvents.mock.calls) window.removeEventListener(type, listener, options);
@@ -72,6 +74,58 @@ describe('page navigation', () => {
     vi.stubGlobal('fetch', request);
     for (const path of ['one/', 'two/', 'three/']) navigation.prefetch(`/repo/${path}`);
     expect(request).toHaveBeenCalledTimes(2);
+  });
+  it.each([{ saveData: true }, { effectiveType: 'slow-2g' }, { effectiveType: '2g' }])(
+    'leaves constrained connections to requested navigation: %j', async (connection) => {
+      Object.defineProperty(navigator, 'connection', { configurable: true, value: connection });
+      vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/article/', location.href).href)));
+      navigation.prefetch('/repo/article/');
+      expect(fetch).not.toHaveBeenCalled();
+      await navigation.go('/repo/article/');
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(vi.mocked(fetch).mock.calls[0][1]?.priority).toBe('high');
+    },
+  );
+  it('fetches speculative pages at low priority', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/article/', location.href).href)));
+    navigation.prefetch('/repo/article/');
+    await navigation.go('/repo/article/');
+    expect(vi.mocked(fetch).mock.calls[0][1]?.priority).toBe('low');
+  });
+  it('ends a stalled response body and releases its prefetch slot', async () => {
+    vi.useFakeTimers();
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const signal = init?.signal as AbortSignal;
+      signals.push(signal);
+      return {
+        ok: true, headers: new Headers({ 'content-type': 'text/html' }),
+        text: () => new Promise<string>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new DOMException('Timed out', 'AbortError')), { once: true });
+        }),
+      };
+    }));
+    navigation.prefetch('/repo/one/');
+    navigation.prefetch('/repo/two/');
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    navigation.prefetch('/repo/three/');
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(15_000);
+  });
+  it('announces a pending page without moving the current content', async () => {
+    vi.useFakeTimers();
+    let resolve!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((done) => { resolve = done; })));
+    const pending = navigation.go('/repo/article/');
+    expect(document.getElementById('content')?.getAttribute('aria-busy')).toBe('true');
+    expect(document.documentElement.hasAttribute('data-navigating')).toBe(false);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(document.documentElement.hasAttribute('data-navigating')).toBe(true);
+    resolve(response(new URL('/repo/article/', location.href).href));
+    await pending;
+    expect(document.getElementById('content')?.hasAttribute('aria-busy')).toBe(false);
+    expect(document.documentElement.hasAttribute('data-navigating')).toBe(false);
   });
   it('loads typed page state and only its opaque body payload', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/nested/', location.href).href, 'nested/', '<div data-article-body><p id="note">Note</p></div>')));

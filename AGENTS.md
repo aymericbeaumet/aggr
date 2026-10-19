@@ -204,6 +204,8 @@ Use mise for local commands and CI; native OS libraries and compilers remain sys
 - The browser suite (`tests/browser/`) is one module per topic, and every test builds its own
   fixture site and Chrome session. `AGGR_BROWSER_TIMEOUT_SECS` lengthens its waits on a loaded
   machine; `AGGR_BUILD_WORKERS` pins the build's worker count.
+  Substitute local provider embed URLs in both SSR markup and the page model before hydration;
+  player binding captures the destination, so changing the DOM afterward cannot redirect it.
 - Keep downloadable development tools in `mise.toml` and `mise.lock`, including the browser
   matching ChromeDriver and Windows x64 NASM. CI may install native OS libraries separately.
 
@@ -395,6 +397,8 @@ Use mise for local commands and CI; native OS libraries and compilers remain sys
   the script sets it elsewhere, and the bar keeps the text column's width while the header's
   surface spans the page.
 - Offline readiness means an article page and all its retained image renditions are cached.
+  Stream network responses before awaiting cache writes; keep storage and eviction alive with
+  `FetchEvent.waitUntil`. HTML offline fallbacks are for documents, never JSON, stylesheets or feeds.
   Keep selected downloads separate from evictable runtime caches and report partial/quota failures.
   Store selected resources by immutable revision, then atomically commit their selection before
   pruning. Failed replacements preserve the previous selection; an empty selection remains
@@ -423,6 +427,8 @@ Use mise for local commands and CI; native OS libraries and compilers remain sys
   finger on release, and that tab is marked current before its page has arrived.
   Article swipes must yield to selection, vertical scroll, pinch zoom, controls, horizontal
   scrollers, and browser edge gestures.
+  Pull-to-refresh also yields to nested scrollers, controls, selection and zoom. Touch suggestions
+  choose on release, yield to panning, and fit the remaining visual viewport above the keyboard.
   Never apply `touch-action: pan-y` to an ancestor containing horizontal scrollers.
   Share keyboard/swipe article destinations; a missing neighbor returns to the main feed.
 - The client is Svelte 5 (runes) + TypeScript under `web/src/`: `app/`, `feed/`, `article/`

@@ -63,7 +63,14 @@ The TypeScript checker writes temporary files under ignored `web/.svelte-check/`
 Vite hashes executable assets and lists their paths in `assets.json`; Rust publishes them verbatim.
 HTML remains `no-store` in development. Navigation keeps a bounded cache and starts at most two
 prefetches after pointer, focus or touch intent; there are no startup, idle or viewport page downloads.
+Prefetches use low network priority and pause when Data Saver or a 2G connection is reported.
+Requested navigation stays high priority. Its 15-second deadline includes the response body, so a
+stalled transfer releases its slot and can fall back to ordinary navigation or a previously read page.
 A prerendered page waits for activation before changing history or registering a worker.
+
+Touch suggestions select on release and yield to scrolling. Their height follows the visible
+viewport above the keyboard, including browser panning. Installed pull-to-refresh yields to nested
+scrollers, controls, selection and zoom; the app's Search shortcut opens the focused feed search.
 
 ## Preferences
 
@@ -80,21 +87,25 @@ sync, and import and export. Values live in `localStorage` under `aggr:<setting>
 ## Offline
 
 The service worker separates automatically cached pages from selected offline downloads. Its
-script carries the app shell, not the article catalogue: `offline-catalog.json` is fetched only
+script carries the app shell, not the article catalog: `offline-catalog.json` is fetched only
 when a download count is set, and individual collection pages are cached when opened. A new
 worker copies shell files whose revision matches instead of downloading them again. The
 offline preference saves complete article pages and their retained image renditions; readiness
 requires every retained file. Updates stage immutable resource revisions, then publish the complete
-selection in one cache write. A failed or cancelled update keeps the previous complete downloads;
+selection in one cache write. A failed or canceled update keeps the previous complete downloads;
 partial and quota failures remain visible. Uncommitted files are never served, and unused revisions
 are removed after each update. Downloads made by older workers remain readable and move locally
 into the revisioned cache on a successful update, without downloading unchanged files again.
 Overlapping updates and clearing downloads share a queue and, where available, a browser Web Lock.
 Any positive download
-limit also saves the complete archive search manifest, including its versioned catalogue, runtime
+limit also saves the complete archive search manifest, including its versioned catalog, runtime
 and fragments. Only a fully committed index becomes active, and a previous complete index remains
-available during an update. Online/offline transitions select the matching catalogue and runtime;
+available during an update. Online/offline transitions select the matching catalog and runtime;
 search results mark saved articles and omit previews that are unavailable offline.
+
+Network responses stream immediately while cache writes and eviction finish under the fetch
+event's lifetime. Only document requests can fall back to the HTML offline page. JSON, feeds and
+stylesheets fall back to their exact cached URL, including its query, or return a network error.
 
 ## Browser regression tests
 
@@ -130,11 +141,11 @@ Chrome 154 on macOS produced these measurements over local HTTP without compress
 | Regression budget with cacheable versioned assets | 786,432 |
 
 The sample ends 750 ms after worker control, before typing or navigation. It also verifies zero
-external HTTP requests and zero automatic article, collection, search-index or offline-catalogue
+external HTTP requests and zero automatic article, collection, search-index or offline-catalog
 downloads. With cacheable assets, each asset is requested at most once: worker installation reuses
 the browser's HTTP cache. Search works afterward. These are controlled fixture bytes, not
 deployed-site timings; compression and hosting cache headers change the transfer size. The
-samples predate the smaller install shell: collection pages and the article catalogue are no
+samples predate the smaller install shell: collection pages and the article catalog are no
 longer part of service-worker installation.
 
 ```sh
@@ -172,7 +183,7 @@ use canonical publisher identifiers, for example `source:"hnrss.org"` or
 `source:"youtube.com/@Micode"`. Friendly source names are presentation labels and optional manual
 aliases. `via` uses the same normalized label as the source directory: a resolved Spotify show
 named `Underscore_` reads as `spotify.com/underscore`, while its query and collection identity
-remains `open.spotify.com/show/<id>`. Without a resolved name, the catalogue path remains visible.
+remains `open.spotify.com/show/<id>`. Without a resolved name, the catalog path remains visible.
 Other facets can insert readable unique labels. Duplicate labels or labels colliding with another
 identifier retain their stable identifiers; exact identifiers win, and ambiguous manual aliases
 produce an explanation.
@@ -180,7 +191,7 @@ Source includes both the publisher and every configured or retained feed that su
 A canonical article appears once globally and once in each matching publisher collection.
 Ordinary publisher IDs use the lowercase/punycode hostname without trailing dots, conventional
 `www.`, or ports. Other subdomains remain distinct. Shared platforms also keep the account path;
-platform aliases resolve through `src/platform.rs`, while opaque catalogue IDs retain the host
+platform aliases resolve through `src/platform.rs`, while opaque catalog IDs retain the host
 that issued them. Subscriptions belonging to one publisher share a source filter, and duplicate
 publisher/feed memberships collapse. Feed identities come from configured URLs or persisted
 endpoint/site metadata, never archived slugs. An origin with no trusted HTTP(S) metadata contributes
@@ -246,13 +257,13 @@ Display metadata remains opaque to Pagefind's text tokenizer. Archived points an
 are shared by static and search metadata, including explicit zero values; missing counts stay absent.
 Hacker News points, comment counts, and the discussion score are omitted from that shared view.
 
-Completion caches normalized aliases and ranking by immutable catalogue identity; detecting a
+Completion caches normalized aliases and ranking by immutable catalog identity; detecting a
 finished facet token does not build or sort a suggestion list. A persistent search session coalesces
-catalogue requests and keeps two recently used independent Pagefind instances across navigation.
+catalog requests and keeps two recently used independent Pagefind instances across navigation.
 Evicted instances remain alive only while their queries, hydration, preload, or facet requests finish;
 the last operation releases their worker resources and cached results. Application disposal cancels
-shared catalogue requests and retires instances after their active operations finish. JavaScript module code remains subject to
-the browser's import cache. Content updates and online/offline changes revalidate the catalogue;
+shared catalog requests and retires instances after their active operations finish. JavaScript module code remains subject to
+the browser's import cache. Content updates and online/offline changes revalidate the catalog;
 failed content revalidation retains the usable index, while network transitions reselect the current
 online index or the worker's committed offline index. Page disposal cancels only its own work. Result hydration is cached by
 query-specific result reference, not document ID. Pagefind can mutate and return the same fragment

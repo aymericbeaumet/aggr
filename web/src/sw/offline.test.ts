@@ -20,7 +20,7 @@ async function seedLegacy(env: ReturnType<typeof harness>, items = catalog): Pro
 }
 
 describe('offline articles', () => {
-  it('fetches the article catalogue only for a positive download count, and only once', async () => {
+  it('fetches the article catalog only for a positive download count, and only once', async () => {
     const { ctx, requests } = harness();
     await saveOfflineArticles(ctx, 0);
     expect(requests.some((url) => url.endsWith('offline-catalog.json'))).toBe(false);
@@ -194,7 +194,7 @@ describe('offline articles', () => {
     expect((await saveOfflineArticles(ctx, 1)).saved.map((item) => item.title)).toEqual(['Published']);
   });
 
-  it('persists saved articles in catalogue order when downloads finish out of order', async () => {
+  it('persists saved articles in catalog order when downloads finish out of order', async () => {
     const { ctx, state } = harness();
     state.network = async (url) => {
       if (url.endsWith('large.webp')) await new Promise((resolve) => setTimeout(resolve, 20));

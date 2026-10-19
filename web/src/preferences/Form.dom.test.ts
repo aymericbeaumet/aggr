@@ -167,7 +167,7 @@ describe('Form', () => {
     document.querySelector<HTMLButtonElement>('[data-preferences-action="cancel"]')?.click();
     flushSync();
     expect(control<HTMLElement>('preferences-import').hidden).toBe(true);
-    expect(status()).toBe('Import cancelled. Your preferences were not changed.');
+    expect(status()).toBe('Import canceled. Your preferences were not changed.');
     expect(storage.getItem('aggr:theme')).toBe('light');
   });
 

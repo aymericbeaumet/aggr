@@ -54,6 +54,7 @@ describe('PageCache', () => {
     expect(second).not.toBe(first);
     expect(await second.page).toEqual(page('a'));
     expect(second.ready).toBe(true);
+    expect(second.fetched).toEqual(page('a'));
     expect(cache.peek('a')).toBe(second);
     expect(requests).toBe(2);
   });

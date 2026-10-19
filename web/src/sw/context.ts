@@ -31,7 +31,7 @@ export interface WorkerState {
   searchAbort: AbortController | null;
   searchGeneration: number;
   searchStatus: SearchStatus;
-  /** The article catalogue for this worker, once a positive download count has loaded it. */
+  /** The article catalog for this worker, once a positive download count has loaded it. */
   offlineCatalog: OfflineItem[] | null;
   /** The count from the latest `AGGR_OFFLINE_CONFIG`, `null` until one arrives. */
   configurationCount: number | null;

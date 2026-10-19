@@ -436,7 +436,7 @@ impl<'a> Pages<'a> {
             ],
             "shortcuts": [
                 {"name":"Feed","short_name":"Feed","url":"./","icons":[{"src":icon,"sizes":"192x192"}]},
-                {"name":"Search","short_name":"Search","url":"./","icons":[{"src":icon,"sizes":"192x192"}]},
+                {"name":"Search","short_name":"Search","url":"./?focus-search=1","icons":[{"src":icon,"sizes":"192x192"}]},
                 {"name":"Browse","short_name":"Browse","url":"./browse/","icons":[{"src":icon,"sizes":"192x192"}]}
             ], "categories":["news","productivity"], "prefer_related_applications":false
         }))?)

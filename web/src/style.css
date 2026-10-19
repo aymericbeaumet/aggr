@@ -441,7 +441,7 @@ html:not([data-thumbnails="hide"]) .row-content { min-height: var(--preview-size
 .meta .reading-stats { white-space: nowrap; }
 .item { overflow-anchor: none; font-size: var(--reading-size); max-width: var(--reading-measure); margin-inline: auto; }
 /* An article's page is as wide as the window, so its header can span it the way the navigation
-   above does; the margins that centred the column become padding and leave the same content box,
+   above does; the margins that centered the column become padding and leave the same content box,
    the one every width inside is measured from. */
 body[data-kind="item"] .main {
   /* Margin notes query the page width. The container stays off list pages: it is a containing
@@ -691,6 +691,9 @@ body[data-kind="item"] .main {
 .preference-help summary { display: grid; place-items: center; width: 1.5rem; height: 1.5rem; border: 1px solid var(--control-border); border-radius: 50%; color: var(--muted); font-size: 0.8rem; line-height: 1; cursor: help; list-style: none; }
 .preference-help summary::-webkit-details-marker { display: none; }
 .preference-help summary:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+@media (pointer: coarse) {
+  .preference-help summary { width: var(--tap-target); height: var(--tap-target); }
+}
 .preference-help-text { position: absolute; z-index: 3; left: 1rem; right: 1rem; margin-top: 0.4rem; padding: 0.65rem; border: 1px solid var(--faint); border-radius: 0.4rem; background: var(--panel); color: var(--fg); box-shadow: 0 3px 12px #0002; font-size: 0.875rem; line-height: 1.5; }
 .preference-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-top: 0.45rem; }
 .preferences-transfer > .preference-actions { padding-block: 0.3rem; }
@@ -850,7 +853,7 @@ body[data-kind="item"] .main {
 .audio-ends-at { color: var(--fg); }
 .audio-tools:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0.5rem 0.75rem; min-width: 0; }
 .audio-tools button, .audio-tools select { box-sizing: border-box; min-height: 2.75rem; border: 1px solid var(--faint); border-radius: 0.45rem; padding: 0.2rem 0.5rem; color: var(--fg); background: var(--panel); font: 0.75rem var(--font); cursor: pointer; }
-/* A circling arrow with the jump length at its centre, the shape every podcast player uses. */
+/* A circling arrow with the jump length at its center, the shape every podcast player uses. */
 .audio-skip { display: grid; place-items: center; flex: none; width: 2.75rem; height: 2.75rem; padding: 0; border: 0; border-radius: 50%; color: var(--fg); background: transparent; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .audio-skip > * { grid-area: 1 / 1; }
 .audio-skip svg { width: 2.1rem; height: 2.1rem; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
@@ -1200,7 +1203,7 @@ body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data
   .row[data-opening], .article-more-card[data-opening] { background: color-mix(in srgb, var(--fg) 7%, transparent); }
   article[data-swipe-navigation] :is(p, h1, h2, h3, h4, h5, h6, li, blockquote):not(:has(pre, table, .table-scroll, audio, video, iframe, object, embed, canvas, [data-no-swipe])) { touch-action: pan-y pinch-zoom; }
   .mobile-tabs[data-keyboard-open] { visibility: hidden; pointer-events: none; }
-  /* Touch reading: links read as links by colour, without the desktop underline, and taps do not
+  /* Touch reading: links read as links by color, without the desktop underline, and taps do not
      flash the platform's default highlight rectangle. */
   .body a, .body a:hover { text-decoration: none; }
   .body a:focus-visible { text-decoration: underline; text-decoration-thickness: 0.12em; }
@@ -1254,7 +1257,7 @@ body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data
   .row, .browse-entry { content-visibility: visible; }
 }
 
-/* ---------------------------------------------------------------- platform behaviour */
+/* ---------------------------------------------------------------- platform behavior */
 
 /* Cross-document navigation animates itself; motion preferences still win. */
 @media (prefers-reduced-motion: no-preference) {

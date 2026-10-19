@@ -10,7 +10,7 @@ export type PagerLink = { href: string; visible: boolean };
 /**
  * One preferred-size slice of a generated page. Every row stays in the document, so crawlers and
  * readers without JavaScript still see the complete static page; the client hides the rows
- * outside `[start, end)` and points the pager at the neighbouring slices.
+ * outside `[start, end)` and points the pager at the neighboring slices.
  */
 export type Slicing = {
   start: number;

@@ -47,7 +47,7 @@ export function resourceKey(ctx: WorkerContext, entry: ResourceEntry): string {
   return url.href;
 }
 
-/** Rendered page revisions hash their bytes; a deployment may change between catalogue and page fetch. */
+/** Rendered page revisions hash their bytes; a deployment may change between catalog and page fetch. */
 export async function validPageRevision(ctx: WorkerContext, entry: ResourceEntry, response: Response): Promise<boolean> {
   if (!new URL(entry.url, ctx.scope).pathname.endsWith('/') || !/^[0-9a-f]{40}$/.test(entry.revision)) return true;
   const digest = await crypto.subtle.digest('SHA-1', await response.clone().arrayBuffer());

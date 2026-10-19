@@ -28,7 +28,7 @@ an archive.
 
 ## Contributions and distribution
 
-Original contributions arrive under the same MIT terms, with explicit acknowledgement
+Original contributions arrive under the same MIT terms, with explicit acknowledgment
 as described in [CONTRIBUTING.md](../CONTRIBUTING.md). Contributors keep copyright;
 inbound and outbound terms are identical, so no copyright assignment is required.
 

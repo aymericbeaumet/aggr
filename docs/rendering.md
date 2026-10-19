@@ -70,7 +70,7 @@ at the root) and `page.feed_title` the title to label its Atom, RSS and JSON Fee
 404 and offline pages carry neither. `site.language` is the `[site] language` BCP 47 tag that the
 head component writes to `<html lang>`, and `site.og_locale` is the same value in Open Graph form
 (`en_GB`). `sources[].language` is the BCP 47 tag a publisher declares for its whole feed (RSS
-`<language>`, Atom `xml:lang`, JSON Feed `language`), canonicalised and recorded in the source
+`<language>`, Atom `xml:lang`, JSON Feed `language`), canonicalized and recorded in the source
 state, and `item.language` inherits it; both are absent when the feed declares none. The reader
 adds `lang` to the article element and the feed-row title only when that tag differs from
 `site.language`, so a single-language instance renders exactly as before.
@@ -427,7 +427,7 @@ If capture fails or the companion cannot fit, the viewer falls back to the publi
 Publisher embedding policies and HTTPS-Only settings can then prevent inline viewing; aggr
 does not bypass browser security. PDF links inside ordinary prose remain links. When preferred
 previews are absent, fetching can also rasterize the first page to a retained thumbnail.
-A PDF article without a published local document is excluded from the downloadable offline catalogue.
+A PDF article without a published local document is excluded from the downloadable offline catalog.
 See [PDF preservation](interoperability.md#pdf-preservation) for capture limits.
 
 ## Stable media loading

@@ -39,7 +39,7 @@ resolved in the reader from the article's own text.
 
 Feed, browse, and preferences sit in a compact bottom tab bar above the home indicator.
 The whole bar is the hit target, and the tab lights up as soon as it is pressed.
-The current tab has a rounded selected background. Links read by colour rather than an underline, and taps do
+The current tab has a rounded selected background. Links read by color rather than an underline, and taps do
 not flash the platform's default highlight.
 
 Swipe left on article prose to open the next older article, or right for the previous newer one.

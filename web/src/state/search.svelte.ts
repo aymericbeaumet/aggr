@@ -31,13 +31,13 @@ export type SearchDriver = {
   submit(): void;
   clear(): void;
   turn(delta: number): void;
-  /** The content or the network changed: revalidate the catalogue and the results. */
+  /** The content or the network changed: revalidate the catalog and the results. */
   refresh(): void;
 };
 
 /**
  * The search field and its results, shared by the toolbar, the suggestion list, the result list
- * and the feed. Persistent across navigations: the engine behind it keeps its catalogue and
+ * and the feed. Persistent across navigations: the engine behind it keeps its catalog and
  * indexes, while the text follows each page's `?q=`.
  */
 class SearchState {

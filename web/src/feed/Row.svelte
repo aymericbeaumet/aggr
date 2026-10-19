@@ -35,7 +35,7 @@
     row.language && row.language.toLowerCase() !== language.toLowerCase() ? row.language : undefined,
   );
   const href = $derived(urlFor(base, row.url));
-  // The band the build painted, recoloured as the article ages while the app runs.
+  // The band the build painted, recolored as the article ages while the app runs.
   const published = $derived(Date.parse(row.metadata.date));
   const band = $derived(
     clock.now !== null && !Number.isNaN(published) ? ageBand(published, clock.now) : row.age_band,

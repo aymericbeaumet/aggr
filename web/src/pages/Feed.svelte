@@ -62,7 +62,7 @@
   });
 
   // The list arrived at this address: the search field follows its `?q=`, and the search module
-  // warms its catalogue (Pagefind itself waits for a valid query). Leaving ends the page's work.
+  // warms its catalog (Pagefind itself waits for a valid query). Leaving ends the page's work.
   $effect(() => {
     const href = shown.href;
     const root = shown.root;

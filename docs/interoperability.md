@@ -125,7 +125,7 @@ box so the space is reserved before it loads, and it carries a flat stand-in pre
 ThumbHash. It gains no WebP renditions. A CDN that answers `auto=format` with AVIF regardless of
 `Accept` — Linear's, for one — is archived this way rather than skipped. Having no decoder also
 means AVIF cannot be compacted: under `media_download_strategy = "compressed"` it keeps its exact bytes, as
-colour-managed and high-bit-depth images do.
+color-managed and high-bit-depth images do.
 
 AVIF support stops there deliberately, and two gaps follow from never decoding it. An animated AVIF
 sequence is archived whole, bounded only by the file-size limit rather than by the frame and pixel

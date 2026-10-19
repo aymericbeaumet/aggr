@@ -40,14 +40,14 @@ const refs = (ids: string[], loaded: string[] = []): ResultRef[] =>
 
 describe('filters', () => {
   it('resolves unique aliases, rejects ambiguity, and gives exact identifiers precedence', () => {
-    const catalogue: Catalog = {
+    const catalog: Catalog = {
       ...manifest,
       facets: { ...manifest.facets, source: [{ value: 'spotify', label: 'Underscore_', count: 2 }, { value: 'youtube', label: 'UNDERSCORE_', count: 2 }] },
     };
-    expect(() => buildFilters(parseQuery('source:underscore_'), catalogue)).toThrow(/Ambiguous source/);
-    expect(buildFilters(parseQuery('source:spotify type:Podcast'), catalogue)).toEqual({ source: { any: ['spotify'] }, type: { any: ['podcast'] } });
-    catalogue.facets.source = [...(catalogue.facets.source ?? []), { value: 'underscore_', label: 'Other', count: 1 }];
-    expect(buildFilters(parseQuery('source:underscore_'), catalogue)).toEqual({ source: { any: ['underscore_'] } });
+    expect(() => buildFilters(parseQuery('source:underscore_'), catalog)).toThrow(/Ambiguous source/);
+    expect(buildFilters(parseQuery('source:spotify type:Podcast'), catalog)).toEqual({ source: { any: ['spotify'] }, type: { any: ['podcast'] } });
+    catalog.facets.source = [...(catalog.facets.source ?? []), { value: 'underscore_', label: 'Other', count: 1 }];
+    expect(buildFilters(parseQuery('source:underscore_'), catalog)).toEqual({ source: { any: ['underscore_'] } });
     expect(() => buildFilters(parseQuery('-tag:missing'), manifest)).toThrow(/Unknown tag/);
   });
 
@@ -137,12 +137,12 @@ describe('the index', () => {
         : term === 'rust' ? ['1', '2', '3', '4', '5'] : term === '"borrow checker"' ? ['2', '3', '4'] : term === 'old' ? ['3'] : ['1', '2'];
       return { results: refs(ids), filters: { source: { blog: 90, two: 80, empty: 10 }, category: { rust: 2 } } };
     });
-    const catalogue: Catalog = {
+    const catalog: Catalog = {
       ...manifest,
       facets: { ...manifest.facets, source: [{ value: 'blog', label: 'Blog', count: 100 }, { value: 'two', label: 'Two', count: 100 }, { value: 'empty', label: 'Empty', count: 10 }] },
     };
     const { importAPI } = fakeModule({ search, filters });
-    const index = createIndex('https://reader.test/', catalogue, importAPI, new AbortController().signal);
+    const index = createIndex('https://reader.test/', catalog, importAPI, new AbortController().signal);
     expect(await index.counts(parseQuery('category:rust'), 'source')).toEqual([
       { value: 'blog', label: 'Blog', count: 90 }, { value: 'two', label: 'Two', count: 80 }, { value: 'empty', label: 'Empty', count: 10 },
     ]);
@@ -220,7 +220,7 @@ describe('the session', () => {
     });
   }
 
-  it('fetches the catalogue uncached and imports Pagefind only for a query', async () => {
+  it('fetches the catalog uncached and imports Pagefind only for a query', async () => {
     const fetcher = serve(() => manifest);
     const { importAPI } = fakeModule({ search: async () => ({ results: [] }) });
     const session = createSession('https://reader.test/', importAPI, true);
@@ -234,7 +234,7 @@ describe('the session', () => {
     expect(importAPI).toHaveBeenCalledTimes(1);
   });
 
-  it('reports an unavailable or foreign catalogue', async () => {
+  it('reports an unavailable or foreign catalog', async () => {
     serve(() => new Response('gone', { status: 404 }));
     await expect(createSession('https://reader.test/', vi.fn(), true).load()).rejects.toThrow(/unavailable/);
     vi.restoreAllMocks();

@@ -68,10 +68,11 @@ export function installKeyboardInset(): void {
   const sync = () =>
     document.documentElement.classList.toggle(
       'is-keyboard-open',
-      window.innerHeight - viewport.height > 120 && editing(document.activeElement),
+      window.innerHeight - viewport.height * viewport.scale > 120 && editing(document.activeElement),
     );
   viewport.addEventListener('resize', sync, { passive: true });
   for (const name of ['focusin', 'focusout']) document.addEventListener(name, sync, { passive: true });
+  sync();
 }
 
 const pictureFrame = (image: HTMLImageElement) =>
