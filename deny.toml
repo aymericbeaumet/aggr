@@ -11,8 +11,8 @@ all-features = true
 
 [licenses]
 # Dependency licenses are exhaustive: a crate whose license expression cannot be satisfied by
-# it fails the check. That is what keeps GPL-3.0 out (the older stable wreq-util release is
-# GPL-3.0; the pinned prereleases are Apache-2.0, see docs/interoperability.md) — cargo-deny has no separate
+# it fails the check. That is what keeps GPL-3.0 out (wreq-util 0.1.0 is GPL-3.0;
+# the pinned stable 0.2.0 is Apache-2.0, see docs/interoperability.md) — cargo-deny has no separate
 # deny list any more, so do not "fix" a bump by adding a copyleft license here.
 allow = [
   "MIT",

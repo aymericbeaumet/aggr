@@ -60,6 +60,9 @@ assets without Node; source checkouts can also launch Vite from optimized binari
 Vitest, and supervisor tests. Rust tests exercise the embedded renderer and publication behavior;
 frontend tests render the actual components. Browser contracts cover hydration and navigation.
 The TypeScript checker writes temporary files under ignored `web/.svelte-check/`.
+The native compiler uses TypeScript 7 through the `@typescript/native` npm alias. Svelte's checker
+still needs the classic TypeScript 6 JavaScript compiler API and its supported peer range, so the
+separate `typescript` dependency stays on that line until the checker supports TypeScript 7.
 
 Vite hashes executable assets and lists their paths in `assets.json`; Rust publishes them verbatim.
 HTML remains `no-store` in development. Navigation keeps a bounded cache and starts at most two

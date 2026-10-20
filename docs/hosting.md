@@ -30,7 +30,7 @@ Cargo builds the CLI from crates.io, using the same embedded reader as the prebu
 cargo install --locked aggr
 ```
 
-This requires Rust 1.96 or newer and the [native build dependencies](interoperability.md#http-extraction-and-native-builds).
+This requires Rust 1.98 or newer and the [native build dependencies](interoperability.md#http-extraction-and-native-builds).
 Node is needed only when building the repository checkout; published crates bundle the compiled
 reader. `aggr-lib` is the Rust library, while the `aggr` crate installs the command.
 

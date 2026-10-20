@@ -220,11 +220,11 @@ of the challenged web application; see [OpenReview ingestion](openreview.md). Ca
 can retain their safe prose and automatically load the sandboxed live original inside the reader; see
 [reader behavior](rendering.md#reader-behavior). Neither route executes publisher scripts during fetching.
 
-`wreq = 6.0.0-rc.31` and `wreq-util = 3.0.0-rc.14` are exact prerelease pins: both published
-packages use Apache-2.0 and declare Rust 1.85 compatibility, preserving aggr's Rust 1.96 minimum.
-The newer stable pair requires Rust 1.98; the older stable utility release has a different,
-GPL-3.0 license. Review the actual package licenses, compiler requirements, and platform builds
-before changing these pins.
+`wreq = 0.16.1` and `wreq-util = 0.2.0` are exact stable pins. Both published packages use
+Apache-2.0 and require Rust 1.98, which is aggr's minimum compiler version. Upstream restarted
+their version numbering after the earlier `6.0.0-rc` and `3.0.0-rc` series. The older stable
+utility release `0.1.0` uses GPL-3.0. Review actual package licenses, compiler requirements,
+and platform builds before changing these pins.
 
 Building from source additionally needs the CMake version pinned in `mise.toml`, a C/C++ toolchain,
 Git, and native libclang for bindgen. Run `make setup` for the mise tools. Linux CI installs

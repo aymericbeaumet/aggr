@@ -58,7 +58,7 @@ jobs:
       - uses: ./.github/actions/native-deps
       - uses: jdx/mise-action@v5
         with:
-          version: 2026.10.11
+          version: 2026.10.15
           install_args: rust node cmake ninja
       - name: Install Windows x64 assembler
         if: matrix.name == 'windows-amd64'

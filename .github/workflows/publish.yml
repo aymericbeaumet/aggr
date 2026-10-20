@@ -27,7 +27,7 @@ jobs:
       - uses: ./.github/actions/native-deps
       - uses: jdx/mise-action@v5
         with:
-          version: 2026.10.11
+          version: 2026.10.15
           install_args: rust node cmake ninja
       - uses: Swatinem/rust-cache@v2
         with:
