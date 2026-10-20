@@ -427,9 +427,14 @@ Use mise for local commands and CI; native OS libraries and compilers remain sys
   Touch tabs activate once on release with immediate contact feedback. The whole tab bar,
   including its padding, is the hit target; a tap that stays on it activates the tab under the
   finger on release, and that tab is marked current before its page has arrived.
+  Guard clicks retargeted to articles under the visible bar; hidden bars, dialogs, fullscreen
+  media and controls drawn above it retain their own gestures.
   Article swipes must yield to selection, vertical scroll, pinch zoom, controls, horizontal
   scrollers, and browser edge gestures.
-  Pull-to-refresh also yields to nested scrollers, controls, selection and zoom. Touch suggestions
+  Pull-to-refresh also yields to nested scrollers, controls, selection and zoom. Keep its motion
+  on the small indicator, coalesce local transform/opacity writes per frame, and attach blocking
+  touch listeners only during eligible gestures; never animate the whole reader or inherit
+  per-frame pull styles from the document. Touch suggestions
   choose on release, yield to panning, and fit the remaining visual viewport above the keyboard.
   Never apply `touch-action: pan-y` to an ancestor containing horizontal scrollers.
   Share keyboard/swipe article destinations; a missing neighbor returns to the main feed.

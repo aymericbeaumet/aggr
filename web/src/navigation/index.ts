@@ -291,6 +291,18 @@ function tabLinks(bar: Element): HTMLAnchorElement[] {
   );
 }
 
+function tabBarAt(x: number, y: number): Element | null {
+  if (document.fullscreenElement || document.querySelector('dialog[open]')) return null;
+  const bar = document.querySelector('.mobile-tabs');
+  if (!bar) return null;
+  const style = getComputedStyle(bar);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.pointerEvents === 'none') return null;
+  const box = bar.getBoundingClientRect();
+  if (box.width <= 0 || box.height <= 0 || x < box.left || x >= box.right || y < box.top || y >= box.bottom) return null;
+  const topmost = document.elementFromPoint?.(x, y);
+  return topmost && !bar.contains(topmost) ? null : bar;
+}
+
 /** Light `link` now: the column under the finger, before its page has been fetched. */
 function holdTab(link: HTMLAnchorElement): void {
   if (link.hasAttribute('data-pressed') && link.getAttribute('aria-current') === 'page') return;
@@ -323,13 +335,20 @@ function releaseTab(): void {
  */
 function installTabActivation(): void {
   let swallowed = false;
+  // During scrolling, a compatibility click can retain the row that was under the fixed bar.
+  document.addEventListener('click', (event) => {
+    const bar = tabBarAt(event.clientX, event.clientY);
+    if (bar && event.target instanceof Node && !bar.contains(event.target)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, { capture: true });
   document.addEventListener(
     'touchstart',
     (event) => {
       swallowed = false;
-      const target = event.target;
-      const tabs = target instanceof Element ? target.closest('.mobile-tabs') : null;
       const touch = event.touches.length === 1 ? event.touches[0] : null;
+      const tabs = touch ? tabBarAt(touch.clientX, touch.clientY) : null;
       if (!tabs || !touch) {
         if (tabGesture) releaseTab();
         return;

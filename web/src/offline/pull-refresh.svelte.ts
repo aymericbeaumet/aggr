@@ -1,20 +1,27 @@
 /**
  * Pull-to-refresh for the installed app, where the browser's own is out of reach: a single
- * touch dragged down from the top of the page pulls the header and the content along, and a
- * pull far enough reloads the page keeping the reader's place. The indicator is `#pull-refresh`
- * in the status bar; the stylesheet moves the page through `data-pull-state` on `<html>`.
+ * touch dragged down from the top reveals a small indicator; the page stays in place. A
+ * deliberate release reloads keeping the reader's place. Motion stays on the indicator's
+ * compositor layer, with no inherited per-frame styles on the document.
  */
 
-export type PullPhase = 'idle' | 'tracking' | 'pulling' | 'armed' | 'refreshing';
+export type PullPhase = 'idle' | 'tracking' | 'pulling' | 'armed' | 'settling' | 'refreshing';
 
-const TRACKING: readonly string[] = ['tracking', 'pulling', 'armed'];
+const TRACKING: readonly PullPhase[] = ['tracking', 'pulling', 'armed'];
+const ARM_DISTANCE = 84;
+const DISARM_DISTANCE = 72;
+const SLOP = 6;
+const resistedDistance = (dy: number) => 80 * -Math.expm1(-(dy - SLOP) / 100);
 
 /** Where a touch that started at the top leaves the gesture, from how far it moved. */
-export function pullState(phase: string, dx: number, dy: number): { phase: string; distance: number } {
+export function pullState(phase: PullPhase, dx: number, dy: number): { phase: PullPhase; distance: number } {
   if (!TRACKING.includes(phase)) return { phase, distance: 0 };
   if (dy <= 0 || Math.abs(dx) > dy) return { phase: 'idle', distance: 0 };
-  if (dy < 6) return { phase, distance: 0 };
-  return { phase: dy >= 84 ? 'armed' : 'pulling', distance: Math.min(72, Math.round(dy * 0.55)) };
+  if (dy < SLOP) return { phase: phase === 'tracking' ? 'tracking' : 'pulling', distance: 0 };
+  return {
+    phase: dy >= (phase === 'armed' ? DISARM_DISTANCE : ARM_DISTANCE) ? 'armed' : 'pulling',
+    distance: resistedDistance(dy),
+  };
 }
 
 /** What the indicator says in each phase; nothing while there is nothing to show. */
@@ -33,7 +40,6 @@ export function pullLabel(phase: string): string {
 
 class Pull {
   phase = $state<PullPhase>('idle');
-  distance = $state(0);
 
   get hidden(): boolean {
     return this.phase === 'idle' || this.phase === 'tracking';
@@ -62,19 +68,69 @@ export type PullOptions = {
   win?: Window;
 };
 
-export function installPullRefresh({ enabled, refresh, doc = document, win = window }: PullOptions): void {
+export function installPullRefresh({ enabled, refresh, doc = document, win = window }: PullOptions): () => void {
   let x = 0;
   let y = 0;
-  const render = (phase: PullPhase, distance: number) => {
+  let distance = 0;
+  let paintFrame: number | null = null;
+  let refreshFrame: number | null = null;
+  let settlingTimer: number | undefined;
+  let listening = false;
+  const indicator = doc.getElementById('pull-refresh');
+  const symbol = indicator?.querySelector<SVGElement>('.pull-refresh-symbol');
+  const ring = indicator?.querySelector<SVGElement>('.pull-refresh-ring');
+  const moveOptions = { passive: false };
+  const phase = (phase: PullPhase) => {
+    if (pull.phase === phase) return;
     pull.phase = phase;
-    pull.distance = distance;
     doc.documentElement.dataset.pullState = phase;
-    doc.documentElement.style.setProperty('--pull-distance', `${distance}px`);
+  };
+  const paint = (next: number) => {
+    distance = next;
+    if (paintFrame !== null) return;
+    paintFrame = win.requestAnimationFrame(() => {
+      paintFrame = null;
+      if (!indicator) return;
+      indicator.style.transform = `translate3d(-50%, ${distance - 40}px, 0)`;
+      indicator.style.opacity = String(Math.min(1, distance / 24));
+      const progress = pull.phase === 'armed' || pull.phase === 'refreshing' ? 1 : Math.min(1, distance / resistedDistance(ARM_DISTANCE));
+      if (symbol) symbol.style.transform = `rotate(${progress * 180}deg)`;
+      if (ring) ring.style.strokeDashoffset = String(100 * (1 - progress));
+    });
+  };
+  const stopMoving = () => {
+    if (listening) doc.removeEventListener('touchmove', move);
+    listening = false;
+  };
+  const reset = () => {
+    stopMoving();
+    if (paintFrame !== null) win.cancelAnimationFrame(paintFrame);
+    if (refreshFrame !== null) win.cancelAnimationFrame(refreshFrame);
+    win.clearTimeout(settlingTimer);
+    paintFrame = refreshFrame = null;
+    settlingTimer = undefined;
+    distance = 0;
+    phase('idle');
+    indicator?.style.removeProperty('transform');
+    indicator?.style.removeProperty('opacity');
+    symbol?.style.removeProperty('transform');
+    ring?.style.removeProperty('stroke-dashoffset');
+  };
+  const settle = () => {
+    stopMoving();
+    if (!distance || doc.documentElement.dataset.motion === 'off' || win.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      reset();
+      return;
+    }
+    phase('settling');
+    paint(0);
+    // transitionend is not guaranteed when the app is backgrounded or styles change.
+    settlingTimer = win.setTimeout(reset, 280);
   };
   const selected = () => doc.getSelection()?.isCollapsed === false;
   const ownsGesture = (target: EventTarget | null) => {
     if (!(target instanceof Element)) return false;
-    if (target.closest('a,button,input,textarea,select,label,summary,audio,video,iframe,object,embed,canvas,pre,table,[contenteditable],[role="slider"],[data-no-pull-refresh]')) return true;
+    if (target.closest('a,button,input,textarea,select,label,summary,audio,video,iframe,object,embed,canvas,pre,table,[contenteditable],[role="slider"],[data-no-pull-refresh],[data-site-navigation]')) return true;
     // A nested scroller owns the whole gesture, including overscroll at either end.
     for (let node: Element | null = target; node && node !== doc.body && node !== doc.documentElement; node = node.parentElement) {
       const style = win.getComputedStyle(node);
@@ -83,42 +139,76 @@ export function installPullRefresh({ enabled, refresh, doc = document, win = win
     }
     return false;
   };
-  doc.addEventListener(
-    'touchstart',
-    (event) => {
-      if (pull.phase === 'refreshing') return;
-      render('idle', 0);
-      if (!enabled() || win.scrollY > 0 || event.touches.length !== 1) return;
-      if (doc.querySelector('dialog[open]') || selected() || ownsGesture(event.target) || (win.visualViewport?.scale ?? 1) > 1) return;
-      x = event.touches[0].clientX;
-      y = event.touches[0].clientY;
-      render('tracking', 0);
-    },
-    { passive: true },
-  );
-  doc.addEventListener(
-    'touchmove',
-    (event) => {
-      if (!TRACKING.includes(pull.phase)) return;
-      if (event.touches.length !== 1 || win.scrollY > 0 || selected()) {
-        render('idle', 0);
+  const start = (event: TouchEvent) => {
+    if (pull.phase === 'refreshing') return;
+    if (event.touches.length !== 1) {
+      cancel();
+      return;
+    }
+    reset();
+    if (!enabled() || win.scrollY > 0) return;
+    if (doc.querySelector('dialog[open]') || selected() || ownsGesture(event.target) || (win.visualViewport?.scale ?? 1) > 1) return;
+    x = event.touches[0].clientX;
+    y = event.touches[0].clientY;
+    if (x < 24 || x > win.innerWidth - 24) return;
+    phase('tracking');
+    doc.addEventListener('touchmove', move, moveOptions);
+    listening = true;
+  };
+  const move = (event: TouchEvent) => {
+    if (!TRACKING.includes(pull.phase)) return;
+    if (event.touches.length !== 1 || win.scrollY > 0 || selected() || (win.visualViewport?.scale ?? 1) > 1) {
+      settle();
+      return;
+    }
+    const next = pullState(pull.phase, event.touches[0].clientX - x, event.touches[0].clientY - y);
+    if ((next.phase === 'pulling' || next.phase === 'armed') && event.cancelable) event.preventDefault();
+    if (next.phase === 'idle') settle();
+    else {
+      phase(next.phase);
+      if (next.phase !== 'tracking') paint(next.distance);
+    }
+  };
+  const end = (event: TouchEvent) => {
+    if (!TRACKING.includes(pull.phase)) return;
+    stopMoving();
+    const released = event.changedTouches?.[0];
+    if (released && pull.phase !== 'tracking') {
+      const next = pullState(pull.phase, released.clientX - x, released.clientY - y);
+      if (next.phase === 'idle') {
+        settle();
         return;
       }
-      const next = pullState(pull.phase, event.touches[0].clientX - x, event.touches[0].clientY - y);
-      if ((next.phase === 'pulling' || next.phase === 'armed') && event.cancelable) event.preventDefault();
-      render(next.phase as PullPhase, next.distance);
-    },
-    { passive: false },
-  );
-  doc.addEventListener(
-    'touchend',
-    (event) => {
-      if (pull.phase === 'armed' && !event.touches.length && !selected()) {
-        render('refreshing', 48);
-        refresh();
-      } else render('idle', 0);
-    },
-    { passive: true },
-  );
-  doc.addEventListener('touchcancel', () => render('idle', 0), { passive: true });
+      phase(next.phase);
+    }
+    if (pull.phase === 'armed' && !event.touches.length && !selected() && win.scrollY <= 0 && (win.visualViewport?.scale ?? 1) <= 1) {
+      phase('refreshing');
+      paint(44);
+      // Let the indicator paint before reload begins, without delaying the request for a tween.
+      refreshFrame = win.requestAnimationFrame(() => {
+        refreshFrame = win.requestAnimationFrame(() => {
+          refreshFrame = null;
+          refresh();
+        });
+      });
+    } else settle();
+  };
+  const cancel = () => { if (TRACKING.includes(pull.phase)) settle(); };
+  const settled = (event: TransitionEvent) => {
+    if (pull.phase === 'settling' && event.target === indicator && event.propertyName === 'transform') reset();
+  };
+  const dispose = () => {
+    reset();
+    doc.removeEventListener('touchstart', start);
+    doc.removeEventListener('touchend', end);
+    doc.removeEventListener('touchcancel', cancel);
+    indicator?.removeEventListener('transitionend', settled);
+    win.removeEventListener('pagehide', reset);
+  };
+  doc.addEventListener('touchstart', start, { passive: true });
+  doc.addEventListener('touchend', end, { passive: true });
+  doc.addEventListener('touchcancel', cancel, { passive: true });
+  indicator?.addEventListener('transitionend', settled);
+  win.addEventListener('pagehide', reset);
+  return dispose;
 }

@@ -107,6 +107,9 @@ it returns to the foreground or reconnects. New articles appear automatically in
 search results, preserving selection and reading position. An open article stays in place.
 Application releases show a separate “Refresh to update” pill; feed updates continue while that
 pill is visible. Browser refresh and the installed app's pull-to-refresh remain available.
+In the installed app, drag down from the top until the circular indicator fills and its arrow
+turns upward, then release. The page and bottom tabs stay in place. A short pull retracts without
+refreshing; motion settings also apply to the indicator.
 
 New-item highlights and the title/favicon dot use tab-local state that disappears when the tab
 closes. Normal browser tabs request a new tab for external links; installed apps hand out-of-scope

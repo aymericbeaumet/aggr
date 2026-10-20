@@ -199,6 +199,89 @@ function touches(target: EventTarget, name: string, active: ReturnType<typeof to
 }
 
 describe('mobile tab gestures', () => {
+  it.each(['fullscreen', 'overlay'])('leaves controls above the bar usable in %s', (mode) => {
+    const { home } = mobileTabs();
+    document.body.insertAdjacentHTML('beforeend', '<button id="player">Media control</button>');
+    const control = document.getElementById('player')!;
+    const activate = vi.fn();
+    control.addEventListener('click', activate);
+    const property = mode === 'fullscreen' ? 'fullscreenElement' : 'elementFromPoint';
+    const previous = Object.getOwnPropertyDescriptor(document, property);
+    Object.defineProperty(document, property, { configurable: true, value: mode === 'fullscreen' ? control : () => control });
+    try {
+      const click = vi.spyOn(home, 'click');
+      touches(control, 'touchstart', [touch(20, 767)]);
+      touches(control, 'touchend', [], [touch(20, 767)]);
+      const event = new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, clientX: 20, clientY: 767 });
+      control.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(activate).toHaveBeenCalledOnce();
+      expect(click).not.toHaveBeenCalled();
+    } finally {
+      if (previous) Object.defineProperty(document, property, previous);
+      else Reflect.deleteProperty(document, property);
+    }
+  });
+
+  it.each([[1, 730], [150, 767], [299, 767]])('blocks a row click delivered beneath the visible bar at %s,%s', (x, y) => {
+    mobileTabs();
+    document.querySelector('main')!.innerHTML = '<a href="/repo/article/" data-row-open>Article underneath</a>';
+    const article = document.querySelector('[data-row-open]')!;
+    const activate = vi.fn();
+    article.addEventListener('click', activate);
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, clientX: x, clientY: y });
+    article.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(true);
+    expect(activate).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('owns a touch geometrically inside the bar even if the platform targets the article underneath', () => {
+    const { home } = mobileTabs();
+    document.querySelector('main')!.innerHTML = '<a href="/repo/article/" data-row-open>Article underneath</a>';
+    const article = document.querySelector('[data-row-open]')!;
+    const click = vi.spyOn(home, 'click').mockImplementation(() => {});
+    touches(article, 'touchstart', [touch(20, 767)]);
+    const release = touches(article, 'touchend', [], [touch(20, 767)]);
+    expect(release.defaultPrevented).toBe(true);
+    expect(click).toHaveBeenCalledOnce();
+  });
+
+  it.each(['visibility:hidden', 'display:none', 'pointer-events:none'])('leaves the page clickable when its bar is %s', (style) => {
+    vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/article/', location.href).href)));
+    const { bar } = mobileTabs();
+    bar.style.cssText = style;
+    document.querySelector('main')!.innerHTML = '<a href="/repo/article/" data-row-open>Visible article</a>';
+    const article = document.querySelector('[data-row-open]')!;
+    const activate = vi.fn();
+    article.addEventListener('click', activate);
+    article.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, clientX: 150, clientY: 767 }));
+    expect(activate).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it('leaves a modal above the bar interactive', () => {
+    mobileTabs();
+    document.body.insertAdjacentHTML('beforeend', '<dialog open><button>Confirm</button></dialog>');
+    const button = document.querySelector('dialog button')!;
+    const activate = vi.fn();
+    button.addEventListener('click', activate);
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, clientX: 150, clientY: 767 }));
+    expect(activate).toHaveBeenCalledOnce();
+  });
+
+  it('keeps an article above the bar clickable', () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/article/', location.href).href)));
+    mobileTabs();
+    document.querySelector('main')!.innerHTML = '<a href="/repo/article/" data-row-open>Visible article</a>';
+    const article = document.querySelector('[data-row-open]')!;
+    const activate = vi.fn();
+    article.addEventListener('click', activate);
+    article.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, clientX: 150, clientY: 699 }));
+    expect(activate).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it('releases contact feedback after a touch whose pointer was canceled by scrolling', async () => {
     (await import('../app/platform')).installTapFeedback();
     const { bar, home } = mobileTabs();
