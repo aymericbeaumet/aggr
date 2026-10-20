@@ -3,7 +3,8 @@ name = "aggr-ui-model"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-publish = false
+description = "Typed page contracts for the aggr feed reader"
+repository = "https://github.com/aymericbeaumet/aggr"
 
 [features]
 typescript = ["dep:ts-rs"]

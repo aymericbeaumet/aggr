@@ -1,21 +1,4 @@
-mod cache;
-mod cli;
-mod commands;
-mod config;
-mod content;
-mod discussions;
-mod document;
-mod git;
-mod http;
-mod media;
-mod media_duration;
-mod model;
-mod platform;
-mod preview;
-mod site;
-mod sources;
-mod store;
-mod threads;
+use aggr_lib::{cli, commands};
 
 use std::process::ExitCode;
 

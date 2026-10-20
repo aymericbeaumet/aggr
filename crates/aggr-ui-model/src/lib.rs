@@ -2,6 +2,9 @@
 
 use serde::Serialize;
 
+/// Source identity included in rendered-output cache keys.
+pub const IMPLEMENTATION: &str = include_str!("lib.rs");
+
 /// Everything the client needs to render and navigate one page.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]

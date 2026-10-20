@@ -70,6 +70,16 @@ jobs:
           # never restore; restore the branch caches but never add tag-scoped entries.
           save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - run: mise exec -- cargo build --release --locked
+      - name: Verify the installable CLI
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          binary=target/release/aggr
+          if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
+          test "$("$binary" --version)" = "aggr $VERSION"
+          "$binary" dev --help > dev-help.txt
+          grep -q -- '--native' dev-help.txt
       - shell: bash
         env:
           ARCHIVE: aggr-${{ matrix.name }}
@@ -106,3 +116,21 @@ jobs:
             --target "$GITHUB_SHA" \
             --generate-notes \
             dist/*
+
+  publish-crates:
+    needs: release
+    uses: ./.github/workflows/publish.yml
+    permissions:
+      contents: read
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  publish-homebrew:
+    needs: release
+    uses: ./.github/workflows/homebrew.yml
+    permissions:
+      contents: read
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

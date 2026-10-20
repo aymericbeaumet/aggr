@@ -11,9 +11,10 @@ repository = "https://github.com/aymericbeaumet/aggr"
 readme = "readme.md"
 keywords = ["rss", "atom", "feed", "reader", "static-site"]
 categories = ["command-line-utilities", "web-programming"]
+include = ["/src/main.rs", "/src/dev_worker.rs", "/readme.md", "/LICENSE", "/THIRD_PARTY_NOTICES", "/Cargo.lock"]
 
 [workspace]
-members = ["crates/aggr-ui-model"]
+members = ["crates/aggr-lib", "crates/aggr-ui-model"]
 
 [features]
 dev-worker = []
@@ -25,38 +26,23 @@ required-features = ["dev-worker"]
 test = false
 bench = false
 
-[build-dependencies]
-aggr-ui-model = { path = "crates/aggr-ui-model", features = ["typescript"] }
-sha2 = "0.11"
-
 [dependencies]
-aggr-ui-model = { path = "crates/aggr-ui-model" }
-ammonia = "4"
-anyhow = "1"
-axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
-base64 = "0.23"
-bytes = "1"
-chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive", "env"] }
-clap_complete = "4"
-comrak = { version = "0.56", default-features = false }
-dom_smoothie = "0.18"
-directories = "6"
-encoding_rs = "0.8"
+aggr-lib = { path = "crates/aggr-lib", version = "2.0.0" }
 env_logger = "0.11"
-# 3.x drops media it does not consider content; src/sources/feed.rs restores it from the XML.
-feed-rs = "3"
-futures-util = "0.3"
-glob = "0.3"
-hayro = { version = "0.8.0", features = ["embed-fonts"] }
-hex = "0.4"
-htmd = "0.5"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico", "tiff", "qoi"] }
-jpeg-encoder = "0.7.1"
 log = "0.4"
-notify = "8"
-pagefind = { version = "1.5.2", default-features = false }
-quick-xml = "0.42"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+anyhow = "1"
+assert_cmd = "2"
+chrono = { version = "0.4", features = ["serde"] }
+fantoccini = { version = "0.22", default-features = false }
+futures-util = "0.3"
+hex = "0.4"
+httpmock = "0.8"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico", "tiff", "qoi"] }
+predicates = "3"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = [
   "rustls-no-provider",
@@ -67,38 +53,16 @@ reqwest = { version = "0.13", default-features = false, features = [
   "http2",
   "stream",
 ] }
-rquickjs = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 scraper = "0.27"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
 sha1 = "0.11"
-sha2 = "0.11"
 slug = "0.1"
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal"] }
-toml = "1"
+tokio = { version = "1", features = ["time"] }
 url = { version = "2", features = ["serde"] }
-unicode-normalization = "0.1"
-unicode-segmentation = "1"
 walkdir = "2"
-# These Apache-2.0 releases support the project's MSRV; newer releases require Rust 1.98.
-wreq = { version = "=6.0.0-rc.31", default-features = false, features = ["webpki-roots", "tokio-rt", "gzip", "brotli", "stream"] }
-wreq-util = { version = "=3.0.0-rc.14", default-features = false, features = ["emulation"] }
-thumbhash = "0.1.0"
-resvg = { version = "0.48.1", default-features = false, features = ["text"] }
-
-[dev-dependencies]
-assert_cmd = "2"
-fantoccini = { version = "0.22", default-features = false }
-httpmock = "0.8"
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
-insta = "1"
-png = "0.18"
-predicates = "3"
-tokio = { version = "1", features = ["test-util"] }
 
 [profile.dev]
 # Generic image decoders are instantiated in aggr itself, not just their dependency crates.

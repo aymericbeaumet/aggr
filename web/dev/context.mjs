@@ -1,5 +1,10 @@
 import { isAbsolute, join, relative } from 'node:path';
 
+export const embeddedInputs = [
+  'config.default.toml', 'examples/starter.toml', 'crates/aggr-lib/src/store/branch-readme.md',
+  'crates/aggr-lib/src/media/fonts', 'web/public',
+];
+
 export function readContext(value = process.env.AGGR_DEV_CONTEXT) {
   if (!value) throw new Error('Start development with cargo run -- dev or make dev.');
   const context = JSON.parse(value);
@@ -37,6 +42,7 @@ export function needsBuild(context, file) {
   const path = relative(context.repository, file).replaceAll('\\', '/');
   if (path.startsWith('../') || path.startsWith('target/') || path.includes('/node_modules/')) return false;
   if (['Cargo.toml', 'Cargo.lock', 'build.rs', '.cargo/config.toml'].includes(path)) return true;
+  if (embeddedInputs.some(input => path === input || path.startsWith(`${input}/`))) return true;
   if ((path.startsWith('src/') || path.startsWith('crates/')) && /(?:\.rs|Cargo\.toml)$/.test(path)) return true;
   return context.workerArgs.includes('--release') &&
     /^(?:web\/src\/|web\/public\/|web\/build|web\/vite|web\/package)/.test(path);

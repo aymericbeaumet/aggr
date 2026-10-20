@@ -63,9 +63,9 @@ function context(state, strictPort = false) {
   return { repository: state.repository, cwd: state.repository, executable: state.executable, workerArgs: ['dev', '--clean', '--port', String(state.port)], viteOrigin: `http://127.0.0.1:${state.port}`, strictPort };
 }
 
-function start(t, state, strictPort) {
+function start(t, state, strictPort, environment = {}) {
   const child = spawn(process.execPath, [entry], {
-    env: { ...process.env, AGGR_DEV_CONTEXT: JSON.stringify(context(state, strictPort)) },
+    env: { ...process.env, ...environment, AGGR_DEV_CONTEXT: JSON.stringify(context(state, strictPort)) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
@@ -131,6 +131,85 @@ test('an occupied explicit public port fails before starting a backend', async t
   await assert.rejects(readFile(state.ready), { code: 'ENOENT' });
 });
 
+test('the public reader serves visited pages and assets while a replacement waits for readiness', { skip: process.platform === 'win32' }, async t => {
+  const state = await fixture(t);
+  const release = join(state.repository, 'release');
+  state.cleanups.push(() => writeFile(release, 'ready'));
+  const source = await readFile(state.executable, 'utf8');
+  const preparation = `const cancelPreparation = () => process.exit(0);
+if (process.env.AGGR_DEV_RESTART === '1') process.stdin.once('data', cancelPreparation);
+while (process.env.AGGR_DEV_RESTART === '1' && !existsSync(directory + '/release')) await new Promise(resolve => setTimeout(resolve, 10));
+process.stdin.removeListener('data', cancelPreparation);
+`;
+  await writeFile(state.executable, source.replace("server.listen(0, '127.0.0.1'", `${preparation}server.listen(0, '127.0.0.1'`));
+  const tools = join(state.repository, 'tools');
+  await mkdir(tools);
+  await mkdir(join(state.repository, 'src'));
+  const rust = join(state.repository, 'src/fixture.rs');
+  await writeFile(rust, 'initial');
+  const cargo = join(tools, 'cargo');
+  await writeFile(cargo, `#!${process.execPath}\nconsole.log(JSON.stringify({reason:'compiler-artifact',target:{name:'aggr-dev-worker'},executable:process.env.AGGR_FIXTURE_EXECUTABLE}));\n`);
+  await chmod(cargo, 0o755);
+  const report = join(state.repository, 'reports/dev-timings.jsonl');
+  const running = start(t, state, false, { PATH: `${tools}:${process.env.PATH}`, AGGR_FIXTURE_EXECUTABLE: state.executable, AGGR_DEV_TIMINGS_REPORT: 'reports/dev-timings.jsonl' });
+  const initial = await backendReady(state, running);
+  const page = await (await fetch(initial.publicOrigin)).text();
+  const asset = await (await fetch(`${initial.publicOrigin}/assets/fixture.png`)).text();
+  await writeFile(rust, 'updated');
+  await waitFor(async () => {
+    try { return await readFile(state.stopped, 'utf8') === String(initial.pid); }
+    catch { return false; }
+  }, 'old worker shutdown');
+  const pending = await fetch(initial.publicOrigin);
+  assert.equal(pending.status, 200, running.output());
+  assert.equal(await pending.text(), page);
+  assert.equal(await (await fetch(`${initial.publicOrigin}/assets/fixture.png`)).text(), asset);
+  const arrived = [false, false];
+  const unseen = [
+    fetch(`${initial.publicOrigin}/items/example/unseen/`),
+    fetch(`${initial.publicOrigin}/items/example/progressive/`, { headers: { accept: 'text/html' } }),
+  ].map((request, index) => request.then(response => { arrived[index] = true; return response; }));
+  const controller = new AbortController();
+  const aborted = assert.rejects(fetch(`${initial.publicOrigin}/items/example/aborted/`, { signal: controller.signal }), { name: 'AbortError' });
+  await delay(50);
+  assert.deepEqual(arrived, [false, false], 'uncached page requests wait without an interim 503');
+  controller.abort();
+  await aborted;
+  await writeFile(release, 'ready');
+  await waitFor(async () => {
+    const current = JSON.parse(await readFile(state.ready, 'utf8'));
+    return current.pid !== initial.pid && await (await fetch(`${initial.publicOrigin}/assets/fixture.png`)).text() === `Worker ${current.pid}`;
+  }, 'replacement promotion');
+  const replacement = JSON.parse(await readFile(state.ready, 'utf8'));
+  for (const request of unseen) {
+    const response = await request;
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), `Worker ${replacement.pid}`);
+  }
+  const records = async () => {
+    try { return (await readFile(report, 'utf8')).trim().split('\n').map(line => JSON.parse(line)); }
+    catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  };
+  await waitFor(async () => (await records()).length === 1, 'first timing record');
+  await writeFile(rust, 'updated again');
+  await waitFor(async () => (await records()).length === 2, 'appended timing record');
+  const measured = await records();
+  assert(measured.every(record => record.status === 'success' && record.compileMs >= 0 && record.prepareMs > 0));
+  assert(Date.parse(measured[0].startedAt) <= Date.parse(measured[1].startedAt));
+  assert.match(running.output(), /dev build: compile [\d.]+s, prepare [\d.]+s \(success\)/);
+  const current = JSON.parse(await readFile(state.ready, 'utf8'));
+  await rm(release);
+  await writeFile(rust, 'stop during preparation');
+  await waitFor(async () => await readFile(state.stopped, 'utf8') === String(current.pid), 'last worker shutdown');
+  const shutdown = fetch(`${initial.publicOrigin}/items/example/shutdown/`, { signal: AbortSignal.timeout(5000) });
+  await delay(50);
+  running.child.kill('SIGINT');
+  const stopped = await shutdown;
+  assert.equal(stopped.status, 503);
+  assert.match(await stopped.text(), /stopping/);
+  await waitFor(() => running.child.exitCode !== null, 'shutdown with a waiting navigation');
+});
+
 test('an unexpected worker exit closes the public server and reports failure', { skip: process.platform === 'win32' }, async t => {
   const state = await fixture(t);
   const running = start(t, state, false);
@@ -174,9 +253,11 @@ test('a worker that fails during startup restores the previous executable', { sk
   await writeFile(broken, `#!${process.execPath}\nprocess.exit(7);\n`);
   await chmod(broken, 0o755);
   let failed = false;
+  let measurement;
   const backend = new Backend(context(state), {
     compile: () => broken,
     buildError: () => { failed = true; },
+    metrics: next => { measurement = next; },
   });
   state.cleanups.push(() => backend.close());
   await backend.start();
@@ -188,7 +269,59 @@ test('a worker that fails during startup restores the previous executable', { sk
   assert.notEqual(restored.pid, first.pid);
   assert.equal(restored.restarted, '1');
   assert.equal(await (await fetch(backend.origin)).text(), `Worker ${restored.pid}`);
+  assert.equal(measurement.status, 'failed');
+  assert.equal(measurement.phase, 'prepare');
+  assert(measurement.compileMs >= 0 && measurement.prepareMs > 0);
 });
+
+for (const latestFails of [false, true]) {
+  test(`a superseded compile is never promoted when the latest compile ${latestFails ? 'fails' : 'succeeds'}`, { skip: process.platform === 'win32' }, async t => {
+    const state = await fixture(t);
+    const compiles = [];
+    const metrics = [];
+    let starts = 0;
+    let failures = 0;
+    const backend = new Backend(context(state), {
+      compile: () => new Promise((resolve, reject) => compiles.push({ resolve, reject })),
+      ready: () => { starts++; },
+      buildError: () => { failures++; },
+      metrics: measurement => metrics.push(measurement),
+    });
+    state.cleanups.push(async () => {
+      for (const compile of compiles) compile.reject(new Error('test cleanup'));
+      await backend.close();
+    });
+    await backend.start();
+    const original = backend.origin;
+    backend.rebuild();
+    await waitFor(() => compiles.length === 1, 'first compile');
+    backend.rebuild();
+    compiles[0].resolve(state.executable);
+    await waitFor(() => compiles.length === 2, 'latest compile');
+    assert.equal(metrics.length, 1);
+    assert.equal(metrics[0].status, 'superseded');
+    assert.equal(metrics[0].prepareMs, null);
+    assert(metrics[0].compileMs >= 0);
+    assert.equal(starts, 1, 'the superseded artifact must not restart the worker');
+    assert.equal(backend.origin, original);
+    assert.equal((await fetch(original)).status, 200);
+    if (latestFails) {
+      compiles[1].reject(new Error('latest fixture compile failed'));
+      await waitFor(() => failures === 1, 'latest compilation failure');
+      assert.equal(starts, 1);
+      assert.equal(backend.origin, original);
+    } else {
+      compiles[1].resolve(state.executable);
+      await waitFor(() => starts === 2, 'latest artifact promotion');
+      assert.notEqual(backend.origin, original);
+    }
+    await waitFor(() => metrics.length === 2, 'latest compile metrics');
+    assert.equal(metrics[1].status, latestFails ? 'failed' : 'success');
+    assert.equal(metrics[1].phase, latestFails ? 'compile' : 'prepare');
+    assert(metrics[1].compileMs >= 0);
+    assert(latestFails ? metrics[1].prepareMs === null : metrics[1].prepareMs > 0);
+  });
+}
 
 test('shutdown cancels a worker that has not reported readiness', { skip: process.platform === 'win32' }, async t => {
   const state = await fixture(t);

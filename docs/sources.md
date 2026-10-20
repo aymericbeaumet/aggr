@@ -84,7 +84,7 @@ url = "https://www.example.com/blog/feed.xml"   # -> sources/example-com/
 ```
 
 Some hosts carry thousands of unrelated publishers, so there the account's path is part of who is
-publishing and stays in the name. That list lives in `src/platform.rs` and covers YouTube, X,
+publishing and stays in the name. That list lives in `crates/aggr-lib/src/platform.rs` and covers YouTube, X,
 GitHub, GitLab, Codeberg, Reddit, Medium, Bluesky, Twitch, Vimeo and SoundCloud, the podcast
 catalogs (Spotify, Apple Podcasts, Pocket Casts, Overcast, Castbox), and the `@handle` convention
 on any host. Each platform is named by its own domain, so a short, mobile or regional alias resolves
@@ -106,7 +106,7 @@ A platform's own pages are not accounts, so a link to one reads as the platform 
 GitLab's and Forgejo's reserved-name lists in their own source, the top-level paths of the other
 platforms' `robots.txt`, and the platform's API documentation where it names a content path
 robots.txt leaves out. A robots.txt also blocks individual members, so any entry that serves a
-profile stays an account. `src/platform/reserved.rs` records each list's source and what was
+profile stays an account. `crates/aggr-lib/src/platform/reserved.rs` records each list's source and what was
 dropped from it. A route missing from those sources still reads as an account, which is the
 safer mistake: a guessed route would quietly fold a real publisher into its host.
 

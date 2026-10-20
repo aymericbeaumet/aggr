@@ -62,7 +62,7 @@ Instagram APIs are a separate integration and are not enabled by adding an ordin
 
 ## Source adapters
 
-Every engine under `src/sources/` claims URLs with a predicate, and `sources/mod.rs` tries them
+Every engine under `crates/aggr-lib/src/sources/` claims URLs with a predicate, and `sources/mod.rs` tries them
 in this order before falling back to the generic feed path. A URL that no adapter claims is an
 ordinary feed or website; nothing here is public configuration.
 

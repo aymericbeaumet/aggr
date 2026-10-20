@@ -904,7 +904,7 @@ fn fresh_local_repository_builds_without_an_origin_or_a_primary_commit() {
         .assert()
         .success()
         .stdout(predicate::str::contains("`aggr build`"))
-        .stdout(predicate::str::contains("`aggr dev`").not());
+        .stdout(predicate::str::contains("`aggr dev`"));
     std::fs::write(
         root.join("rss.xml"),
         r#"<rss version="2.0"><channel><title>Local reader</title><link>https://local.example/</link>
@@ -956,6 +956,17 @@ fn contributor_dev_rejects_invalid_config_before_starting_tools() {
 }
 
 #[test]
+fn missing_configuration_explains_how_to_initialize_it() {
+    let repo = TestRepo::new();
+    repo.aggr()
+        .arg("check")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("aggr init"));
+    assert!(!repo.clone.join(".aggr").exists());
+}
+
+#[test]
 fn init_writes_config_and_workflow() {
     let repo = TestRepo::new();
     repo.aggr()
@@ -983,6 +994,189 @@ fn init_writes_config_and_workflow() {
         .assert()
         .success()
         .stdout(predicate::str::is_match(r"\(0 sources?\b").unwrap());
+}
+
+#[test]
+fn init_github_uses_the_repository_root_and_custom_configuration() {
+    let repo = TestRepo::new();
+    let config = "reading/config's files/reader.toml";
+    repo.aggr()
+        .args(["--config", config, "init", "--github"])
+        .assert()
+        .success();
+    assert!(repo.clone.join(config).exists());
+    let workflow = std::fs::read_to_string(repo.clone.join(".github/workflows/aggr.yml")).unwrap();
+    let workflow: serde_json::Value = serde_yaml_ng::from_str(&workflow).unwrap();
+    assert_eq!(workflow["jobs"]["aggr"]["with"]["config"], config);
+    assert!(!repo.clone.join("reading/.github").exists());
+    assert!(!repo.clone.join("reading/config's files/.github").exists());
+}
+
+#[test]
+fn init_github_uses_the_current_directory_before_git_is_initialized() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = "feeds/reader.toml";
+    aggr_command(tmp.path())
+        .args(["--config", config, "init", "--github"])
+        .assert()
+        .success();
+    let workflow = std::fs::read_to_string(tmp.path().join(".github/workflows/aggr.yml")).unwrap();
+    let workflow: serde_json::Value = serde_yaml_ng::from_str(&workflow).unwrap();
+    assert_eq!(workflow["jobs"]["aggr"]["with"]["config"], config);
+    assert!(!tmp.path().join("feeds/.github").exists());
+}
+
+#[test]
+fn init_github_preflights_both_files_before_writing() {
+    let repo = TestRepo::new();
+    let workflow = repo.clone.join(".github/workflows/aggr.yml");
+    std::fs::create_dir_all(workflow.parent().unwrap()).unwrap();
+    std::fs::write(&workflow, "existing workflow").unwrap();
+    repo.aggr()
+        .args(["init", "--github"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("exists; pass --force"));
+    assert!(!repo.clone.join("aggr.toml").exists());
+    assert_eq!(
+        std::fs::read_to_string(&workflow).unwrap(),
+        "existing workflow"
+    );
+
+    std::fs::remove_file(&workflow).unwrap();
+    std::fs::write(repo.clone.join("aggr.toml"), "existing config").unwrap();
+    repo.aggr().args(["init", "--github"]).assert().failure();
+    assert!(!workflow.exists());
+    assert_eq!(
+        std::fs::read_to_string(repo.clone.join("aggr.toml")).unwrap(),
+        "existing config"
+    );
+    std::fs::remove_file(repo.clone.join("aggr.toml")).unwrap();
+    std::fs::create_dir(&workflow).unwrap();
+    repo.aggr()
+        .args(["init", "--github", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("expected a regular file"));
+    assert!(!repo.clone.join("aggr.toml").exists());
+}
+
+#[cfg(unix)]
+const NATIVE_PREVIEW_CONFIG: &str = "[defaults]\ncontent_download_strategy = 'feed'\nmedia_download_strategy = 'remote'\nmax_age_days = 0\n[[sources]]\nurl = 'local.json'\n";
+
+#[cfg(unix)]
+fn write_native_preview_feed(directory: &Path) {
+    std::fs::write(
+        directory.join("local.json"),
+        r#"{
+        "version":"https://jsonfeed.org/version/1.1","title":"Local feed",
+        "home_page_url":"https://native.example/","items":[{
+          "id":"preview","url":"https://native.example/preview",
+          "title":"Native preview article","content_text":"A reader from a local feed."}]}
+    "#,
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn native_dev_serves_local_feeds_without_node_or_repository_changes() {
+    let repo = TestRepo::new();
+    write_native_preview_feed(&repo.clone);
+    repo.write_raw_config(NATIVE_PREVIEW_CONFIG);
+    let refs = git(&repo.clone, &["show-ref"]).unwrap();
+    let remote_refs = git(&repo.origin, &["show-ref"]).unwrap();
+    let status = git(
+        &repo.clone,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    )
+    .unwrap();
+    let exclude = std::fs::read(repo.clone.join(".git/info/exclude")).unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let cache_path = cache.path().canonicalize().unwrap();
+    let mut command = repo.aggr();
+    command.args(["--config", "aggr.toml"]);
+    run_native_preview_with_only_git(command, &repo.clone, &cache_path);
+    assert_eq!(git(&repo.clone, &["show-ref"]).unwrap(), refs);
+    assert_eq!(git(&repo.origin, &["show-ref"]).unwrap(), remote_refs);
+    assert_eq!(
+        git(
+            &repo.clone,
+            &["status", "--porcelain=v1", "--untracked-files=all"]
+        )
+        .unwrap(),
+        status
+    );
+    assert_eq!(
+        std::fs::read(repo.clone.join(".git/info/exclude")).unwrap(),
+        exclude
+    );
+    assert!(!repo.clone.join(".git/worktrees").exists());
+    assert!(!repo.clone.join(".aggr").exists());
+    assert!(!repo.clone.join("_site").exists());
+    assert_eq!(std::env::current_dir().unwrap(), cwd);
+}
+
+#[cfg(unix)]
+#[test]
+fn native_dev_without_a_config_previews_the_demo_without_changing_the_directory() {
+    let cwd = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let cache_path = cache.path().canonicalize().unwrap();
+    let demo = cache_path.join("try-v1");
+    std::fs::create_dir(&demo).unwrap();
+    write_native_preview_feed(&demo);
+    std::fs::write(demo.join("aggr.toml"), NATIVE_PREVIEW_CONFIG).unwrap();
+    run_native_preview_with_only_git(aggr_command(cwd.path()), cwd.path(), &cache_path);
+    assert_eq!(std::fs::read_dir(cwd.path()).unwrap().count(), 0);
+    assert!(demo.join(".git").is_dir());
+    assert_eq!(
+        git(&demo, &["symbolic-ref", "--short", "HEAD"])
+            .unwrap()
+            .trim(),
+        "main"
+    );
+    assert!(git(&demo, &["for-each-ref"]).unwrap().is_empty());
+    assert!(!demo.join(".git/worktrees").exists());
+    assert!(!demo.join(".aggr").exists());
+    assert!(!demo.join("_site").exists());
+}
+
+#[cfg(unix)]
+fn run_native_preview_with_only_git(mut command: Command, directory: &Path, cache: &Path) {
+    let tools = tempfile::tempdir().unwrap();
+    // Bypass version-manager shims: this PATH contains the actual Git binary and nothing else.
+    let git_exec = git(directory, &["--exec-path"]).unwrap();
+    let git_binary = Path::new(git_exec.trim())
+        .join("git")
+        .canonicalize()
+        .unwrap();
+    std::os::unix::fs::symlink(git_binary, tools.path().join("git")).unwrap();
+    let available = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = available.local_addr().unwrap().port();
+    drop(available);
+    let child = command
+        .env_remove("AGGR_DEV_INTERNAL_WORKER")
+        .env("PATH", tools.path())
+        .env("AGGR_CACHE_DIR", cache)
+        .args(["dev", "--native", "--port", &port.to_string()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let page = std::panic::catch_unwind(|| {
+        wait_for_dev(port, Duration::from_secs(20));
+        wait_for_dev_page(port, "/", "Native preview article", Duration::from_secs(30))
+    });
+    let stopped = stop_dev(child);
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let html = page.unwrap();
+    assert!(html.contains("assets/app/"), "{html}");
 }
 
 #[cfg(unix)]
@@ -1097,6 +1291,15 @@ fn dev_release_keeps_an_opted_in_site_out_of_search_engines() {
 
 #[test]
 fn sync_reports_finished_sources_while_another_source_is_still_waiting() {
+    reports_finished_sources_while_another_source_is_still_waiting("sync");
+}
+
+#[test]
+fn check_reports_finished_sources_while_another_source_is_still_waiting() {
+    reports_finished_sources_while_another_source_is_still_waiting("check");
+}
+
+fn reports_finished_sources_while_another_source_is_still_waiting(command: &str) {
     use std::io::{BufRead as _, BufReader, Write as _};
 
     let slow = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1149,7 +1352,7 @@ fn sync_reports_finished_sources_while_another_source_is_still_waiting() {
     ));
     let mut child = repo
         .aggr()
-        .arg("sync")
+        .arg(command)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -1165,7 +1368,9 @@ fn sync_reports_finished_sources_while_another_source_is_still_waiting() {
     });
     let progress = loop {
         match output.recv_timeout(std::time::Duration::from_secs(10)) {
-            Ok(line) if line.starts_with("fast:") => break Ok(line),
+            Ok(line) if line.starts_with("fast:") || line.starts_with("ok     fast") => {
+                break Ok(line);
+            }
             Ok(_) => {}
             Err(error) => break Err(error),
         }
@@ -1181,8 +1386,12 @@ fn sync_reports_finished_sources_while_another_source_is_still_waiting() {
     );
     let progress =
         progress.expect("fast source must report completion before slow source is released");
-    assert!(progress.contains("1/2 sources complete"), "{progress}");
-    assert!(progress.contains("s;"), "{progress}");
+    if command == "sync" {
+        assert!(progress.contains("1/2 sources complete"), "{progress}");
+        assert!(progress.contains("s;"), "{progress}");
+    } else {
+        assert!(progress.contains("0 item(s)"), "{progress}");
+    }
 }
 
 #[test]
@@ -1791,6 +2000,61 @@ fn source_errors_are_recorded_on_transition_only_and_all_failed_is_fatal() {
 }
 
 #[test]
+fn release_without_a_public_url_fails_before_fetches_or_local_changes() {
+    for arguments in [
+        vec!["build", "--release"],
+        vec!["build", "--release", "--clean"],
+    ] {
+        assert_invalid_build_preserves_project(&arguments, "--release needs a public URL");
+    }
+}
+
+#[test]
+fn invalid_explicit_base_urls_fail_before_fetches_or_local_changes() {
+    for url in ["reader.example/feeds", "file:///tmp/reader", "https://"] {
+        assert_invalid_build_preserves_project(
+            &["build", "--release", "--clean", "--base-url", url],
+            "--base-url must be an absolute http(s) URL with a host",
+        );
+    }
+    assert_invalid_build_preserves_project(
+        &["build", "--base-url", "reader.example/feeds"],
+        "--base-url must be an absolute http(s) URL with a host",
+    );
+}
+
+fn assert_invalid_build_preserves_project(arguments: &[&str], error: &str) {
+    let server = MockServer::start();
+    let feed = server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200).body(FEED);
+    });
+    let repo = TestRepo::new();
+    repo.write_config(&server.url("/feed.xml"), "");
+    let before = git(&repo.clone, &["show-ref"]).unwrap();
+    let exclude = repo.clone.join(".git/info/exclude");
+    let excluded = std::fs::read(&exclude).unwrap();
+    let output = repo.clone.join("_site");
+    std::fs::create_dir(&output).unwrap();
+    std::fs::write(output.join(".aggr-site"), env!("CARGO_PKG_VERSION")).unwrap();
+    std::fs::write(output.join("index.html"), "previous publication").unwrap();
+    repo.aggr()
+        .args(arguments)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(error));
+    feed.assert_calls(0);
+    assert!(!repo.clone.join(".aggr").exists());
+    assert_eq!(git(&repo.clone, &["show-ref"]).unwrap(), before);
+    assert!(repo.origin_rev("refs/heads/aggr").is_none());
+    assert_eq!(std::fs::read(&exclude).unwrap(), excluded);
+    assert_eq!(
+        std::fs::read_to_string(output.join("index.html")).unwrap(),
+        "previous publication"
+    );
+}
+
+#[test]
 fn build_renders_the_site_and_release_needs_a_url() {
     let server = MockServer::start();
     server.mock(|when, then| {
@@ -2184,6 +2448,34 @@ fn check_probes_sources() {
         .success()
         .stdout(predicate::str::contains("ok     demo"))
         .stdout(predicate::str::contains("2 item(s)"));
+}
+
+#[test]
+fn check_reports_each_result_and_fails_when_one_source_fails() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/feed.xml");
+        then.status(200).body(FEED);
+    });
+    let broken = MockServer::start();
+    broken.mock(|when, then| {
+        when.method(GET);
+        then.status(410);
+    });
+    let repo = TestRepo::new();
+    repo.write_raw_config(&format!(
+        "[[sources]]\nname = 'Healthy'\nurl = '{}'\n[[sources]]\nname = 'Broken'\nurl = '{}'\n",
+        server.url("/feed.xml"),
+        broken.url("/broken")
+    ));
+    repo.aggr()
+        .arg("check")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("ok     healthy"))
+        .stdout(predicate::str::contains("error  broken"))
+        .stderr(predicate::str::contains("1 of 2 source(s) failed"));
+    assert!(!repo.clone.join(".aggr").exists());
 }
 
 #[test]

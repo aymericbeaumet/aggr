@@ -44,17 +44,22 @@ or commits to the data branch. Pinned and offline builds only render their exist
 
 ## Local development
 
-`cargo run -- dev` starts Vite HMR and automatic Rust restarts. With no local configuration it uses
-`examples/aggr.toml`; set `AGGR_CONFIG=/path/to/aggr.toml` to preview another instance.
+`cargo run -- dev` starts Vite HMR and automatic Rust restarts. `cargo run --release -- dev` also
+works. With no local configuration, `dev` tries the embedded two-source starter in an isolated
+cache; set `AGGR_CONFIG=/path/to/aggr.toml` to preview another instance.
 Node and npm are source-build tools: Cargo compiles and embeds the reader automatically.
-Installed release binaries need neither, and exclude the dev command, server, watchers and reload clients.
+Installed release binaries include `dev` and serve the embedded reader without Node. Use
+`aggr dev --native` to choose that mode in a source checkout, or `aggr dev --demo --native` to
+try the product without creating a configuration or Git repository in your current directory.
 
 The Rust preview backend prepares the archive's shared display metadata, then renders each page only when it is
 requested. Opening the feed reads its thumbnails; opening an article loads that article's media.
 Completion uses a small metadata catalog; the full-text index is built only when a search needs
 its runtime, and reuses the persistent Pagefind cache.
 Vite handles Svelte, TypeScript and CSS updates. Rust changes compile while the previous worker
-continues serving, then replace it and reload the browser after a successful startup.
+continues serving. During replacement preparation, the public server retains complete responses
+for recently visited pages and assets, then reloads after successful startup. Saves that supersede
+an in-flight compilation wait for the latest build instead of promoting intermediate workers.
 Completed sources become visible while slower remote sources continue; local reprocessing also
 publishes before network refresh completes. Each preview owns immutable archive inputs. A template syntax error keeps the last working
 snapshot available. Requested output lives in disposable per-generation directories; the archive

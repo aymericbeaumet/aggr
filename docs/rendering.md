@@ -13,8 +13,8 @@ serves atomic snapshots, keeping the last good generation when preparation fails
 
 ## Page data and URLs
 
-Rust's display contexts live in `src/site/context.rs`; the serialized contract lives in
-`crates/aggr-ui-model`. `src/site/page.rs` prepares the head, URLs, directories and page model.
+Rust's display contexts live in `crates/aggr-lib/src/site/context.rs`; the serialized contract lives in
+`crates/aggr-ui-model`. `crates/aggr-lib/src/site/page.rs` prepares the head, URLs, directories and page model.
 Article HTML is sanitized and passed separately from the JSON model.
 
 `site.indexing` is true only for release builds with `[site] indexing = true`; utility pages
@@ -203,7 +203,7 @@ for its form, validation, sharing, and import/export. Controls identify their se
 persists only the allowlisted `aggr:<setting>` local-storage key.
 
 Site owners define initial values for every setting in `[preferences]`; the typed Rust schema
-in `src/config/preferences.rs` supplies `site.preferences` as browser JSON. Device values take
+in `crates/aggr-lib/src/config/preferences.rs` supplies `site.preferences` as browser JSON. Device values take
 precedence, and resetting preferences returns to the site's defaults. See
 [`config.default.toml`](../config.default.toml) for all choices.
 

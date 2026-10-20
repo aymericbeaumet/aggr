@@ -1,8 +1,10 @@
 import { request as httpRequest } from 'node:http';
-import { join } from 'node:path';
+import { appendFile, mkdir } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { build, createServer } from 'vite';
 import { Backend } from './backend.mjs';
-import { needsBuild, readContext } from './context.mjs';
+import { embeddedInputs, needsBuild, readContext } from './context.mjs';
+import { LastGoodResponses, ReadinessGate } from './responses.mjs';
 
 const context = readContext();
 const origin = new URL(context.viteOrigin);
@@ -13,6 +15,9 @@ let stopping;
 let finish;
 let bootstrap;
 const bootstrapInputs = new Set();
+const lastGood = new LastGoodResponses();
+const readiness = new ReadinessGate();
+let timingWrites = Promise.resolve();
 const finished = new Promise(resolve => { finish = resolve; });
 
 async function bootstrapCode() {
@@ -80,7 +85,33 @@ function proxy(request, response) {
     });
     return;
   }
-  if (!backend?.origin) { waiting(response); return; }
+  if (!backend?.origin) {
+    unavailable(request, response);
+    return;
+  }
+  forward(request, response);
+}
+
+function unavailable(request, response) {
+  if (response.destroyed || response.writableEnded) return;
+  if (stopping) {
+    response.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+    response.end('The development server is stopping.');
+    return;
+  }
+  if (lastGood.respond(request, response)) return;
+  const pending = readiness.wait(request, response);
+  if (!pending) { waiting(response); return; }
+  void pending.then(ready => {
+    if (response.destroyed || response.writableEnded) return;
+    if (ready && !stopping && backend?.origin) forward(request, response);
+    else if (stopping) unavailable(request, response);
+    else waiting(response);
+  });
+}
+
+function forward(request, response) {
+  lastGood.capture(request, response);
   const headers = { ...request.headers, host: new URL(backend.origin).host };
   delete headers['x-aggr-page-model'];
   if (!release) headers['x-aggr-page-model'] = '1';
@@ -103,8 +134,10 @@ function proxy(request, response) {
     else result.pipe(response);
   });
   upstream.on('error', error => {
-    if (stopping || response.destroyed) return;
-    if (!response.headersSent) waiting(response);
+    if (response.destroyed) return;
+    if (!response.headersSent) {
+      unavailable(request, response);
+    }
     else response.destroy(error);
   });
   response.on('close', () => upstream.destroy());
@@ -118,7 +151,9 @@ async function stop(error) {
     process.exitCode = 1;
   }
   stopping = (async () => {
+    readiness.close();
     await backend?.close();
+    await timingWrites;
     await frontend?.close();
     finish();
   })();
@@ -150,6 +185,8 @@ async function run() {
   frontend.config.server.origin = origin.origin;
   backend = new Backend({ ...context, viteOrigin: origin.origin }, {
     ready(worker) {
+      lastGood.clear();
+      readiness.ready(worker.base);
       console.log(`aggr dev: ${origin.origin}${worker.base}`);
       frontend.ws.send({ type: 'full-reload' });
     },
@@ -157,11 +194,20 @@ async function run() {
     buildError(error) {
       frontend.ws.send({ type: 'error', err: { message: error.message, stack: error.stack ?? '' } });
     },
+    metrics(measurement) {
+      if (!process.env.AGGR_DEV_TIMINGS_REPORT) return;
+      const report = resolve(context.cwd, process.env.AGGR_DEV_TIMINGS_REPORT);
+      timingWrites = timingWrites.then(async () => {
+        await mkdir(dirname(report), { recursive: true });
+        await appendFile(report, `${JSON.stringify(measurement)}\n`);
+      }).catch(error => console.error(`Could not write development timings to ${report}: ${error.message}`));
+    },
   });
   frontend.watcher.add([
     join(context.repository, 'src'), join(context.repository, 'crates'),
     join(context.repository, 'Cargo.toml'), join(context.repository, 'Cargo.lock'),
     join(context.repository, 'build.rs'), join(context.repository, '.cargo/config.toml'),
+    ...embeddedInputs.map(path => join(context.repository, path)),
   ]);
   frontend.watcher.on('all', (event, file) => {
     if (['add', 'change', 'unlink'].includes(event) && needsBuild(context, file)) backend.rebuild();

@@ -5,13 +5,34 @@ static-host agnostic. GitHub is the turnkey path, not a requirement.
 
 ## Installing the binary
 
-Install a prebuilt binary with
+Homebrew installs the prebuilt binary from the shared tap on macOS and Linux:
+
+```sh
+brew install aymericbeaumet/tap/aggr
+aggr --version
+```
+
+Linux binaries are built on Ubuntu 24.04 and require glibc 2.39 or newer. On an older Linux
+distribution, build from source with Cargo instead. The Homebrew formula supports Intel and ARM
+on both operating systems and installs Git, which aggr uses to manage the archive.
+
+Alternatively, install a prebuilt binary with
 [mise's GitHub backend](https://mise.jdx.dev/dev-tools/backends/github.html):
 
 ```sh
 mise use -g github:aymericbeaumet/aggr@2.0.0
 aggr --version
 ```
+
+Cargo builds the CLI from crates.io, using the same embedded reader as the prebuilt binary:
+
+```sh
+cargo install --locked aggr
+```
+
+This requires Rust 1.96 or newer and the [native build dependencies](interoperability.md#http-extraction-and-native-builds).
+Node is needed only when building the repository checkout; published crates bundle the compiled
+reader. `aggr-lib` is the Rust library, while the `aggr` crate installs the command.
 
 Or download the archive for your OS and architecture from
 [GitHub Releases](https://github.com/aymericbeaumet/aggr/releases/latest), verify it against the

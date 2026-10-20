@@ -12,10 +12,40 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "aggr"
 version = "2.0.0"
 dependencies = [
+ "aggr-lib",
+ "anyhow",
+ "assert_cmd",
+ "chrono",
+ "env_logger",
+ "fantoccini",
+ "futures-util",
+ "hex",
+ "httpmock",
+ "hyper-util",
+ "image",
+ "log",
+ "predicates",
+ "regex",
+ "reqwest",
+ "rustls",
+ "scraper",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha1 0.11.0",
+ "slug",
+ "tempfile",
+ "tokio",
+ "url",
+ "walkdir",
+]
+
+[[package]]
+name = "aggr-lib"
+version = "2.0.0"
+dependencies = [
  "aggr-ui-model",
  "ammonia",
  "anyhow",
- "assert_cmd",
  "axum",
  "base64 0.23.1",
  "bytes",
@@ -27,7 +57,6 @@ dependencies = [
  "dom_smoothie",
  "encoding_rs",
  "env_logger",
- "fantoccini",
  "feed-rs",
  "futures-util",
  "glob",
@@ -35,7 +64,6 @@ dependencies = [
  "hex",
  "htmd",
  "httpmock",
- "hyper-util",
  "image",
  "insta",
  "jpeg-encoder",
@@ -43,7 +71,6 @@ dependencies = [
  "notify",
  "pagefind",
  "png",
- "predicates",
  "quick-xml",
  "regex",
  "reqwest",
@@ -62,7 +89,6 @@ dependencies = [
  "thumbhash",
  "tokio",
  "toml 1.1.8+spec-1.1.0",
- "unicode-normalization",
  "unicode-segmentation",
  "url",
  "walkdir",

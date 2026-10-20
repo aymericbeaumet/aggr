@@ -29,19 +29,42 @@ Original-page extraction and local media are settings you turn on when you want 
 GitHub setup publishes the reader and its archive publicly. See [sources](docs/sources.md),
 [hosting](docs/hosting.md), and [build budgets](docs/build-budget.md).
 
-To try it on your machine:
+Install with Homebrew, mise, or Cargo:
 
 ```sh
-mise use -g github:aymericbeaumet/aggr@2.0.0  # or download a binary from Releases
+brew install aymericbeaumet/tap/aggr
+# or:
+mise use -g github:aymericbeaumet/aggr@2.0.0
+# or (builds from source):
+cargo install --locked aggr
+```
+
+Homebrew and mise install prebuilt binaries. Cargo needs Rust and the
+[native build prerequisites](docs/interoperability.md#http-extraction-and-native-builds); it does not need
+Node. See [installation](docs/hosting.md#installing-the-binary) for platform requirements and
+manual downloads. To try the reader:
+
+```sh
+aggr dev --demo --native             # open http://127.0.0.1:7319
+```
+
+The demo uses an isolated OS cache and leaves your current directory unchanged. Native preview
+works in release binaries without Node. To keep an archive of your own:
+
+```sh
 mkdir reads && cd reads && git init
 aggr init
+aggr dev --native                    # preview; Ctrl-C to stop
 aggr build                          # saves the archive and writes _site/
 ```
 
 The build records articles on a local `aggr` branch. It pushes that branch when an `origin`
-remote is configured. Serve `_site/` with any static HTTP server.
+remote is configured. `aggr dev` provides the local reader without committing or pushing.
 For the contributor preview with Vite HMR and automatic Rust restarts, use
 `cargo run -- dev` from this repository; see [client development](docs/client.md).
+`cargo run --release -- dev` supports the same workflow with an optimized binary.
+
+Rust applications can use [`aggr-lib`](crates/aggr-lib/README.md), the library behind the CLI.
 
 ## How is it different?
 
@@ -84,7 +107,8 @@ run takes, is in [benchmarks](docs/benchmarks.md).
 
 [Sources](docs/sources.md) · [Reader](docs/reading.md) · [Commands](docs/commands.md) ·
 [Hosting](docs/hosting.md) · [Rendering](docs/rendering.md) · [Git model](docs/git-model.md) ·
-[Interoperability](docs/interoperability.md) · [Performance](docs/performance.md)
+[Interoperability](docs/interoperability.md) · [Performance](docs/performance.md) ·
+[Releases](docs/distribution.md)
 
 Rust prepares the archive and renders a shared Svelte application embedded in the binary.
 Cargo builds the UI automatically with Node; the installed binary needs no Node to generate sites. See [contributing](CONTRIBUTING.md) and

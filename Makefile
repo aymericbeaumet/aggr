@@ -1,23 +1,37 @@
-.PHONY: all setup build release test lint fmt fmt-check check check-rust timings dev client-check msrv clean install run help
+.PHONY: all setup dependencies build release test lint fmt fmt-check check check-rust timings dev client-check msrv clean install run help
+.PHONY: package publish
+
+PACKAGE_ARGS ?=
 
 all: check
 
 setup:
 	mise install
+	$(MAKE) dependencies
 
-build:
+dependencies:
+	mise exec -- node web/build/dependencies.mjs
+
+build: dependencies
 	mise exec -- cargo build --locked
 
 timings:
 	mise exec -- cargo build --locked --timings
 
-release:
+release: dependencies
 	mise exec -- cargo build --locked --release
 
-test:
+package: build
+	mise exec -- node web/build/package.mjs
+	mise exec -- cargo package -p aggr-ui-model -p aggr-lib -p aggr $(PACKAGE_ARGS)
+
+publish:
+	mise exec -- node scripts/publish.mjs $(PACKAGE_ARGS)
+
+test: dependencies
 	mise exec -- cargo test --workspace --locked
 
-lint:
+lint: dependencies
 	mise exec -- cargo clippy --workspace --locked --all-targets -- --deny warnings
 
 fmt:
@@ -38,11 +52,12 @@ check-rust:
 client-check: build
 	mise exec -- npm --prefix web run check
 	mise exec -- npm --prefix web test
+	mise exec -- npm --prefix web run test:build
 	mise exec -- npm --prefix web run test:dev
 
 # Vite serves the reader while the supervisor rebuilds and replaces Rust workers.
 dev: export AGGR_CONFIG ?= examples/aggr.toml
-dev:
+dev: dependencies
 	mise exec -- cargo run --locked -- dev $(ARGS)
 
 # Build with the minimum supported Rust version declared in Cargo.toml.
@@ -56,7 +71,7 @@ install:
 	mise exec -- cargo install --path . --locked
 
 # Sync, render and live-reload the demo config: make run ARGS="dev --port 3000"
-run:
+run: dependencies
 	mise exec -- cargo run --locked -- --config examples/aggr.toml $(ARGS)
 
 help:
@@ -64,6 +79,8 @@ help:
 	@echo "  setup      - Install pinned build tools"
 	@echo "  build      - Build debug binary"
 	@echo "  release    - Build release binary"
+	@echo "  package    - Prepare and verify the model, library and CLI crates"
+	@echo "  publish    - Publish missing model, library and CLI versions to crates.io"
 	@echo "  test       - Run all tests"
 	@echo "  lint       - Run clippy with warnings denied"
 	@echo "  fmt        - Format code"

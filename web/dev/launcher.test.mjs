@@ -32,6 +32,9 @@ test('rebuilds target a different executable and exclude frontend edits in ordin
   for (const file of ['src/site/client.rs', 'crates/aggr-ui-model/src/lib.rs', 'crates/aggr-ui-model/Cargo.toml', 'Cargo.lock', 'build.rs']) {
     assert(needsBuild(context, join(context.repository, file)), file);
   }
+  for (const file of ['config.default.toml', 'examples/starter.toml', 'crates/aggr-lib/src/store/branch-readme.md', 'crates/aggr-lib/src/media/fonts/AtkinsonHyperlegible-Regular.ttf', 'web/public/assets/favicon-32.png']) {
+    assert(needsBuild(context, join(context.repository, file)), file);
+  }
   for (const file of ['web/src/App.svelte', 'web/.generated/types/ClientPage.ts', 'target/debug/aggr', 'aggr.toml']) {
     assert(!needsBuild(context, join(context.repository, file)), file);
   }

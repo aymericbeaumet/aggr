@@ -80,6 +80,7 @@ jobs:
             .aggr/cache/build-v1/recording-duration-v1
             .aggr/cache/build-v1/feed-parsing
             .aggr/cache/build-v1/budget-v1
+            .aggr/cache/build-v1/prepared-markdown-v1
           key: aggr-state-v1-${{ github.repository_id }}-${{ github.run_id }}
           restore-keys: |
             aggr-state-v1-${{ github.repository_id }}-
@@ -241,6 +242,7 @@ jobs:
             .aggr/cache/build-v1/recording-duration-v1
             .aggr/cache/build-v1/feed-parsing
             .aggr/cache/build-v1/budget-v1
+            .aggr/cache/build-v1/prepared-markdown-v1
           key: aggr-state-v1-${{ github.repository_id }}-${{ github.run_id }}
 
       # Immutable cache entries must not accumulate identical media on scheduled no-op runs.

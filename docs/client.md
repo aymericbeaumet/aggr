@@ -53,7 +53,8 @@ stack. `--port` selects the public port; `make dev ARGS="--port 3000"` forwards 
 
 Cached articles appear first, and completed sources become visible during cold sync. Development
 uses an isolated cache and never commits or pushes the archive. `dev --release` exercises full
-publication rendering. Release binaries omit the development command and all server/watch tooling.
+publication rendering. Release binaries include native preview and live reload. They use embedded
+assets without Node; source checkouts can also launch Vite from optimized binaries.
 
 `make client-check` first builds Rust to generate the contract, then runs Svelte/TypeScript checks,
 Vitest, and supervisor tests. Rust tests exercise the embedded renderer and publication behavior;
@@ -74,7 +75,7 @@ scrollers, controls, selection and zoom; the app's Search shortcut opens the foc
 
 ## Preferences
 
-`src/config/preferences.rs` holds one typed table. It produces the validation rules embedded as
+`crates/aggr-lib/src/config/preferences.rs` holds one typed table. It produces the validation rules embedded as
 JSON in `#aggr-preferences` and the form schema the client renders on `/preferences/`. Nothing
 redeclares a setting: adding one there adds its control, its validation and its default everywhere.
 The form is a static import of the preferences page, in the eager bundle with the shell. Opening
@@ -191,7 +192,7 @@ Source includes both the publisher and every configured or retained feed that su
 A canonical article appears once globally and once in each matching publisher collection.
 Ordinary publisher IDs use the lowercase/punycode hostname without trailing dots, conventional
 `www.`, or ports. Other subdomains remain distinct. Shared platforms also keep the account path;
-platform aliases resolve through `src/platform.rs`, while opaque catalog IDs retain the host
+platform aliases resolve through `crates/aggr-lib/src/platform.rs`, while opaque catalog IDs retain the host
 that issued them. Subscriptions belonging to one publisher share a source filter, and duplicate
 publisher/feed memberships collapse. Feed identities come from configured URLs or persisted
 endpoint/site metadata, never archived slugs. An origin with no trusted HTTP(S) metadata contributes

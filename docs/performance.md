@@ -150,12 +150,13 @@ version, but never the application-release fingerprint.
 
 ## Caches on GitHub Actions
 
-`src/cache.rs` is the registry of every `.aggr/cache/build-v1` namespace; `Namespace::ci_cached`
+`crates/aggr-lib/src/cache.rs` is the registry of every `.aggr/cache/build-v1` namespace; `Namespace::ci_cached`
 decides which ones the reusable workflow carries between runners, and a unit test holds the
 workflow's `actions/cache` paths to that list. Only derived state about bytes the site already
 publishes qualifies, because it invalidates itself: `deployment-media-v1` (validated compressed
 publication copies), `validated-images-v2` (content-keyed receipts),
-`pagefind-v1` (index keyed by its input fingerprint), `feed-parsing` (parser-version receipts that
+`pagefind-v1` (index keyed by its input fingerprint), `prepared-markdown-v1` (validated prepared
+article text), `feed-parsing` (parser-version receipts that
 gate conditional GET), `budget-v1` (what a fitting build needed for everything but media, under the
 limit it was measured against), and the timestamped backoff markers in `discussions-v1`,
 `image-failures-v1`, `capture-retries-v1` and `recording-duration-v1`.
@@ -225,13 +226,18 @@ Search completion uses `search-catalog.json` (version, base, document count, and
 runtime and its filter files wait until an actual query needs them, so a reader who never searches
 downloads none of it. See [client development](client.md) for the search contract.
 
-Prefetching is bounded. A press or a hover fetches that page at once, and a page already in memory
-is parsed ahead of the tap and swapped in the same turn. The three tabs are fetched as soon as
-the reader starts. After paint, the reader warms the first three rows already on screen. An
-article's neighbors carry `rel="prefetch"` in the document. Guesses are at most sixteen per page,
-and none at all under Save-Data or on a 2G connection. Intent is not counted. Fetched pages stay
-in memory for five minutes, 24 at most. Guesses are parsed one per frame; a page the reader means
-to open is parsed as soon as it arrives.
+Prefetching follows pointer, touch or focus intent, with at most two speculative requests in
+flight and low network priority. There are no startup, idle, or viewport article downloads.
+Save-Data and 2G connections disable speculation. Requested navigation stays high priority,
+and its 15-second deadline includes the response body. Fetched pages stay in memory for five
+minutes, 24 at most; a prefetched page is parsed ahead of activation.
+
+Prepared Markdown is reusable across processes under `prepared-markdown-v1`. Keys cover normalized
+body bytes, rendering/highlighting implementations and locked dependencies. Checksummed, bounded
+receipts are disposable and never change the archive. Page metadata and media policy are applied
+to current inputs. Lazy dev coordinates cold work per article or output family; complete ready
+files can be served while another article is preparing. Cold requests share a machine-sized
+allowance across snapshot generations, reserving half the workers for background sync.
 
 ## Measuring changes
 
@@ -315,6 +321,11 @@ milliseconds were:
 Navigation benefits from removing frame waits. Startup and first-search measurements remain in a
 similar range; this does not establish an across-the-board speedup. The browser performance test
 writes individual samples to `target/browser-artifacts/client-performance.json`.
+Those historical runs used a simpler harness. The current test records samples and medians
+with images and PWA enabled, cold/warm/offline visits, and desktop and mobile CPU/network profiles.
+It records paint, readiness, layout shifts, long tasks, traffic, and observed event latency;
+the latter is a diagnostic sample rather than an INP score. Configure repetitions with
+`AGGR_PERFORMANCE_RUNS` (five by default, at most ten).
 
 ## Rust development builds
 
@@ -324,9 +335,9 @@ unoptimized development build. Warm asset validation still reads and SHA-256 has
 verified SHA-1 asset identities without a second byte pass.
 
 The profile emits line tables instead of full DWARF. Backtraces and profiles keep file and line
-information, while the debug information that dominated linking is gone: a one-line edit to
-`src/main.rs` rebuilds in about 6 s instead of about 19 s on an M-series laptop, which is what
-`cargo run -- dev` pays on every restart. Use `RUSTFLAGS="-g"` for a session that needs full
+information. Earlier measurements of the monolithic CLI found a one-line entry-point edit took
+about 6 s instead of about 19 s on an M-series laptop. These predate the library split and are
+not a current edit-loop baseline. Use `RUSTFLAGS="-g"` for a session that needs full
 variable inspection under a debugger.
 
 Keep the local `target/` directory between edits. Cargo enables incremental compilation for the
@@ -335,8 +346,19 @@ benefit. `make timings` writes Cargo's HTML timing report under `target/cargo-ti
 cached no-op build separately from a representative source edit, and avoid concurrent source or
 embedded-asset writes while measuring. See [Cargo profiles](https://doc.rust-lang.org/cargo/reference/profiles.html).
 
+The contributor supervisor logs compilation and replacement preparation separately, including
+failed or superseded builds. Set `AGGR_DEV_TIMINGS_REPORT=target/dev-timings.jsonl` to retain
+ordered records. A superseded compilation is discarded before replacing the active worker.
+Previously visited pages and small assets remain available from a bounded proxy cache during
+worker handoff. Uncached page navigation waits for replacement readiness, with a 30-second
+deadline and at most 64 waiting requests. Aborted requests and shutdown release their slots.
+
 `make check` verifies formatting, then runs the frontend checks alongside Rust validation. Rust linting
 finishes before tests begin, avoiding competing Cargo processes and target-directory locks.
+The CLI is a thin consumer of `crates/aggr-lib`. Executable frontend inputs share a bounded,
+content-addressed artifact cache across Cargo and frontend tests. Test-only frontend edits do
+not rebuild the production bundles. `make dependencies` explicitly repairs locked packages,
+including when Cargo considers the Rust artifacts fresh.
 Compiler parallelism remains under Cargo's control. Build, run, lint, and test Make targets use
 `--locked` so verification cannot silently update dependency versions.
 

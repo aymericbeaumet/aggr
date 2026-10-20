@@ -31,8 +31,7 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   binaries render with bounded, isolated QuickJS runtimes and need no Node or external JavaScript
   process. Rendering has no network or filesystem bindings. Every page works without JavaScript;
   sanitized article HTML appears once in the document, outside the embedded typed page model.
-  Debug `cargo run -- dev` starts Vite HMR and supervises Rust workers; release binaries exclude
-  the dev command, server and watchers. The CLI requires a subcommand. There is one reader design,
+  `cargo run -- dev` and `cargo run --release -- dev` start Vite HMR and supervise Rust workers in a source checkout. Release binaries also support native `dev` preview without Node; `--native` selects it explicitly. The CLI requires a subcommand. There is one reader design,
   changed in this repository; `[site.params]` is rejected. Async Rust
   work uses tokio (`JoinSet` + `Semaphore`); git is shelled out. Every CPU-bound stage is sized from
   the machine's parallelism, never a fixed slot count, and stages that run at the same time share it
@@ -70,60 +69,63 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   workflow `@vX` selects the greatest published binary in its own major channel at run time;
   binary releases do not move workflow tags. Keep `@v1` on v1 binaries and publish a new `@v2`
   workflow contract for v2. Distribute binaries through GitHub Releases and mise using its
-  `github:aymericbeaumet/aggr` backend. See [migration](docs/sources.md#upgrading-from-112-to-20).
+  `github:aymericbeaumet/aggr` backend, Homebrew's `aymericbeaumet/tap`, and crates.io's `aggr`
+  package. Keep the release jobs and [distribution reference](docs/distribution.md) aligned.
+  See [migration](docs/sources.md#upgrading-from-112-to-20).
 
 ## Layout
 
 ```
-src/main.rs, cli.rs                       entry + clap types; AGGR_CONFIG and AGGR_BASE_URL env defaults
-src/commands/mod.rs                       Project = config + sources + repo; the .aggr/ lock and worktree
-src/commands/sync.rs                      fetch, commit with trailers, push, move refs/aggr/last-good
-src/commands/build.rs                     sync then render, or render a pinned --data-ref
-src/commands/dev.rs                       isolated cache, lazy snapshots, watch and live reload
-src/commands/fetch.rs                     shared fetch stage: per-source workers, article capture, persistence
-src/commands/fetch/index.rs               one archive pass: stored URLs, paths, reconciliation indexes
-src/commands/fetch/links.rs               cross-source URL reservations for overlapping feeds
-src/commands/fetch/plan.rs                what an item becomes on disk, decided before any write
-src/commands/fetch/transaction.rs         per-source file transaction with rollback
-src/commands/fetch/repair.rs              post-feed repairs: missing media, feed-only capture upgrades
-src/commands/fetch/tests.rs               the fetch stage's unit tests
-src/commands/fetch/duration.rs            feed-parser receipts that gate conditional GET for durations
-src/commands/fetch/openreview.rs          public paper metadata instead of the challenged web app
-src/commands/fetch/podcast.rs             publisher-feed reconciliation of streaming-show items
-src/commands/fetch/recording.rs           bounded recording-duration probes with daily backoff
-src/commands/check.rs                     probe every source once; non-zero when any fails
-src/commands/clean.rs                     provably disposable targets only
-src/commands/init.rs                      aggr.toml and the optional GitHub workflow
-src/commands/lock.rs                      non-blocking advisory lock (.aggr/aggr.lock, dev.lock)
-src/commands/server.rs                    the dev HTTP server and its reload stream
-src/config.rs, config/                    aggr.toml types, imports and collections, ${ENV}, BCP 47 tags, preferences, validation
-src/git.rs                                worktree/orphan bootstrap, commit with trailers, push+rebase, refs
-src/http.rs, http/transport.rs            reqwest client (UA, timeouts, size cap, conditional GET, retries) + wreq challenge fallback
-src/sources/mod.rs                        engine dispatch by URL predicate: instagram, qwen, podcast, then feed
-src/sources/feed.rs, html.rs              RSS/Atom/JSON via feed-rs (empty media texts it refuses removed first, media it drops restored from the XML); the discovery ladder from HTML
-src/sources/aggr.rs                       another aggr repository as a source
-src/sources/instagram.rs                  profile pages that expose post cards
-src/sources/podcast.rs                    show pages resolved to publisher feeds
-src/sources/qwen.rs                       Qwen's article API behind its JavaScript blog
-src/sources/youtube.rs, youtube/          Shorts filter, video URLs, posters, durations
-src/content.rs, content/                  strip → extract → Markdown → safe HTML; scan, cleanup, resources
-src/content_highlight.rs                  bounded build-time syntax highlighting
-src/media.rs, media/                      lossless article images; ThumbHash placeholders, srcset, SVG rasters, validation receipts
-src/media_duration.rs                     strict recording durations shared by feeds and players
-src/preview.rs, preview/pdf.rs            bounded thumbnails, PDF first pages
-src/threads.rs, threads/x.rs              ActivityPub and X thread expansion
-src/discussions.rs                        discussion-network lookups with cached backoff
-src/cache.rs                              cache roots, the Namespace registry, the render-fingerprint classification
-src/model.rs                              front matter, dedupe keys, link normalization, file names, blob sha
-src/store/                                the branch tree: items, state, seen, status, retention, front matter
-src/site/mod.rs                           build orchestration: phases, media windows, the timing line
-src/site/assets.rs                        content-addressed media gathered on workers, published in item order
-src/site/context.rs                       prepared archive display contexts
-src/site/render.rs                        embedded Svelte renderer in isolated QuickJS runtimes
-src/site/outputs.rs                       feeds, OPML, discovery documents, sitemaps, redirect stubs
-src/site/pagefind.rs                      the search index and its cache key
-src/site/parallel.rs                      ordered map over at most 8 scoped workers; AGGR_BUILD_WORKERS
-src/site/{related,display,document,interactive,item_type,native_media,video}.rs  navigation and presentation contexts
+src/main.rs                              thin CLI entry point calling aggr-lib
+crates/aggr-lib/src/lib.rs, cli.rs        public library + clap types; AGGR_CONFIG and AGGR_BASE_URL env defaults
+crates/aggr-lib/src/commands/mod.rs                       Project = config + sources + repo; the .aggr/ lock and worktree
+crates/aggr-lib/src/commands/sync.rs                      fetch, commit with trailers, push, move refs/aggr/last-good
+crates/aggr-lib/src/commands/build.rs                     sync then render, or render a pinned --data-ref
+crates/aggr-lib/src/commands/dev.rs                       isolated cache, lazy snapshots, watch and live reload
+crates/aggr-lib/src/commands/fetch.rs                     shared fetch stage: per-source workers, article capture, persistence
+crates/aggr-lib/src/commands/fetch/index.rs               one archive pass: stored URLs, paths, reconciliation indexes
+crates/aggr-lib/src/commands/fetch/links.rs               cross-source URL reservations for overlapping feeds
+crates/aggr-lib/src/commands/fetch/plan.rs                what an item becomes on disk, decided before any write
+crates/aggr-lib/src/commands/fetch/transaction.rs         per-source file transaction with rollback
+crates/aggr-lib/src/commands/fetch/repair.rs              post-feed repairs: missing media, feed-only capture upgrades
+crates/aggr-lib/src/commands/fetch/tests.rs               the fetch stage's unit tests
+crates/aggr-lib/src/commands/fetch/duration.rs            feed-parser receipts that gate conditional GET for durations
+crates/aggr-lib/src/commands/fetch/openreview.rs          public paper metadata instead of the challenged web app
+crates/aggr-lib/src/commands/fetch/podcast.rs             publisher-feed reconciliation of streaming-show items
+crates/aggr-lib/src/commands/fetch/recording.rs           bounded recording-duration probes with daily backoff
+crates/aggr-lib/src/commands/check.rs                     probe every source once; non-zero when any fails
+crates/aggr-lib/src/commands/clean.rs                     provably disposable targets only
+crates/aggr-lib/src/commands/init.rs                      aggr.toml and the optional GitHub workflow
+crates/aggr-lib/src/commands/lock.rs                      non-blocking advisory lock (.aggr/aggr.lock, dev.lock)
+crates/aggr-lib/src/commands/server.rs                    the dev HTTP server and its reload stream
+crates/aggr-lib/src/config.rs, config/                    aggr.toml types, imports and collections, ${ENV}, BCP 47 tags, preferences, validation
+crates/aggr-lib/src/git.rs                                worktree/orphan bootstrap, commit with trailers, push+rebase, refs
+crates/aggr-lib/src/http.rs, http/transport.rs            reqwest client (UA, timeouts, size cap, conditional GET, retries) + wreq challenge fallback
+crates/aggr-lib/src/sources/mod.rs                        engine dispatch by URL predicate: instagram, qwen, podcast, then feed
+crates/aggr-lib/src/sources/feed.rs, html.rs              RSS/Atom/JSON via feed-rs (empty media texts it refuses removed first, media it drops restored from the XML); the discovery ladder from HTML
+crates/aggr-lib/src/sources/aggr.rs                       another aggr repository as a source
+crates/aggr-lib/src/sources/instagram.rs                  profile pages that expose post cards
+crates/aggr-lib/src/sources/podcast.rs                    show pages resolved to publisher feeds
+crates/aggr-lib/src/sources/qwen.rs                       Qwen's article API behind its JavaScript blog
+crates/aggr-lib/src/sources/youtube.rs, youtube/          Shorts filter, video URLs, posters, durations
+crates/aggr-lib/src/content.rs, content/                  strip → extract → Markdown → safe HTML; scan, cleanup, resources
+crates/aggr-lib/src/content_highlight.rs                  bounded build-time syntax highlighting
+crates/aggr-lib/src/media.rs, media/                      lossless article images; ThumbHash placeholders, srcset, SVG rasters, validation receipts
+crates/aggr-lib/src/media_duration.rs                     strict recording durations shared by feeds and players
+crates/aggr-lib/src/preview.rs, preview/pdf.rs            bounded thumbnails, PDF first pages
+crates/aggr-lib/src/threads.rs, threads/x.rs              ActivityPub and X thread expansion
+crates/aggr-lib/src/discussions.rs                        discussion-network lookups with cached backoff
+crates/aggr-lib/src/cache.rs                              cache roots, the Namespace registry, the render-fingerprint classification
+crates/aggr-lib/src/model.rs                              front matter, dedupe keys, link normalization, file names, blob sha
+crates/aggr-lib/src/store/                                the branch tree: items, state, seen, status, retention, front matter
+crates/aggr-lib/src/site/mod.rs                           build orchestration: phases, media windows, the timing line
+crates/aggr-lib/src/site/assets.rs                        content-addressed media gathered on workers, published in item order
+crates/aggr-lib/src/site/context.rs                       prepared archive display contexts
+crates/aggr-lib/src/site/render.rs                        embedded Svelte renderer in isolated QuickJS runtimes
+crates/aggr-lib/src/site/outputs.rs                       feeds, OPML, discovery documents, sitemaps, redirect stubs
+crates/aggr-lib/src/site/pagefind.rs                      the search index and its cache key
+crates/aggr-lib/src/site/parallel.rs                      ordered map over at most 8 scoped workers; AGGR_BUILD_WORKERS
+crates/aggr-lib/src/site/{related,display,document,interactive,item_type,native_media,video}.rs  navigation and presentation contexts
 crates/aggr-ui-model/                     shared serialized page contract and TypeScript export
 web/                                      Svelte reader, SSR, browser hydration and Vite development stack
 tests/cli.rs                              end-to-end: bare origin + clone + httpmock + the real binary
@@ -191,12 +193,12 @@ Use mise for local commands and CI; native OS libraries and compilers remain sys
   Publish completed-source snapshots during sync, and acknowledge immutable capture before final retention.
   Lazy snapshots own their archive until the last request releases them; never render in-flight source writes.
   `AGGR_VITE_URL` reserves the public development origin and accepts loopback HTTP only.
-  Keep fixed pages and collection routes in `src/site/page.rs`; eager publication and lazy dev
+  Keep fixed pages and collection routes in `crates/aggr-lib/src/site/page.rs`; eager publication and lazy dev
   consume the same inventory while retaining separate scheduling.
-- Every `src/sources/*` adapter documents its accepted URL contract in
+- Every `crates/aggr-lib/src/sources/*` adapter documents its accepted URL contract in
   [interoperability](docs/interoperability.md#source-adapters); `sources/mod.rs` dispatches on
   those predicates in order.
-- Every new `src/**/*.rs` file is classified in `src/cache.rs`: list it in
+- Every new `crates/aggr-lib/src/**/*.rs` file is classified in `crates/aggr-lib/src/cache.rs`: list it in
   `render_implementation_sources()` when it can change rendered bytes, otherwise in
   `RENDER_INDEPENDENT_SOURCES`. The classification unit test fails until it is.
 - Cache directories are registered in `cache::Namespace`; a unit test pins the reusable workflow's
@@ -250,10 +252,10 @@ Use mise for local commands and CI; native OS libraries and compilers remain sys
   missing content already absent from stored HTML requires a fresh extraction.
   A formula is a formula wherever a page put it: MathML with a TeX annotation, a `math` class, or
   `$…$` in the prose. One command the bounded translator does not know leaves the whole formula as
-  its source, so a command it can read as text belongs in `src/content/math.rs`.
+  its source, so a command it can read as text belongs in `crates/aggr-lib/src/content/math.rs`.
   Markdown must be able to say what the HTML said: an inline wrapper never holds a block, emphasis
   markers flank their content or move aside, and markers with nothing to mark are dropped rather
-  than written into the prose. `src/content/markdown/fuzz.rs` generates documents to hold the
+  than written into the prose. `crates/aggr-lib/src/content/markdown/fuzz.rs` generates documents to hold the
   conversion to that, and points the same oracle at a real archive through `AGGR_CORPUS`.
   An article URL that cannot name its own account (a YouTube watch URL) has one read from its page
   during the fetch it already makes and stored beside the item; a captured account on another host
@@ -289,10 +291,10 @@ Use mise for local commands and CI; native OS libraries and compilers remain sys
   stored source IDs to publisher IDs. Canonical articles carry deduplicated publisher/feed
   memberships and stay unique globally. Visible labels use a canonical name: a hostname alone, plus
   the account path only on the platform hosts listed in
-  `src/platform.rs`, where one domain is shared between unrelated publishers. `src/platform.rs` is
+  `crates/aggr-lib/src/platform.rs`, where one domain is shared between unrelated publishers. `crates/aggr-lib/src/platform.rs` is
   the only place that knows host aliases, account path shapes, or which hosts use opaque
   identifiers; never re-derive any of that elsewhere. A platform's reserved routes
-  (`src/platform/reserved.rs`) are copied from what it publishes — its own source, robots.txt, or
+  (`crates/aggr-lib/src/platform/reserved.rs`) are copied from what it publishes — its own source, robots.txt, or
   API docs — and never extended by hand; drop a robots.txt entry that serves a member's profile. A publisher label names the account the
   article itself identifies, so it reads the same whoever linked it; only where nothing names one
   does the subscription that carried it, and then the bare host, stand in. A `via` label names the
@@ -469,7 +471,7 @@ Use mise for local commands and CI; native OS libraries and compilers remain sys
 - A prerendered page runs before anyone sees it: gate session storage, history writes and worker
   registration behind `document.prerendering`.
 - Reader defaults are the flat `[preferences]` table. `[site.preferences]` is rejected. The typed
-  table in `src/config/preferences.rs` produces the browser validation rules and the form schema.
+  table in `crates/aggr-lib/src/config/preferences.rs` produces the browser validation rules and the form schema.
   Never redeclare a setting in a template or a script. Schema.org ownership is the flat
   `[identity]` table. `[site.identity]` is rejected.
 - Documents carry no `<base>` element. `url_for` and `facet_url` resolve from the page being
@@ -530,3 +532,17 @@ See [client development](docs/client.md) for frontend commands, ownership, and s
   media omitted from lightweight snapshots. Never decode media to calculate retention bytes.
 - Retention removes owned body/HTML/media files in normal commits; keep manual deletion
   tombstones distinct from policy evictions. See [storage](docs/storage.md).
+
+## Library distribution
+
+- The CLI depends on `crates/aggr-lib`; shared Rust implementation belongs there. `aggr-ui-model`
+  is its published page-contract dependency. Keep aggr/aggr-lib package versions and VERSION aligned.
+- `make package` prepares ignored, explicitly included reader assets and resources, then verifies
+  the self-contained crates. Published library builds consume those embedded inputs without Node
+  or repository-relative files. Never commit generated reader bundles.
+- Publish through `.github/workflows/publish.yml`, using the `CARGO_REGISTRY_TOKEN` repository
+  secret for the model, library, and CLI. `.github/workflows/homebrew.yml` updates the shared tap
+  with `HOMEBREW_TAP_TOKEN`; mise uses GitHub release archives directly. See
+  [distribution](docs/distribution.md) for release and retry contracts.
+- Run Rust unit filters with `cargo test -p aggr-lib`; root integration tests exercise the CLI.
+  Include release `dev --help` and native local-feed preview in verification.

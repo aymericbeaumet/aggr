@@ -3,6 +3,7 @@ import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { performance } from 'node:perf_hooks';
 import { buildArguments, workerArguments } from './context.mjs';
 
 const readyPrefix = '\x1eaggr-ready ';
@@ -80,17 +81,36 @@ export class Backend {
     const state = { kind: 'building', again: false };
     this.#state = state;
     this.#work = (async () => {
+      const measurement = { kind: 'build', startedAt: new Date().toISOString(), status: 'failed', phase: 'compile', compileMs: 0, prepareMs: null };
+      const compileStarted = performance.now();
+      let prepareStarted;
+      const prepared = () => {
+        if (prepareStarted === undefined) return;
+        measurement.prepareMs = performance.now() - prepareStarted;
+        prepareStarted = undefined;
+      };
       try {
-        const artifact = await this.#compile();
-        if (!artifact || this.#state.kind === 'stopping') return;
+        let artifact;
+        try { artifact = await this.#compile(); }
+        finally { measurement.compileMs = performance.now() - compileStarted; }
+        if (!artifact || this.#state.kind === 'stopping') { measurement.status = 'cancelled'; return; }
+        if (state.again) { measurement.status = 'superseded'; return; }
+        measurement.phase = 'prepare';
+        prepareStarted = performance.now();
         const executable = await this.#copy(artifact);
+        if (state.again) {
+          measurement.status = 'superseded';
+          await rm(dirname(executable), { recursive: true, force: true });
+          return;
+        }
         const previous = this.#current;
         this.#current = undefined;
         await stopWorker(previous);
-        if (this.#state.kind === 'stopping') return;
+        if (this.#state.kind === 'stopping') { measurement.status = 'cancelled'; return; }
         try {
           this.#current = await this.#launch(executable, true);
         } catch (error) {
+          prepared();
           if (previous && this.#state.kind !== 'stopping') {
             console.error('The new worker could not start; restoring the previous build.');
             this.#current = await this.#launch(previous.executable, true);
@@ -99,11 +119,19 @@ export class Backend {
           await rm(dirname(executable), { recursive: true, force: true });
           throw error;
         }
+        prepared();
         this.#hooks.ready?.(this.#current);
+        measurement.status = 'success';
         if (previous) await rm(previous.directory, { recursive: true, force: true });
       } catch (error) {
         console.error(error instanceof Error ? error.message : error);
         this.#hooks.buildError?.(error);
+      } finally {
+        prepared();
+        const preparation = measurement.prepareMs === null ? 'skipped' : `${(measurement.prepareMs / 1000).toFixed(2)}s`;
+        console.log(`dev build: compile ${(measurement.compileMs / 1000).toFixed(2)}s, prepare ${preparation} (${measurement.status})`);
+        try { this.#hooks.metrics?.(measurement); }
+        catch (error) { console.error('Could not record development timings:', error); }
       }
     })();
     await this.#work;
