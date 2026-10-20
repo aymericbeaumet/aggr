@@ -1,6 +1,13 @@
 [settings]
 lockfile = true
 
+[settings.task]
+# Setup provisions tools explicitly; CI installs only the subset each job needs.
+run_auto_install = false
+
+[env]
+_.path = ["{{config_root}}/web/node_modules/.bin"]
+
 [tools]
 actionlint = "1.7.12"
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"
@@ -37,3 +44,151 @@ os = ["windows/x64"]
 
 [tools."http:nasm".platforms]
 windows-x64 = { url = "https://www.nasm.us/pub/nasm/releasebuilds/{{ version }}/win64/nasm-{{ version }}-win64.zip", checksum = "sha256:161d0bfaff53c2f9e9f3e69fd0672323ebabafd1268976a5cec11be92a19aee7", bin_path = "nasm-{{ version }}" }
+
+[tasks.default]
+description = "Run all Rust and frontend checks"
+depends = ["check"]
+
+[tasks.setup]
+description = "Install pinned tools and locked frontend packages"
+run = ["mise install", "mise run dependencies"]
+
+[tasks.dependencies]
+description = "Repair locked frontend dependencies"
+run = "node web/build/dependencies.mjs"
+
+[tasks.build]
+description = "Build the CLI and embedded reader"
+depends = ["dependencies"]
+run = "cargo build --locked"
+
+[tasks.release]
+description = "Build the optimized CLI"
+depends = ["dependencies"]
+run = "cargo build --release --locked"
+
+[tasks.timings]
+description = "Build with Cargo's HTML timing report"
+depends = ["dependencies"]
+run = "cargo build --locked --timings"
+
+[tasks.dev]
+description = "Run the demo with Vite HMR and Rust restarts"
+depends = ["dependencies"]
+env = { AGGR_CONFIG = "{{env.AGGR_CONFIG | default(value='examples/aggr.toml')}}" }
+run = "cargo run --locked -- dev"
+
+[tasks.run]
+description = "Run aggr against examples/aggr.toml"
+depends = ["dependencies"]
+run = "cargo run --locked -- --config examples/aggr.toml"
+
+[tasks.test]
+description = "Run all Rust workspace tests"
+depends = ["dependencies"]
+run = "cargo test --workspace --locked"
+
+[tasks.lint]
+description = "Run Clippy with warnings denied"
+depends = ["dependencies"]
+run = "cargo clippy --workspace --locked --all-targets -- --deny warnings"
+
+[tasks.deps-check]
+description = "Check dependency licenses, advisories and sources"
+run = "cargo-deny --locked --all-features check"
+
+[tasks.workflow-check]
+description = "Check GitHub Actions workflows"
+run = "actionlint"
+
+[tasks.fmt]
+description = "Format Rust code"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check Rust formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.check-rust]
+description = "Lint Rust, then run its tests"
+run = [{ task = "lint" }, { task = "test" }]
+
+[tasks.check]
+description = "Check formatting, then Rust and frontend behavior"
+run = [{ task = "fmt-check" }, { tasks = ["check-rust", "client-check"] }]
+
+[tasks.client-build]
+description = "Compile the embedded reader and browser assets"
+depends = ["build"]
+dir = "web"
+run = "node build.ts"
+
+[tasks.client-typecheck]
+description = "Check Svelte and TypeScript"
+depends = ["build"]
+dir = "web"
+run = ["svelte-check --tsgo --tsconfig ./tsconfig.json", "tsc --noEmit -p tsconfig.worker.json"]
+
+[tasks.client-test]
+description = "Build and test the reader"
+depends = ["build"]
+dir = "web"
+run = ["node build.ts", "vitest run"]
+
+[tasks.client-test-build]
+description = "Test frontend build and publication helpers"
+depends = ["dependencies"]
+dir = "web"
+run = "node --test build/*.test.mjs ../scripts/*.test.mjs"
+
+[tasks.client-test-dev]
+description = "Test the development supervisor"
+depends = ["dependencies"]
+dir = "web"
+run = "node --test --test-concurrency=1 dev/*.test.mjs"
+
+[tasks.client-check]
+description = "Check, build and test the frontend and supervisor"
+run = [{ task = "client-typecheck" }, { task = "client-test" }, { task = "client-test-build" }, { task = "client-test-dev" }]
+
+[tasks.browser-test]
+description = "Run browser contracts against AGGR_WEBDRIVER_URL"
+depends = ["build"]
+run = "cargo test --locked --test browser -- --ignored"
+
+[tasks.verify-release]
+description = "Check the release CLI's supported commands"
+run = "node web/dev/verify-release.mjs"
+
+[tasks.package]
+description = "Prepare and verify all three publishable crates"
+depends = ["build"]
+run = ["node web/build/package.mjs", "cargo package -p aggr-ui-model -p aggr-lib -p aggr"]
+
+[tasks.publish]
+description = "Publish missing model, library and CLI versions"
+run = "node scripts/publish.mjs"
+
+[tasks.publish-test]
+description = "Test crates.io publication without uploading"
+run = "node --test scripts/publish.test.mjs"
+
+[tasks.homebrew]
+description = "Prepare or publish a Homebrew formula for a release"
+run = "node scripts/homebrew.mjs"
+
+[tasks.homebrew-test]
+description = "Test Homebrew publication without writing to the tap"
+run = "node --test scripts/homebrew.test.mjs"
+
+[tasks.msrv]
+description = "Build with the declared minimum Rust version"
+run = "node scripts/msrv.mjs"
+
+[tasks.clean]
+description = "Remove Cargo build artifacts"
+run = "cargo clean"
+
+[tasks.install]
+description = "Install the CLI locally"
+run = "cargo install --path . --locked"

@@ -6,7 +6,7 @@ static page embeds instead of from the DOM; Rust still renders every page. Later
 identities, native navigation, and responsive layout changes remain in place.
 
 Historical paths below are relative to that commit; the current client lives in `web/src/`.
-Behavioral tests run with `make client-check`; the browser contracts under `tests/browser/` use
+Behavioral tests run with `mise run client-check`; the browser contracts under `tests/browser/` use
 the generated site and a real Chrome session.
 
 | Contract | Reference implementation | Current implementation and evidence |

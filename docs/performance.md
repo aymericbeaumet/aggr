@@ -342,7 +342,7 @@ variable inspection under a debugger.
 
 Keep the local `target/` directory between edits. Cargo enables incremental compilation for the
 application by default; changing compiler flags, profiles, or target directories can discard that
-benefit. `make timings` writes Cargo's HTML timing report under `target/cargo-timings/`. Compare a
+benefit. `mise run timings` writes Cargo's HTML timing report under `target/cargo-timings/`. Compare a
 cached no-op build separately from a representative source edit, and avoid concurrent source or
 embedded-asset writes while measuring. See [Cargo profiles](https://doc.rust-lang.org/cargo/reference/profiles.html).
 
@@ -353,13 +353,13 @@ Previously visited pages and small assets remain available from a bounded proxy 
 worker handoff. Uncached page navigation waits for replacement readiness, with a 30-second
 deadline and at most 64 waiting requests. Aborted requests and shutdown release their slots.
 
-`make check` verifies formatting, then runs the frontend checks alongside Rust validation. Rust linting
+`mise run check` verifies formatting, then runs the frontend checks alongside Rust validation. Rust linting
 finishes before tests begin, avoiding competing Cargo processes and target-directory locks.
 The CLI is a thin consumer of `crates/aggr-lib`. Executable frontend inputs share a bounded,
 content-addressed artifact cache across Cargo and frontend tests. Test-only frontend edits do
-not rebuild the production bundles. `make dependencies` explicitly repairs locked packages,
+not rebuild the production bundles. `mise run dependencies` explicitly repairs locked packages,
 including when Cargo considers the Rust artifacts fresh.
-Compiler parallelism remains under Cargo's control. Build, run, lint, and test Make targets use
+Compiler parallelism remains under Cargo's control. Build, run, lint, and test mise tasks use
 `--locked` so verification cannot silently update dependency versions.
 
 CI preserves completed dependency builds even when later checks fail, including the native TLS

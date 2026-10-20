@@ -140,16 +140,17 @@ docs/*.md                                 the user-facing reference the readme l
 ## Commands
 
 ```sh
-make setup                                   # install the mise-pinned tools and locked client packages
-make dev                                     # demo with Vite HMR and automatic Rust restarts
-make check                                   # fmt, clippy, Rust tests, svelte-check and vitest
-mise exec -- cargo test --locked --test cli  # end-to-end only
-make run ARGS="dev --port 3000"              # dogfood examples/aggr.toml
+mise run setup                               # install pinned tools and locked client packages
+mise run dev                                 # demo with Vite HMR and automatic Rust restarts
+mise run check                               # fmt, clippy, Rust tests, svelte-check and vitest
+mise exec -- cargo test --locked --test cli    # end-to-end only
+mise run dev -- --port 3000                   # dogfood examples/aggr.toml
 mise exec -- cargo run --locked -- sync --dry-run -vv  # fetch without writing, with debug logs
 ```
 
-Keep development tool versions in `mise.toml` and `mise.lock`, including all CI build tools.
-Use mise for local commands and CI; native OS libraries and compilers remain system prerequisites.
+Keep development tool versions and tasks in `mise.toml`, with versions locked in `mise.lock`.
+Use the same mise tasks locally and in CI; do not add Make targets or npm scripts.
+Native OS libraries and compilers remain system prerequisites.
 
 ## Conventions
 
@@ -189,7 +190,7 @@ Use mise for local commands and CI; native OS libraries and compilers remain sys
   snapshot ownership across blocking requests, and keep the last good generation on preparation failure.
   Blocking archive writes and snapshot jobs must own the dev cache lock themselves: cancelling
   their async caller does not stop a blocking worker or wait for a dropped task set to finish.
-  Debug `cargo run -- dev` and `make dev` use a stable Vite front door and build-before-stop Rust restarts.
+  Debug `cargo run -- dev` and `mise run dev` use a stable Vite front door and build-before-stop Rust restarts.
   Publish completed-source snapshots during sync, and acknowledge immutable capture before final retention.
   Lazy snapshots own their archive until the last request releases them; never render in-flight source writes.
   `AGGR_VITE_URL` reserves the public development origin and accepts loopback HTTP only.
@@ -542,7 +543,7 @@ See [client development](docs/client.md) for frontend commands, ownership, and s
 
 - The CLI depends on `crates/aggr-lib`; shared Rust implementation belongs there. `aggr-ui-model`
   is its published page-contract dependency. Keep aggr/aggr-lib package versions and VERSION aligned.
-- `make package` prepares ignored, explicitly included reader assets and resources, then verifies
+- `mise run package` prepares ignored, explicitly included reader assets and resources, then verifies
   the self-contained crates. Published library builds consume those embedded inputs without Node
   or repository-relative files. Never commit generated reader bundles.
 - Publish through `.github/workflows/publish.yml`, using the `CARGO_REGISTRY_TOKEN` repository

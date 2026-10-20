@@ -1,6 +1,6 @@
 # cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
 #
-# Run locally with `mise exec -- cargo deny check`; CI runs it in the `deps` job of
+# Run locally with `mise run deps-check`; CI runs it in the `deps` job of
 # .github/workflows/ci.yml. Every relaxation below names its reason; change the configuration
 # with the dependency change that makes an entry obsolete, never to make a failing check pass.
 

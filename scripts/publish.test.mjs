@@ -30,7 +30,7 @@ test('first publication verifies packages and publishes the model, library and C
   const f = fixture();
   await f.publish({ args: ['--allow-dirty'], ref: { type: 'tag', name: 'v2.0.0' } });
   assert.deepEqual(f.calls.map(({ command, args }) => [command, args]), [
-    ['make', ['package', 'PACKAGE_ARGS=--allow-dirty']],
+    ['mise', ['run', 'package', '--', '--allow-dirty']],
     ['cargo', ['publish', '--registry', 'crates-io', '-p', 'aggr-ui-model@0.1.0', '-p', 'aggr-lib@2.0.0', '-p', 'aggr@2.0.0', '--allow-dirty']],
   ]);
   assert.equal(f.calls[0].env.CARGO_REGISTRY_TOKEN, undefined);
@@ -80,7 +80,7 @@ test('registry failures or malformed responses never become permission to publis
 
 test('package verification failure stops before any upload', async () => {
   const f = fixture();
-  await assert.rejects(f.publish({ run: async command => { assert.equal(command, 'make'); throw new Error('package failed'); } }), /package failed/);
+  await assert.rejects(f.publish({ run: async command => { assert.equal(command, 'mise'); throw new Error('package failed'); } }), /package failed/);
 });
 
 test('version, tag and argument mistakes fail before registry access', async () => {

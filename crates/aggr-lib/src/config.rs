@@ -1842,7 +1842,7 @@ media_download_strategy = "remote"
 
     #[test]
     fn the_shipped_example_config_resolves() {
-        // `examples/aggr.toml` backs `make run` and the docs; keep it loadable as written.
+        // `examples/aggr.toml` backs `mise run run` and the docs; keep it loadable as written.
         let config =
             Config::parse(include_str!(concat!(env!("OUT_DIR"), "/example.toml"))).unwrap();
         assert_eq!(config.site.title, "My reads");

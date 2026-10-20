@@ -46,7 +46,7 @@ export async function publishPackages({
   fetchIndex = fetch, run, log = console.log,
 }) {
   if (args.some(arg => arg !== '--allow-dirty'))
-    throw new Error('Publishing accepts only PACKAGE_ARGS=--allow-dirty');
+    throw new Error('Publishing accepts only --allow-dirty');
   const targets = packages(metadata, version.trim(), ref);
   const existing = await Promise.all(targets.map(pkg => published(pkg, fetchIndex)));
   const pending = targets.filter((pkg, index) => {
@@ -59,7 +59,7 @@ export async function publishPackages({
   }
   if (env.GITHUB_ACTIONS === 'true' && !env.CARGO_REGISTRY_TOKEN)
     throw new Error('Add the CARGO_REGISTRY_TOKEN repository Actions secret to publish new crate versions');
-  await run('make', ['package', `PACKAGE_ARGS=${args.join(' ')}`], { env: buildEnvironment(env) });
+  await run('mise', ['run', 'package', '--', ...args], { env: buildEnvironment(env) });
   await run('cargo', [
     'publish', '--registry', 'crates-io',
     ...pending.flatMap(pkg => ['-p', `${pkg.name}@${pkg.version}`]), ...args,

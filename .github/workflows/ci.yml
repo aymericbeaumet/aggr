@@ -50,10 +50,10 @@ jobs:
           # release.yml re-runs this workflow on the tag ref; caches saved there can never be
           # restored by main or pull requests and only eat the repository's cache quota.
           save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-      - run: mise exec -- cargo fmt --all -- --check
+      - run: mise run fmt-check
         if: matrix.name == 'linux-amd64'
-      - run: mise exec -- cargo clippy --workspace --locked --all-targets -- -D warnings
-      - run: mise exec -- cargo test --workspace --locked
+      - run: mise run lint
+      - run: mise run test
 
   browser:
     name: browser (chrome)
@@ -109,7 +109,7 @@ jobs:
             sleep 0.25
           done
           curl --fail --silent --show-error "$AGGR_WEBDRIVER_URL/status" | jq -e '.value.ready == true'
-          mise exec -- cargo test --workspace --locked --test browser -- --ignored --nocapture --test-threads=2
+          mise run browser-test -- --nocapture --test-threads=2
       - name: Upload browser failure screenshots and logs
         if: failure()
         uses: actions/upload-artifact@v7
@@ -136,7 +136,7 @@ jobs:
         with:
           cache-on-failure: true
           save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-      - run: mise exec rust@${{ steps.msrv.outputs.version }} -- cargo build --locked
+      - run: mise run msrv
 
   client:
     runs-on: ubuntu-24.04
@@ -148,7 +148,7 @@ jobs:
           version: 2026.10.15
           install_args: rust node cmake ninja
       - uses: Swatinem/rust-cache@v2
-      - run: make client-check
+      - run: mise run client-check
 
   # Licenses, RustSec advisories, duplicate versions and registry sources of the dependency tree,
   # as configured in deny.toml. Use the same mise-pinned cargo-deny as local development.
@@ -160,8 +160,8 @@ jobs:
       - uses: jdx/mise-action@v5
         with:
           version: 2026.10.15
-          install_args: aqua:EmbarkStudios/cargo-deny
-      - run: mise exec -- cargo-deny --locked --all-features check
+          install_args: rust aqua:EmbarkStudios/cargo-deny
+      - run: mise run deps-check
 
   # The version is committed in two places; keep them equal before anything gets tagged.
   version:

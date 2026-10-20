@@ -68,8 +68,8 @@ and fetch caches survive restart, and nothing is committed or pushed.
 Use `cargo run -- dev --release` to exercise the complete publication build, including its media budget
 and PWA outputs. Ordinary lazy dev omits PWA outputs; the dev server unregisters its scoped worker
 to keep browser caches from hiding edits.
-`make dev` is a shortcut for the same contributor stack.
-`make check` runs the Rust and frontend checks. See [client development](client.md).
+`mise run dev` is a shortcut for the same contributor stack.
+`mise run check` runs the Rust and frontend checks. See [client development](client.md).
 
 ## Cache and cleanup
 

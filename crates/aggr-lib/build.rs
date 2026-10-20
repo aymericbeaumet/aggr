@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 fn run(command: &mut Command, operation: &str) {
     let output = command
         .output()
-        .unwrap_or_else(|error| panic!("{operation}: {error}; run `make setup` first"));
+        .unwrap_or_else(|error| panic!("{operation}: {error}; run `mise run setup` first"));
     assert!(
         output.status.success(),
         "{operation}: {}\n{}\n{}",
@@ -63,7 +63,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", source.display());
         fs::copy(&source, output.join(name)).unwrap_or_else(|error| {
             panic!(
-                "embedding {}: {error}; run `make package` before packaging",
+                "embedding {}: {error}; run `mise run package` before packaging",
                 source.display()
             )
         });
@@ -117,7 +117,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", source.display());
         assert!(
             source.join("assets.json").is_file(),
-            "packaged reader assets missing; run `make package` before publishing"
+            "packaged reader assets missing; run `mise run package` before publishing"
         );
         if ui.exists() {
             fs::remove_dir_all(&ui).expect("clearing previous packaged reader assets");

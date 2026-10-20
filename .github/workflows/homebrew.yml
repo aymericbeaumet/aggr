@@ -35,10 +35,10 @@ jobs:
         with:
           version: 2026.10.15
           install_args: node
-      - run: mise exec -- node --test scripts/homebrew.test.mjs
+      - run: mise run homebrew-test
       - name: Prepare and test the release formula
         run: |
-          mise exec -- node scripts/homebrew.mjs "$TAG" --output "$RUNNER_TEMP/aggr.rb"
+          mise run homebrew -- "$TAG" --output "$RUNNER_TEMP/aggr.rb"
           brew tap-new --no-git local/aggr-ci
           cp "$RUNNER_TEMP/aggr.rb" "$(brew --repository local/aggr-ci)/Formula/aggr.rb"
           brew install local/aggr-ci/aggr
@@ -46,4 +46,4 @@ jobs:
       - name: Update the shared Homebrew tap
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: mise exec -- node scripts/homebrew.mjs "$TAG"
+        run: mise run homebrew -- "$TAG"

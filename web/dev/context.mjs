@@ -6,7 +6,7 @@ export const embeddedInputs = [
 ];
 
 export function readContext(value = process.env.AGGR_DEV_CONTEXT) {
-  if (!value) throw new Error('Start development with cargo run -- dev or make dev.');
+  if (!value) throw new Error('Start development with mise run dev or cargo run -- dev.');
   const context = JSON.parse(value);
   if (!context || !isAbsolute(context.repository ?? '') || !isAbsolute(context.cwd ?? '') ||
       !isAbsolute(context.executable ?? '') || !Array.isArray(context.workerArgs) ||

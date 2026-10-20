@@ -227,7 +227,7 @@ utility release `0.1.0` uses GPL-3.0. Review actual package licenses, compiler r
 and platform builds before changing these pins.
 
 Building from source additionally needs the CMake version pinned in `mise.toml`, a C/C++ toolchain,
-Git, and native libclang for bindgen. Run `make setup` for the mise tools. Linux CI installs
+Git, and native libclang for bindgen. Run `mise run setup` for the mise tools. Linux CI installs
 `libclang-dev build-essential`; macOS uses Xcode's native tools and libclang. Windows uses the native
 Visual Studio environment, mise's Ninja, and LLVM; `LIBCLANG_PATH` points to LLVM's `bin` directory.
 Windows x64 gets a pinned NASM through mise. Windows ARM64 uses clang-cl's integrated assembler

@@ -26,7 +26,7 @@ function npmCi(root) {
   return new Promise((accept, reject) => {
     const child = spawn(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['ci', '--include=dev', '--no-audit', '--no-fund'], { cwd: root, stdio: 'inherit', shell: process.platform === 'win32' });
     child.once('error', reject);
-    child.once('exit', code => code === 0 ? accept() : reject(new Error(`Installing locked frontend dependencies failed (${code}). Run make setup to retry.`)));
+    child.once('exit', code => code === 0 ? accept() : reject(new Error(`Installing locked frontend dependencies failed (${code}). Run mise run setup to retry.`)));
   });
 }
 
@@ -43,7 +43,7 @@ export async function ensureDependencies(root, install = npmCi) {
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (previous === digest && await installed(root, lock)) return false;
     await install(root);
-    if (!await installed(root, lock)) throw new Error('Frontend dependencies are incomplete after npm ci. Run make setup to retry.');
+    if (!await installed(root, lock)) throw new Error('Frontend dependencies are incomplete after npm ci. Run mise run setup to retry.');
     await mkdir(dirname(receipt), { recursive: true });
     const stage = `${receipt}.${randomUUID()}`;
     await writeFile(stage, digest);

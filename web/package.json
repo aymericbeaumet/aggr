@@ -5,15 +5,6 @@
   "engines": {
     "node": ">=26"
   },
-  "scripts": {
-    "test:dev": "node --test dev/*.test.mjs",
-    "test:build": "node --test build/*.test.mjs ../scripts/*.test.mjs",
-    "verify:release": "node dev/verify-release.mjs",
-    "build": "node build.ts",
-    "check": "svelte-check --tsgo --tsconfig ./tsconfig.json && tsc --noEmit -p tsconfig.worker.json",
-    "test": "node build.ts && vitest run",
-    "verify": "npm run check && npm test"
-  },
   "dependencies": {
     "svelte": "^5.57.2"
   },

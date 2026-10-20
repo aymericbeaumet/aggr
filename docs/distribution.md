@@ -47,7 +47,7 @@ and platform prerequisites are in [hosting](hosting.md#installing-the-binary).
 
 ## Local verification
 
-`make package` prepares the compiled reader and verifies all three self-contained Cargo packages.
+`mise run package` prepares the compiled reader and verifies all three self-contained Cargo packages.
 Published packages embed those assets and require no Node installation. The Node tests under
 `scripts/` cover publication order, retries, checksum validation, and tap updates without making
 external writes. The Homebrew workflow installs and tests the actual release binary before

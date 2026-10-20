@@ -44,7 +44,7 @@ test('rebuilds target a different executable and exclude frontend edits in ordin
 });
 
 test('missing or malformed contexts fail before a subprocess starts', () => {
-  assert.throws(() => readContext(''), /cargo run -- dev or make dev/);
+  assert.throws(() => readContext(''), /mise run dev or cargo run -- dev/);
   assert.throws(() => readContext('{'), SyntaxError);
   for (const invalid of [{}, { ...context, cwd: 'relative' }, { ...context, executable: '' }, { ...context, workerArgs: [1] }]) {
     assert.throws(() => readContext(JSON.stringify(invalid)), /Invalid development launcher context/);

@@ -12,6 +12,8 @@ works with JavaScript disabled. Search remains a build-time Pagefind index, with
 Vite produces the browser bundles, bootstrap, service worker, and an isolated server renderer in
 Cargo's `OUT_DIR`. Generated types and bundles are not committed. `mise.toml` and `mise.lock` pin
 build tools; `Cargo.lock` and `web/package-lock.json` pin packages.
+Mise also owns the development tasks in `mise.toml`, shared by local work and CI.
+The frontend has no npm scripts: npm installs locked dependencies, and mise runs the tools directly.
 
 The binary embeds that output. Installed commands need neither Node nor frontend source files:
 Rust calls the synchronous Svelte renderer in QuickJS with no network, filesystem, or process
@@ -37,11 +39,11 @@ Persistent playback stays outside the changing page content.
 ## Development
 
 ```sh
-make setup                         # install pinned build tools
+mise run setup                     # install pinned tools and locked packages
 cargo run -- dev                   # local config, or demo when no config exists
-make dev                           # demo archive
-AGGR_CONFIG=/path/to/aggr.toml make dev
-make check                         # Rust, TypeScript, component and launcher checks
+mise run dev                       # demo archive
+AGGR_CONFIG=/path/to/aggr.toml mise run dev
+mise run check                     # Rust, TypeScript, component and launcher checks
 ```
 
 `cargo run -- dev` starts one Node supervisor with a stable Vite front door. Frontend edits use
@@ -49,16 +51,26 @@ Svelte HMR; Vite renders document requests from Rust's typed model. Rust edits c
 worker while the last successful generation continues serving. A failed compilation leaves that
 worker available. Successful replacements retain archive snapshots safely and reload the browser.
 Configuration and archive changes use the worker's snapshot/reload stream. Ctrl-C shuts down the
-stack. `--port` selects the public port; `make dev ARGS="--port 3000"` forwards options.
+stack. `--port` selects the public port; `mise run dev -- --port 3000` forwards options.
 
 Cached articles appear first, and completed sources become visible during cold sync. Development
 uses an isolated cache and never commits or pushes the archive. `dev --release` exercises full
 publication rendering. Release binaries include native preview and live reload. They use embedded
 assets without Node; source checkouts can also launch Vite from optimized binaries.
 
-`make client-check` first builds Rust to generate the contract, then runs Svelte/TypeScript checks,
+`mise run client-check` first builds Rust to generate the contract, then runs Svelte/TypeScript checks,
 Vitest, and supervisor tests. Rust tests exercise the embedded renderer and publication behavior;
 frontend tests render the actual components. Browser contracts cover hydration and navigation.
+For focused frontend work, use these tasks:
+
+| Task | Purpose |
+| --- | --- |
+| `mise run client-typecheck` | Svelte and TypeScript checks |
+| `mise run client-build` | Compile the reader assets |
+| `mise run client-test` | Component and browser-state tests |
+| `mise run client-test-build` | Build and distribution helper tests |
+| `mise run client-test-dev` | Development supervisor tests |
+
 The TypeScript checker writes temporary files under ignored `web/.svelte-check/`.
 The native compiler uses TypeScript 7 through the `@typescript/native` npm alias. Svelte's checker
 still needs the classic TypeScript 6 JavaScript compiler API and its supported peer range, so the
@@ -114,7 +126,7 @@ stylesheets fall back to their exact cached URL, including its query, or return 
 ## Browser regression tests
 
 The browser suite uses a local ChromeDriver and a temporary, pinned article archive. `mise.toml`
-pins ChromeDriver and Chrome for Testing to the same release. `make setup` installs both through
+pins ChromeDriver and Chrome for Testing to the same release. `mise run setup` installs both through
 mise on supported desktop platforms. Point `AGGR_CHROME_BINARY` at the mise-installed browser:
 
 ```sh
@@ -245,7 +257,7 @@ while the manifest loads must not discard the vocabulary needed to complete that
 The vocabulary comes from `search-catalog.json`, which contains only the index version, base,
 document count, and facets. Focusing the
 field or completing an unresolved qualifier does not initialize Pagefind or fetch its index chunks.
-`make client-check` exercises the query and session contracts with vitest and runs the Node
+`mise run client-check` exercises the query and session contracts with vitest and runs the Node
 development launcher tests alongside them.
 Once a valid query is entered, runtime initialization overlaps the existing typing delay. Fully
 resolved filter queries also use Pagefind's supported preload API; partial text does not speculate

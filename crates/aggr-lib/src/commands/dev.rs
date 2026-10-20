@@ -133,17 +133,17 @@ fn launch(config_path: &Path, args: &DevArgs, verbose: u8) -> Result<()> {
         .arg(repository.join("web/build/dependencies.mjs"))
         .current_dir(&repository)
         .status()
-        .context("preparing frontend dependencies; run `make setup` first")?;
+        .context("preparing frontend dependencies; run `mise run setup` first")?;
     ensure!(
         dependencies.success(),
-        "frontend dependency repair failed; run `make setup`"
+        "frontend dependency repair failed; run `mise run setup`"
     );
     ensure!(
         script.is_file()
             && repository
                 .join("web/node_modules/vite/package.json")
                 .is_file(),
-        "contributor development needs the source checkout and Node packages; run `make setup` in {}",
+        "contributor development needs the source checkout and Node packages; run `mise run setup` in {}",
         repository.display()
     );
     let config = config_path
@@ -167,7 +167,7 @@ fn launch(config_path: &Path, args: &DevArgs, verbose: u8) -> Result<()> {
         .current_dir(&context.repository)
         .env("AGGR_DEV_CONTEXT", serde_json::to_string(&context)?)
         .status()
-        .context("starting Node development tools; run `make setup` first")?;
+        .context("starting Node development tools; run `mise run setup` first")?;
     ensure!(status.success(), "development tools exited with {status}");
     Ok(())
 }

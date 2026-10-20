@@ -11,7 +11,7 @@ await mkdir(staged, { recursive: true });
 const result = spawnSync(process.execPath, [join(root, 'web/build.ts')], {
   cwd: join(root, 'web'), env: { ...process.env, AGGR_UI_OUT_DIR: join(staged, 'ui') }, stdio: 'inherit',
 });
-if (result.status !== 0) throw new Error('Could not prepare the packaged reader. Run make build first.');
+if (result.status !== 0) throw new Error('Could not prepare the packaged reader. Run mise run build first.');
 for (const [source, name] of [
   ['config.default.toml', 'config.default.toml'], ['examples/starter.toml', 'starter.toml'],
   ['examples/aggr.toml', 'example.toml'], ['docs/aggr-instance.schema.json', 'aggr-instance.schema.json'],
