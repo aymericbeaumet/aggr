@@ -23,6 +23,7 @@ expression: "rss_collection(&site, &build(), &site.title, \"\", &[item(), podcas
     <content:encoded>&lt;p&gt;Clean &amp;amp; &lt;strong&gt;complete&lt;/strong&gt;&lt;/p&gt;</content:encoded>
     <category>Engineering</category>
     <category>Rust</category>
+    <source url="https://example.test/reads/sources/source/rss.xml">upstream.example</source>
   </item>
   <item>
     <title>Episode 1</title>
@@ -36,6 +37,7 @@ expression: "rss_collection(&site, &build(), &site.title, \"\", &[item(), podcas
     <content:encoded>&lt;p&gt;Clean &amp;amp; &lt;strong&gt;complete&lt;/strong&gt;&lt;/p&gt;</content:encoded>
     <category>Engineering</category>
     <category>Rust</category>
+    <source url="https://example.test/reads/sources/source/rss.xml">upstream.example</source>
   </item>
 </channel>
 </rss>

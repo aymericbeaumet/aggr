@@ -304,7 +304,10 @@ streams and advertises them from its HTML:
 The same names live below `sources/<slug>/`, `categories/<slug>/`, and `tags/<slug>/`. The
 human-facing `/sources/`, `/categories/`, and `/tags/` directories link to those stable
 per-collection routes; `/browse/` combines the directories. Feed entries point their primary URL at the local
-clean-reading page and carry the original URL through the format's provenance field.
+clean-reading page and carry the original URL through the format's provenance field. An RSS item's
+`<source>` names its publisher the way the reader does (`youtube.com/@channel`, `github.com/owner`,
+or a domain) and links to that publisher's `sources/<slug>/rss.xml`, so a client can label every
+item without knowing any platform's URL scheme.
 
 The syndication surface is the same on every host: the three feed formats carry each episode or
 video enclosure (`rel=enclosure` in Atom, `<enclosure>` in RSS, `attachments` in JSON Feed) with

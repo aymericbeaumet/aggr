@@ -544,6 +544,16 @@ pub fn rss_collection(
         for category in item_categories(item) {
             element(&mut out, 4, "category", &category);
         }
+        // The publisher reads by the canonical name the reader shows (`youtube.com/@channel`),
+        // and RSS requires `url` to be a channel: that publisher's own collection feed.
+        if !item.publisher_source.is_empty() && !item.source_display.is_empty() {
+            let channel = site_url(site, &format!("sources/{}/rss.xml", item.publisher_source));
+            out.push_str(&format!(
+                "    <source url=\"{}\">{}</source>\n",
+                escape(&channel),
+                escape(&item.source_display)
+            ));
+        }
         out.push_str("  </item>\n");
     }
     out.push_str("</channel>\n</rss>\n");
@@ -1457,6 +1467,17 @@ mod tests {
         ));
         assert!(rss.contains("<category>Engineering</category>"));
         assert!(rss.contains("<category>Rust</category>"));
+        assert!(rss.contains(
+            "<source url=\"https://example.test/reads/sources/source/rss.xml\">upstream.example</source>"
+        ));
+    }
+
+    #[test]
+    fn rss_source_needs_a_publisher_collection() {
+        let mut unresolved = item();
+        unresolved.publisher_source.clear();
+        let rss = rss_collection(&site(), &build(), "Example", "", &[unresolved]);
+        assert!(!rss.contains("<source"), "{rss}");
     }
 
     #[test]
