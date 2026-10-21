@@ -1,6 +1,5 @@
-/// <reference types="node" />
 import { load } from '../../test/fixtures';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, expect, it, testTools } from "../../test/browser";
 import type { ClientPage } from '@aggr-model/ClientPage';
 import { badges, lastSeenKey } from '../updates/badges';
 import { page } from '../state/page.svelte';
@@ -9,29 +8,10 @@ import { flushSync } from 'svelte';
 import { versions } from '../state/versions.svelte';
 import { pageArrived } from './reader';
 
-vi.mock('./reader', () => ({
-  startReader: () => badges.configure(page.root, sessionStorage, document),
-  pageArrived: vi.fn(() => {
-    versions.latest = String(Number(versions.latest || 0) + 1);
-    const model = page.model;
-    badges.arrive([...(model?.site.entries ?? []), ...(model?.page.view === 'list' ? model.page.data.rows.map((row) => row.url) : [])]);
-  }),
-  refreshToUpdate() {},
-  retryConnection() {},
-}));
-vi.mock('../navigation', () => ({
-  navigation: {
-    install() {},
-    speculate() {},
-    replaceAddress() {},
-    prefetch() {},
-  },
-}));
-
-afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+afterEach(() => { testTools.clearAllTimers(); testTools.useRealTimers(); });
 
 it('paints acknowledged new entries before advertising that the client is ready', () => {
-  vi.useFakeTimers();
+  testTools.useFakeTimers();
   sessionStorage.clear();
   const fixture = { props: { page: load('page-river') } };
   const model = fixture.props.page;
@@ -53,9 +33,9 @@ it('paints acknowledged new entries before advertising that the client is ready'
 
 
 it('settles each navigation once when arrival reads and writes reactive reader state', () => {
-  vi.useFakeTimers();
+  testTools.useFakeTimers();
   load('page-river');
-  vi.mocked(pageArrived).mockClear();
+  testTools.mocked(pageArrived).mockClear();
   const shown = mountApp(document);
   if (!shown) throw new Error('missing page');
   expect(pageArrived).toHaveBeenCalledTimes(1);

@@ -114,6 +114,7 @@ fn visible_archive(items: Vec<Item>, sources: &[Source]) -> (Vec<Item>, Vec<(Str
 }
 
 /// Facts about the build that do not come from the data tree.
+#[derive(Clone)]
 pub struct BuildInfo {
     pub hermetic: bool,
     pub metrics: std::sync::Arc<std::sync::Mutex<BuildMetrics>>,
@@ -125,9 +126,7 @@ pub struct BuildInfo {
     pub data_sha: Option<String>,
     pub generation: String,
     pub now: DateTime<Utc>,
-    /// Production build: absolute URLs from `base_url`, CNAME for custom domains.
-    pub release: bool,
-    /// Local dev snapshots remain unindexable even when emulating a release build.
+    /// Local preview defers the global publication budget; its HTTP server sends noindex.
     pub development: bool,
     /// Include the persistent publication cache marker in the measured output budget.
     pub render_cache_key: Option<String>,
@@ -234,10 +233,14 @@ pub fn cache_version(build: &BuildCtx) -> String {
 
 /// Reader releases depend on shipped code, never on values substituted while rendering it.
 fn app_version(binary_version: &str) -> String {
+    app_version_for_ui(binary_version, render::implementation_hash())
+}
+
+fn app_version_for_ui(binary_version: &str, ui: &str) -> String {
     let mut hash = Sha1::new();
     hash.update(b"aggr-app-v2");
     hash.update(binary_version.as_bytes());
-    hash.update(render::implementation_hash().as_bytes());
+    hash.update(ui.as_bytes());
     hex::encode(hash.finalize())
 }
 
@@ -443,8 +446,7 @@ pub fn build(
     // `build_max_bytes` is what a host will accept, and a development snapshot is never published:
     // it is served from a local cache. Measuring it there costs a second complete build whenever the
     // archive is larger than the limit, which is the common case for an instance worth the wait.
-    // `aggr dev --release` is how the published shape is exercised locally, and it still applies.
-    let limit = if info.development && !info.release {
+    let limit = if info.development {
         u64::MAX
     } else {
         config.site.build_max_bytes
@@ -607,12 +609,12 @@ fn prepare_site(
         og_locale: context::og_locale(&config.site.language),
         base_path: base.clone(),
         base_url: info.base_url.clone().map(|url| ensure_trailing_slash(&url)),
-        indexing: config.site.indexing && info.release && !info.development,
+        indexing: config.site.indexing,
         repository: repository.clone(),
         data_branch: config.store.branch.clone(),
         network_url: outputs::AGGR_NETWORK,
         instance_type_url: outputs::AGGR_INSTANCE_TYPE,
-        pwa: config.site.pwa && !lazy,
+        pwa: config.site.pwa,
         config_page_url: repository.as_deref().and_then(|repository| {
             info.config_sha
                 .as_deref()
@@ -648,7 +650,6 @@ fn prepare_site(
         config_sha: info.config_sha.clone(),
         data_sha: info.data_sha.clone(),
         generation: info.generation.clone(),
-        release: info.release,
     };
     let links = repository.as_deref().map(|repository| GitHubLinks {
         repository,
@@ -657,6 +658,7 @@ fn prepare_site(
     });
 
     let renderer = Renderer::new()?;
+    build_ctx.app_version = app_version_for_ui(env!("CARGO_PKG_VERSION"), renderer.hash());
 
     // Sources: config order, enriched with stored state and counts.
     let status = store.status()?;
@@ -669,12 +671,11 @@ fn prepare_site(
     let prepared_key = preparation_cache.map(|_| {
         crate::model::sha1_hex(
             format!(
-                "{config:?}:{sources:?}:{site:?}:{source_ctxs:?}:{}:{:?}:{:?}:{:?}:{}:{}",
+                "{config:?}:{sources:?}:{site:?}:{source_ctxs:?}:{}:{:?}:{:?}:{:?}:{}",
                 info.generation,
                 info.config_sha,
                 info.data_sha,
                 info.base_url,
-                info.release,
                 info.discussions.fingerprint(),
             )
             .as_bytes(),
@@ -1430,11 +1431,8 @@ fn build_report(
     )
 }
 
-/// The host `CNAME` should carry: a release build on a domain that is not GitHub's own.
+/// The custom canonical host for Pages, excluding platform domains and local preview.
 pub fn cname(info: &BuildInfo) -> Option<String> {
-    if !info.release {
-        return None;
-    }
     let url = url::Url::parse(info.base_url.as_deref()?).ok()?;
     let host = url.host_str()?;
     (!host.ends_with(".github.io") && host != "localhost").then(|| host.to_string())
@@ -1712,7 +1710,6 @@ mod tests {
             config_sha: Some("c".repeat(40)),
             data_sha: None,
             generation: "g".repeat(40),
-            release: false,
         };
         assert_eq!(
             cache_version(&build),
@@ -1869,7 +1866,7 @@ mod tests {
         let tree = |name: &str, now: DateTime<Utc>| {
             let out = dir.path().join(name);
             let mut build_info = info(out.clone());
-            build_info.release = true;
+
             build_info.now = now;
             build_info.pagefind_cache = Some(pagefind_cache.clone());
             build(&config, &sources, &store, dir.path(), &build_info).unwrap();
@@ -1986,7 +1983,7 @@ mod tests {
         let tree = |name: &str, workers: usize| {
             let out = dir.path().join(name);
             let mut build_info = info(out.clone());
-            build_info.release = true;
+
             build_info.pagefind_cache = Some(pagefind_cache.clone());
             let started = std::time::Instant::now();
             parallel::with_workers(workers, || {
@@ -2083,7 +2080,7 @@ mod tests {
             data_sha: Some("d".repeat(40)),
             generation: "fixture".into(),
             now: day(20),
-            release: false,
+
             development: false,
             render_cache_key: None,
             discussions: crate::discussions::ResolutionSet::default(),
@@ -2138,7 +2135,7 @@ mod tests {
         assert!(out.join("pagefind").is_dir());
         assert!(site.response("../data/items.md").unwrap().is_none());
         for path in ["offline.html", "manifest.webmanifest", "sw.js"] {
-            assert!(site.response(path).unwrap().is_none(), "{path}");
+            assert!(site.response(path).unwrap().is_some(), "{path}");
         }
     }
 
@@ -2749,8 +2746,8 @@ category = "Science"
         }
         let before = store.items().unwrap();
         let out = dir.path().join("out");
-        let mut build_info = info(out.clone());
-        build_info.release = true;
+        let build_info = info(out.clone());
+
         let summary = build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         assert_eq!(summary.items, 2);
         assert_eq!(
@@ -2864,7 +2861,7 @@ category = "Science"
         let (config, sources, store) = fixture(dir.path(), 1, "pwa = true\n");
         let out = dir.path().join("out");
         let mut build_info = info(out.clone());
-        build_info.release = true;
+
         build_info.pagefind_cache = Some(dir.path().join("pagefind-cache"));
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         let original = std::fs::read_to_string(out.join("sw.js")).unwrap();
@@ -2920,16 +2917,16 @@ category = "Science"
 
         let mut development = info(out.clone());
         development.development = true;
-        development.release = false;
+
         // The snapshot is served locally, so the hosting limit is not its business.
         build(&config, &sources, &store, dir.path(), &development).unwrap();
 
         let mut published = info(out.clone());
-        published.development = true;
-        published.release = true;
+        published.development = false;
+
         assert!(
             build(&config, &sources, &store, dir.path(), &published).is_err(),
-            "a release build measures the limit it will be published under"
+            "publication measures the complete output limit"
         );
     }
 
@@ -3623,8 +3620,8 @@ category = "Science"
             })
             .unwrap();
         let out = dir.path().join("out");
-        let mut build_info = info(out.clone());
-        build_info.release = true;
+        let build_info = info(out.clone());
+
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         let path = format!("assets/previews/{hash}.jpg");
         assert_eq!(std::fs::read(out.join(&path)).unwrap(), bytes);
@@ -3811,8 +3808,8 @@ category = "Science"
         );
 
         let out = dir.path().join("out");
-        let mut build_info = info(out.clone());
-        build_info.release = true;
+        let build_info = info(out.clone());
+
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
 
         let feed = std::fs::read_to_string(out.join("index.html")).unwrap();
@@ -3987,8 +3984,8 @@ category = "Science"
             "indexing = true\n[preferences]\noffline_items = 2\n",
         );
         let out = dir.path().join("out");
-        let mut build_info = info(out.clone());
-        build_info.release = true;
+        let build_info = info(out.clone());
+
         let summary = build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         assert_eq!(summary.items, 3);
         // River, combined publisher/feed archive, six utility/directory pages, and the offline page.
@@ -4530,8 +4527,8 @@ same_as = ["https://social.example/@ada"]
             .unwrap();
 
         let out = dir.path().join("out");
-        let mut build_info = info(out.clone());
-        build_info.release = true;
+        let build_info = info(out.clone());
+
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
         let sitemap = std::fs::read_to_string(out.join("sitemap.xml")).unwrap();
         let entry = sitemap
@@ -4582,18 +4579,17 @@ same_as = ["https://social.example/@ada"]
 
     #[test]
     fn indexing_policy_preserves_reader_search_and_discovery() {
-        for (extra, release, development, indexable) in [
-            ("", true, false, false),
-            ("indexing = true\n", true, false, true),
-            ("indexing = true\n", false, false, false),
-            ("indexing = true\n", true, true, false),
+        for (extra, development, indexable) in [
+            ("", false, false),
+            ("indexing = true\n", false, true),
+            ("indexing = true\n", true, true),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let (config, sources, store) = fixture(dir.path(), 1, extra);
             let out = dir.path().join("out");
             let mut build_info = info(out.clone());
             build_info.base_url = Some("https://reads.example/".into());
-            build_info.release = release;
+
             build_info.development = development;
             build(&config, &sources, &store, dir.path(), &build_info).unwrap();
 
@@ -4615,10 +4611,7 @@ same_as = ["https://social.example/@ada"]
                 } else {
                     "name=\"robots\" content=\"noindex,follow\""
                 };
-                assert!(
-                    html.contains(directive),
-                    "{extra:?}, release={release}, {path}"
-                );
+                assert!(html.contains(directive), "{extra:?}, {path}");
             }
             assert_eq!(out.join("sitemap.xml").exists(), indexable);
             let robots = std::fs::read_to_string(out.join("robots.txt")).unwrap();
@@ -4652,7 +4645,7 @@ same_as = ["https://social.example/@ada"]
         let out = dir.path().join("out");
         let mut build_info = info(out.clone());
         build_info.base_url = Some("https://reads.example/".into());
-        build_info.release = true;
+
         build(&config, &sources, &store, dir.path(), &build_info).unwrap();
 
         let robots = std::fs::read_to_string(out.join("robots.txt")).unwrap();

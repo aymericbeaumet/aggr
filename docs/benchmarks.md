@@ -84,9 +84,9 @@ source media fields too. In a disposable checkout containing the selected data o
 
 ```sh
 GITHUB_ACTIONS=true aggr build --clean --data-ref 76a5f2ba581940085d55209be31590aba2559d6c \
-  --release --base-url https://aggr.example/ --report /tmp/aggr-cold.json
+  --base-url https://aggr.example/ --report /tmp/aggr-cold.json
 GITHUB_ACTIONS=true aggr build --data-ref 76a5f2ba581940085d55209be31590aba2559d6c \
-  --release --base-url https://aggr.example/ --report /tmp/aggr-warm.json
+  --base-url https://aggr.example/ --report /tmp/aggr-warm.json
 ```
 
 The controlled browser fixture transferred **832,826 uncompressed HTTP response bytes**, including

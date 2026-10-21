@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { cursorKey, cursorRow, readCursor, stepIndex, writeCursor } from './cursor';
 
 class MemoryStore {

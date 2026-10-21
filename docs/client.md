@@ -8,14 +8,14 @@ works with JavaScript disabled. Search remains a build-time Pagefind index, with
 ## Build and runtime
 
 `cargo build` exports the shared page types from `crates/aggr-ui-model` into ignored
-`web/.generated/types/`, installs locked npm dependencies when needed, and runs `web/build.ts`.
-Vite produces the browser bundles, bootstrap, service worker, and an isolated server renderer in
+`web/.generated/types/` and calls the Rust UI-build library. Native Rolldown produces the browser
+bundles, bootstrap, service worker, and an isolated server renderer in
 Cargo's `OUT_DIR`. Generated types and bundles are not committed. `mise.toml` and `mise.lock` pin
-build tools; `Cargo.lock` and `web/package-lock.json` pin packages.
+build tools; `Cargo.lock` and the checked-in vendor inventory pin dependencies.
 Mise also owns the development tasks in `mise.toml`, shared by local work and CI.
-The frontend has no npm scripts: npm installs locked dependencies, and mise runs the tools directly.
+The complete toolchain is native. See [native tooling](native-toolchain.md) for its build and cache contract.
 
-The binary embeds that output. Installed commands need neither Node nor frontend source files:
+The binary embeds that output. Installed commands need no frontend source files:
 Rust calls the synchronous Svelte renderer in QuickJS with no network, filesystem, or process
 bindings. Each rendering thread reuses its own runtime, with memory, stack, and execution limits.
 The embedded asset fingerprint participates in publication caches and application versions.
@@ -46,20 +46,21 @@ AGGR_CONFIG=/path/to/aggr.toml mise run dev
 mise run check                     # Rust, TypeScript, component and launcher checks
 ```
 
-`cargo run -- dev` starts one Node supervisor with a stable Vite front door. Frontend edits use
-Svelte HMR; Vite renders document requests from Rust's typed model. Rust edits compile a replacement
+`cargo run -- dev` starts the Rust supervisor with a stable local origin. Frontend edits compile
+an immutable UI bundle which the running Rust renderer loads directly, then reload the page.
+Rust edits compile a replacement
 worker while the last successful generation continues serving. A failed compilation leaves that
 worker available. Successful replacements retain archive snapshots safely and reload the browser.
 Configuration and archive changes use the worker's snapshot/reload stream. Ctrl-C shuts down the
 stack. `--port` selects the public port; `mise run dev -- --port 3000` forwards options.
 
 Cached articles appear first, and completed sources become visible during cold sync. Development
-uses an isolated cache and never commits or pushes the archive. `dev --release` exercises full
-publication rendering. Release binaries include native preview and live reload. They use embedded
-assets without Node; source checkouts can also launch Vite from optimized binaries.
+uses an isolated cache and never commits or pushes the archive. `build` validates the complete
+publication. Installed binaries include preview and live reload using embedded assets. In source
+checkouts, `--no-watch` chooses the embedded assets without contributor compilation.
 
-`mise run client-check` first builds Rust to generate the contract, then runs Svelte/TypeScript checks,
-Vitest, and supervisor tests. Rust tests exercise the embedded renderer and publication behavior;
+`mise run client-check` exports the typed contract, runs Svelte/TypeScript checks, and executes
+isolated browser tests. `cargo test -p aggr-tools` checks the supervisor and release helpers. Rust tests exercise the embedded renderer and publication behavior;
 frontend tests render the actual components. Browser contracts cover hydration and navigation.
 For focused frontend work, use these tasks:
 
@@ -68,15 +69,14 @@ For focused frontend work, use these tasks:
 | `mise run client-typecheck` | Svelte and TypeScript checks |
 | `mise run client-build` | Compile the reader assets |
 | `mise run client-test` | Component and browser-state tests |
-| `mise run client-test-build` | Build and distribution helper tests |
-| `mise run client-test-dev` | Development supervisor tests |
+| `cargo test -p aggr-tools` | Native build, distribution and supervisor tests |
 
-The TypeScript checker writes temporary files under ignored `web/.svelte-check/`.
-The native compiler uses TypeScript 7 through the `@typescript/native` npm alias. Svelte's checker
-still needs the classic TypeScript 6 JavaScript compiler API and its supported peer range, so the
-separate `typescript` dependency stays on that line until the checker supports TypeScript 7.
+The native TypeScript checker consumes Svelte-aware virtual sources and maps diagnostics to the
+original files. It is installed directly by mise; projection helpers run in isolated QuickJS.
 
-Vite hashes executable assets and lists their paths in `assets.json`; Rust publishes them verbatim.
+Rolldown hashes executable assets and lists their paths in `assets.json`; Rust publishes them verbatim.
+After hydration, shared stylesheet and preload URLs stay fixed across navigation so changing page
+depth never detaches the live stylesheet. Server HTML keeps portable relative asset URLs.
 HTML remains `no-store` in development. Navigation keeps a bounded cache and starts at most two
 prefetches after pointer, focus or touch intent; there are no startup, idle or viewport page downloads.
 Prefetches use low network priority and pause when Data Saver or a 2G connection is reported.
@@ -257,8 +257,8 @@ while the manifest loads must not discard the vocabulary needed to complete that
 The vocabulary comes from `search-catalog.json`, which contains only the index version, base,
 document count, and facets. Focusing the
 field or completing an unresolved qualifier does not initialize Pagefind or fetch its index chunks.
-`mise run client-check` exercises the query and session contracts with vitest and runs the Node
-development launcher tests alongside them.
+`mise run client-check` checks types with native TypeScript and exercises query and session
+contracts in Chrome through the Rust test runner.
 Once a valid query is entered, runtime initialization overlaps the existing typing delay. Fully
 resolved filter queries also use Pagefind's supported preload API; partial text does not speculate
 on potentially broad prefix matches. Clearing, replacing, or abandoning the query cancels pending

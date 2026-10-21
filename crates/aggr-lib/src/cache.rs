@@ -212,7 +212,7 @@ pub struct RenderFingerprint<'a> {
     pub config_sha: Option<&'a str>,
     pub data_sha: Option<&'a str>,
     pub base_url: Option<&'a str>,
-    pub release: bool,
+
     pub discussions: Option<&'a str>,
     pub generation: &'a str,
 }
@@ -224,7 +224,6 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
         config_sha,
         data_sha,
         base_url,
-        release,
         discussions,
         generation,
     } = input;
@@ -239,7 +238,7 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     hash_field(
         &mut hash,
         b"embedded-reader",
-        crate::site::render::implementation_hash().as_bytes(),
+        crate::site::render::Renderer::new()?.hash().as_bytes(),
     );
     hash_field(
         &mut hash,
@@ -248,7 +247,6 @@ pub fn render_fingerprint(input: RenderFingerprint<'_>) -> Result<String> {
     );
     hash_field(&mut hash, b"data-sha", data_sha.unwrap_or("").as_bytes());
     hash_field(&mut hash, b"base-url", base_url.unwrap_or("").as_bytes());
-    hash_field(&mut hash, b"release", if release { b"1" } else { b"0" });
     hash_field(
         &mut hash,
         b"discussions",
@@ -376,11 +374,11 @@ fn render_implementation_sources() -> &'static [(&'static str, &'static str, &'s
 /// Source files (relative to `src/`, a trailing `/` matching a whole directory) that cannot change
 /// rendered bytes, with the reason each one is safe to leave out of the fingerprint. Anything
 /// they influence reaches the renderer through inputs that are fingerprinted on their own: the
-/// data commit, the loaded config files, the base URL, the release flag and the generation.
+/// data commit, the loaded config files, the canonical URL and the generation.
 #[cfg(test)]
 const RENDER_INDEPENDENT_SOURCES: &[&str] = &[
     // Process entry, argument parsing and command orchestration. Every rendering decision they
-    // make (output URL, release mode, pinned data ref) is an explicit fingerprint field.
+    // make (canonical URL, pinned data ref) is an explicit fingerprint field.
     "lib.rs",
     "cli.rs",
     "commands/",
@@ -1496,7 +1494,7 @@ mod tests {
                     config_sha: Some("config"),
                     data_sha: Some("data"),
                     base_url: None,
-                    release: false,
+
                     discussions: $discussions,
                     generation: "generation",
                 })
@@ -1531,7 +1529,7 @@ mod tests {
                 config_sha: Some("config"),
                 data_sha: Some("data"),
                 base_url: None,
-                release: false,
+
                 discussions: None,
                 generation: "generation",
             })

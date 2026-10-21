@@ -127,7 +127,8 @@ pub(super) fn prepare_markdown(
 }
 
 pub(crate) struct Site {
-    prepared: PreparedSite,
+    prepared: Arc<PreparedSite>,
+    ui: Ui,
     store: Store,
     media_policy: assets::MediaPolicy,
     full_quality_days: u32,
@@ -141,7 +142,9 @@ pub(crate) struct Site {
     media_memo: assets::MediaMemo,
     shared: SharedCtx,
     search: Mutex<bool>,
+    search_source: Option<Arc<Site>>,
     catalogue: pagefind::SearchCatalogue,
+    offline: Mutex<OfflineState>,
     // Media preparation is isolated per article. Only final deduplicated publication shares a
     // short lock; ready responses never wait for preparation or rendering.
     materialized: Vec<Mutex<Materialized>>,
@@ -151,6 +154,21 @@ pub(crate) struct Site {
     cold_work: Arc<ColdWork>,
     directory: Option<tempfile::TempDir>,
     archive_directory: Option<Arc<tempfile::TempDir>>,
+}
+
+#[derive(Clone)]
+struct Ui {
+    renderer: Renderer,
+    build_ctx: BuildCtx,
+}
+
+#[derive(Default)]
+enum OfflineState {
+    #[default]
+    Idle,
+    Building,
+    Ready,
+    Failed(String),
 }
 
 #[derive(Default)]
@@ -254,11 +272,50 @@ impl Site {
         {
             log::warn!("dev cache limit cleanup skipped: {error:#}");
         }
-        prepared.renderer.write_static(&info.out)?;
+        // Keep only the current archive in the hot-reload cache. Deleted or replaced content must
+        // not accumulate for the lifetime of a long-running development process.
+        let bodies: std::collections::BTreeSet<_> = prepared
+            .all_items
+            .iter()
+            .map(|item| crate::model::sha1_hex(item.body.as_bytes()))
+            .collect();
+        lock(&cache.markdown).retain(|key, _| bodies.contains(key));
+        let paths: std::collections::BTreeSet<_> = prepared
+            .all_items
+            .iter()
+            .map(|item| item.path.as_str())
+            .collect();
+        lock(&cache.normalized).retain(|path, _| paths.contains(path.as_str()));
+        let ui = Ui {
+            renderer: prepared.renderer.clone(),
+            build_ctx: prepared.build_ctx.clone(),
+        };
+        Self::from_prepared(
+            config,
+            sources,
+            store,
+            info,
+            cache,
+            (Arc::new(prepared), ui),
+            started,
+        )
+    }
+
+    fn from_prepared(
+        config: &Config,
+        sources: &[Source],
+        store: Store,
+        info: BuildInfo,
+        cache: &PreparationCache,
+        prepared: (Arc<PreparedSite>, Ui),
+        started: std::time::Instant,
+    ) -> Result<Self> {
+        let (prepared, ui) = prepared;
+        ui.renderer.write_static(&info.out)?;
         write(&info.out.join(MARKER), env!("CARGO_PKG_VERSION").as_bytes())?;
         write(
             &info.out.join("updates.json"),
-            outputs::updates(&prepared.site, &prepared.build_ctx)?.as_bytes(),
+            outputs::updates(&prepared.site, &ui.build_ctx)?.as_bytes(),
         )?;
         let articles: BTreeMap<_, _> = prepared
             .archive_items
@@ -280,20 +337,6 @@ impl Site {
                 .map(move |pager| (format!("{}index.html", pager.path), (i, pager)))
             })
             .collect();
-        // Keep only the current archive in the hot-reload cache. Deleted or replaced content must
-        // not accumulate for the lifetime of a long-running development process.
-        let bodies: std::collections::BTreeSet<_> = prepared
-            .all_items
-            .iter()
-            .map(|item| crate::model::sha1_hex(item.body.as_bytes()))
-            .collect();
-        lock(&cache.markdown).retain(|key, _| bodies.contains(key));
-        let paths: std::collections::BTreeSet<_> = prepared
-            .all_items
-            .iter()
-            .map(|item| item.path.as_str())
-            .collect();
-        lock(&cache.normalized).retain(|path, _| paths.contains(path.as_str()));
         log::info!(
             "dev: prepared {} article routes in {:.3}s; pages, media and search render on demand",
             articles.len(),
@@ -303,11 +346,7 @@ impl Site {
         // Dev generations have private immutable index URLs. A catalogue can therefore name a
         // deferred index before Pagefind runs, without exposing mixed chunks during a reload.
         use sha2::{Digest as _, Sha256};
-        let index_version = hex::encode(Sha256::digest(format!(
-            "{}:{}",
-            info.out.display(),
-            prepared.build_ctx.content_version
-        )));
+        let index_version = hex::encode(Sha256::digest(ui.build_ctx.content_version.as_bytes()));
         let vocabulary: Vec<_> = prepared
             .archive_items
             .iter()
@@ -321,7 +360,7 @@ impl Site {
         let (shared_previews, shared_images) = shared_media(&prepared);
         let shared = SharedCtx::new(
             &prepared.site,
-            &prepared.build_ctx,
+            &ui.build_ctx,
             &prepared.source_ctxs,
             &prepared.categories,
             &prepared.tags,
@@ -341,8 +380,9 @@ impl Site {
                     .map(|path| path.to_string_lossy().into_owned())
             })
             .collect();
-        Ok(Self {
+        let site = Self {
             prepared,
+            ui,
             store,
             media_policy: assets::MediaPolicy::defaults(&config.defaults)
                 .with_image_format(config.site.media_image_format),
@@ -357,7 +397,9 @@ impl Site {
             media_memo,
             shared,
             search: Mutex::new(false),
+            search_source: None,
             catalogue,
+            offline: Mutex::default(),
             materialized,
             published: Mutex::default(),
             routes: Mutex::default(),
@@ -365,7 +407,154 @@ impl Site {
             cold_work: Arc::clone(&cache.cold_work),
             directory: None,
             archive_directory: None,
-        })
+        };
+        if config.site.pwa {
+            site.prepare_shell(config.preferences.offline_items)?;
+        }
+        Ok(site)
+    }
+
+    /// A template edit replaces only page/asset outputs, retaining immutable data and search.
+    pub(crate) fn reload_ui(
+        self: &Arc<Self>,
+        config: &Config,
+        cache: &PreparationCache,
+    ) -> Result<Option<Self>> {
+        self.reload_ui_with_renderer(config, cache, Renderer::new()?)
+    }
+
+    fn reload_ui_with_renderer(
+        self: &Arc<Self>,
+        config: &Config,
+        cache: &PreparationCache,
+        renderer: Renderer,
+    ) -> Result<Option<Self>> {
+        if renderer.hash() == self.ui.renderer.hash() {
+            return Ok(None);
+        }
+        let parent = self.root().parent().context("preview generation parent")?;
+        let directory = tempfile::Builder::new()
+            .prefix("ui-snapshot-")
+            .tempdir_in(parent)?;
+        let mut info = self.info.clone();
+        info.out = directory.path().join("site");
+        prepare_out_dir(&info.out)?;
+        if self.root().join("aggr.toml").is_file() {
+            std::fs::copy(self.root().join("aggr.toml"), info.out.join("aggr.toml"))?;
+        }
+        let mut ui = self.ui.clone();
+        ui.build_ctx.app_version = app_version_for_ui(env!("CARGO_PKG_VERSION"), renderer.hash());
+        ui.renderer = renderer;
+        let mut site = Self::from_prepared(
+            config,
+            &self.sources,
+            self.store.clone(),
+            info,
+            cache,
+            (Arc::clone(&self.prepared), ui),
+            std::time::Instant::now(),
+        )?
+        .own_directory(directory);
+        site.archive_directory = self.archive_directory.clone();
+        site.search_source = Some(self.search_source.as_ref().unwrap_or(self).clone());
+        Ok(Some(site))
+    }
+
+    fn prepare_shell(&self, offline_count: usize) -> Result<()> {
+        let pages = self.pages();
+        write(
+            &self.root().join("offline.html"),
+            pages
+                .simple(SimplePage {
+                    page_items: Some(
+                        &self.prepared.archive_items
+                            [..self.prepared.archive_items.len().min(offline_count)],
+                    ),
+                    ..SimplePage::new("offline", "Offline", "offline.html")
+                })?
+                .as_bytes(),
+        )?;
+        write(
+            &self.root().join("manifest.webmanifest"),
+            pages.manifest()?.as_bytes(),
+        )?;
+        self.mark_ready(["offline.html".to_owned(), "manifest.webmanifest".to_owned()].into_iter());
+        for key in ["browse/index.html", "preferences/index.html", "404.html"] {
+            self.response(key)?.context("preparing offline shell")?;
+        }
+        let renderer = &self.ui.renderer;
+        let assets = renderer.write_static(self.root())?;
+        let paths = precache::paths(renderer, &assets);
+        let mut config = SwConfig {
+            version: cache_version(&self.ui.build_ctx),
+            app_version: self.ui.build_ctx.app_version.clone(),
+            content_version: self.ui.build_ctx.content_version.clone(),
+            precache: assets::precache_entries(self.root(), paths, &lock(&self.published))?,
+            offline_catalog_url: "offline-catalog.json".into(),
+            offline_count,
+            search_manifest: serde_json::json!({"version":self.catalogue.version,"base":self.catalogue.base}),
+        };
+        let worker = renderer.asset_site_path("assets/app/worker.js");
+        config.version = crate::model::sha1_hex(worker_source(&config, &worker)?.as_bytes());
+        write(
+            &self.root().join("sw.js"),
+            worker_source(&config, &worker)?.as_bytes(),
+        )?;
+        self.mark_ready(std::iter::once("sw.js".to_owned()));
+        Ok(())
+    }
+
+    /// Expensive offline families are single-flight and survive a disconnected catalogue request.
+    pub(crate) fn start_offline_catalogue(self: &Arc<Self>) -> Result<bool> {
+        if !self.prepared.site.pwa {
+            return Ok(true);
+        }
+        let mut state = lock(&self.offline);
+        match &*state {
+            OfflineState::Ready => return Ok(true),
+            OfflineState::Building => return Ok(false),
+            OfflineState::Failed(error) => {
+                let error = anyhow::anyhow!("offline preparation failed: {error}");
+                *state = OfflineState::Idle;
+                return Err(error);
+            }
+            OfflineState::Idle => {}
+        }
+        *state = OfflineState::Building;
+        let site = Arc::clone(self);
+        if let Err(error) = std::thread::Builder::new()
+            .name("aggr-dev-offline".into())
+            .spawn(move || {
+                let result = site.prepare_offline_catalogue();
+                *lock(&site.offline) = match result {
+                    Ok(()) => OfflineState::Ready,
+                    Err(error) => OfflineState::Failed(format!("{error:#}")),
+                };
+            })
+        {
+            *state = OfflineState::Idle;
+            return Err(error.into());
+        }
+        Ok(false)
+    }
+
+    fn prepare_offline_catalogue(&self) -> Result<()> {
+        let mut items = Vec::new();
+        let mut images = BTreeMap::new();
+        for index in 0..self.prepared.archive_items.len().min(1000) {
+            let key = format!("{}index.html", self.prepared.archive_items[index].url);
+            self.response(&key)?.context("rendering offline article")?;
+            let (item, local) = self.with_media(index)?;
+            images.insert(item.path.clone(), local);
+            items.push(item);
+        }
+        let catalogue = offline::catalogue(self.root(), &items, &images, &lock(&self.published))?;
+        write(
+            &self.root().join("offline-catalog.json"),
+            &serde_json::to_vec(&catalogue)?,
+        )?;
+        self.mark_ready(std::iter::once("offline-catalog.json".to_owned()));
+        Ok(())
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -386,7 +575,7 @@ impl Site {
         let prepared = &self.prepared;
         Pages::new(
             &prepared.site,
-            &prepared.renderer,
+            &self.ui.renderer,
             self.shared.clone(),
             &prepared.archive_items,
             prepared.per_page,
@@ -538,7 +727,10 @@ impl Site {
         {
             return Ok(None);
         }
-        if key.starts_with(&self.catalogue.base) {
+        if key.starts_with(&self.catalogue.base) || key == "search-manifest.json" {
+            if let Some(source) = &self.search_source {
+                return source.response(key);
+            }
             self.prepare_search()?;
             return match std::fs::read(self.root().join(key)) {
                 Ok(bytes) => Ok(Some(bytes)),
@@ -611,20 +803,14 @@ impl Site {
             staging.path().join(published.base),
             self.root().join(&self.catalogue.base),
         )?;
+        offline::search_manifest(self.root(), &self.catalogue)?;
+        self.mark_ready(std::iter::once("search-manifest.json".to_owned()));
         *built = true;
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn page_model(&self, key: &str) -> Result<Option<aggr_ui_model::RenderRequest>> {
-        if key.is_empty()
-            || key.contains('\\')
-            || Path::new(key)
-                .components()
-                .any(|part| !matches!(part, Component::Normal(_)))
-        {
-            return Ok(None);
-        }
-        let _permit = self.cold_work.acquire();
         self.page_request(key)
     }
 
@@ -725,7 +911,7 @@ impl Site {
                 self.root(),
                 &self.pages(),
                 &prepared.site,
-                &prepared.build_ctx,
+                &self.ui.build_ctx,
                 &self.store,
                 &ctx,
                 item,
@@ -744,7 +930,7 @@ impl Site {
         if let Some(request) = self.page_request(key)? {
             crate::cache::write(
                 &self.root().join(key),
-                prepared.renderer.render_page(&request)?.as_bytes(),
+                self.ui.renderer.render_page(&request)?.as_bytes(),
             )?;
             return Ok(true);
         }
@@ -779,7 +965,7 @@ impl Site {
                 write_collection_feeds(
                     self.root(),
                     &prepared.site,
-                    &prepared.build_ctx,
+                    &self.ui.build_ctx,
                     &collection.title,
                     &collection.prefix,
                     &items,
@@ -787,7 +973,7 @@ impl Site {
                 if collection.prefix.is_empty() {
                     write(
                         &self.root().join("feed.xml"),
-                        outputs::atom_feed(&prepared.site, &prepared.build_ctx, &items).as_bytes(),
+                        outputs::atom_feed(&prepared.site, &self.ui.build_ctx, &items).as_bytes(),
                     )?;
                 }
                 self.mark_ready(
@@ -803,10 +989,10 @@ impl Site {
             .iter()
             .map(archive_modified_at)
             .max()
-            .unwrap_or(prepared.build_ctx.time);
+            .unwrap_or(self.ui.build_ctx.time);
         let body = match key {
             "aggr.json" => {
-                outputs::instance_descriptor(&prepared.site, &prepared.build_ctx, updated)?
+                outputs::instance_descriptor(&prepared.site, &self.ui.build_ctx, updated)?
             }
             "llms.txt" => outputs::llms_txt(&prepared.site),
             "sources.opml" => {
@@ -886,7 +1072,7 @@ mod benchmarks {
                 data_sha: None,
                 generation: generation.clone(),
                 now,
-                release: false,
+
                 discussions: crate::discussions::ResolutionSet::default(),
                 development: true,
                 render_cache_key: None,
@@ -950,6 +1136,118 @@ mod tests {
         let mut info = crate::site::tests::info(root.join("lazy"));
         info.development = true;
         Site::prepare(&config, &sources, store, root, info, cache).unwrap()
+    }
+
+    #[test]
+    fn ui_reload_reuses_archive_preparation_and_search_without_rereading_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let (config, sources, store) =
+            crate::site::tests::fixture(directory.path(), 3, "max_age_days = 30\npwa = false\n");
+        let mut info = crate::site::tests::info(directory.path().join("lazy"));
+        info.development = true;
+        let cache = PreparationCache::default();
+        let original = Arc::new(
+            Site::prepare(&config, &sources, store, directory.path(), info, &cache).unwrap(),
+        );
+        let catalogue = original.response("search-catalog.json").unwrap().unwrap();
+        let index = format!("{}search-manifest.json", original.catalogue.base);
+        let search = original.response(&index).unwrap().unwrap();
+        std::fs::rename(
+            directory.path().join("data"),
+            directory.path().join("unavailable-archive"),
+        )
+        .unwrap();
+        let renderer =
+            Renderer::test_source("globalThis.aggrRender = () => 'updated template'; void 0;");
+        let updated = Arc::new(
+            original
+                .reload_ui_with_renderer(&config, &cache, renderer)
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(
+            Arc::ptr_eq(&updated.prepared, &original.prepared),
+            "UI reload never copies archived Markdown bodies"
+        );
+        assert_eq!(
+            updated.ui.build_ctx.content_version,
+            original.ui.build_ctx.content_version
+        );
+        assert_ne!(
+            updated.ui.build_ctx.app_version,
+            original.ui.build_ctx.app_version
+        );
+        assert_eq!(
+            updated.response("index.html").unwrap().unwrap(),
+            b"updated template"
+        );
+        assert_eq!(
+            updated.response("search-catalog.json").unwrap().unwrap(),
+            catalogue
+        );
+        assert_eq!(updated.response(&index).unwrap().unwrap(), search);
+        assert!(
+            !updated.root().join("pagefind").exists(),
+            "UI changes reuse the existing immutable search generation"
+        );
+        assert!(Arc::ptr_eq(
+            updated.search_source.as_ref().unwrap(),
+            &original
+        ));
+        assert!(
+            updated
+                .reload_ui_with_renderer(&config, &cache, updated.ui.renderer.clone())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pwa_shell_is_ready_without_archive_pages_and_catalogue_prepares_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let (config, sources, store) =
+            crate::site::tests::fixture(directory.path(), 3, "max_age_days = 30\npwa = true\n");
+        let mut info = crate::site::tests::info(directory.path().join("lazy"));
+        info.development = true;
+        let site = Arc::new(
+            Site::prepare(
+                &config,
+                &sources,
+                store,
+                directory.path(),
+                info,
+                &PreparationCache::default(),
+            )
+            .unwrap(),
+        );
+        assert!(site.response("sw.js").unwrap().is_some());
+        assert!(site.response("manifest.webmanifest").unwrap().is_some());
+        assert!(!site.root().join("items").exists());
+        assert!(!site.root().join("pagefind").exists());
+        assert!(!site.start_offline_catalogue().unwrap());
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !site.start_offline_catalogue().unwrap() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let bytes = site.response("offline-catalog.json").unwrap().unwrap();
+        let catalogue: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(catalogue.as_array().unwrap().len(), 3);
+        for item in catalogue.as_array().unwrap() {
+            let url = item["url"].as_str().unwrap();
+            let resource = item["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["url"] == url)
+                .unwrap();
+            let key = format!("{url}index.html");
+            assert_eq!(
+                resource["revision"],
+                crate::model::sha1_hex(site.response(&key).unwrap().unwrap())
+            );
+        }
+        assert!(site.start_offline_catalogue().unwrap());
     }
 
     #[test]

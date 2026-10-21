@@ -191,10 +191,7 @@ fn build_reuses_output_without_a_duplicate_and_budget_failure_preserves_it() {
         text.replace("[site]", "[site]\nbuild_max_bytes = 1"),
     )
     .unwrap();
-    for arguments in [
-        vec!["build", "--offline"],
-        vec!["build", "--offline", "--release"],
-    ] {
+    for arguments in [vec!["build", "--offline"], vec!["build", "--hermetic"]] {
         aggr_command(root)
             .env("SOURCE_DATE_EPOCH", "1790856000")
             .args(arguments)

@@ -86,10 +86,9 @@ refuses as before. On a 3,000-item instance this took a release build from 239.6
 single 294.9 s pass, publishing 39 fewer media groups out of 12,210.
 
 `build_max_bytes` is what a host will accept for a published site, so only a publishing build
-measures it. A development snapshot (`cargo run -- dev` without `--release`) is served from a local cache
+measures it. A development snapshot (`cargo run -- dev`) is served from a local cache
 and skips the check: when an archive is larger than the limit, measuring it costs a second complete
-build, which on a 3,000-item instance was 205 s followed by 319 s. `cargo run -- dev --release` still
-applies the budget and prepares the complete published site.
+build, which on a 3,000-item instance was 205 s followed by 319 s. `aggr build` applies the budget and prepares the complete published site.
 
 Every stage that is CPU-bound runs on the machine's parallelism rather than a fixed slot count.
 Reading the archive (one file read and parse per item) and re-deriving stored bodies both run on the
@@ -131,7 +130,7 @@ are prepared once per generation. Search indexing uses a separate lock so an ind
 block already available page and asset responses. Media bytes are read for the response, never
 copied into a permanent archive-sized memory map. Each generation has its own disposable directory;
 an in-flight request retains its generation until it finishes, and a failed preparation leaves the
-previous snapshot available. `dev --release` retains the complete publication build for verification.
+previous snapshot available. `aggr build` materializes the complete publication output for verification.
 
 On the cached instance used for the previous full-dev benchmark (3,540 stored items, 3,283 visible
 articles), request-driven preparation measured 29.65 seconds cold and 2.02 seconds with prepared

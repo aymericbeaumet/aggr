@@ -31,8 +31,7 @@ cargo install --locked aggr
 ```
 
 This requires Rust 1.98 or newer and the [native build dependencies](interoperability.md#http-extraction-and-native-builds).
-Node is needed only when building the repository checkout; published crates bundle the compiled
-reader. `aggr-lib` is the Rust library, while the `aggr` crate installs the command.
+Source and published builds use the native Rust UI compiler.
 
 Or download the archive for your OS and architecture from
 [GitHub Releases](https://github.com/aymericbeaumet/aggr/releases/latest), verify it against the
@@ -131,7 +130,6 @@ Configure the provider's scheduler to run this from a normal Git checkout:
 
 ```sh
 aggr build \
-  --release \
   --base-url "https://reads.example.net/" \
   --out _site
 ```
@@ -180,8 +178,8 @@ If you want search engines to index your public reader, opt in explicitly:
 indexing = true
 ```
 
-This takes effect only in `aggr build --release`. Development and preview builds always use
-`noindex,follow`, even with indexing enabled. An enabled release build emits a sitemap when its
+This takes effect in every `aggr build`. Preview preserves the same indexing metadata but sends
+an HTTP `X-Robots-Tag: noindex` header. An enabled build emits a sitemap when its
 public URL is known. At an origin root, `robots.txt` permits crawling and advertises that sitemap;
 with indexing disabled it still permits crawling so engines can read the page's `noindex` directive.
 An instance under a subpath does not write `robots.txt`, since that file only governs an origin

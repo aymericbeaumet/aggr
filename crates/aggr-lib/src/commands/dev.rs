@@ -58,7 +58,7 @@ pub async fn run(config_path: &Path, args: &DevArgs, verbose: u8) -> Result<()> 
     } else {
         config_path.to_path_buf()
     };
-    if args.native
+    if args.no_watch
         || source_checkout().is_none()
         || std::env::var_os(INTERNAL_WORKER).as_deref() == Some(std::ffi::OsStr::new("1"))
     {
@@ -74,7 +74,7 @@ pub async fn run(config_path: &Path, args: &DevArgs, verbose: u8) -> Result<()> 
 pub(crate) fn source_checkout() -> Option<std::path::PathBuf> {
     option_env!("AGGR_SOURCE_ROOT")
         .map(std::path::PathBuf::from)
-        .filter(|root| root.join("web/dev/start.mjs").is_file())
+        .filter(|root| root.join("crates/aggr-tools/Cargo.toml").is_file())
 }
 
 fn demo_config() -> Result<std::path::PathBuf> {
@@ -120,32 +120,13 @@ struct Context {
     cwd: std::path::PathBuf,
     executable: std::path::PathBuf,
     worker_args: Vec<String>,
-    vite_origin: String,
+    public_origin: String,
     strict_port: bool,
 }
 
 fn launch(config_path: &Path, args: &DevArgs, verbose: u8) -> Result<()> {
     let repository = source_checkout()
-        .context("contributor source checkout is unavailable; use `aggr dev --native`")?;
-    let script = repository.join("web/dev/start.mjs");
-    let dependencies = std::process::Command::new("mise")
-        .args(["exec", "--", "node"])
-        .arg(repository.join("web/build/dependencies.mjs"))
-        .current_dir(&repository)
-        .status()
-        .context("preparing frontend dependencies; run `mise run setup` first")?;
-    ensure!(
-        dependencies.success(),
-        "frontend dependency repair failed; run `mise run setup`"
-    );
-    ensure!(
-        script.is_file()
-            && repository
-                .join("web/node_modules/vite/package.json")
-                .is_file(),
-        "contributor development needs the source checkout and Node packages; run `mise run setup` in {}",
-        repository.display()
-    );
+        .context("contributor source checkout is unavailable; use `aggr dev --no-watch`")?;
     let config = config_path
         .canonicalize()
         .with_context(|| format!("resolving {}", config_path.display()))?;
@@ -154,20 +135,17 @@ fn launch(config_path: &Path, args: &DevArgs, verbose: u8) -> Result<()> {
         cwd: std::env::current_dir().context("resolving development directory")?,
         executable: std::env::current_exe().context("resolving development executable")?,
         worker_args: worker_arguments(&config, args, verbose)?,
-        vite_origin: if std::env::var_os("AGGR_VITE_URL").is_some() {
-            server::vite_origin()?
-        } else {
-            format!("http://127.0.0.1:{}", args.port)
-        },
-        strict_port: std::env::var_os("AGGR_VITE_URL").is_some(),
+        public_origin: format!("http://127.0.0.1:{}", args.port),
+        strict_port: false,
     };
-    let status = std::process::Command::new("mise")
-        .args(["exec", "--", "node"])
-        .arg(script)
-        .current_dir(&context.repository)
+    let status = std::process::Command::new("cargo")
+        .args(["run", "--locked", "--manifest-path"])
+        .arg(context.repository.join("Cargo.toml"))
+        .args(["--package", "aggr-tools", "--", "dev"])
+        .current_dir(&context.cwd)
         .env("AGGR_DEV_CONTEXT", serde_json::to_string(&context)?)
         .status()
-        .context("starting Node development tools; run `mise run setup` first")?;
+        .context("starting Rust development tools")?;
     ensure!(status.success(), "development tools exited with {status}");
     Ok(())
 }
@@ -188,7 +166,6 @@ fn worker_arguments(config: &Path, args: &DevArgs, verbose: u8) -> Result<Vec<St
     }
     for (enabled, flag) in [
         (args.clean, "--clean"),
-        (args.release, "--release"),
         (args.fetch.dry_run, "--dry-run"),
         (args.fetch.refresh, "--refresh"),
         (args.fetch.reprocess, "--reprocess"),
@@ -285,10 +262,10 @@ mod tests {
         use clap::Parser as _;
         let config = Path::new("reader with spaces; $(touch nope).toml");
         let args = DevArgs {
-            native: false,
+            no_watch: false,
             demo: false,
             clean: true,
-            release: true,
+
             port: 8123,
             base_url: Some("https://example.com/reads/?literal=$(touch nope)&x=1".into()),
             fetch: crate::cli::FetchArgs {
@@ -307,7 +284,7 @@ mod tests {
         };
         assert_eq!(parsed.port, args.port);
         assert_eq!(parsed.base_url, args.base_url);
-        assert!(parsed.clean && parsed.release && parsed.fetch.refresh);
+        assert!(parsed.clean && parsed.fetch.refresh);
     }
 
     #[test]

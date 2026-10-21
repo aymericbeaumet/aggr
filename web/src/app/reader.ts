@@ -58,9 +58,20 @@ export function startReader(doc: Document = document, win: Window = window): voi
   badges.configure(root, store, doc);
   feed = new FeedUpdater();
   feed.install(doc, win);
+  let previewEvents: EventSource | null = null;
   poller = new Poller({
     load: async (signal) => {
       const response = await fetch(new URL('updates.json', root).href, { cache: 'no-store', signal });
+      const run = response.headers.get('x-aggr-dev-run');
+      const revision = response.headers.get('x-aggr-dev-revision');
+      if (!previewEvents && run && revision) {
+        const endpoint = new URL('__aggr/reload', root);
+        endpoint.searchParams.set('run', run);
+        endpoint.searchParams.set('revision', revision);
+        previewEvents = new EventSource(endpoint);
+        previewEvents.onmessage = () => win.location.reload();
+        win.addEventListener('pagehide', () => previewEvents?.close(), { once: true });
+      }
       return response.ok ? response.json() : null;
     },
     onBuild,

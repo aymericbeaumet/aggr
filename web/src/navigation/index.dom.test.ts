@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, testTools } from "../../test/browser";
 
 const model = (path: string, title = 'Reader') => ({
   base: '/repo/', path, kind: path ? 'browse' : 'river', title,
@@ -17,21 +17,20 @@ function response(url: string, path = 'article/', content = 'Arrived content'): 
 let navigation: typeof import('./index')['navigation'];
 let scope: typeof import('./scope')['pageScope'];
 let currentPage: typeof import('../state/page.svelte')['page'];
-let documentEvents: ReturnType<typeof vi.spyOn>;
-let windowEvents: ReturnType<typeof vi.spyOn>;
+let documentEvents: ReturnType<typeof testTools.spyOn>;
+let windowEvents: ReturnType<typeof testTools.spyOn>;
 let connection: PropertyDescriptor | undefined;
 
 beforeEach(async () => {
-  vi.resetModules();
-  vi.stubGlobal('fetch', vi.fn());
+  testTools.stubGlobal('fetch', testTools.fn());
   history.replaceState({}, '', '/repo/');
   document.head.innerHTML = '<title>Current</title>';
   document.body.innerHTML = '<main id="content" tabindex="-1">Current content</main>';
-  documentEvents = vi.spyOn(document, 'addEventListener');
-  windowEvents = vi.spyOn(window, 'addEventListener');
-  vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
-  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 0);
-  vi.spyOn(console, 'error').mockImplementation(() => {});
+  documentEvents = testTools.spyOn(document, 'addEventListener');
+  windowEvents = testTools.spyOn(window, 'addEventListener');
+  testTools.spyOn(window, 'scrollTo').mockImplementation(() => {});
+  testTools.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 0);
+  testTools.spyOn(console, 'error').mockImplementation(() => {});
   connection = Object.getOwnPropertyDescriptor(navigator, 'connection');
   Object.defineProperty(navigator, 'connection', { configurable: true, value: { saveData: false } });
   currentPage = (await import('../state/page.svelte')).page;
@@ -43,15 +42,15 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-  vi.useRealTimers();
+  testTools.useRealTimers();
   document.documentElement.removeAttribute('data-navigating');
   scope.abort();
   for (const [type, listener, options] of documentEvents.mock.calls) document.removeEventListener(type, listener, options);
   for (const [type, listener, options] of windowEvents.mock.calls) window.removeEventListener(type, listener, options);
   if (connection) Object.defineProperty(navigator, 'connection', connection);
   else Reflect.deleteProperty(navigator, 'connection');
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
+  testTools.unstubAllGlobals();
+  testTools.restoreAllMocks();
 });
 
 describe('page navigation', () => {
@@ -60,8 +59,8 @@ describe('page navigation', () => {
   });
   it('prefetches a focused archive link and leaves external links alone', () => {
     const url = new URL('/repo/article/', location.href).href;
-    const request = vi.fn(async (_input: RequestInfo | URL) => response(url));
-    vi.stubGlobal('fetch', request);
+    const request = testTools.fn(async (_input: RequestInfo | URL) => response(url));
+    testTools.stubGlobal('fetch', request);
     document.body.insertAdjacentHTML('beforeend', '<a id="inside" href="/repo/article/">Article</a><a id="outside" href="https://publisher.test/">Publisher</a>');
     document.getElementById('outside')?.focus();
     expect(request).not.toHaveBeenCalled();
@@ -70,32 +69,32 @@ describe('page navigation', () => {
     expect(request.mock.calls[0][0]).toBe(url);
   });
   it('bounds simultaneous intent prefetches', () => {
-    const request = vi.fn(() => new Promise<Response>(() => {}));
-    vi.stubGlobal('fetch', request);
+    const request = testTools.fn(() => new Promise<Response>(() => {}));
+    testTools.stubGlobal('fetch', request);
     for (const path of ['one/', 'two/', 'three/']) navigation.prefetch(`/repo/${path}`);
     expect(request).toHaveBeenCalledTimes(2);
   });
   it.each([{ saveData: true }, { effectiveType: 'slow-2g' }, { effectiveType: '2g' }])(
     'leaves constrained connections to requested navigation: %j', async (connection) => {
       Object.defineProperty(navigator, 'connection', { configurable: true, value: connection });
-      vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/article/', location.href).href)));
+      testTools.stubGlobal('fetch', testTools.fn(async () => response(new URL('/repo/article/', location.href).href)));
       navigation.prefetch('/repo/article/');
       expect(fetch).not.toHaveBeenCalled();
       await navigation.go('/repo/article/');
       expect(fetch).toHaveBeenCalledOnce();
-      expect(vi.mocked(fetch).mock.calls[0][1]?.priority).toBe('high');
+      expect(testTools.mocked(fetch).mock.calls[0][1]?.priority).toBe('high');
     },
   );
   it('fetches speculative pages at low priority', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/article/', location.href).href)));
+    testTools.stubGlobal('fetch', testTools.fn(async () => response(new URL('/repo/article/', location.href).href)));
     navigation.prefetch('/repo/article/');
     await navigation.go('/repo/article/');
-    expect(vi.mocked(fetch).mock.calls[0][1]?.priority).toBe('low');
+    expect(testTools.mocked(fetch).mock.calls[0][1]?.priority).toBe('low');
   });
   it('ends a stalled response body and releases its prefetch slot', async () => {
-    vi.useFakeTimers();
+    testTools.useFakeTimers();
     const signals: AbortSignal[] = [];
-    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    testTools.stubGlobal('fetch', testTools.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const signal = init?.signal as AbortSignal;
       signals.push(signal);
       return {
@@ -107,20 +106,20 @@ describe('page navigation', () => {
     }));
     navigation.prefetch('/repo/one/');
     navigation.prefetch('/repo/two/');
-    await vi.advanceTimersByTimeAsync(15_000);
+    await testTools.advanceTimersByTimeAsync(15_000);
     expect(signals.every((signal) => signal.aborted)).toBe(true);
     navigation.prefetch('/repo/three/');
     expect(fetch).toHaveBeenCalledTimes(3);
-    await vi.advanceTimersByTimeAsync(15_000);
+    await testTools.advanceTimersByTimeAsync(15_000);
   });
   it('announces a pending page without moving the current content', async () => {
-    vi.useFakeTimers();
+    testTools.useFakeTimers();
     let resolve!: (response: Response) => void;
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((done) => { resolve = done; })));
+    testTools.stubGlobal('fetch', testTools.fn(() => new Promise<Response>((done) => { resolve = done; })));
     const pending = navigation.go('/repo/article/');
     expect(document.getElementById('content')?.getAttribute('aria-busy')).toBe('true');
     expect(document.documentElement.hasAttribute('data-navigating')).toBe(false);
-    await vi.advanceTimersByTimeAsync(150);
+    await testTools.advanceTimersByTimeAsync(150);
     expect(document.documentElement.hasAttribute('data-navigating')).toBe(true);
     resolve(response(new URL('/repo/article/', location.href).href));
     await pending;
@@ -128,15 +127,15 @@ describe('page navigation', () => {
     expect(document.documentElement.hasAttribute('data-navigating')).toBe(false);
   });
   it('loads typed page state and only its opaque body payload', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/nested/', location.href).href, 'nested/', '<div data-article-body><p id="note">Note</p></div>')));
+    testTools.stubGlobal('fetch', testTools.fn(async () => response(new URL('/repo/nested/', location.href).href, 'nested/', '<div data-article-body><p id="note">Note</p></div>')));
     await navigation.go('/repo/nested/');
     expect(currentPage.model?.path).toBe('nested/');
     expect(currentPage.bodyHtml).toBe('<p id="note">Note</p>');
   });
   it('shares a prefetched document between different article fragments', async () => {
     const url = new URL('/repo/article/', location.href).href;
-    const fetch = vi.fn(async (_input: RequestInfo | URL) => response(url));
-    vi.stubGlobal('fetch', fetch);
+    const fetch = testTools.fn(async (_input: RequestInfo | URL) => response(url));
+    testTools.stubGlobal('fetch', fetch);
     navigation.prefetch(`${url}#first`);
     await navigation.go(`${url}#second`);
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -146,7 +145,7 @@ describe('page navigation', () => {
   });
 
   it.each(['https://external.test/article/', '/outside/article/'])('leaves the current page mounted for a redirect outside the archive: %s', async (destination) => {
-    vi.stubGlobal('fetch', vi.fn(async () => response(new URL(destination, location.href).href)));
+    testTools.stubGlobal('fetch', testTools.fn(async () => response(new URL(destination, location.href).href)));
     const original = currentPage.current;
     const originalSignal = scope.signal;
     await expect(navigation.go('/repo/article/')).resolves.toBeUndefined();
@@ -157,7 +156,7 @@ describe('page navigation', () => {
   });
 
   it('keeps redirects within the archive and the requested article fragment', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/renamed/', location.href).href)));
+    testTools.stubGlobal('fetch', testTools.fn(async () => response(new URL('/repo/renamed/', location.href).href)));
     const originalSignal = scope.signal;
     await navigation.go('/repo/article/#section');
     expect(location.pathname).toBe('/repo/renamed/');
@@ -168,8 +167,8 @@ describe('page navigation', () => {
   });
 
   it.each(['pushState', 'replaceState'] as const)('preserves the current page when the browser refuses %s', async (method) => {
-    vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/article/', location.href).href)));
-    vi.spyOn(history, method).mockImplementation(() => { throw new DOMException('history unavailable', 'SecurityError'); });
+    testTools.stubGlobal('fetch', testTools.fn(async () => response(new URL('/repo/article/', location.href).href)));
+    testTools.spyOn(history, method).mockImplementation(() => { throw new DOMException('history unavailable', 'SecurityError'); });
     const originalSignal = scope.signal;
     const original = currentPage.current;
     await expect(navigation.go('/repo/article/', { replace: method === 'replaceState' })).resolves.toBeUndefined();
@@ -182,6 +181,7 @@ describe('page navigation', () => {
 function mobileTabs(): { bar: HTMLElement; home: HTMLAnchorElement } {
   const bar = document.createElement('nav');
   bar.className = 'mobile-tabs';
+  bar.style.cssText = 'position:fixed;left:0;top:700px;width:300px;height:68px;z-index:1000';
   bar.setAttribute('data-site-navigation', '');
   bar.innerHTML = '<a data-route="" data-kinds="river" href="/repo/">Feed</a><a data-route="browse/" data-kinds="browse" href="/repo/browse/">Browse</a><a data-route="preferences/" data-kinds="preferences" href="/repo/preferences/">Preferences</a>';
   bar.getBoundingClientRect = () => new DOMRect(0, 700, 300, 68);
@@ -203,13 +203,13 @@ describe('mobile tab gestures', () => {
     const { home } = mobileTabs();
     document.body.insertAdjacentHTML('beforeend', '<button id="player">Media control</button>');
     const control = document.getElementById('player')!;
-    const activate = vi.fn();
+    const activate = testTools.fn();
     control.addEventListener('click', activate);
     const property = mode === 'fullscreen' ? 'fullscreenElement' : 'elementFromPoint';
     const previous = Object.getOwnPropertyDescriptor(document, property);
     Object.defineProperty(document, property, { configurable: true, value: mode === 'fullscreen' ? control : () => control });
     try {
-      const click = vi.spyOn(home, 'click');
+      const click = testTools.spyOn(home, 'click');
       touches(control, 'touchstart', [touch(20, 767)]);
       touches(control, 'touchend', [], [touch(20, 767)]);
       const event = new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, clientX: 20, clientY: 767 });
@@ -227,7 +227,7 @@ describe('mobile tab gestures', () => {
     mobileTabs();
     document.querySelector('main')!.innerHTML = '<a href="/repo/article/" data-row-open>Article underneath</a>';
     const article = document.querySelector('[data-row-open]')!;
-    const activate = vi.fn();
+    const activate = testTools.fn();
     article.addEventListener('click', activate);
     const click = new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, clientX: x, clientY: y });
     article.dispatchEvent(click);
@@ -240,7 +240,7 @@ describe('mobile tab gestures', () => {
     const { home } = mobileTabs();
     document.querySelector('main')!.innerHTML = '<a href="/repo/article/" data-row-open>Article underneath</a>';
     const article = document.querySelector('[data-row-open]')!;
-    const click = vi.spyOn(home, 'click').mockImplementation(() => {});
+    const click = testTools.spyOn(home, 'click').mockImplementation(() => {});
     touches(article, 'touchstart', [touch(20, 767)]);
     const release = touches(article, 'touchend', [], [touch(20, 767)]);
     expect(release.defaultPrevented).toBe(true);
@@ -248,12 +248,12 @@ describe('mobile tab gestures', () => {
   });
 
   it.each(['visibility:hidden', 'display:none', 'pointer-events:none'])('leaves the page clickable when its bar is %s', (style) => {
-    vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/article/', location.href).href)));
+    testTools.stubGlobal('fetch', testTools.fn(async () => response(new URL('/repo/article/', location.href).href)));
     const { bar } = mobileTabs();
     bar.style.cssText = style;
     document.querySelector('main')!.innerHTML = '<a href="/repo/article/" data-row-open>Visible article</a>';
     const article = document.querySelector('[data-row-open]')!;
-    const activate = vi.fn();
+    const activate = testTools.fn();
     article.addEventListener('click', activate);
     article.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, clientX: 150, clientY: 767 }));
     expect(activate).toHaveBeenCalledOnce();
@@ -264,18 +264,18 @@ describe('mobile tab gestures', () => {
     mobileTabs();
     document.body.insertAdjacentHTML('beforeend', '<dialog open><button>Confirm</button></dialog>');
     const button = document.querySelector('dialog button')!;
-    const activate = vi.fn();
+    const activate = testTools.fn();
     button.addEventListener('click', activate);
     button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, clientX: 150, clientY: 767 }));
     expect(activate).toHaveBeenCalledOnce();
   });
 
   it('keeps an article above the bar clickable', () => {
-    vi.stubGlobal('fetch', vi.fn(async () => response(new URL('/repo/article/', location.href).href)));
+    testTools.stubGlobal('fetch', testTools.fn(async () => response(new URL('/repo/article/', location.href).href)));
     mobileTabs();
     document.querySelector('main')!.innerHTML = '<a href="/repo/article/" data-row-open>Visible article</a>';
     const article = document.querySelector('[data-row-open]')!;
-    const activate = vi.fn();
+    const activate = testTools.fn();
     article.addEventListener('click', activate);
     article.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, clientX: 150, clientY: 699 }));
     expect(activate).toHaveBeenCalledOnce();
@@ -285,7 +285,7 @@ describe('mobile tab gestures', () => {
   it('releases contact feedback after a touch whose pointer was canceled by scrolling', async () => {
     (await import('../app/platform')).installTapFeedback();
     const { bar, home } = mobileTabs();
-    const click = vi.spyOn(home, 'click').mockImplementation(() => {});
+    const click = testTools.spyOn(home, 'click').mockImplementation(() => {});
     touches(bar, 'touchstart', [touch(20)]);
     document.dispatchEvent(new Event('pointercancel'));
     touches(bar, 'touchmove', [touch(25)]);
@@ -298,7 +298,7 @@ describe('mobile tab gestures', () => {
 
   it('cancels a drag off the bar without activating a tab', () => {
     const { bar, home } = mobileTabs();
-    const click = vi.spyOn(home, 'click').mockImplementation(() => {});
+    const click = testTools.spyOn(home, 'click').mockImplementation(() => {});
     touches(bar, 'touchstart', [touch(20)]);
     touches(bar, 'touchmove', [touch(20, 680)]);
     const release = touches(bar, 'touchend', [], [touch(20, 680)]);
@@ -309,7 +309,7 @@ describe('mobile tab gestures', () => {
 
   it('lets a second finger cancel activation and contact feedback', () => {
     const { bar, home } = mobileTabs();
-    const click = vi.spyOn(home, 'click').mockImplementation(() => {});
+    const click = testTools.spyOn(home, 'click').mockImplementation(() => {});
     touches(bar, 'touchstart', [touch(20)]);
     touches(document.body, 'touchstart', [touch(20), touch(100, 400, 2)]);
     touches(bar, 'touchend', [], [touch(20), touch(100, 400, 2)]);

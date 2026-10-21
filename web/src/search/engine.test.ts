@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, testTools } from "../../test/browser";
 import { offline } from '../state/offline.svelte';
 import { buildFilters, createIndex, createSession, limiter, type ImportAPI } from './engine';
 import { parseQuery } from './query';
@@ -21,9 +21,9 @@ type Fake = Partial<Pagefind> & { search: Pagefind['search'] };
 
 /** A Pagefind module whose instance is `api`, counting how often it is imported and destroyed. */
 function fakeModule(api: Fake) {
-  const destroy = vi.fn(async () => {});
-  const init = vi.fn(async () => {});
-  const importAPI = vi.fn<ImportAPI>(async () => ({
+  const destroy = testTools.fn(async () => {});
+  const init = testTools.fn(async () => {});
+  const importAPI = testTools.fn<ImportAPI>(async () => ({
     createInstance: () => ({ init, destroy, preload: async () => {}, ...api }),
   }));
   return { importAPI, destroy, init };
@@ -66,7 +66,7 @@ describe('the index', () => {
   it('intersects entire phrase result sets and subtracts exclusions before paging, hydrating only the page', async () => {
     const loaded: string[] = [];
     const matches: Record<string, string[]> = { rust: ['1', '2', '3', '4'], '"borrow checker"': ['4', '2', '3'], old: ['2'] };
-    const search = vi.fn(async (term: string | null): Promise<Matches> => ({ results: refs(matches[term || ''] || [], loaded) }));
+    const search = testTools.fn(async (term: string | null): Promise<Matches> => ({ results: refs(matches[term || ''] || [], loaded) }));
     const { importAPI } = fakeModule({ search });
     const index = createIndex('https://reader.test/', manifest, importAPI, new AbortController().signal);
     expect(importAPI).not.toHaveBeenCalled();
@@ -82,8 +82,8 @@ describe('the index', () => {
   });
 
   it('sorts filter-only queries newest first and preloads only those', async () => {
-    const search = vi.fn(async (): Promise<Matches> => ({ results: [] }));
-    const preload = vi.fn(async () => {});
+    const search = testTools.fn(async (): Promise<Matches> => ({ results: [] }));
+    const preload = testTools.fn(async () => {});
     const { importAPI } = fakeModule({ search, preload });
     const index = createIndex('https://reader.test/', manifest, importAPI, new AbortController().signal);
     await index.prepare(parseQuery('rust'));
@@ -115,7 +115,7 @@ describe('the index', () => {
       },
     };
     const other: ResultRef = { id: 'other', data: async () => ({ url: '/other/', meta: {} }) };
-    const search = vi.fn(async (term: string | null): Promise<Matches> => ({ results: term === 'a' ? [first, other] : [second] }));
+    const search = testTools.fn(async (term: string | null): Promise<Matches> => ({ results: term === 'a' ? [first, other] : [second] }));
     const { importAPI } = fakeModule({ search });
     const index = createIndex('https://reader.test/', manifest, importAPI, new AbortController().signal);
     const a = index.run(parseQuery('a'), 1, 25);
@@ -129,8 +129,8 @@ describe('the index', () => {
   });
 
   it('counts a facet after every other clause: Pagefind counts for one search, memberships otherwise', async () => {
-    const filters = vi.fn(async () => ({}));
-    const search = vi.fn(async (term: string | null, options?: Record<string, unknown>): Promise<Matches> => {
+    const filters = testTools.fn(async () => ({}));
+    const search = testTools.fn(async (term: string | null, options?: Record<string, unknown>): Promise<Matches> => {
       const source = (options?.filters as Record<string, unknown> | undefined)?.source;
       const ids =
         source === 'blog' ? ['2', '3'] : source === 'two' ? ['4', '5'] : source === 'empty' ? ['8']
@@ -155,17 +155,17 @@ describe('the index', () => {
 
   it('retires only once its leases have finished, and refuses new work afterwards', async () => {
     let finish!: (matches: Matches) => void;
-    const search = vi.fn(() => new Promise<Matches>((resolve) => (finish = resolve)));
+    const search = testTools.fn(() => new Promise<Matches>((resolve) => (finish = resolve)));
     const { importAPI, destroy } = fakeModule({ search });
     const index = createIndex('https://reader.test/', manifest, importAPI, new AbortController().signal);
     const running = index.run(parseQuery('rust'), 1, 25);
-    await vi.waitFor(() => expect(search).toHaveBeenCalled());
+    await testTools.waitFor(() => expect(search).toHaveBeenCalled());
     index.retire();
     expect(destroy).not.toHaveBeenCalled();
     await expect(index.run(parseQuery('rust'), 1, 25)).rejects.toThrow(/retired/);
     finish({ results: [] });
     expect((await running).total).toBe(0);
-    await vi.waitFor(() => expect(destroy).toHaveBeenCalledTimes(1));
+    await testTools.waitFor(() => expect(destroy).toHaveBeenCalledTimes(1));
   });
 
   it('keeps at most the configured number of index requests in flight', async () => {
@@ -186,7 +186,7 @@ describe('the index', () => {
 
 describe('the session', () => {
   afterEach(() => {
-    vi.restoreAllMocks();
+    testTools.restoreAllMocks();
     offline.status = null;
   });
 
@@ -214,7 +214,7 @@ describe('the session', () => {
   };
 
   function serve(served: () => Catalog | Response) {
-    return vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+    return testTools.spyOn(globalThis, 'fetch').mockImplementation(async () => {
       const value = served();
       return value instanceof Response ? value : new Response(JSON.stringify(value));
     });
@@ -236,10 +236,10 @@ describe('the session', () => {
 
   it('reports an unavailable or foreign catalog', async () => {
     serve(() => new Response('gone', { status: 404 }));
-    await expect(createSession('https://reader.test/', vi.fn(), true).load()).rejects.toThrow(/unavailable/);
-    vi.restoreAllMocks();
+    await expect(createSession('https://reader.test/', testTools.fn(), true).load()).rejects.toThrow(/unavailable/);
+    testTools.restoreAllMocks();
     serve(() => ({ ...manifest, base: 'https://elsewhere.test/pagefind/' }));
-    await expect(createSession('https://reader.test/', vi.fn(), true).load()).rejects.toThrow(/Invalid/);
+    await expect(createSession('https://reader.test/', testTools.fn(), true).load()).rejects.toThrow(/Invalid/);
   });
 
   it('keeps the usable index when a revalidation fails, and keeps two versions alive', async () => {
@@ -265,14 +265,14 @@ describe('the session', () => {
     session.stale();
     await (await session.load()).run(parseQuery('rust'), 1, 25);
     // Three versions seen: the least recently used one (v2) is gone.
-    await vi.waitFor(() => expect(destroy).toHaveBeenCalledTimes(1));
+    await testTools.waitFor(() => expect(destroy).toHaveBeenCalledTimes(1));
     session.dispose();
     await expect(session.load()).rejects.toThrow();
   });
 
   it('selects the saved offline index when the network is gone', async () => {
     const fetcher = serve(() => ({ ...manifest, version: 'saved', base: 'pagefind/saved/' }));
-    const session = createSession('https://reader.test/', vi.fn(), false);
+    const session = createSession('https://reader.test/', testTools.fn(), false);
     await expect(session.load()).rejects.toThrow(/offline search index/);
     saved('saved', 'offline/');
     expect((await session.load()).manifest.version).toBe('saved');

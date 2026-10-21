@@ -59,7 +59,7 @@ jobs:
       - uses: jdx/mise-action@v5
         with:
           version: 2026.10.15
-          install_args: rust node cmake ninja
+          install_args: rust cmake ninja
       - name: Install Windows x64 assembler
         if: matrix.name == 'windows-amd64'
         run: mise install http:nasm
@@ -79,7 +79,7 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
           test "$("$binary" --version)" = "aggr $VERSION"
           "$binary" dev --help > dev-help.txt
-          grep -q -- '--native' dev-help.txt
+          grep -q -- '--no-watch' dev-help.txt
       - shell: bash
         env:
           ARCHIVE: aggr-${{ matrix.name }}

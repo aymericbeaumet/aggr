@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, testTools } from "../../test/browser";
 import { installPullRefresh, pull } from './pull-refresh.svelte';
 
-let events: ReturnType<typeof vi.spyOn>;
-let refresh: ReturnType<typeof vi.fn<() => void>>;
+let events: ReturnType<typeof testTools.spyOn>;
+let refresh: ReturnType<typeof testTools.fn<() => void>>;
 let dispose: () => void;
 let frames: Map<number, FrameRequestCallback>;
 let frameId: number;
@@ -26,15 +26,15 @@ beforeEach(() => {
   pull.phase = 'idle';
   frames = new Map();
   frameId = 0;
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-  vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false })));
-  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+  testTools.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  testTools.stubGlobal('matchMedia', testTools.fn(() => ({ matches: false })));
+  testTools.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
     frames.set(++frameId, callback);
     return frameId;
   });
-  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => { frames.delete(id); });
-  events = vi.spyOn(document, 'addEventListener');
-  refresh = vi.fn();
+  testTools.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => { frames.delete(id); });
+  events = testTools.spyOn(document, 'addEventListener');
+  refresh = testTools.fn();
   dispose = installPullRefresh({ enabled: () => true, refresh });
 });
 
@@ -45,9 +45,9 @@ afterEach(() => {
   document.documentElement.removeAttribute('data-pull-state');
   document.documentElement.style.removeProperty('--pull-distance');
   delete document.documentElement.dataset.motion;
-  vi.restoreAllMocks();
-  vi.unstubAllGlobals();
-  vi.useRealTimers();
+  testTools.restoreAllMocks();
+  testTools.unstubAllGlobals();
+  testTools.useRealTimers();
 });
 
 describe('installed pull-to-refresh', () => {
@@ -88,7 +88,7 @@ describe('installed pull-to-refresh', () => {
     expect(pull.phase).toBe('settling');
     expect(pull.hidden).toBe(false);
     frame();
-    vi.advanceTimersByTime(300);
+    testTools.advanceTimersByTime(300);
     expect(pull.phase).toBe('idle');
     expect(pull.hidden).toBe(true);
     expect(refresh).not.toHaveBeenCalled();
@@ -96,7 +96,7 @@ describe('installed pull-to-refresh', () => {
 
   it('does not leave a blocking touchmove handler installed between gestures', () => {
     expect(events.mock.calls.some((call: unknown[]) => call[0] === 'touchmove')).toBe(false);
-    const remove = vi.spyOn(document, 'removeEventListener');
+    const remove = testTools.spyOn(document, 'removeEventListener');
     const target = document.querySelector('p')!;
     touch(target, 'touchstart', 100);
     expect(events.mock.calls.some((call: unknown[]) => call[0] === 'touchmove')).toBe(true);
@@ -117,7 +117,7 @@ describe('installed pull-to-refresh', () => {
   });
 
   it.each(['system', 'preference'])('settles immediately when %s motion is disabled', (mode) => {
-    if (mode === 'system') vi.mocked(window.matchMedia).mockReturnValue({ matches: true } as MediaQueryList);
+    if (mode === 'system') testTools.mocked(window.matchMedia).mockReturnValue({ matches: true } as MediaQueryList);
     else document.documentElement.dataset.motion = 'off';
     const target = document.querySelector('p')!;
     touch(target, 'touchstart', 100);
@@ -137,7 +137,7 @@ describe('installed pull-to-refresh', () => {
     touch(target, 'touchstart', 100);
     touch(target, 'touchmove', 160);
     frame();
-    vi.advanceTimersByTime(300);
+    testTools.advanceTimersByTime(300);
     expect(pull.phase).toBe('pulling');
     expect(pull.hidden).toBe(false);
   });

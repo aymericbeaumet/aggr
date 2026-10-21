@@ -70,7 +70,7 @@ pub struct SiteConfig {
     pub max_age_days: u32,
     /// `owner/repo`; defaults to `$GITHUB_REPOSITORY` when unset.
     pub repository: Option<String>,
-    /// Public URL of the site (`--release` builds). A custom domain here also writes `CNAME`.
+    /// Canonical public URL of the site. A custom domain here also writes `CNAME`.
     pub url: Option<Url>,
     /// Opt into search-engine indexing and sitemaps for release builds.
     pub indexing: bool,

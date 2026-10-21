@@ -14,8 +14,10 @@ categories = ["command-line-utilities", "web-programming"]
 include = ["src/**", "build.rs", "README.md", "LICENSE", ".generated/publish/**"]
 
 [build-dependencies]
+aggr-ui-build = { path = "../aggr-ui-build", version = "0.1.0" }
 aggr-ui-model = { path = "../aggr-ui-model", version = "0.1.0", features = ["typescript"] }
 sha2 = "0.11.1"
+serde_json = "1.0.154"
 
 [dependencies]
 aggr-ui-model = { path = "../aggr-ui-model", version = "0.1.0" }
@@ -58,7 +60,8 @@ rquickjs = "0.14.0"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+# Keep emitted bytes independent of Cargo feature unification with the native bundler.
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 serde_yaml_ng = "0.10.0"
 sha1 = "0.11.0"
 sha2 = "0.11.1"

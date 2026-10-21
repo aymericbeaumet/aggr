@@ -21,7 +21,7 @@ pub const SCRUBBED_ENV: &[&str] = &[
     "AGGR_CONFIG",
     "AGGR_CACHE_DIR",
     "AGGR_CLEAN_UNSET",
-    "AGGR_VITE_URL",
+    "AGGR_UI_DIR",
     "AGGR_DEV_CONTEXT",
     "AGGR_DEV_INTERNAL_WORKER",
 ];

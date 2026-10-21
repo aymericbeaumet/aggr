@@ -379,7 +379,7 @@ repository's complete Git history.
 - Internal links never assume an origin root. They resolve relative to the generated page.
 - Canonical links, feed identifiers, linkset targets, OpenSearch templates, and sitemaps are emitted
   only when the public base URL is known from `--base-url`, or from `[site] url` during an
-  `aggr build --release`. Sitemaps additionally require the release indexing opt-in.
+  `aggr build`. Sitemaps additionally require the indexing opt-in.
 - Moving a published site to a new origin or mount path requires one rebuild so absolute identities
   remain truthful.
 - Item paths do not change after capture. Their current static pages remain published while the

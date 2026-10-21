@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from "../../test/browser";
 import { load } from '../../test/fixtures';
 import { mountApp } from './boot';
 import { page } from '../state/page.svelte';

@@ -5,7 +5,7 @@ on:
   workflow_call:
     secrets:
       CARGO_REGISTRY_TOKEN:
-        description: crates.io token permitted to publish aggr-ui-model, aggr-lib and aggr
+        description: crates.io token permitted to publish aggr-ui-model, aggr-ui-build, aggr-lib and aggr
         required: false
 
 permissions:
@@ -28,7 +28,7 @@ jobs:
       - uses: jdx/mise-action@v5
         with:
           version: 2026.10.15
-          install_args: rust node cmake ninja
+          install_args: rust cmake ninja
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-x64

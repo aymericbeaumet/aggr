@@ -1,5 +1,6 @@
 //! The private live-reload HTTP server used by `aggr dev`; not intended for production traffic.
 
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -26,37 +27,50 @@ use super::{Project, build, sync};
 use crate::cli::{BuildArgs, DevArgs, FetchArgs};
 use crate::git::Worktree;
 
-mod vite;
-
-pub(super) fn vite_origin() -> Result<String> {
-    Ok(vite::Client::from_env()?
-        .map(|client| client.origin().to_owned())
-        .unwrap_or_else(|| "http://127.0.0.1:5173".into()))
-}
-
 const DEV_KEY_FILE: &str = ".aggr-dev-key";
 
+#[cfg(test)]
 type SiteFiles = BTreeMap<String, Arc<Vec<u8>>>;
 
 enum Snapshot {
     Pending(Arc<Vec<u8>>),
+    #[cfg(test)]
     Files(SiteFiles),
     Lazy(Arc<crate::site::dev::Site>),
 }
 
 #[derive(Clone)]
 struct MemorySite {
+    base: String,
     snapshot: Arc<RwLock<Snapshot>>,
     revision: Arc<AtomicU64>,
     ownership: Option<Arc<super::lock::DevLock>>,
+    retired: Arc<std::sync::Mutex<Vec<Arc<crate::site::dev::Site>>>>,
+}
+
+fn pending_reload(base: &str) -> String {
+    let endpoint = serde_json::to_string(&format!("{base}__aggr/reload"))
+        .expect("serializing preview endpoint");
+    format!(
+        "<script>var events=new EventSource({endpoint});events.onmessage=function(){{location.reload()}};events.onerror=function(){{events.close();setTimeout(function(){{location.reload()}},1000)}};</script>"
+    )
 }
 
 impl MemorySite {
+    #[cfg(test)]
     fn loading() -> Self {
+        Self::loading_at("/")
+    }
+
+    fn loading_at(base: &str) -> Self {
         let page = b"<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>aggr dev</title><style>body{font:16px system-ui;margin:3rem;max-width:40rem}body:before{content:'';display:inline-block;width:.75rem;height:.75rem;margin-right:.6rem;border:2px solid #8ea1ff;border-top-color:transparent;border-radius:50%;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style><p>Preparing the archive; pages render on request&hellip;</p>".to_vec();
+        let mut page = page;
+        page.extend_from_slice(pending_reload(base).as_bytes());
         let page = Arc::new(page);
         Self {
+            base: base.to_owned(),
             ownership: None,
+            retired: Arc::default(),
             revision: Arc::default(),
             snapshot: Arc::new(RwLock::new(Snapshot::Pending(page))),
         }
@@ -73,6 +87,8 @@ impl MemorySite {
         let page = format!(
             "<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>aggr dev: preparation failed</title><style>body{{font:16px system-ui;margin:3rem;max-width:40rem}}pre{{white-space:pre-wrap;overflow-wrap:anywhere}}</style><h1>The archive could not be prepared</h1><p>Fix the source or configuration error below. Development will retry when files change or sources refresh.</p><pre>{message}</pre>"
         ).into_bytes();
+        let mut page = page;
+        page.extend_from_slice(pending_reload(&self.base).as_bytes());
         if previous.as_slice() == page.as_slice() {
             return false;
         }
@@ -84,13 +100,16 @@ impl MemorySite {
     /// The snapshot the previous `aggr dev` promoted, or nothing when there is none. A snapshot
     /// that cannot be read is removed as well: its dev key would otherwise keep matching, the
     /// first rebuild would be skipped, and the placeholder would be served indefinitely.
+    #[cfg(test)]
     fn cached(root: &Path) -> Option<Self> {
         if !root.join(".aggr-site").is_file() {
             return None;
         }
         match read_site(root, None) {
             Ok(files) => Some(Self {
+                base: "/".into(),
                 ownership: None,
+                retired: Arc::default(),
                 revision: Arc::default(),
                 snapshot: Arc::new(RwLock::new(Snapshot::Files(files))),
             }),
@@ -109,12 +128,15 @@ impl MemorySite {
         let files = read_site(staging, None)?;
         remove_build(staging)?;
         Ok(Self {
+            base: "/".into(),
             ownership: None,
+            retired: Arc::default(),
             revision: Arc::default(),
             snapshot: Arc::new(RwLock::new(Snapshot::Files(files))),
         })
     }
 
+    #[cfg(test)]
     async fn replace_from(&self, staging: &Path, cached: &Path) -> Result<()> {
         let ownership = self.ownership.clone();
         let retained = match &*self.snapshot.read().await {
@@ -166,13 +188,68 @@ impl MemorySite {
     async fn lazy_root(&self) -> Option<PathBuf> {
         match &*self.snapshot.read().await {
             Snapshot::Lazy(site) => Some(site.root().to_owned()),
-            Snapshot::Files(_) | Snapshot::Pending(_) => None,
+            #[cfg(test)]
+            Snapshot::Files(_) => None,
+            Snapshot::Pending(_) => None,
         }
     }
 
     async fn replace_lazy(&self, site: crate::site::dev::Site) {
-        *self.snapshot.write().await = Snapshot::Lazy(Arc::new(site));
+        let mut snapshot = self.snapshot.write().await;
+        if let Snapshot::Lazy(previous) = &*snapshot {
+            let mut retired = self
+                .retired
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            retired.push(Arc::clone(previous));
+            if retired.len() > 4 {
+                retired.remove(0);
+            }
+        }
+        *snapshot = Snapshot::Lazy(Arc::new(site));
         self.revision.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn reload_ui(
+        &self,
+        project: Arc<Project>,
+        cache: Arc<crate::site::dev::PreparationCache>,
+    ) -> Result<bool> {
+        loop {
+            let current = match &*self.snapshot.read().await {
+                Snapshot::Lazy(site) => Arc::clone(site),
+                _ => return Ok(false),
+            };
+            let expected = Arc::clone(&current);
+            let project = Arc::clone(&project);
+            let cache = Arc::clone(&cache);
+            let next =
+                tokio::task::spawn_blocking(move || current.reload_ui(&project.config, &cache))
+                    .await??;
+            let Some(next) = next else { return Ok(false) };
+            let mut snapshot = self.snapshot.write().await;
+            if !matches!(&*snapshot, Snapshot::Lazy(active) if Arc::ptr_eq(active, &expected)) {
+                continue;
+            }
+            let mut retired = self
+                .retired
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            retired.push(expected);
+            if retired.len() > 4 {
+                retired.remove(0);
+            }
+            *snapshot = Snapshot::Lazy(Arc::new(next));
+            self.revision.fetch_add(1, Ordering::SeqCst);
+            return Ok(true);
+        }
+    }
+
+    async fn offline_catalogue_ready(&self) -> Result<bool> {
+        match &*self.snapshot.read().await {
+            Snapshot::Lazy(site) => site.start_offline_catalogue(),
+            _ => Ok(true),
+        }
     }
 
     async fn body(&self, key: &str) -> Result<Option<Arc<Vec<u8>>>> {
@@ -180,15 +257,32 @@ impl MemorySite {
             Snapshot::Pending(page) => {
                 return Ok(matches!(key, "index.html" | "404.html").then(|| Arc::clone(page)));
             }
+            #[cfg(test)]
             Snapshot::Files(files) => return Ok(files.get(key).cloned()),
             Snapshot::Lazy(site) => Arc::clone(site),
+        };
+        let retired = if immutable_site_file(key) {
+            self.retired
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        } else {
+            Vec::new()
         };
         let key = key.to_owned();
         let ownership = self.ownership.clone();
         // The snapshot owns its scratch directory until the last in-flight request ends.
         tokio::task::spawn_blocking(move || {
             let _ownership = ownership;
-            site.response(&key).map(|body| body.map(Arc::new))
+            if let Some(body) = site.response(&key)? {
+                return Ok(Some(Arc::new(body)));
+            }
+            for previous in retired.iter().rev() {
+                if let Some(body) = previous.response(&key)? {
+                    return Ok(Some(Arc::new(body)));
+                }
+            }
+            Ok(None)
         })
         .await
         .context("rendering dev response")?
@@ -203,34 +297,6 @@ impl MemorySite {
             return Ok(None);
         };
         Ok(self.body(&key).await?.map(|body| (key, body)))
-    }
-
-    async fn page_model(
-        &self,
-        base: &str,
-        path: &str,
-    ) -> Result<Option<(StatusCode, aggr_ui_model::RenderRequest)>> {
-        let Some(key) = resolve_key(base, path).filter(|key| key.ends_with(".html")) else {
-            return Ok(None);
-        };
-        let site = match &*self.snapshot.read().await {
-            Snapshot::Lazy(site) => Arc::clone(site),
-            Snapshot::Pending(_) | Snapshot::Files(_) => return Ok(None),
-        };
-        let ownership = self.ownership.clone();
-        tokio::task::spawn_blocking(move || {
-            let _ownership = ownership;
-            if let Some(model) = site.page_model(&key)? {
-                return Ok(Some((StatusCode::OK, model)));
-            }
-            if site.response(&key)?.is_some() {
-                return Ok(None);
-            }
-            site.page_model("404.html")
-                .map(|model| model.map(|model| (StatusCode::NOT_FOUND, model)))
-        })
-        .await
-        .context("preparing development page model")?
     }
 
     #[cfg(test)]
@@ -306,6 +372,7 @@ fn immutable_site_file(key: &str) -> bool {
         .is_some_and(|(_, digest)| hex(digest, 12))
 }
 
+#[cfg(test)]
 fn read_site(root: &Path, previous: Option<&SiteFiles>) -> Result<SiteFiles> {
     let mut files = BTreeMap::new();
     let mut pending = Vec::new();
@@ -367,6 +434,7 @@ fn read_site(root: &Path, previous: Option<&SiteFiles>) -> Result<SiteFiles> {
     Ok(files)
 }
 
+#[cfg(test)]
 fn remove_build(root: &Path) -> Result<()> {
     if root.exists() {
         std::fs::remove_dir_all(root)
@@ -413,13 +481,7 @@ pub(super) async fn run_with_reload(
             project.sources.len()
         );
     }
-    let mut site = match args.release.then(|| MemorySite::cached(&cached)).flatten() {
-        Some(site) => {
-            println!("restored the previous dev build from cache");
-            site
-        }
-        None => MemorySite::loading(),
-    };
+    let mut site = MemorySite::loading_at(&base);
     site.ownership = Some(ownership);
     let (reload, _) = broadcast::channel(16);
     let (stop_http, http_shutdown) = watch::channel(false);
@@ -526,25 +588,14 @@ async fn refresh_inner(
 ) -> Result<bool> {
     let worktree = Worktree::ephemeral(state.data.clone());
     let visible_change = if sync_sources {
-        let report = if build_args.release {
-            sync::run_dev(
-                &project,
-                &worktree,
-                fetch_args,
-                &state.cache,
-                state.site.ownership.clone(),
-            )
-            .await?
-        } else {
-            sync_with_previews(
-                project.clone(),
-                worktree,
-                fetch_args.clone(),
-                build_args,
-                state,
-            )
-            .await?
-        };
+        let report = sync_with_previews(
+            project.clone(),
+            worktree,
+            fetch_args.clone(),
+            build_args,
+            state,
+        )
+        .await?;
         println!(
             "dev data: {} new item(s) in the isolated system cache (never committed or pushed)",
             report.added()
@@ -736,11 +787,7 @@ async fn render_snapshot(
     discussions: crate::discussions::ResolutionSet,
     visible_change: bool,
 ) -> Result<bool> {
-    let archive = if build_args.release {
-        None
-    } else {
-        Some(capture_archive(state).await?)
-    };
+    let archive = Some(capture_archive(state).await?);
     render_snapshot_from_archive(
         project,
         build_args,
@@ -767,11 +814,7 @@ async fn render_snapshot_from_archive(
         .as_ref()
         .map_or_else(|| state.data.clone(), |archive| archive.root().to_owned());
     let cache = state.cache.clone();
-    let cached = if build_args.release {
-        state.cached.clone()
-    } else {
-        state.site.lazy_root().await.unwrap_or_default()
-    };
+    let cached = state.site.lazy_root().await.unwrap_or_default();
     let staging = state.staging.clone();
     let preparation = Arc::clone(&state.preparation);
     let ownership = state.site.ownership.clone();
@@ -810,12 +853,6 @@ async fn render_snapshot_from_archive(
         .context("dev render worker stopped before finishing")??;
     match rendered {
         RenderedSnapshot::Current => return Ok(false),
-        RenderedSnapshot::Release => {
-            state
-                .site
-                .replace_from(&state.staging, &state.cached)
-                .await?;
-        }
         RenderedSnapshot::Lazy(site) => state.site.replace_lazy(*site).await,
     }
     let _ = state.reload.send(());
@@ -824,14 +861,13 @@ async fn render_snapshot_from_archive(
 
 enum RenderedSnapshot {
     Current,
-    Release,
     Lazy(Box<crate::site::dev::Site>),
 }
 
 #[allow(clippy::too_many_arguments)]
 fn render_refresh(
     project: &Project,
-    build_args: &BuildArgs,
+    _build_args: &BuildArgs,
     data: &Path,
     cache: &Path,
     cached: &Path,
@@ -856,7 +892,7 @@ fn render_refresh(
         config_sha: config_sha.as_deref(),
         data_sha: None,
         base_url: base_url.as_deref(),
-        release: build_args.release,
+
         discussions: Some(&discussions_fingerprint),
         generation: &generation,
     })?;
@@ -864,7 +900,7 @@ fn render_refresh(
         println!("dev build already current");
         return Ok(RenderedSnapshot::Current);
     }
-    if !build_args.release {
+    {
         let scratch = staging
             .parent()
             .context("dev staging directory has no parent")?;
@@ -884,7 +920,7 @@ fn render_refresh(
             data_sha: None,
             generation,
             now,
-            release: false,
+
             discussions,
             development: true,
             render_cache_key: None,
@@ -902,15 +938,8 @@ fn render_refresh(
         crate::cache::write(&out.join(DEV_KEY_FILE), fingerprint.as_bytes())
             .context("writing the dev snapshot fingerprint")?;
         println!("prepared dev snapshot; pages and media render on request");
-        return Ok(RenderedSnapshot::Lazy(Box::new(site)));
+        Ok(RenderedSnapshot::Lazy(Box::new(site)))
     }
-    // The staging directory is disposable. A template error may leave a partial tree without the
-    // safety marker used for user-selected output directories, so always reset it before retrying.
-    remove_build(staging)?;
-    build::run_ephemeral(project, build_args, data, staging, cache, discussions)?;
-    crate::cache::write(&staging.join(DEV_KEY_FILE), fingerprint.as_bytes())
-        .context("writing the dev build fingerprint")?;
-    Ok(RenderedSnapshot::Release)
 }
 
 fn rebuild_required(visible_change: bool, site: &Path, fingerprint: &str) -> bool {
@@ -1028,9 +1057,30 @@ impl PendingWatcher {
                 }
                 changed.sort();
                 changed.dedup();
+                let ui_only = std::env::var_os("AGGR_UI_DIR").is_some_and(|root| {
+                    let pointer = PathBuf::from(root).join("current.json");
+                    changed.iter().all(|path| path == &pointer)
+                });
+                if ui_only {
+                    match state
+                        .site
+                        .reload_ui(Arc::clone(&active_project), Arc::clone(&state.preparation))
+                        .await
+                    {
+                        Ok(true) => {
+                            let _ = state.reload.send(());
+                            println!("reader reloaded");
+                        }
+                        Ok(false) => {}
+                        Err(error) => eprintln!(
+                            "reader preparation failed; keeping the previous reader: {error:#}"
+                        ),
+                    }
+                    continue;
+                }
                 let sync_sources = changed
                     .iter()
-                    .any(|path| active_paths.configs.contains(path));
+                    .any(|path| active_project.config.loaded_files.contains(path));
                 let result: Result<bool> = async {
                     let project = reload_project(active_project.clone(), sync_sources).await?;
                     let next_paths = WatchPaths::new(&project, &state)?;
@@ -1066,6 +1116,9 @@ async fn reload_project(project: Arc<Project>, config_changed: bool) -> Result<A
 impl WatchPaths {
     fn new(project: &Project, state: &DevState) -> Result<Self> {
         let mut configs = project.config.loaded_files.clone();
+        if let Some(root) = std::env::var_os("AGGR_UI_DIR") {
+            configs.push(PathBuf::from(root).join("current.json"));
+        }
         configs.sort();
         configs.dedup();
 
@@ -1144,31 +1197,8 @@ struct HttpState {
     shutdown: watch::Receiver<bool>,
 }
 
-async fn handle(State(state): State<Arc<HttpState>>, uri: Uri, headers: HeaderMap) -> Response {
+async fn handle(State(state): State<Arc<HttpState>>, uri: Uri, _headers: HeaderMap) -> Response {
     let path = uri.path();
-    if path == format!("{}__aggr/dev.js", state.base) {
-        let parameters = url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
-            .collect::<BTreeMap<_, _>>();
-        let run = parameters
-            .get("run")
-            .filter(|run| {
-                run.bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            })
-            .map_or(state.run.as_str(), |run| run.as_ref());
-        let revision = parameters
-            .get("revision")
-            .and_then(|revision| revision.parse().ok())
-            .unwrap_or_else(|| state.site.revision.load(Ordering::SeqCst));
-        return (
-            [
-                (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            reload_script(&state.base, run, revision),
-        )
-            .into_response();
-    }
     if path == format!("{}__aggr/reload", state.base) {
         // Subscribe before comparing generations so a concurrent promotion cannot be missed.
         let updates = state.reload.subscribe();
@@ -1208,54 +1238,29 @@ async fn handle(State(state): State<Arc<HttpState>>, uri: Uri, headers: HeaderMa
         )
             .into_response();
     }
-    // An older revision on a newer body causes a harmless retry; the reverse could miss an update.
-    let revision = state.site.revision.load(Ordering::SeqCst);
-    if headers
-        .get("x-aggr-page-model")
-        .is_some_and(|value| value == "1")
-    {
-        match state.site.page_model(&state.base, path).await {
-            Ok(Some((status, model))) => {
-                let body = match serde_json::to_vec(&model) {
-                    Ok(body) => body,
-                    Err(error) => {
-                        log::error!("could not serialize dev route {path}: {error}");
-                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                    }
-                };
-                let mut response = Response::new(Body::from(body));
-                *response.status_mut() = status;
-                let headers = response.headers_mut();
-                headers.insert(
-                    header::CONTENT_TYPE,
-                    header::HeaderValue::from_static("application/json"),
-                );
-                headers.insert("x-aggr-page-model", header::HeaderValue::from_static("1"));
-                headers.insert(
-                    header::CACHE_CONTROL,
-                    header::HeaderValue::from_static("no-store"),
-                );
-                let client = format!(
-                    "{}__aggr/dev.js?run={}&revision={revision}",
-                    state.base, state.run,
-                );
-                if let Ok(client) = client.parse() {
-                    headers.insert("x-aggr-dev-client", client);
-                }
-                return response;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                log::error!("could not prepare dev route {path}: {error:#}");
+    if path == format!("{}offline-catalog.json", state.base) {
+        match state.site.offline_catalogue_ready().await {
+            Ok(false) => {
                 return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Could not prepare this page. See the development server log.",
+                    StatusCode::ACCEPTED,
+                    [
+                        (header::RETRY_AFTER, "1"),
+                        (header::CACHE_CONTROL, "no-store"),
+                    ],
+                    "Offline articles are being prepared.",
                 )
                     .into_response();
             }
+            Err(error) => {
+                log::error!("{error:#}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            Ok(true) => {}
         }
     }
-    let (status, key, mut body) = match state.site.resolve_response(&state.base, path).await {
+    // An older revision on a newer body causes a harmless retry; the reverse could miss an update.
+    let revision = state.site.revision.load(Ordering::SeqCst);
+    let (status, key, body) = match state.site.resolve_response(&state.base, path).await {
         Ok(Some((file, body))) => (StatusCode::OK, file, body),
         Ok(None) => {
             let (file, body) = state.site.not_found().await;
@@ -1271,15 +1276,18 @@ async fn handle(State(state): State<Arc<HttpState>>, uri: Uri, headers: HeaderMa
         }
     };
     let file = Path::new(&key);
-    if file
-        .extension()
-        .is_some_and(|extension| extension == "html")
-    {
-        body = Arc::new(inject_reload(&body, &state.base, &state.run, revision));
-    }
     let mut response = Response::new(Body::from(bytes::Bytes::from_owner(SharedBody(body))));
     *response.status_mut() = status;
     let headers = response.headers_mut();
+    headers.insert(
+        "x-robots-tag",
+        header::HeaderValue::from_static("noindex, nofollow"),
+    );
+    headers.insert("x-aggr-dev-run", state.run.parse().expect("numeric run"));
+    headers.insert(
+        "x-aggr-dev-revision",
+        revision.to_string().parse().expect("numeric revision"),
+    );
     headers.insert(
         header::CONTENT_TYPE,
         content_type(file).parse().expect("static content type"),
@@ -1304,23 +1312,6 @@ impl AsRef<[u8]> for SharedBody {
     fn as_ref(&self) -> &[u8] {
         self.0.as_slice()
     }
-}
-
-fn inject_reload(body: &[u8], base: &str, run: &str, revision: u64) -> Vec<u8> {
-    let script = format!("<script>{}</script>", reload_script(base, run, revision));
-    let html = String::from_utf8_lossy(body);
-    if let Some(at) = html.rfind("</body>") {
-        format!("{}{}{}", &html[..at], script, &html[at..]).into_bytes()
-    } else {
-        format!("{html}{script}").into_bytes()
-    }
-}
-
-fn reload_script(base: &str, run: &str, revision: u64) -> String {
-    format!(
-        "(function(){{var b=new URL({0:?},location.origin),u=new URL(location.href);if(u.searchParams.delete('__aggr_dev'))history.replaceState(null,'',u);if('serviceWorker'in navigator)navigator.serviceWorker.getRegistration(b).then(function(r){{if(r)r.unregister()}});if('caches'in window){{var p='aggr:'+encodeURIComponent(b.pathname)+':';caches.keys().then(function(k){{k.filter(function(x){{return x.indexOf(p)===0}}).forEach(function(x){{caches.delete(x)}})}})}}new EventSource('{0}__aggr/reload?run={1}&revision={2}').onmessage=function(){{var n=new URL(location.href);n.searchParams.set('__aggr_dev',Date.now());location.replace(n)}}}})();",
-        base, run, revision
-    )
 }
 
 /// Map a request path to a file under `root`, honoring the base path a release build was made
@@ -1376,7 +1367,7 @@ const FRESH_CACHE: &str = "no-store";
 
 /// How one development response may be stored. HTML stays uncached so a reload shows the
 /// snapshot just written, without `Clear-Site-Data`: that header dumps the HTTP cache on every
-/// document, and the reload script already drops the reader's own caches. A content-addressed
+/// document. A content-addressed
 /// name keeps its bytes for a year. The shapes match `immutable` in `web/src/sw/routing.ts`.
 fn cache_control(key: &str) -> &'static str {
     if Path::new(key)
@@ -1411,7 +1402,7 @@ fn immutable_asset(key: &str) -> bool {
     }
     if asset.starts_with("app/")
         && (name.ends_with(".js") || name.ends_with(".css"))
-        && ends_with_vite_hash(stem)
+        && ends_with_bundle_hash(stem)
     {
         return true;
     }
@@ -1432,7 +1423,7 @@ fn hashed_suffix(stem: &str, len: usize, accept: impl Fn(u8) -> bool) -> bool {
         && bytes[bytes.len() - len..].iter().copied().all(accept)
 }
 
-fn ends_with_vite_hash(stem: &str) -> bool {
+fn ends_with_bundle_hash(stem: &str) -> bool {
     hashed_suffix(stem, 8, |byte| {
         byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
     })
@@ -1594,7 +1585,9 @@ mod tests {
         let listener = bind(0).await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let site = MemorySite {
+            base: "/repo/".into(),
             ownership: None,
+            retired: Arc::default(),
             revision: Arc::default(),
             snapshot: Arc::new(RwLock::new(Snapshot::Files(BTreeMap::from([
                 (
@@ -1631,6 +1624,8 @@ mod tests {
         let page = client.get(format!("{origin}/repo/")).send().await.unwrap();
         assert_eq!(page.status(), 200);
         assert_eq!(page.headers()["content-type"], "text/html; charset=utf-8");
+        assert!(page.headers().contains_key("x-aggr-dev-run"));
+        assert_eq!(page.headers()["x-robots-tag"], "noindex, nofollow");
         assert!(
             page.headers()["cache-control"]
                 .to_str()
@@ -1638,7 +1633,7 @@ mod tests {
                 .contains("no-store")
         );
         let body = page.bytes().await.unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("/repo/__aggr/reload"));
+        assert_eq!(body.as_ref(), b"<body>reader</body>");
         let head = client.head(format!("{origin}/repo/")).send().await.unwrap();
         assert_eq!(head.status(), 200);
         assert_eq!(head.headers()["content-length"], body.len().to_string());
@@ -2281,12 +2276,11 @@ mod tests {
             !root.join("pagefind").exists(),
             "search is initialized on demand"
         );
-        let mut headers = HeaderMap::new();
-        headers.insert("x-aggr-page-model", "1".parse().unwrap());
+        let headers = HeaderMap::new();
         let http_state = Arc::new(HttpState {
             site: state.site.clone(),
             base: "/".into(),
-            run: "model-test".into(),
+            run: "preview-test".into(),
             reload: state.reload.clone(),
             shutdown: watch::channel(false).1,
         });
@@ -2296,25 +2290,27 @@ mod tests {
             headers.clone(),
         )
         .await;
-        assert_eq!(response.headers()["x-aggr-page-model"], "1");
-        assert!(
-            response.headers()["x-aggr-dev-client"]
-                .to_str()
-                .unwrap()
-                .contains("run=model-test")
-        );
-        let model = axum::body::to_bytes(response.into_body(), usize::MAX)
+        assert_eq!(response.headers()["x-aggr-dev-run"], "preview-test");
+        assert_eq!(response.headers()["x-robots-tag"], "noindex, nofollow");
+        let html = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let model: serde_json::Value = serde_json::from_slice(&model).unwrap();
-        assert_eq!(
-            model["page"]["page"]["data"]["rows"][0]["title"],
-            "Retained article"
-        );
         assert!(
-            !root.join("index.html").exists(),
-            "source SSR requests never run the embedded renderer"
+            std::str::from_utf8(&html)
+                .unwrap()
+                .contains("Retained article")
         );
+        assert_eq!(
+            html.as_ref(),
+            state
+                .site
+                .body("index.html")
+                .await
+                .unwrap()
+                .unwrap()
+                .as_slice()
+        );
+        assert!(root.join("index.html").is_file());
         for route in ["/missing.html", "/missing/"] {
             let response = handle(
                 State(http_state.clone()),
@@ -2323,14 +2319,12 @@ mod tests {
             )
             .await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
-            assert_eq!(response.headers()["x-aggr-page-model"], "1");
-            let model = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let model: serde_json::Value = serde_json::from_slice(&model).unwrap();
-            assert_eq!(model["page"]["page"]["view"], "not_found");
+            assert_eq!(
+                response.headers()["content-type"],
+                "text/html; charset=utf-8"
+            );
         }
-        assert!(!root.join("404.html").exists());
+        assert!(root.join("404.html").is_file());
         let response = handle(
             State(http_state.clone()),
             duplicate_route.parse().unwrap(),
@@ -2338,7 +2332,6 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(!response.headers().contains_key("x-aggr-page-model"));
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -2350,7 +2343,6 @@ mod tests {
         )));
         let response = handle(State(http_state), "/missing.png".parse().unwrap(), headers).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert!(!response.headers().contains_key("x-aggr-page-model"));
         let page = state.site.response("/", "/").await.unwrap().1;
         assert!(
             std::str::from_utf8(&page)
@@ -2441,8 +2433,8 @@ mod tests {
         );
         drop(retained_snapshot);
         assert!(
-            !root.exists(),
-            "superseded snapshots release their scratch directory"
+            root.exists(),
+            "recent generations retain the immutable assets an older page still names"
         );
         let enriched: crate::discussions::ResolutionSet =
             serde_json::from_value(serde_json::json!({
@@ -2548,6 +2540,11 @@ mod tests {
             Some(last_good.as_path())
         );
         feed.assert_calls_async(0).await;
+        drop(state);
+        assert!(
+            !root.exists(),
+            "dropping the preview releases retired generations"
+        );
     }
 
     #[test]
@@ -2604,17 +2601,33 @@ mod tests {
         assert_ne!(listener.local_addr().unwrap().port(), port);
     }
 
-    #[test]
-    fn injects_reload_client_without_touching_the_build() {
-        let html = inject_reload(b"<body>Hello</body>", "/repo/", "run-1", 3);
-        let html = String::from_utf8(html).unwrap();
-        assert!(html.contains("new EventSource('/repo/__aggr/reload?run=run-1&revision=3')"));
-        assert!(html.contains("caches.delete"));
-        assert!(html.contains("__aggr_dev"));
-        assert!(!html.contains("window.AGGR"));
-        assert!(!html.contains("aggr:build"));
-        assert!(html.contains("n.searchParams.set('__aggr_dev',Date.now());location.replace(n)"));
-        assert!(html.ends_with("</body>"));
+    #[tokio::test]
+    async fn preview_html_is_canonical_and_reload_uses_headers() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("site");
+        std::fs::create_dir_all(&staging).unwrap();
+        let html = b"<body>Canonical article</body>";
+        std::fs::write(staging.join("index.html"), html).unwrap();
+        let site = MemorySite::load(&staging).await.unwrap();
+        let (reload, _) = broadcast::channel(16);
+        let (_, shutdown) = watch::channel(false);
+        let state = Arc::new(HttpState {
+            site,
+            base: "/".into(),
+            run: "123".into(),
+            reload,
+            shutdown,
+        });
+        let response = handle(State(state), "/".parse().unwrap(), HeaderMap::new()).await;
+        assert_eq!(response.headers()["x-robots-tag"], "noindex, nofollow");
+        assert_eq!(response.headers()["x-aggr-dev-run"], "123");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .as_ref(),
+            html
+        );
     }
 
     #[test]

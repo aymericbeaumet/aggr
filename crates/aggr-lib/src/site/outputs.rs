@@ -1250,7 +1250,6 @@ mod tests {
             config_sha: None,
             data_sha: None,
             generation: "generation".into(),
-            release: true,
         }
     }
 

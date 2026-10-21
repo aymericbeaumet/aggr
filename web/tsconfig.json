@@ -13,9 +13,7 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
-    "types": [
-      "vite/client"
-    ],
+    "types": [],
     "paths": {
       "@aggr-model/*": [
         "./.generated/types/*"
@@ -27,6 +25,7 @@
     "test"
   ],
   "exclude": [
-    "src/sw"
+    "src/sw",
+    "test/projector.ts"
   ]
 }

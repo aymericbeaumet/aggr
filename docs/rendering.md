@@ -3,8 +3,8 @@
 aggr prepares archive display data in Rust and renders the reader with shared Svelte components
 under `web/`. Cargo compiles and embeds the UI; installed binaries render it in isolated QuickJS
 runtimes without Node. There is one design: no theme setting, template override, or `[site.params]`.
-Changing the reader means changing this repository. Vite supplies component and stylesheet HMR
-in development. See [client development](client.md) for the build and hydration contract.
+Changing the reader means changing this repository. The native compiler swaps renderer and asset
+bundles in the running server for fast reload. See [client development](client.md).
 
 Publication and lazy development share archive preparation, page rendering, and one inventory of
 fixed pages and collections. Publication writes the complete site; ordinary dev resolves those
@@ -17,10 +17,10 @@ Rust's display contexts live in `crates/aggr-lib/src/site/context.rs`; the seria
 `crates/aggr-ui-model`. `crates/aggr-lib/src/site/page.rs` prepares the head, URLs, directories and page model.
 Article HTML is sanitized and passed separately from the JSON model.
 
-`site.indexing` is true only for release builds with `[site] indexing = true`; utility pages
+`site.indexing` follows `[site] indexing = true`; utility pages
 remain excluded. The shared head component emits the corresponding robots metadata.
 
-Preview and development builds always request `noindex`. Local search and feeds remain available
+Preview requests `noindex` through HTTP headers without changing generated HTML. Local search and feeds remain available
 regardless of this setting; see [public hosting](hosting.md#publication-and-search-indexing).
 
 Items and recommendation links also expose `metadata`, the precomputed display view shared with search:

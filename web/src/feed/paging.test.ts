@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import type { PaginatorCtx } from '@aggr-model/PaginatorCtx';
 import { feedPageUrl, sliceFeed } from './paging';
 

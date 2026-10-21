@@ -26,7 +26,7 @@ not a requirement. A run that finds nothing new leaves no trace.";
 #[derive(Debug, Parser)]
 #[command(name = "aggr", version, about = ABOUT, long_about = LONG_ABOUT)]
 #[command(
-    after_help = "Use aggr dev --demo to try the reader. In a source checkout, cargo run -- dev starts contributor tools; --native uses embedded assets."
+    after_help = "Use aggr dev --demo to try the reader. In a source checkout, cargo run -- dev starts contributor tools; --no-watch uses embedded assets."
 )]
 pub struct Cli {
     /// Path to the configuration file.
@@ -195,29 +195,22 @@ pub struct BuildArgs {
     /// Write a JSON build report outside the generated site.
     #[arg(long, value_name = "PATH")]
     pub report: Option<PathBuf>,
-    /// Production build: absolute URLs from the configured site URL (or --base-url) and a CNAME for custom
-    /// domains. Without it the site is built to be served from `/`.
-    #[arg(long)]
-    pub release: bool,
 }
 
 #[derive(Debug, Args, Default)]
 pub struct DevArgs {
-    /// Serve the embedded reader without Node or contributor build tools.
+    /// Preview the embedded reader without watching contributor source files.
     #[arg(long)]
-    pub native: bool,
+    pub no_watch: bool,
     /// Try the embedded starter in an isolated cache, without creating a project.
     #[arg(long)]
     pub demo: bool,
     /// Clean this project's disposable caches and dev data before starting; keep the archive.
     #[arg(long, conflicts_with = "dry_run")]
     pub clean: bool,
-    /// Absolute URL used to exercise a release build locally (defaults to the configured site URL).
+    /// Canonical site URL (defaults to the configured site URL).
     #[arg(long, value_name = "URL", env = "AGGR_BASE_URL")]
     pub base_url: Option<String>,
-    /// Build exactly as production while retaining dev's isolated cache and live reload.
-    #[arg(long)]
-    pub release: bool,
     #[command(flatten)]
     pub fetch: FetchArgs,
     /// Port to listen on.
@@ -232,7 +225,6 @@ impl DevArgs {
             out: None,
             base_url: self.base_url.clone(),
             data_ref: None,
-            release: self.release,
             ..Default::default()
         }
     }
@@ -298,12 +290,12 @@ mod tests {
 
     #[test]
     fn dev_has_local_defaults() {
-        let dev = Cli::try_parse_from(["aggr", "dev", "--release"]).unwrap();
+        let dev = Cli::try_parse_from(["aggr", "dev"]).unwrap();
         let Command::Dev(dev) = dev.command else {
             panic!("expected dev");
         };
         assert_eq!(dev.port, 7319);
-        assert!(dev.release);
+        assert!(!dev.no_watch);
         assert!(Cli::try_parse_from(["aggr", "dev", "--out", "_site"]).is_err());
         assert!(Cli::try_parse_from(["aggr", "dev", "--data-ref", "HEAD"]).is_err());
 
@@ -339,9 +331,9 @@ mod tests {
     }
 
     #[test]
-    fn release_cli_supports_native_development() {
-        let cli = Cli::try_parse_from(["aggr", "dev", "--native", "--demo"]).unwrap();
-        assert!(matches!(cli.command, Command::Dev(args) if args.native && args.demo));
+    fn installed_cli_supports_a_demo_without_source_watching() {
+        let cli = Cli::try_parse_from(["aggr", "dev", "--no-watch", "--demo"]).unwrap();
+        assert!(matches!(cli.command, Command::Dev(args) if args.no_watch && args.demo));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { flushSync, mount, unmount } from 'svelte';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from "../../test/browser";
 import type { PreferenceSchema } from '@aggr-model/PreferenceSchema';
 import { page } from '../state/page.svelte';
 import { loadPreferences, preferences } from '../state/preferences.svelte';
@@ -43,8 +43,7 @@ const schema: PreferenceSchema = {
 };
 
 let app: Record<string, unknown> | null = null;
-// Node's own `localStorage` global shadows jsdom's and is undefined without a file, so the
-// store is a map with the two methods the state uses.
+// Keep imported and exported preferences isolated from browser storage.
 const stored = new Map<string, string>();
 const storage = {
   getItem: (key: string) => stored.get(key) ?? null,
@@ -193,6 +192,10 @@ describe('Form', () => {
   });
 
   it('offers the link to copy by hand where the clipboard is out of reach', async () => {
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const share = Object.getOwnPropertyDescriptor(navigator, 'share');
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+    Object.defineProperty(navigator, 'share', { configurable: true, value: undefined });
     open({ theme: 'dark' });
     control<HTMLButtonElement>('copy-state').click();
     await Promise.resolve();
@@ -205,6 +208,8 @@ describe('Form', () => {
     expect(url.searchParams.has('aggr-state')).toBe(false);
     expect(status()).toBe('Copy the selected link. Clipboard access is unavailable.');
     expect(control<HTMLButtonElement>('share-state').hidden).toBe(true);
+    if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard); else Reflect.deleteProperty(navigator, 'clipboard');
+    if (share) Object.defineProperty(navigator, 'share', share); else Reflect.deleteProperty(navigator, 'share');
   });
 
   it('follows a change made in another tab', () => {

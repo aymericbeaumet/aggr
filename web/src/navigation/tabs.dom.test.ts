@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { markCurrentTab, markTabForKind, tabUnder, type TabBox } from './tabs';
 
 const bar: TabBox = { left: 0, top: 700, width: 300, height: 68 };

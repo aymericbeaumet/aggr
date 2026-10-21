@@ -5,14 +5,10 @@ lockfile = true
 # Setup provisions tools explicitly; CI installs only the subset each job needs.
 run_auto_install = false
 
-[env]
-_.path = ["{{config_root}}/web/node_modules/.bin"]
-
 [tools]
 actionlint = "1.7.12"
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"
 cmake = "4.4.4"
-node = "26.12.0"
 ninja = "1.13.2"
 rust = { version = "1.99.1", profile = "default" }
 
@@ -45,52 +41,52 @@ os = ["windows/x64"]
 [tools."http:nasm".platforms]
 windows-x64 = { url = "https://www.nasm.us/pub/nasm/releasebuilds/{{ version }}/win64/nasm-{{ version }}-win64.zip", checksum = "sha256:161d0bfaff53c2f9e9f3e69fd0672323ebabafd1268976a5cec11be92a19aee7", bin_path = "nasm-{{ version }}" }
 
+[tools."http:typescript-native"]
+version = "7.0.2"
+
+[tools."http:typescript-native".platforms]
+linux-arm64 = { url = "https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.0.2.tgz", checksum = "sha256:c83d931ac9dd7549cde6e71246aa9d6a9812843023df3e277fe3b5dcf41dd0ea", bin_path = "package/lib", format = "tar.gz" }
+linux-x64 = { url = "https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-7.0.2.tgz", checksum = "sha256:7ecad6f67377e831856367ab062ef394f21506a611405bf8ac0ff039348637d3", bin_path = "package/lib", format = "tar.gz" }
+macos-arm64 = { url = "https://registry.npmjs.org/@typescript/typescript-darwin-arm64/-/typescript-darwin-arm64-7.0.2.tgz", checksum = "sha256:902e2fe1cf0799198ef902c6b8c310a450fef629a6baba41d45641ef75c04ebd", bin_path = "package/lib", format = "tar.gz" }
+macos-x64 = { url = "https://registry.npmjs.org/@typescript/typescript-darwin-x64/-/typescript-darwin-x64-7.0.2.tgz", checksum = "sha256:eba158cb54050f723d5ff781438f33de5640054440bb4f2bd170cfe9bc2eb551", bin_path = "package/lib", format = "tar.gz" }
+windows-arm64 = { url = "https://registry.npmjs.org/@typescript/typescript-win32-arm64/-/typescript-win32-arm64-7.0.2.tgz", checksum = "sha256:0a73534e6ee50cdbb2a29ac48657ca0ad13cf0f424cf63808e4df7baeb87b8be", bin_path = "package/lib", format = "tar.gz" }
+windows-x64 = { url = "https://registry.npmjs.org/@typescript/typescript-win32-x64/-/typescript-win32-x64-7.0.2.tgz", checksum = "sha256:61fc4e141d2bc687db580e71bbfa63b9c209f0310645d82ca1b457eb3a24fd19", bin_path = "package/lib", format = "tar.gz" }
+
 [tasks.default]
 description = "Run all Rust and frontend checks"
 depends = ["check"]
 
 [tasks.setup]
-description = "Install pinned tools and locked frontend packages"
-run = ["mise install", "mise run dependencies"]
-
-[tasks.dependencies]
-description = "Repair locked frontend dependencies"
-run = "node web/build/dependencies.mjs"
+description = "Install only this project's pinned native tools"
+run = ["mise install rust cmake ninja", "cargo run --locked -p aggr-tools -- setup"]
 
 [tasks.build]
 description = "Build the CLI and embedded reader"
-depends = ["dependencies"]
 run = "cargo build --locked"
 
 [tasks.release]
 description = "Build the optimized CLI"
-depends = ["dependencies"]
 run = "cargo build --release --locked"
 
 [tasks.timings]
 description = "Build with Cargo's HTML timing report"
-depends = ["dependencies"]
 run = "cargo build --locked --timings"
 
 [tasks.dev]
-description = "Run the demo with Vite HMR and Rust restarts"
-depends = ["dependencies"]
+description = "Run the demo with native compilation and fast reload"
 env = { AGGR_CONFIG = "{{env.AGGR_CONFIG | default(value='examples/aggr.toml')}}" }
 run = "cargo run --locked -- dev"
 
 [tasks.run]
 description = "Run aggr against examples/aggr.toml"
-depends = ["dependencies"]
 run = "cargo run --locked -- --config examples/aggr.toml"
 
 [tasks.test]
-description = "Run all Rust workspace tests"
-depends = ["dependencies"]
+description = "Run Rust workspace tests"
 run = "cargo test --workspace --locked"
 
 [tasks.lint]
 description = "Run Clippy with warnings denied"
-depends = ["dependencies"]
 run = "cargo clippy --workspace --locked --all-targets -- --deny warnings"
 
 [tasks.deps-check]
@@ -114,42 +110,29 @@ description = "Lint Rust, then run its tests"
 run = [{ task = "lint" }, { task = "test" }]
 
 [tasks.check]
-description = "Check formatting, then Rust and frontend behavior"
-run = [{ task = "fmt-check" }, { tasks = ["check-rust", "client-check"] }]
+description = "Check formatting, Rust and the reader"
+# Finish Rust builds before the browser runs; keep executable generations stable during tests.
+run = [{ task = "fmt-check" }, { task = "check-rust" }, { task = "client-check" }]
 
 [tasks.client-build]
-description = "Compile the embedded reader and browser assets"
-depends = ["build"]
-dir = "web"
-run = "node build.ts"
+description = "Compile the reader with native Rolldown"
+run = "cargo run --locked -p aggr-tools -- build"
+
+[tasks.vendor]
+description = "Verify or update frozen frontend sources"
+run = "cargo run --locked -p aggr-tools -- vendor"
 
 [tasks.client-typecheck]
-description = "Check Svelte and TypeScript"
-depends = ["build"]
-dir = "web"
-run = ["svelte-check --tsgo --tsconfig ./tsconfig.json", "tsc --noEmit -p tsconfig.worker.json"]
+description = "Check Svelte and TypeScript without a JavaScript host"
+run = "cargo run --locked -p aggr-tools -- check"
 
 [tasks.client-test]
-description = "Build and test the reader"
-depends = ["build"]
-dir = "web"
-run = ["node build.ts", "vitest run"]
-
-[tasks.client-test-build]
-description = "Test frontend build and publication helpers"
-depends = ["dependencies"]
-dir = "web"
-run = "node --test build/*.test.mjs ../scripts/*.test.mjs"
-
-[tasks.client-test-dev]
-description = "Test the development supervisor"
-depends = ["dependencies"]
-dir = "web"
-run = "node --test --test-concurrency=1 dev/*.test.mjs"
+description = "Run isolated reader tests in the real browser"
+run = "cargo run --locked -p aggr-tools -- client-test"
 
 [tasks.client-check]
-description = "Check, build and test the frontend and supervisor"
-run = [{ task = "client-typecheck" }, { task = "client-test" }, { task = "client-test-build" }, { task = "client-test-dev" }]
+description = "Check and test the reader"
+run = [{ task = "client-typecheck" }, { task = "client-test" }]
 
 [tasks.browser-test]
 description = "Run browser contracts against AGGR_WEBDRIVER_URL"
@@ -157,33 +140,32 @@ depends = ["build"]
 run = "cargo test --locked --test browser -- --ignored"
 
 [tasks.verify-release]
-description = "Check the release CLI's supported commands"
-run = "node web/dev/verify-release.mjs"
+description = "Check the installable CLI's commands"
+run = "cargo run --locked -p aggr-tools -- verify-release"
 
 [tasks.package]
-description = "Prepare and verify all three publishable crates"
-depends = ["build"]
-run = ["node web/build/package.mjs", "cargo package -p aggr-ui-model -p aggr-lib -p aggr"]
+description = "Prepare and verify the publishable crates"
+run = "cargo run --locked -p aggr-tools -- package"
 
 [tasks.publish]
-description = "Publish missing model, library and CLI versions"
-run = "node scripts/publish.mjs"
+description = "Publish missing crate versions in dependency order"
+run = "cargo run --locked -p aggr-tools -- publish"
 
 [tasks.publish-test]
-description = "Test crates.io publication without uploading"
-run = "node --test scripts/publish.test.mjs"
+description = "Test publication without uploading"
+run = "cargo test --locked -p aggr-tools distribution::tests"
 
 [tasks.homebrew]
-description = "Prepare or publish a Homebrew formula for a release"
-run = "node scripts/homebrew.mjs"
+description = "Prepare or publish a release formula"
+run = "cargo run --locked -p aggr-tools -- homebrew"
 
 [tasks.homebrew-test]
-description = "Test Homebrew publication without writing to the tap"
-run = "node --test scripts/homebrew.test.mjs"
+description = "Test Homebrew publication without updating the tap"
+run = "cargo test --locked -p aggr-tools distribution::tests"
 
 [tasks.msrv]
 description = "Build with the declared minimum Rust version"
-run = "node scripts/msrv.mjs"
+run = "cargo run --locked -p aggr-tools -- msrv"
 
 [tasks.clean]
 description = "Remove Cargo build artifacts"

@@ -161,7 +161,7 @@ jobs:
 
       # Build starts with a sync. The Pages URL wins over `[site] url`; without Pages the config
       # must name the host.
-      - run: aggr build --release --out "$GITHUB_WORKSPACE/_site" --report "$RUNNER_TEMP/aggr-build.json"
+      - run: aggr build --out "$GITHUB_WORKSPACE/_site" --report "$RUNNER_TEMP/aggr-build.json"
         env:
           AGGR_BASE_URL: ${{ steps.pages.outputs.base_url }}
 

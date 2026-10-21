@@ -75,6 +75,7 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
       // An entry lights up the moment it arrives and only fades once it stops being new, which is
       // what a feed that refreshes itself does to the rows it has already shown.
       const arrival = background.transitionDuration;
+      const state = { row: row.className, visibility: document.visibilityState, pending: sessionStorage.getItem('aggr:new-entries:%2Freader%2F') };
       row.classList.remove('is-new');
       const duration = getComputedStyle(cell, '::before').transitionDuration;
       const badge = document.querySelector('link[rel~=icon]').href.startsWith('data:');
@@ -84,7 +85,7 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
           const middle = color();
           setTimeout(() => {
             const final = color();
-            done({highlighted, initial, middle, final, aligned, arrival, duration, badge});
+            done({highlighted, initial, middle, final, aligned, arrival, duration, badge, state});
           }, 3500);
         }, 2000);
       });
@@ -94,7 +95,7 @@ async fn article_reading_contracts(client: &Client, fixture: &Fixture) -> Result
         .await?;
     assert_eq!(
         new_item_fade["arrival"], "0s",
-        "a new entry is highlighted on arrival, not animated into place"
+        "a new entry is highlighted on arrival, not animated into place: {new_item_fade}"
     );
     assert_eq!(new_item_fade["duration"], "5s");
     assert_eq!(

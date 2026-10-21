@@ -18,7 +18,7 @@ The `config`, `sources`, `store`, and `site` modules expose the underlying build
 blocks; `commands` exposes complete workflows. Network access belongs to ingestion.
 Rendering consumes local archived content and embedded reader assets.
 
-Published crates include the compiled reader and require no Node installation.
+Published crates include the compiled reader and build with Cargo alone.
 Native dependencies for the HTTP challenge fallback are described in
 [interoperability](https://github.com/aymericbeaumet/aggr/blob/main/docs/interoperability.md).
 See the [repository README](https://github.com/aymericbeaumet/aggr) for CLI installation and use,

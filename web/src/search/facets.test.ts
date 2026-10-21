@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { facetIndex, readableQuery, resolveFacet } from './facets';
 import type { Facets } from './types';
 

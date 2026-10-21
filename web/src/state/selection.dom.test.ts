@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import type { CursorRow } from '../selection/cursor';
 import { selection } from './selection.svelte';
 

@@ -112,16 +112,6 @@ fn trim_cache(project: &Project) {
 /// The same required synchronization stage for dev, redirected to its private cache and stopped
 /// before git commit/push. Keeping this here prevents build and dev from growing different fetch
 /// semantics over time.
-pub(super) async fn run_dev(
-    project: &Project,
-    worktree: &crate::git::Worktree,
-    args: &FetchArgs,
-    cache: &Path,
-    ownership: Option<std::sync::Arc<super::lock::DevLock>>,
-) -> Result<Report> {
-    run_dev_observed(project, worktree, args, cache, None, ownership).await
-}
-
 pub(super) async fn run_dev_with_progress(
     project: &Project,
     worktree: &crate::git::Worktree,
@@ -130,24 +120,13 @@ pub(super) async fn run_dev_with_progress(
     progress: tokio::sync::mpsc::Sender<fetch::Progress>,
     ownership: Option<std::sync::Arc<super::lock::DevLock>>,
 ) -> Result<Report> {
-    run_dev_observed(project, worktree, args, cache, Some(progress), ownership).await
-}
-
-async fn run_dev_observed(
-    project: &Project,
-    worktree: &crate::git::Worktree,
-    args: &FetchArgs,
-    cache: &Path,
-    progress: Option<tokio::sync::mpsc::Sender<fetch::Progress>>,
-    ownership: Option<std::sync::Arc<super::lock::DevLock>>,
-) -> Result<Report> {
     let report = fetch::run_with_cache_progress(
         project,
         worktree,
         args,
         cache,
         fetch::StatePolicy::DevCache,
-        progress,
+        Some(progress),
         ownership,
     )
     .await;

@@ -1,21 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use sha2::{Digest, Sha256};
-
-fn run(command: &mut Command, operation: &str) {
-    let output = command
-        .output()
-        .unwrap_or_else(|error| panic!("{operation}: {error}; run `mise run setup` first"));
-    assert!(
-        output.status.success(),
-        "{operation}: {}\n{}\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
 
 fn files(root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
@@ -27,7 +13,7 @@ fn files(root: &Path) -> Vec<PathBuf> {
             paths.push(path);
         }
     }
-    paths.sort();
+    paths.sort_by(|left, right| left.as_os_str().cmp(right.as_os_str()));
     paths
 }
 
@@ -41,8 +27,8 @@ fn main() {
     };
     let web = root.join("web");
     let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("build output directory"));
-    let ui = output.join("ui");
-    let workspace = web.join("build.ts").is_file();
+    let ui;
+    let workspace = web.join("src").is_dir();
     let packaged = manifest.join(".generated/publish");
     let resources = [
         ("config.default.toml", "config.default.toml"),
@@ -73,19 +59,13 @@ fn main() {
         for input in [
             "web/src",
             "web/public",
-            "web/build.ts",
-            "web/build",
-            "web/vite.config.ts",
-            "web/tsconfig.json",
-            "web/svelte.config.js",
-            "web/package.json",
-            "web/package-lock.json",
+            "crates/aggr-ui-build/vendor",
+            "crates/aggr-ui-build/src",
             "crates/aggr-ui-model/src",
             "mise.toml",
         ] {
             println!("cargo:rerun-if-changed={}", root.join(input).display());
         }
-        println!("cargo:rerun-if-env-changed=NODE_ENV");
 
         let generated = web.join(".generated");
         fs::create_dir_all(&generated).expect("creating generated UI directory");
@@ -98,21 +78,12 @@ fn main() {
             .expect("opening UI build lock");
         guard.lock().expect("locking UI generation");
 
-        run(
-            Command::new("node")
-                .arg("build/dependencies.mjs")
-                .current_dir(&web),
-            "preparing locked frontend dependencies",
-        );
         aggr_ui_model::export_types(generated.join("types")).expect("exporting page model types");
-        run(
-            Command::new("node")
-                .arg("build.ts")
-                .current_dir(&web)
-                .env("AGGR_UI_OUT_DIR", &ui),
-            "building the Svelte reader",
-        );
+        ui = aggr_ui_build::build(&root, &output.join("ui-generations"))
+            .expect("building the native Svelte reader")
+            .directory;
     } else {
+        ui = output.join("ui");
         let source = packaged.join("ui");
         println!("cargo:rerun-if-changed={}", source.display());
         assert!(
@@ -129,6 +100,19 @@ fn main() {
             fs::copy(path, destination).expect("copying packaged reader assets");
         }
     }
+
+    let asset_manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(ui.join("assets.json")).expect("reading embedded UI manifest"),
+    )
+    .expect("parsing embedded UI manifest");
+    let contract = asset_manifest["contract"]
+        .as_str()
+        .expect("embedded UI manifest requires a page-model contract hash");
+    assert!(
+        contract.len() == 64 && contract.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "embedded UI contract must be a SHA256 digest"
+    );
+    println!("cargo:rustc-env=AGGR_UI_CONTRACT_HASH={contract}");
 
     let mut fingerprint = Sha256::new();
     let mut embedded = String::from("pub static UI_FILES: &[(&str, &[u8])] = &[\n");

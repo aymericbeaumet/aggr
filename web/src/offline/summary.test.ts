@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import type { OfflineStatus, SearchStatus } from '../sw/messages';
 import { offlineSummary } from './summary';
 

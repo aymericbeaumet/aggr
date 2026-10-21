@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { catalog, harness, indexBase, manifest, scope, tick, version } from './harness';
+import { describe, expect, it } from "../../test/browser";
+import { catalog, harness, indexBase, key, manifest, scope, tick, version } from './harness';
 import { isOfflineStatus } from './messages';
 import { configureOffline, readOfflineStatus, saveOfflineArticles } from './offline';
 import { readSelection, resourceKey, storedResource } from './protected';
@@ -20,6 +20,25 @@ async function seedLegacy(env: ReturnType<typeof harness>, items = catalog): Pro
 }
 
 describe('offline articles', () => {
+  it('waits for a lazily prepared catalog and reuses the completed result', async () => {
+    const { ctx: original } = harness();
+    let attempts = 0;
+    const ctx = {
+      ...original,
+      fetch: async (...args: Parameters<typeof original.fetch>) => {
+        if (key(args[0]).endsWith('offline-catalog.json') && ++attempts === 1)
+          return new Response(null, { status: 202, headers: { 'Retry-After': '0' } });
+        return original.fetch(...args);
+      },
+    };
+    const result = await saveOfflineArticles(ctx, 1);
+    expect(result.saved.map(item => item.title)).toEqual(['Newest']);
+    expect(result.failed).toBe(0);
+    expect(attempts).toBe(2);
+    await saveOfflineArticles(ctx, 1);
+    expect(attempts).toBe(2);
+  });
+
   it('fetches the article catalog only for a positive download count, and only once', async () => {
     const { ctx, requests } = harness();
     await saveOfflineArticles(ctx, 0);
@@ -29,6 +48,35 @@ describe('offline articles', () => {
     const before = requests.length;
     await saveOfflineArticles(ctx, 1);
     expect(requests.slice(before).some((url) => url.endsWith('offline-catalog.json'))).toBe(false);
+  });
+
+  it('disabling cancels a lazily prepared catalog without waiting for its retry delay', async () => {
+    const { ctx: original } = harness();
+    let requested!: () => void;
+    const started = new Promise<void>((resolve) => { requested = resolve; });
+    const ctx = {
+      ...original,
+      fetch: async (...args: Parameters<typeof original.fetch>) => {
+        if (key(args[0]).endsWith('offline-catalog.json')) {
+          requested();
+          return new Response(null, { status: 202, headers: { 'Retry-After': '5' } });
+        }
+        return original.fetch(...args);
+      },
+    };
+    const pending = configureOffline(ctx, 2);
+    await started;
+    await tick();
+    const clearing = configureOffline(ctx, 0);
+    const cleared = await Promise.race([
+      clearing.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 500)),
+    ]);
+    expect(cleared).toBe(true);
+    await pending;
+    const status = await readOfflineStatus(ctx);
+    expect(status.requested).toBe(0);
+    expect(status.saved).toHaveLength(0);
   });
 
   it('require the page and every retained rendition, sharing resources across items', async () => {
@@ -93,9 +141,14 @@ describe('offline articles', () => {
     ] }];
     let release!: (response: Response) => void;
     const staged = new Promise<Response>((resolve) => { release = resolve; });
-    state.network = async (url) => url.endsWith('items/new/') ? staged : new Response(url);
+    let requested!: () => void;
+    const started = new Promise<void>((resolve) => { requested = resolve; });
+    state.network = async (url) => {
+      if (url.endsWith('items/new/')) { requested(); return staged; }
+      return new Response(url);
+    };
     const update = saveOfflineArticles(ctx, 1);
-    await tick();
+    await started;
     state.offline = true;
     expect((await readOfflineStatus(ctx)).saved.map((item) => item.title)).toEqual(['Newest']);
     expect(await (await pageResponse(ctx, new Request(`${scope}items/new/?from=feed`))).text()).toBe(`${scope}items/new/`);

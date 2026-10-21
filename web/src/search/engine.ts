@@ -330,7 +330,7 @@ export type Session = {
 /** Node has no `onLine`; anywhere it is unknown, the network is assumed. */
 export const isOnline = (): boolean => typeof navigator === 'undefined' || navigator.onLine !== false;
 
-const defaultImport: ImportAPI = (url) => import(/* @vite-ignore */ url) as Promise<PagefindModule>;
+const defaultImport: ImportAPI = (url) => import(url) as Promise<PagefindModule>;
 
 export function createSession(base: string, importAPI: ImportAPI = defaultImport, online = isOnline()): Session {
   const versions = new Map<string, Index>();

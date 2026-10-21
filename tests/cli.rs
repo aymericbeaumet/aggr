@@ -205,31 +205,6 @@ fn stop_dev(mut child: std::process::Child) -> std::process::Output {
     panic!("aggr dev did not stop after SIGINT");
 }
 
-#[cfg(unix)]
-fn wait_for_cached_site(root: &Path, timeout: Duration) -> PathBuf {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if let Some(entry) = walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(Result::ok)
-            .find(|entry| {
-                entry.file_name() == ".aggr-site"
-                    && entry.path().parent().is_some_and(|site| {
-                        site.file_name().is_some_and(|name| name == "site")
-                            && site.join(".aggr-dev-key").is_file()
-                            && entry.path().strip_prefix(root).is_ok_and(|relative| {
-                                !relative.components().any(|part| part.as_os_str() == "tmp")
-                            })
-                    })
-            })
-        {
-            return entry.path().parent().unwrap().to_path_buf();
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("aggr dev did not populate its persistent cache");
-}
-
 fn preview_image() -> Vec<u8> {
     let mut bytes = std::io::Cursor::new(Vec::new());
     image::RgbImage::from_pixel(640, 400, image::Rgb([48, 128, 96]))
@@ -941,7 +916,6 @@ fn fresh_local_repository_builds_without_an_origin_or_a_primary_commit() {
     );
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn contributor_dev_rejects_invalid_config_before_starting_tools() {
     let repo = TestRepo::new();
@@ -1160,7 +1134,7 @@ fn run_native_preview_with_only_git(mut command: Command, directory: &Path, cach
         .env_remove("AGGR_DEV_INTERNAL_WORKER")
         .env("PATH", tools.path())
         .env("AGGR_CACHE_DIR", cache)
-        .args(["dev", "--native", "--port", &port.to_string()])
+        .args(["dev", "--no-watch", "--port", &port.to_string()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1249,7 +1223,7 @@ fn dev_uses_an_external_persistent_cache_and_stops_on_ctrl_c() {
 
 #[test]
 #[cfg(unix)]
-fn dev_release_keeps_an_opted_in_site_out_of_search_engines() {
+fn dev_keeps_publication_metadata_but_blocks_crawling_over_http() {
     let server = MockServer::start();
     server.mock(|when, then| {
         when.method(GET).path("/feed.xml");
@@ -1268,25 +1242,41 @@ fn dev_release_keeps_an_opted_in_site_out_of_search_engines() {
     let child = repo
         .aggr()
         .env("AGGR_CACHE_DIR", &cache_path)
-        .args(["dev", "--release", "--port", &port.to_string()])
+        .args(["dev", "--port", &port.to_string()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     wait_for_dev(port, Duration::from_secs(10));
-    let site = wait_for_cached_site(&cache_path, Duration::from_secs(20));
+    wait_for_dev_page(port, "/", "Second", Duration::from_secs(20));
+    aggr_lib::http::install_crypto_provider();
+    let (headers, html) = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let response = reqwest::get(format!("http://127.0.0.1:{port}/"))
+            .await
+            .unwrap();
+        let headers = response.headers().clone();
+        (headers, response.text().await.unwrap())
+    });
     let output = stop_dev(child);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let html = std::fs::read_to_string(site.join("index.html")).unwrap();
-    assert!(html.contains("name=\"robots\" content=\"noindex,follow\""));
-    assert!(!site.join("sitemap.xml").exists());
-    let descriptor: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(site.join("aggr.json")).unwrap()).unwrap();
-    assert!(descriptor["discovery"].get("sitemap").is_none());
+    assert_eq!(headers.get("x-robots-tag").unwrap(), "noindex, nofollow");
+    let document = scraper::Html::parse_document(&html);
+    let selector = scraper::Selector::parse("meta[name=robots]").unwrap();
+    let robots = document
+        .select(&selector)
+        .next()
+        .unwrap()
+        .value()
+        .attr("content")
+        .unwrap();
+    let directives: Vec<_> = robots.split(',').collect();
+    assert!(directives.contains(&"index"));
+    assert!(directives.contains(&"follow"));
+    assert!(!directives.contains(&"noindex"));
 }
 
 #[test]
@@ -2000,20 +1990,10 @@ fn source_errors_are_recorded_on_transition_only_and_all_failed_is_fatal() {
 }
 
 #[test]
-fn release_without_a_public_url_fails_before_fetches_or_local_changes() {
-    for arguments in [
-        vec!["build", "--release"],
-        vec!["build", "--release", "--clean"],
-    ] {
-        assert_invalid_build_preserves_project(&arguments, "--release needs a public URL");
-    }
-}
-
-#[test]
 fn invalid_explicit_base_urls_fail_before_fetches_or_local_changes() {
     for url in ["reader.example/feeds", "file:///tmp/reader", "https://"] {
         assert_invalid_build_preserves_project(
-            &["build", "--release", "--clean", "--base-url", url],
+            &["build", "--clean", "--base-url", url],
             "--base-url must be an absolute http(s) URL with a host",
         );
     }
@@ -2055,7 +2035,7 @@ fn assert_invalid_build_preserves_project(arguments: &[&str], error: &str) {
 }
 
 #[test]
-fn build_renders_the_site_and_release_needs_a_url() {
+fn build_renders_portable_and_canonical_sites() {
     let server = MockServer::start();
     server.mock(|when, then| {
         when.method(GET).path("/feed.xml");
@@ -2285,12 +2265,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
         .stdout(predicate::str::contains("from cache"));
 
     repo.aggr()
-        .args(["build", "--release"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("--release needs a public URL"));
-    repo.aggr()
-        .args(["build", "--release", "--base-url", "https://o.github.io/r/"])
+        .args(["build", "--base-url", "https://o.github.io/r/"])
         .assert()
         .success();
     let index = std::fs::read_to_string(site.join("index.html")).unwrap();
@@ -2309,7 +2284,7 @@ fn build_renders_the_site_and_release_needs_a_url() {
         &server.url("/feed.xml"),
         "url = \"https://reads.example.com\"\npwa = false",
     );
-    repo.aggr().args(["build", "--release"]).assert().success();
+    repo.aggr().arg("build").assert().success();
     assert!(!site.join("sw.js").exists(), "pwa = false writes no worker");
     assert!(!site.join("manifest.webmanifest").exists());
     assert_eq!(

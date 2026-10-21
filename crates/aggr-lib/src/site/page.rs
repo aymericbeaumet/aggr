@@ -1085,7 +1085,6 @@ mod tests {
             config_sha: None,
             data_sha: None,
             generation: "generation".into(),
-            release: false,
         }
     }
 
@@ -1315,7 +1314,6 @@ mod tests {
                 config_sha: None,
                 data_sha: None,
                 generation: "g".into(),
-                release: false,
             };
             let renderer = Renderer::new().unwrap();
             let shared = SharedCtx::new(&site, &build, &[], &[], &[]);

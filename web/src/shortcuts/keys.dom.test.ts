@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { controlOwnsArrows, editing } from './keys';
 
 function mount(html: string): HTMLElement {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { pullLabel, pullState } from './pull-refresh.svelte';
 
 describe('pullState', () => {

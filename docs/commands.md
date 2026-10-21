@@ -4,8 +4,8 @@
 |---|---|
 | `aggr init [--github] [--defaults]` | Write the small starter config, optionally the GitHub workflow; `--defaults` copies the full reference config instead. |
 | `aggr sync [--fetch-only] [--dry-run] [--refresh]` | Fetch new items. Normally commit and push them; `--fetch-only` writes locally without either, while `--dry-run` writes nothing. |
-| `aggr build [--release] [--out DIR] [--data-ref REF]` | Sync and render, or render a pinned data ref without fetches, commits, or pushes. |
-| `cargo run -- dev [--release] [--port 7319]` | Start the Node-managed contributor stack, sync into an isolated cache, and preview pages. Debug builds only; never commits or pushes. |
+| `aggr build [--out DIR] [--data-ref REF]` | Sync and render, or render a pinned data ref without fetches, commits, or pushes. |
+| `cargo run -- dev [--port 7319]` | Start the native contributor stack, sync into an isolated cache, and preview pages; never commits or pushes. |
 | `aggr clean [--dry-run] [--out DIR]` | Remove disposable dev state, build cache, and owned output. `--dry-run` lists exact targets. |
 | `aggr storage inspect [--json]` | Report current archive, local media, generated output, cache and Git object bytes without changing them. |
 | `aggr storage prune-renditions [--dry-run\|--apply]` | Verify originals, then explicitly remove optional archived renditions in an ordinary commit. Dry run is the default. |
@@ -44,32 +44,24 @@ or commits to the data branch. Pinned and offline builds only render their exist
 
 ## Local development
 
-`cargo run -- dev` starts Vite HMR and automatic Rust restarts. `cargo run --release -- dev` also
-works. With no local configuration, `dev` tries the embedded two-source starter in an isolated
-cache; set `AGGR_CONFIG=/path/to/aggr.toml` to preview another instance.
-Node and npm are source-build tools: Cargo compiles and embeds the reader automatically.
-Installed release binaries include `dev` and serve the embedded reader without Node. Use
-`aggr dev --native` to choose that mode in a source checkout, or `aggr dev --demo --native` to
-try the product without creating a configuration or Git repository in your current directory.
+`mise run dev` and `cargo run -- dev` start the native compiler and preview supervisor.
+`cargo run --release -- dev` uses the same behavior with an optimized executable. With no local
+configuration, `dev` tries the embedded starter in an isolated cache; set `AGGR_CONFIG` to preview
+another instance. Installed binaries serve their embedded reader. `aggr dev --no-watch` selects
+that frozen preview in a source checkout; `aggr dev --demo` needs no configuration or repository.
 
-The Rust preview backend prepares the archive's shared display metadata, then renders each page only when it is
-requested. Opening the feed reads its thumbnails; opening an article loads that article's media.
-Completion uses a small metadata catalog; the full-text index is built only when a search needs
-its runtime, and reuses the persistent Pagefind cache.
-Vite handles Svelte, TypeScript and CSS updates. Rust changes compile while the previous worker
-continues serving. During replacement preparation, the public server retains complete responses
-for recently visited pages and assets, then reloads after successful startup. Saves that supersede
-an in-flight compilation wait for the latest build instead of promoting intermediate workers.
-Completed sources become visible while slower remote sources continue; local reprocessing also
-publishes before network refresh completes. Each preview owns immutable archive inputs. A template syntax error keeps the last working
-snapshot available. Requested output lives in disposable per-generation directories; the archive
-and fetch caches survive restart, and nothing is committed or pushed.
+The preview prepares shared archive metadata, then renders pages, media and search on demand.
+UI and template edits compile with Rolldown and reload the page without restarting Rust. Rust edits
+compile in the background while the previous worker serves requests; successful replacements
+reload the browser. Failed compilations preserve the last working generation. Data and search
+caches survive UI edits and worker restarts. Nothing is committed or pushed.
 
-Use `cargo run -- dev --release` to exercise the complete publication build, including its media budget
-and PWA outputs. Ordinary lazy dev omits PWA outputs; the dev server unregisters its scoped worker
-to keep browser caches from hiding edits.
-`mise run dev` is a shortcut for the same contributor stack.
-`mise run check` runs the Rust and frontend checks. See [client development](client.md).
+Development uses the same renderer, assets and configured PWA behavior as publication. The preview
+adds an HTTP noindex header and a reload stream, preserving canonical page bytes and offline hashes.
+Large offline catalogues are prepared once on demand. `aggr build` materializes the complete site and
+checks its publication budget. See [the native toolchain](native-toolchain.md) for details.
+
+`mise run check` runs the Rust, type and browser unit checks. See [client development](client.md).
 
 ## Cache and cleanup
 

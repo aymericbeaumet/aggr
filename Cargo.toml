@@ -14,7 +14,7 @@ categories = ["command-line-utilities", "web-programming"]
 include = ["/src/main.rs", "/src/dev_worker.rs", "/readme.md", "/LICENSE", "/THIRD_PARTY_NOTICES", "/Cargo.lock"]
 
 [workspace]
-members = ["crates/aggr-lib", "crates/aggr-ui-model"]
+members = ["crates/aggr-lib", "crates/aggr-ui-model", "crates/aggr-ui-build", "crates/aggr-tools"]
 
 [features]
 dev-worker = []
@@ -77,6 +77,25 @@ opt-level = 0
 opt-level = 3
 
 [profile.dev.package.regex-automata]
+opt-level = 3
+
+# These run on every UI edit; keep native compiler and JavaScript execution fast in dev.
+[profile.dev.package.rquickjs-sys]
+opt-level = 3
+
+[profile.dev.package.rolldown]
+opt-level = 3
+
+[profile.dev.package.oxc_parser]
+opt-level = 3
+
+[profile.dev.package.oxc_transformer]
+opt-level = 3
+
+[profile.dev.package.oxc_codegen]
+opt-level = 3
+
+[profile.dev.package.lightningcss]
 opt-level = 3
 
 # Asset validation hashes retained bytes even when their decoded metadata is cached.

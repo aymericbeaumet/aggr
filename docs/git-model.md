@@ -214,7 +214,7 @@ then pins which data tree aggr renders:
 ```sh
 git fetch origin refs/aggr/last-good:refs/aggr/last-good
 aggr build --data-ref refs/aggr/last-good \
-  --release --base-url "https://reads.example.net/"
+  --base-url "https://reads.example.net/"
 ```
 
 With `--data-ref`, `build` resolves only locally available Git objects and materializes a temporary

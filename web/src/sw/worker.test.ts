@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { cacheNames, SHELL_REVISION, stale } from './caches';
 import { harness, scope, tick } from './harness';
 import { isBuildMessage, isOfflineStatus, parsePageMessage, validOfflineCount } from './messages';

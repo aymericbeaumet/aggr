@@ -118,7 +118,6 @@ pub struct BuildCtx {
     /// Content + semantic-time fingerprint used to version offline caches exactly when output
     /// can change without a new data commit.
     pub generation: String,
-    pub release: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

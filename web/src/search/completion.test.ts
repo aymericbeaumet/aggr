@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { acceptCompletion, complete, completionContext, isCompletingFacet } from './completion';
 import type { Facets } from './types';
 

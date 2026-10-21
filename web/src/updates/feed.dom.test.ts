@@ -1,7 +1,6 @@
 import { load, fixture, render } from '../../test/fixtures';
-/// <reference types="node" />
 import { flushSync } from 'svelte';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, testTools } from "../../test/browser";
 import { mountApp } from '../app/boot';
 import type { ClientPage } from '@aggr-model/ClientPage';
 import { row } from '../search/fixture';
@@ -37,7 +36,7 @@ describe('the live feed', () => {
     fresh.marked = [];
     fresh.visible = true;
     scrolledTo(0);
-    window.scrollBy = vi.fn();
+    window.scrollBy = testTools.fn();
   });
 
   it('replaces the rows in the page state and keeps the nodes of the rows already shown', () => {
@@ -160,7 +159,7 @@ describe('the live feed', () => {
     expect(page.model?.build.content).toBe(model.build.content);
     // Back to the window: the swap may go ahead where they left off.
     document.dispatchEvent(new Event('visibilitychange'));
-    await vi.waitFor(() => expect(page.model?.build.content).toBe('content-next'));
+    await testTools.waitFor(() => expect(page.model?.build.content).toBe('content-next'));
     expect(loads).toEqual([page.href]);
     expect(rows()[0].dataset.path).toBe('items/blog/2026/09/arrival');
   });
@@ -168,14 +167,14 @@ describe('the live feed', () => {
   it('swaps at once at the top of the list, and not for a version the page already shows', async () => {
     const model = load('page-river');
     mountApp(document);
-    const load_ = vi.fn(async () => newer(model));
+    const load_ = testTools.fn(async () => newer(model));
     const updater = new FeedUpdater({ load: load_ });
     updater.install(document, window);
     updater.notice(model.build.content);
     await Promise.resolve();
     expect(load_).not.toHaveBeenCalled();
     updater.notice('content-next');
-    await vi.waitFor(() => expect(page.model?.build.content).toBe('content-next'));
+    await testTools.waitFor(() => expect(page.model?.build.content).toBe('content-next'));
     expect(load_).toHaveBeenCalledTimes(1);
   });
 });

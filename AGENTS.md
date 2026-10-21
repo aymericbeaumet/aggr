@@ -25,13 +25,16 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   needs — article text, images, previews, durations, discussions, the search index — is resolved
   during the fetch and stored. A build that would need the network drops the feature instead.
 - The CLI and archive preparation are Rust. Svelte 5 components in `web/` own all reader markup,
-  shared by server rendering and browser hydration. Cargo runs the pinned Node/Vite build and
+  shared by server rendering and browser hydration. Cargo calls the native Rolldown build library and
   generates TypeScript from `crates/aggr-ui-model` into ignored `web/.generated/types/`. The binary
   embeds the renderer and assets from `OUT_DIR`; never commit generated types or bundles. Published
-  binaries render with bounded, isolated QuickJS runtimes and need no Node or external JavaScript
+  binaries render with bounded, isolated QuickJS runtimes and need no external JavaScript
   process. Rendering has no network or filesystem bindings. Every page works without JavaScript;
   sanitized article HTML appears once in the document, outside the embedded typed page model.
-  `cargo run -- dev` and `cargo run --release -- dev` start Vite HMR and supervise Rust workers in a source checkout. Release binaries also support native `dev` preview without Node; `--native` selects it explicitly. The CLI requires a subcommand. There is one reader design,
+  Source development uses the official Svelte compiler inside QuickJS and native Rolldown; never
+  introduce a Node/npm/Bun/Deno process or frontend package installation. `cargo run -- dev` and
+  `mise run dev` supervise Rust workers and swap immutable UI bundles without restarting Rust for
+  template edits. `dev --no-watch` previews embedded assets. The CLI requires a subcommand. There is one reader design,
   changed in this repository; `[site.params]` is rejected. Async Rust
   work uses tokio (`JoinSet` + `Semaphore`); git is shelled out. Every CPU-bound stage is sized from
   the machine's parallelism, never a fixed slot count, and stages that run at the same time share it
@@ -52,14 +55,13 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   `config.rs` (it is embedded and parsed by a test).
 - `aggr init` embeds `examples/starter.toml`: keep that small, explicit starter distinct from
   the full defaults. Retention bounds the current tree, never accumulated Git history.
-- Search-engine indexing is opt-in with `[site] indexing = true` in release builds; development
-  and previews remain noindex. Preserve local search and instance discovery regardless.
+- Search-engine indexing is opt-in with `[site] indexing = true`. Preview keeps publication HTML
+  unchanged and blocks crawling with HTTP `X-Robots-Tag: noindex`. Preserve local search and discovery.
 - Build budgets preserve all retained article text and leave archived media untouched. A build that fits records what it
   needed for everything but media, so the next one starts there instead of measuring the overflow
   with a whole extra build; the exact retry still decides whether that guess was right. The budget
-  is a publishing limit: only a release build measures it, because measuring an over-budget archive
-  costs a second complete build, and a development snapshot is never published. `dev --release`
-  still applies it. Admit complete media
+  is a publishing limit: every `build` measures it; development resolves requested output without
+  measuring the complete archive. Admit complete media
   families newest first, measure the complete output, and fail if text and required assets cannot
   fit. Include publication cache markers and recheck reused output. Render caching keeps only a file-inventory receipt; stage beside the destination and validate before promotion. Cache compressed publication
   copies separately from sync state; see `docs/build-budget.md`.
@@ -127,7 +129,9 @@ crates/aggr-lib/src/site/pagefind.rs                      the search index and i
 crates/aggr-lib/src/site/parallel.rs                      ordered map over at most 8 scoped workers; AGGR_BUILD_WORKERS
 crates/aggr-lib/src/site/{related,display,document,interactive,item_type,native_media,video}.rs  navigation and presentation contexts
 crates/aggr-ui-model/                     shared serialized page contract and TypeScript export
-web/                                      Svelte reader, SSR, browser hydration and Vite development stack
+crates/aggr-ui-build/                     native Svelte/Rolldown compiler and vendored frontend dependencies
+crates/aggr-tools/                        native development, checking, browser tests and release helpers
+web/                                      Svelte reader, SSR and browser hydration
 tests/cli.rs                              end-to-end: bare origin + clone + httpmock + the real binary
 tests/clean.rs, local_sources.rs          cleanup and local-file source scenarios
 tests/support/                            shared integration helpers: git and environment isolation
@@ -140,16 +144,16 @@ docs/*.md                                 the user-facing reference the readme l
 ## Commands
 
 ```sh
-mise run setup                               # install pinned tools and locked client packages
-mise run dev                                 # demo with Vite HMR and automatic Rust restarts
-mise run check                               # fmt, clippy, Rust tests, svelte-check and vitest
+mise run setup                               # install pinned native tools and locked Rust dependencies
+mise run dev                                 # demo with fast UI reload and automatic Rust restarts
+mise run check                               # fmt, clippy, Rust tests, native type checks and browser tests
 mise exec -- cargo test --locked --test cli    # end-to-end only
 mise run dev -- --port 3000                   # dogfood examples/aggr.toml
 mise exec -- cargo run --locked -- sync --dry-run -vv  # fetch without writing, with debug logs
 ```
 
 Keep development tool versions and tasks in `mise.toml`, with versions locked in `mise.lock`.
-Use the same mise tasks locally and in CI; do not add Make targets or npm scripts.
+Use the same mise tasks locally and in CI; all custom tooling is Rust. See [native tooling](docs/native-toolchain.md).
 Native OS libraries and compilers remain system prerequisites.
 
 ## Conventions
@@ -186,14 +190,16 @@ Native OS libraries and compilers remain system prerequisites.
   See [interoperability](docs/interoperability.md) for native build requirements.
 - `sync` persists to git; `build` runs that same sync first; `dev` runs it against a namespaced
   OS cache and serves atomic snapshots without committing or pushing. Ordinary dev renders requested
-  pages, media and search on demand; `dev --release` exercises the full publication build. Retain
+  pages, media and search on demand; `build` validates the complete publication. Retain
   snapshot ownership across blocking requests, and keep the last good generation on preparation failure.
   Blocking archive writes and snapshot jobs must own the dev cache lock themselves: cancelling
   their async caller does not stop a blocking worker or wait for a dropped task set to finish.
-  Debug `cargo run -- dev` and `mise run dev` use a stable Vite front door and build-before-stop Rust restarts.
+  `cargo run -- dev` and `mise run dev` use a stable native HTTP relay and build-before-stop Rust restarts.
   Publish completed-source snapshots during sync, and acknowledge immutable capture before final retention.
   Lazy snapshots own their archive until the last request releases them; never render in-flight source writes.
-  `AGGR_VITE_URL` reserves the public development origin and accepts loopback HTTP only.
+  UI compilation publishes complete immutable bundles; pin one data/UI pair for each request.
+  Keep canonical page bytes unchanged so offline hashes remain valid. Advertise reload SSE through
+  the existing updates response and never unregister workers or delete caches just to show an edit.
   Keep fixed pages and collection routes in `crates/aggr-lib/src/site/page.rs`; eager publication and lazy dev
   consume the same inventory while retaining separate scheduling.
 - Every `crates/aggr-lib/src/sources/*` adapter documents its accepted URL contract in
@@ -448,9 +454,9 @@ Native OS libraries and compilers remain system prerequisites.
 - Link stylesheets and modulepreloads before the blocking bootstrap, with `#aggr-preferences`
   immediately above it. Keep browser-local state changes after hydration. Feed rows skip layout
   until near the screen; print lays them out. Never scrape display data from markup.
-- Vite hashes executable bundles; `assets.json` resolves public asset paths. Publish those bytes
-  verbatim and include transitive eager imports in offline precaches. Keep shared handlers in
-  TypeScript modules; importing component exports from them prevents component HMR.
+- Rolldown hashes executable bundles; `assets.json` resolves public asset paths. Publish those bytes
+  verbatim and include transitive eager imports in offline precaches. Cache archive preparation,
+  search, UI transforms and QuickJS renderer code independently; template edits never invoke Cargo.
 - Reach for the platform before JavaScript: scroll-driven animations, `<dialog>` with invoker
   commands, stretched links, CSS counters. Wrap anything not universally supported in `@supports`
   or a feature check that degrades to plain HTML. Generated HTML must stay usable with JavaScript
@@ -547,7 +553,7 @@ See [client development](docs/client.md) for frontend commands, ownership, and s
   the self-contained crates. Published library builds consume those embedded inputs without Node
   or repository-relative files. Never commit generated reader bundles.
 - Publish through `.github/workflows/publish.yml`, using the `CARGO_REGISTRY_TOKEN` repository
-  secret for the model, library, and CLI. `.github/workflows/homebrew.yml` updates the shared tap
+  secret for the model, UI compiler, library, and CLI. `.github/workflows/homebrew.yml` updates the shared tap
   with `HOMEBREW_TAP_TOKEN`; mise uses GitHub release archives directly. See
   [distribution](docs/distribution.md) for release and retry contracts.
 - Run Rust unit filters with `cargo test -p aggr-lib`; root integration tests exercise the CLI.

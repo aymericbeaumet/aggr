@@ -71,7 +71,7 @@ max_items = 5000
 max_age_days = 365
 # "owner/repo" for permalinks; auto-detected from $GITHUB_REPOSITORY in Actions.
 # repository = "owner/repo"
-# Public URL used by `aggr build --release` (the workflow passes it automatically for
+# Public URL used by `aggr build` (the workflow passes it automatically for
 # *.github.io). A custom domain here also writes the CNAME file GitHub Pages needs.
 # url = "https://reads.example.com"
 # Allow search-engine indexing and emit a sitemap in release builds. This does not control access.

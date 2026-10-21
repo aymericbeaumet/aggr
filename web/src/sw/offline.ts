@@ -12,16 +12,36 @@ import type { OfflineItem, ResourceEntry } from './types';
 const DOWNLOAD_SLOTS = 6;
 
 /** The published article catalog. A zero download count never asks for it. */
-async function catalog(ctx: WorkerContext): Promise<OfflineItem[]> {
+async function catalog(ctx: WorkerContext, signal?: AbortSignal): Promise<OfflineItem[]> {
   const cached = ctx.state.offlineCatalog;
   if (cached) return cached;
-  const response = await fetchEntry(
-    ctx.fetch,
-    offlineUrl(ctx, ctx.config.offline_catalog_url),
-    ctx.timeouts.precache,
-    undefined,
-    'reload',
-  );
+  let response: Response;
+  const deadline = Date.now() + 5 * 60_000;
+  for (;;) {
+    response = await fetchEntry(
+      ctx.fetch,
+      offlineUrl(ctx, ctx.config.offline_catalog_url),
+      ctx.timeouts.precache,
+      signal,
+      'reload',
+    );
+    if (response.status !== 202) break;
+    if (Date.now() >= deadline) throw new Error('network');
+    const retry = Number(response.headers.get('Retry-After'));
+    const delay = Number.isFinite(retry) ? Math.min(5000, Math.max(100, retry * 1000)) : 1000;
+    await new Promise<void>((resolve, reject) => {
+      const cancelled = () => {
+        clearTimeout(timer);
+        reject(new DOMException('aborted', 'AbortError'));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', cancelled);
+        resolve();
+      }, delay);
+      signal?.addEventListener('abort', cancelled, { once: true });
+      if (signal?.aborted) cancelled();
+    });
+  }
   const body: unknown = await response.json();
   const items = Array.isArray(body) ? body.filter((item) => localOfflineItem(ctx, item)) : [];
   ctx.state.offlineCatalog = items;
@@ -115,7 +135,7 @@ async function saveSelection(
   try {
     if (superseded()) return { ...result, cancelled: true };
     if (count > 0) {
-      const items = await catalog(ctx);
+      const items = await catalog(ctx, signal);
       selected = items.slice(0, count);
       order = new Map(items.map((item, index) => [item.url, index] as const));
       result.total = selected.length;

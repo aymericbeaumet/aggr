@@ -1,11 +1,11 @@
 import { flushSync, mount, unmount } from 'svelte';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, testTools } from "../../test/browser";
 import Completions from './Completions.svelte';
 import { search, type SearchDriver } from '../state/search.svelte';
 
 let component: ReturnType<typeof mount> | undefined;
-const choose = vi.fn();
-const highlight = vi.fn();
+const choose = testTools.fn();
+const highlight = testTools.fn();
 let viewport: EventTarget & { height: number; offsetTop: number };
 
 function pointer(target: Element, type: string, pointerType = 'touch', x = 20, y = 20): Event {
@@ -23,7 +23,7 @@ beforeEach(() => {
   choose.mockClear();
   highlight.mockClear();
   viewport = Object.assign(new EventTarget(), { height: 800, offsetTop: 0 });
-  vi.stubGlobal('visualViewport', viewport);
+  testTools.stubGlobal('visualViewport', viewport);
   document.body.innerHTML = '<input type="search"><div id="suggestions"></div>';
   document.querySelector('input')!.focus();
   search.open = true;
@@ -39,7 +39,7 @@ afterEach(async () => {
   search.driver = null;
   search.open = false;
   document.body.replaceChildren();
-  vi.unstubAllGlobals();
+  testTools.unstubAllGlobals();
 });
 
 describe('suggestion pointer gestures', () => {
@@ -108,7 +108,7 @@ describe('suggestion viewport bounds', () => {
   });
 
   it('stops watching the viewport when suggestions hide and when the component unmounts', async () => {
-    const remove = vi.spyOn(viewport, 'removeEventListener');
+    const remove = testTools.spyOn(viewport, 'removeEventListener');
     search.open = false;
     flushSync();
     expect(remove).toHaveBeenCalledWith('resize', expect.any(Function));

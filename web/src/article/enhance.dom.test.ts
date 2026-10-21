@@ -1,5 +1,5 @@
 import { flushSync, mount, unmount } from 'svelte';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from "../../test/browser";
 import { fixture } from '../../test/fixtures';
 import Article from '../pages/Article.svelte';
 import { page } from '../state/page.svelte';

@@ -1,13 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, testTools } from "../../test/browser";
 import { search, type SearchDriver } from '../state/search.svelte';
 import { completionKeydown } from './completion-keys';
 
 let field: HTMLInputElement;
 
 const driver = (): SearchDriver => ({
-  arrive: vi.fn(), leave: vi.fn(), changed: vi.fn(), moved: vi.fn(), focus: vi.fn(), blur: vi.fn(),
-  choose: vi.fn(), highlight: vi.fn(), close: vi.fn(() => true), submit: vi.fn(), clear: vi.fn(),
-  turn: vi.fn(), refresh: vi.fn(),
+  arrive: testTools.fn(), leave: testTools.fn(), changed: testTools.fn(), moved: testTools.fn(), focus: testTools.fn(), blur: testTools.fn(),
+  choose: testTools.fn(), highlight: testTools.fn(), close: testTools.fn(() => true), submit: testTools.fn(), clear: testTools.fn(),
+  turn: testTools.fn(), refresh: testTools.fn(),
 });
 
 function press(key: string, shiftKey = false) {

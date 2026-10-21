@@ -30,6 +30,7 @@ pub const GITIGNORE: &str = "\
 .tmp*
 ";
 
+#[derive(Clone)]
 pub struct Store {
     root: PathBuf,
     image_cache: Option<crate::media::StoredAssetCache>,

@@ -1,42 +1,10 @@
 import { load, fixture, render } from '../../test/fixtures';
-/// <reference types="node" />
 import { flushSync } from 'svelte';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, testTools } from "../../test/browser";
 import { mountApp } from '../app/boot';
-import type { ClientRow } from '@aggr-model/ClientRow';
 import { search } from '../state/search.svelte';
 import { selection } from '../state/selection.svelte';
-import { hex, row, searchRow } from './fixture';
-import type { Index, SearchPage, Session } from './engine';
-import type { Catalog } from './types';
-
-const fake = vi.hoisted(() => ({
-  results: [] as { url: string; title: string }[],
-  runs: [] as string[],
-}));
-
-const catalog: Catalog = { version: 'v1', base: 'pagefind/v1/', docs: 3, facets: { source: [{ value: 'blog.example', label: 'Blog', count: 3 }] } };
-
-vi.mock('./engine', () => {
-  const index: Index = {
-    manifest: catalog,
-    retire() {},
-    async prepare() {},
-    async run(query): Promise<SearchPage> {
-      fake.runs.push(query.raw);
-      const results = fake.results.map(({ url, title }) => ({
-        url,
-        meta: { title, aggr_display: hex(searchRow({ ...row, url, path: url.replace(/\/$/, ''), title } satisfies ClientRow)) },
-      }));
-      return { results, total: results.length, page: 1, pages: 1, size: 50 };
-    },
-    async counts() {
-      return [];
-    },
-  };
-  const session: Session = { load: async () => index, stale() {}, network: () => false, dispose() {} };
-  return { createSession: () => session, isOnline: () => true };
-});
+import { fake } from '../../test/search-engine';
 
 
 const field = () => document.getElementById('q') as HTMLInputElement;
@@ -52,7 +20,7 @@ function type(text: string): void {
 
 describe('search on the feed', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    testTools.useFakeTimers();
     sessionStorage.clear();
     history.replaceState(null, '', '/');
     fake.results = [
@@ -65,7 +33,7 @@ describe('search on the feed', () => {
   });
 
   afterEach(() => {
-    vi.useRealTimers();
+    testTools.useRealTimers();
   });
 
   it('accepts a change-only clear before focus and subsequent typing', () => {
@@ -87,7 +55,7 @@ describe('search on the feed', () => {
   it('keeps ready results when blur commits an already handled input edit', async () => {
     type('rust');
     await search.load();
-    await vi.advanceTimersByTimeAsync(100);
+    await testTools.advanceTimersByTimeAsync(100);
     flushSync();
     const results = search.results;
     expect(results?.rows).toHaveLength(2);
@@ -96,7 +64,7 @@ describe('search on the feed', () => {
     flushSync();
     expect(search.results).toBe(results);
     expect(document.getElementById('list')?.hidden).toBe(false);
-    await vi.advanceTimersByTimeAsync(100);
+    await testTools.advanceTimersByTimeAsync(100);
     expect(fake.runs).toEqual(['rust']);
   });
 
@@ -117,7 +85,7 @@ describe('search on the feed', () => {
     expect(feed().hidden).toBe(true);
     expect(document.body.hasAttribute('data-searching')).toBe(true);
     await search.load();
-    await vi.advanceTimersByTimeAsync(100);
+    await testTools.advanceTimersByTimeAsync(100);
     flushSync();
     expect(fake.runs).toEqual(['rust']);
     const rows = document.querySelectorAll('#list .row');
@@ -130,7 +98,7 @@ describe('search on the feed', () => {
     expect(JSON.parse(sessionStorage.getItem(`aggr:search-snapshot:${encodeURIComponent('/')}`) || '{}')).toMatchObject({ query: 'rust', page: 1 });
     // Clearing hands the list and its cursor back to the feed.
     type('');
-    await vi.advanceTimersByTimeAsync(100);
+    await testTools.advanceTimersByTimeAsync(100);
     flushSync();
     expect(feed().hidden).toBe(false);
     expect(document.body.hasAttribute('data-searching')).toBe(false);
@@ -142,7 +110,7 @@ describe('search on the feed', () => {
   it('keeps a focused result by URL while staged results replace the rows around it', async () => {
     type('rust');
     await search.load();
-    await vi.advanceTimersByTimeAsync(100);
+    await testTools.advanceTimersByTimeAsync(100);
     flushSync();
     const two = Array.from(document.querySelectorAll<HTMLAnchorElement>('#list [data-row-open]')).find((link) => link.textContent === 'Two');
     expect(two).toBeDefined();
@@ -157,7 +125,7 @@ describe('search on the feed', () => {
     ];
     search.driver?.refresh();
     expect(document.querySelectorAll('#list .row')).toHaveLength(2);
-    await vi.advanceTimersByTimeAsync(100);
+    await testTools.advanceTimersByTimeAsync(100);
     flushSync();
     expect(document.querySelectorAll('#list .row')).toHaveLength(3);
     const focused = document.activeElement;

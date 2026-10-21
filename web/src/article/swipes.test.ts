@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { swipeOutcome, touchCapable, vertical } from './swipes';
 
 describe('touchCapable', () => {

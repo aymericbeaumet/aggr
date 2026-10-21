@@ -16,6 +16,7 @@ all-features = true
 # deny list any more, so do not "fix" a bump by adding a copyleft license here.
 allow = [
   "MIT",
+  "BSL-1.0",            # Rolldown xxhash and OXC dragonbox; permissive Boost license
   "Apache-2.0",
   "BSD-2-Clause",        # arrayref, comrak
   "BSD-3-Clause",        # bindgen, brotli, encoding_rs, lol_html, tiny-skia, zstd-sys
@@ -24,7 +25,7 @@ allow = [
   "Zlib",                # const_format, foldhash, konst, slotmap, zlib-rs
   "Unicode-3.0",         # ICU4X (icu_*, zerovec, yoke, …) and unicode-ident
   "Unicode-DFS-2016",    # finl_unicode
-  "MPL-2.0",             # Servo's cssparser and selectors; webdriver (dev only)
+  "MPL-2.0",             # Lightning CSS, Servo cssparser/selectors; webdriver (dev only)
   "BlueOak-1.0.0",       # minicbor
   "CC0-1.0",             # notify
   "CDLA-Permissive-2.0", # webpki-root-certs

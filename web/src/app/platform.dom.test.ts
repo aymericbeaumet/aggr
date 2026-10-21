@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, testTools } from "../../test/browser";
 import { installFeedChrome, installKeyboardInset } from './platform';
 
-/** A stand-in observer: jsdom does not lay elements out, and it may not deliver resize records. */
+/** Deliver resize observations explicitly so the measurement sequence is deterministic. */
 let observer: { observed: Element[]; disconnected: boolean; fire: () => void } | null = null;
 
 function installFakeObserver(): void {
@@ -90,18 +90,19 @@ describe('keyboard inset', () => {
   afterEach(() => {
     document.documentElement.classList.remove('is-keyboard-open');
     document.body.replaceChildren();
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
+    testTools.unstubAllGlobals();
+    testTools.restoreAllMocks();
   });
 
-  it('distinguishes pinch zoom from the keyboard and restores tabs when editing ends', () => {
-    const events = vi.spyOn(document, 'addEventListener');
+  it('distinguishes pinch zoom from the keyboard and restores tabs when editing ends', async () => {
+    const events = testTools.spyOn(document, 'addEventListener');
     const viewport = Object.assign(new EventTarget(), { height: 400, scale: 2 });
-    vi.stubGlobal('visualViewport', viewport);
-    vi.stubGlobal('innerHeight', 800);
+    testTools.stubGlobal('visualViewport', viewport);
+    testTools.stubGlobal('innerHeight', 800);
     document.body.innerHTML = '<input type="search">';
     const input = document.querySelector('input')!;
     input.focus();
+    expect(document.activeElement).toBe(input);
     installKeyboardInset();
     try {
       expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(false);
@@ -109,6 +110,7 @@ describe('keyboard inset', () => {
       viewport.dispatchEvent(new Event('resize'));
       expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(true);
       input.blur();
+      await testTools.waitFor(() => expect(document.activeElement).not.toBe(input));
       expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(false);
     } finally {
       for (const [name, listener, options] of events.mock.calls) document.removeEventListener(name, listener, options);

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import type { ClientPage } from '@aggr-model/ClientPage';
 import { row } from '../search/fixture';
 import { fixture } from '../../test/fixtures';

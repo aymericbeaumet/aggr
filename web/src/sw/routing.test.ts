@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { PAGE_LIMIT, trim } from './caches';
 import { harness, scope, tick } from './harness';
 import { assetResponse, classify, handleFetch, immutable, pageResponse, type RequestLike } from './routing';

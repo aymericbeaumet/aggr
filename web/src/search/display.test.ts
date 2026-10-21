@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { displayRow, excerptText, isClientRow, resultRow } from './display';
 import { hex, row } from './fixture';
 

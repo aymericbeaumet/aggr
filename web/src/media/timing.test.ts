@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { clock, duration, endsAt, wallClock } from './timing';
 
 describe('duration', () => {

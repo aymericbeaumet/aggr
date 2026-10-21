@@ -1,5 +1,5 @@
 //! `aggr build`: sync and render live data, or render a pinned data ref without a source sync.
-//! Plain builds are served from `/`; `--release` builds for the public URL and writes the CNAME.
+//! Publication uses the configured canonical URL and applies the complete output budget.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -102,7 +102,7 @@ async fn run_prevalidated(
         config_sha: config_sha.as_deref(),
         data_sha: data_sha.as_deref(),
         base_url: base_url.as_deref(),
-        release: args.release,
+
         discussions: Some(&discussions_fingerprint),
         generation: &generation,
     })?;
@@ -152,7 +152,7 @@ async fn run_prevalidated(
         data_sha: data_sha.clone(),
         generation,
         now,
-        release: args.release,
+
         discussions,
         development: false,
         render_cache_key: Some(fingerprint.clone()),
@@ -317,52 +317,6 @@ fn write_report(
     Ok(())
 }
 
-/// Render dev's isolated store into staging before the server swaps its in-memory snapshot.
-pub fn run_ephemeral(
-    project: &Project,
-    args: &BuildArgs,
-    data_dir: &Path,
-    out: &Path,
-    cache_dir: &Path,
-    discussions: ResolutionSet,
-) -> Result<Summary> {
-    let store = Store::open(data_dir).with_image_cache(cache_dir);
-    let now = Utc::now();
-    let generation = site::render_generation(
-        &store.retained_items(&project.sources, now)?,
-        &project.config.site,
-        now,
-    );
-    let info = BuildInfo {
-        hermetic: false,
-        metrics: Default::default(),
-        out: out.to_path_buf(),
-        base_url: base_url(project, args)?,
-        config_sha: project.config_sha(),
-        config_path: project.config_repo_path(),
-        data_sha: None,
-        generation,
-        now,
-        release: args.release,
-        discussions,
-        development: true,
-        render_cache_key: None,
-        pagefind_cache: Some(cache_dir.to_path_buf()),
-    };
-    let summary = site::build(
-        &project.config,
-        &project.sources,
-        &store,
-        &project.root,
-        &info,
-    )?;
-    println!(
-        "built {} page(s), {} item(s), {} stub(s) for the in-memory dev snapshot",
-        summary.pages, summary.items, summary.stubs
-    );
-    Ok(summary)
-}
-
 pub async fn resolve_discussions(
     project: &Project,
     store: &Store,
@@ -400,19 +354,14 @@ pub fn out_dir(project: &Project, args: &BuildArgs) -> PathBuf {
     }
 }
 
-/// Where the site will live: `--base-url` always wins; `--release` falls back to `[site] url`
-/// and refuses to guess; plain builds have no base URL and are served from `/`.
+/// Canonical publication URL: an explicit override wins over the configured site URL.
 pub fn base_url(project: &Project, args: &BuildArgs) -> Result<Option<String>> {
     let (value, setting) = if let Some(url) = non_empty(args.base_url.as_deref()) {
         (url, "--base-url")
-    } else if !args.release {
-        return Ok(None);
     } else {
         match &project.config.site.url {
             Some(url) => (url.as_str(), "[site] url"),
-            None => bail!(
-                "--release needs a public URL: set `[site] url` in aggr.toml or pass --base-url"
-            ),
+            None => return Ok(None),
         }
     };
     let error = || format!("{setting} must be an absolute http(s) URL with a host");

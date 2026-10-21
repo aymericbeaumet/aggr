@@ -45,7 +45,7 @@ Node. See [installation](docs/hosting.md#installing-the-binary) for platform req
 manual downloads. To try the reader:
 
 ```sh
-aggr dev --demo --native             # open http://127.0.0.1:7319
+aggr dev --demo                      # open http://127.0.0.1:7319
 ```
 
 The demo uses an isolated OS cache and leaves your current directory unchanged. Native preview
@@ -54,13 +54,13 @@ works in release binaries without Node. To keep an archive of your own:
 ```sh
 mkdir reads && cd reads && git init
 aggr init
-aggr dev --native                    # preview; Ctrl-C to stop
+aggr dev                             # preview; Ctrl-C to stop
 aggr build                          # saves the archive and writes _site/
 ```
 
 The build records articles on a local `aggr` branch. It pushes that branch when an `origin`
 remote is configured. `aggr dev` provides the local reader without committing or pushing.
-For the contributor preview with Vite HMR and automatic Rust restarts, use
+For the contributor preview with fast template reload and automatic Rust restarts, use
 `cargo run -- dev` from this repository; see [client development](docs/client.md).
 `cargo run --release -- dev` supports the same workflow with an optimized binary.
 
@@ -111,7 +111,7 @@ run takes, is in [benchmarks](docs/benchmarks.md).
 [Releases](docs/distribution.md)
 
 Rust prepares the archive and renders a shared Svelte application embedded in the binary.
-Cargo builds the UI automatically with Node; the installed binary needs no Node to generate sites. See [contributing](CONTRIBUTING.md) and
+Cargo builds the UI automatically with the native Rust toolchain. See [contributing](CONTRIBUTING.md) and
 [client development](docs/client.md).
 
 ## License

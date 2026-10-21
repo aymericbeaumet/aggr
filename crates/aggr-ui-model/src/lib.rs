@@ -41,7 +41,7 @@ pub struct ClientSite {
     pub assets: ClientAssets,
 }
 
-/// Site paths of the compiled client, resolved through Vite's manifest at build time.
+/// Site paths of the compiled client, resolved through the native bundle manifest.
 #[derive(Debug, Clone, Default, Serialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 pub struct ClientAssets {
