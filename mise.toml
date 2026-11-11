@@ -86,7 +86,7 @@ run = "cargo run --locked -- --config examples/aggr.toml"
 
 [tasks.test]
 description = "Run Rust workspace tests"
-run = "cargo test --workspace --locked"
+run = "cargo test --workspace --locked --no-fail-fast"
 
 [tasks.lint]
 description = "Run Clippy with warnings denied"

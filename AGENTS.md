@@ -173,6 +173,8 @@ Native OS libraries and compilers remain system prerequisites.
   browser fixtures edit their separate local archive clone before rebuilding.
 - httpmock serves the first registered matching mock: `delete()` the old one before adding a
   new mock for the same path.
+- Capture child logs and the last HTTP response/error in server readiness tests. Share one startup
+  deadline across connection and response reads so a lazy first render gets the remaining budget.
 - A listing that is only the page it came from is not a listing: probe the conventional endpoints
   before accepting a single-page app's own shell, and prefer any feed that parses. Keep the
   subscribed origin's endpoints in the probe set when a response redirects away from it, and say in

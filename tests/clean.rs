@@ -718,42 +718,75 @@ fn dev_clean_acquires_one_lock_and_keeps_it_while_serving() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
+    let stdout = tempfile::NamedTempFile::new().unwrap();
+    let stderr = tempfile::NamedTempFile::new().unwrap();
+    let logs = || {
+        format!(
+            "stdout:\n{}\nstderr:\n{}",
+            std::fs::read_to_string(stdout.path()).unwrap_or_default(),
+            std::fs::read_to_string(stderr.path()).unwrap_or_default(),
+        )
+    };
     let mut process = RunningDev(
         fixture
             .command()
-            .args(["dev", "--clean", "--port", &port.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .args(["dev", "--clean", "--port", &port.to_string(), "-vv"])
+            .stdout(Stdio::from(stdout.reopen().unwrap()))
+            .stderr(Stdio::from(stderr.reopen().unwrap()))
             .spawn()
             .unwrap(),
     );
     let deadline = Instant::now() + Duration::from_secs(20);
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut last_probe = "no connection attempted".to_owned();
     loop {
-        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-            stream
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(1)))
-                .unwrap();
-            let mut response = String::new();
-            if stream
-                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                .is_ok()
-                && stream.read_to_string(&mut response).is_ok()
-                && response.starts_with("HTTP/1.1 200")
-                && response.contains("<main id=\"content\"")
-            {
-                break;
-            }
-        }
-        assert!(
-            process.0.try_wait().unwrap().is_none(),
-            "dev --clean exited before serving"
-        );
         assert!(
             Instant::now() < deadline,
-            "dev --clean did not serve a page"
+            "dev --clean did not serve a page: {last_probe}\n{}",
+            logs(),
+        );
+        let mut response = Vec::new();
+        let probe = (|| -> std::io::Result<()> {
+            let remaining = || {
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "startup deadline elapsed",
+                        )
+                    })
+            };
+            let mut stream = std::net::TcpStream::connect_timeout(&address, remaining()?)?;
+            stream.set_write_timeout(Some(remaining()?))?;
+            stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+            let mut chunk = [0; 8192];
+            loop {
+                // The first page renders lazily; give it the remaining startup budget.
+                stream.set_read_timeout(Some(remaining()?))?;
+                let count = stream.read(&mut chunk)?;
+                if count == 0 {
+                    return Ok(());
+                }
+                response.extend_from_slice(&chunk[..count]);
+            }
+        })();
+        let response = String::from_utf8_lossy(&response);
+        if probe.is_ok()
+            && response.starts_with("HTTP/1.1 200")
+            && response.contains("<main id=\"content\"")
+        {
+            break;
+        }
+        last_probe = format!(
+            "{probe:?}; response: {}",
+            response.chars().take(2048).collect::<String>(),
+        );
+        let status = process.0.try_wait().unwrap();
+        assert!(
+            status.is_none(),
+            "dev --clean exited before serving ({status:?}): {last_probe}\n{}",
+            logs(),
         );
         std::thread::sleep(Duration::from_millis(20));
     }
