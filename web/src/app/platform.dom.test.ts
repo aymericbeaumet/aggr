@@ -116,4 +116,28 @@ describe('keyboard inset', () => {
       for (const [name, listener, options] of events.mock.calls) document.removeEventListener(name, listener, options);
     }
   });
+
+  it('follows the focus destination before activeElement catches up', () => {
+    const events = testTools.spyOn(document, 'addEventListener');
+    const viewport = Object.assign(new EventTarget(), { height: 400, scale: 1 });
+    testTools.stubGlobal('visualViewport', viewport);
+    testTools.stubGlobal('innerHeight', 800);
+    document.body.innerHTML = '<input type="search"><textarea></textarea><button>Done</button>';
+    const input = document.querySelector('input')!;
+    input.focus();
+    installKeyboardInset();
+    try {
+      expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(true);
+      input.dispatchEvent(new FocusEvent('focusout', {
+        bubbles: true, relatedTarget: document.querySelector('textarea'),
+      }));
+      expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(true);
+      input.dispatchEvent(new FocusEvent('focusout', {
+        bubbles: true, relatedTarget: document.querySelector('button'),
+      }));
+      expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(false);
+    } finally {
+      for (const [name, listener, options] of events.mock.calls) document.removeEventListener(name, listener, options);
+    }
+  });
 });
