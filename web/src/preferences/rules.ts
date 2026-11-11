@@ -1,5 +1,5 @@
-import type { BootstrapRule } from '../generated/BootstrapRule';
-import type { JsonValue } from '../generated/serde_json/JsonValue';
+import type { BootstrapRule } from '@aggr-model/BootstrapRule';
+import type { JsonValue } from '@aggr-model/serde_json/JsonValue';
 
 export type PreferenceValue = string | number | boolean;
 /** The validation rules `#aggr-preferences` embeds, keyed by setting name. */

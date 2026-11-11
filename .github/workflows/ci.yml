@@ -32,16 +32,16 @@ jobs:
           - { name: windows-arm64, os: windows-11-arm }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/native-deps
-      - uses: jdx/mise-action@v5
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
-          version: 2026.10.11
-          install_args: rust cmake ninja
+          version: 2026.11.6
+          install_args: --locked rust cmake ninja http:typescript-native
       - name: Install Windows x64 assembler
         if: matrix.name == 'windows-amd64'
-        run: mise install http:nasm
-      - uses: Swatinem/rust-cache@v2
+        run: mise install --locked http:nasm
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
           # The linux-amd64 leg produces the cache the browser job restores; the other legs keep
@@ -50,47 +50,38 @@ jobs:
           # release.yml re-runs this workflow on the tag ref; caches saved there can never be
           # restored by main or pull requests and only eat the repository's cache quota.
           save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-      - run: mise exec -- cargo fmt --all -- --check
+      - run: mise run fmt-check
         if: matrix.name == 'linux-amd64'
-      - run: mise exec -- cargo clippy --locked --all-targets -- -D warnings
-      - run: mise exec -- cargo test --locked
-      # `cargo test` exports the client's TypeScript types with ts-rs; stale bindings fail here.
-      - name: Generated client types are committed
-        if: matrix.name == 'linux-amd64'
-        run: git diff --exit-code -- web/src/generated
+      - run: mise run lint
+      - run: mise run test
 
   browser:
     name: browser (chrome)
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    # The cache can be cold: native Rolldown, QuickJS and BoringSSL compile before the tests.
+    timeout-minutes: 45
     permissions:
       contents: read
     env:
       AGGR_WEBDRIVER_URL: http://127.0.0.1:9515
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/native-deps
-      - uses: jdx/mise-action@v5
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
-          version: 2026.10.11
-          install_args: rust cmake ninja chromedriver http:chrome-for-testing
-      - uses: Swatinem/rust-cache@v2
+          version: 2026.11.6
+          install_args: --locked rust cmake ninja http:chromedriver http:chrome-for-testing
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # Restore what test (linux-amd64) built for the same lockfile instead of keeping a
-          # second copy of it.
+          # Reuse previous test (linux-amd64) builds when available. Jobs run concurrently,
+          # so a new dependency graph must also succeed without a warm cache.
           shared-key: linux-x64
           save-if: false
-      - name: Install pinned Chrome
+      - name: Verify pinned Chrome runtime
         shell: bash
         run: |
-          set -euo pipefail
-          browser_dir="$(mise where http:chrome-for-testing)/chrome-linux64"
-          mapfile -t dependencies < "$browser_dir/deb.deps"
-          sudo apt-get update -qq
-          sudo apt-get satisfy -y --no-install-recommends "${dependencies[@]}"
-          "$browser_dir/chrome" --version
+          bash .github/actions/native-deps/chrome.sh
           mise exec -- chromedriver --version
-          echo "AGGR_CHROME_BINARY=$browser_dir/chrome" >> "$GITHUB_ENV"
       - name: Test reader and offline browser contracts
         shell: bash
         env:
@@ -113,10 +104,10 @@ jobs:
             sleep 0.25
           done
           curl --fail --silent --show-error "$AGGR_WEBDRIVER_URL/status" | jq -e '.value.ready == true'
-          mise exec -- cargo test --locked --test browser -- --ignored --nocapture --test-threads=2
+          mise run browser-test -- --nocapture --test-threads=2
       - name: Upload browser failure screenshots and logs
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: browser-chrome-failure
           path: target/browser-artifacts/
@@ -127,38 +118,38 @@ jobs:
   msrv:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: msrv
         run: echo "version=$(perl -ne 'print $1 if /^rust-version = "(.*)"/' Cargo.toml)" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/native-deps
-      - uses: jdx/mise-action@v5
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
-          version: 2026.10.11
+          version: 2026.11.6
           install: false
-      - run: mise install rust@${{ steps.msrv.outputs.version }} cmake ninja
-      - uses: Swatinem/rust-cache@v2
+      # The task runner is compiled with project Rust before it selects the minimum version.
+      - run: mise install --locked rust cmake ninja
+      - run: mise install rust@${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
+          key: msrv-${{ steps.msrv.outputs.version }}
           save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-      - run: mise exec rust@${{ steps.msrv.outputs.version }} -- cargo build --locked
+      - run: mise run msrv
 
-  # The Svelte client: type-check, unit tests, then a rebuild that must reproduce the committed
-  # bundles under src/theme/static/app (Node is a development tool only; the binary embeds
-  # the committed output).
   client:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/native-deps
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
-          version: 2026.10.11
-          install_args: node
-      - run: mise exec -- npm ci --prefix web
-      - run: mise exec -- npm --prefix web run verify
-      - name: Committed client assets match the sources
-        run: |
-          git add --intent-to-add -- src/theme/static/app
-          git diff --exit-code -- src/theme/static/app
+          version: 2026.11.6
+          install_args: --locked rust cmake ninja http:typescript-native http:chromedriver http:chrome-for-testing
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Verify pinned Chrome runtime
+        shell: bash
+        run: bash .github/actions/native-deps/chrome.sh
+      - run: mise run client-check
 
   # Licenses, RustSec advisories, duplicate versions and registry sources of the dependency tree,
   # as configured in deny.toml. Use the same mise-pinned cargo-deny as local development.
@@ -166,18 +157,29 @@ jobs:
     name: deps (cargo-deny)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
-          version: 2026.10.11
-          install_args: aqua:EmbarkStudios/cargo-deny
-      - run: mise exec -- cargo-deny --locked --all-features check
+          version: 2026.11.6
+          install_args: --locked rust aqua:EmbarkStudios/cargo-deny
+      - run: mise run deps-check
+
+  workflows:
+    name: workflows (jactionlint)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.11.6
+          install_args: --locked github:jdx/jactionlint shellcheck
+      - run: mise run workflow-check
 
   # The version is committed in two places; keep them equal before anything gets tagged.
   version:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: |
           cargo="$(perl -ne 'print $1 if /^version = "(.*)"/' Cargo.toml)"
           file="$(tr -d '[:space:]' < VERSION)"
@@ -190,7 +192,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: release
         env:
           GH_TOKEN: ${{ github.token }}

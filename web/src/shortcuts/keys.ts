@@ -1,4 +1,4 @@
-import type { DiscussionLinkCtx } from '../generated/DiscussionLinkCtx';
+import type { DiscussionLinkCtx } from '@aggr-model/DiscussionLinkCtx';
 
 const TEXT_ENTRY = new Set(['text', 'search', 'url', 'email', 'password', 'tel', 'number']);
 

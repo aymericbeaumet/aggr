@@ -1,6 +1,6 @@
 # cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
 #
-# Run locally with `mise exec -- cargo deny check`; CI runs it in the `deps` job of
+# Run locally with `mise run deps-check`; CI runs it in the `deps` job of
 # .github/workflows/ci.yml. Every relaxation below names its reason; change the configuration
 # with the dependency change that makes an entry obsolete, never to make a failing check pass.
 
@@ -11,25 +11,25 @@ all-features = true
 
 [licenses]
 # Dependency licenses are exhaustive: a crate whose license expression cannot be satisfied by
-# it fails the check. That is what keeps GPL-3.0 out (the older stable wreq-util release is
-# GPL-3.0; the pinned prereleases are Apache-2.0, see docs/interoperability.md) — cargo-deny has no separate
+# it fails the check. That is what keeps GPL-3.0 out (wreq-util 0.1.0 is GPL-3.0;
+# the pinned stable 0.2.1 is Apache-2.0, see docs/interoperability.md) — cargo-deny has no separate
 # deny list any more, so do not "fix" a bump by adding a copyleft license here.
 allow = [
   "MIT",
+  "BSL-1.0",            # Rolldown xxhash and OXC dragonbox; permissive Boost license
   "Apache-2.0",
   "BSD-2-Clause",        # arrayref, comrak
   "BSD-3-Clause",        # bindgen, brotli, encoding_rs, lol_html, tiny-skia, zstd-sys
   "ISC",                 # ring (Apache-2.0 AND ISC), rustls-webpki, scraper, untrusted
+  "IJG",                 # jpeg-encoder progressive JPEG transform; notice ships with binaries
   "Zlib",                # const_format, foldhash, konst, slotmap, zlib-rs
   "Unicode-3.0",         # ICU4X (icu_*, zerovec, yoke, …) and unicode-ident
   "Unicode-DFS-2016",    # finl_unicode
-  "MPL-2.0",             # Servo's cssparser and selectors; webdriver (dev only)
+  "MPL-2.0",             # Lightning CSS, Servo cssparser/selectors; webdriver (dev only)
   "BlueOak-1.0.0",       # minicbor
   "CC0-1.0",             # notify
   "CDLA-Permissive-2.0", # webpki-root-certs
 ]
-# stringmetrics (dev, via httpmock) declares no SPDX expression, only an Apache-2.0 LICENSE file;
-# the default threshold recognises it without a clarification.
 confidence-threshold = 0.8
 
 [licenses.private]
@@ -57,24 +57,20 @@ skip = [
   { crate = "block-buffer@0.10", reason = "sha1/sha2 0.10 generation" },
   { crate = "crypto-common@0.1", reason = "sha1/sha2 0.10 generation" },
   { crate = "cpufeatures@0.2", reason = "sha1/sha2 0.10 generation" },
-  # html5ever 0.38 → 0.39 → 0.40: ammonia is on 0.40, scraper and dom_smoothie (dom_query) on
-  # 0.39, htmd and markup5ever_rcdom on 0.38. Each generation brings its own atoms.
+  # htmd and markup5ever_rcdom keep html5ever 0.38 beside ammonia, scraper and dom_query's 0.40.
   { crate = "html5ever@0.38", reason = "htmd and markup5ever_rcdom" },
   { crate = "markup5ever@0.38", reason = "htmd and markup5ever_rcdom" },
-  { crate = "html5ever@0.39", reason = "scraper, dom_query (dom_smoothie)" },
-  { crate = "markup5ever@0.39", reason = "scraper, dom_query (dom_smoothie)" },
-  { crate = "web_atoms@0.2", reason = "html5ever 0.38/0.39 generation" },
-  { crate = "string_cache@0.9", reason = "markup5ever 0.38/0.39 generation" },
-  { crate = "string_cache_codegen@0.6", reason = "markup5ever 0.38/0.39 generation" },
-  # Servo CSS crates: ammonia is on cssparser 0.38, scraper and dom_query on 0.37, and lol_html
-  # pins the generation before.
+  { crate = "web_atoms@0.2", reason = "html5ever 0.38 generation" },
+  { crate = "string_cache@0.9", reason = "markup5ever 0.38 generation" },
+  { crate = "string_cache_codegen@0.6", reason = "markup5ever 0.38 generation" },
+  # Lightning CSS keeps cssparser 0.37 and lol_html keeps 0.36 beside the HTML parsers' 0.38.
   { crate = "selectors@0.37", reason = "lol_html" },
   { crate = "cssparser@0.36", reason = "lol_html" },
-  { crate = "cssparser@0.37", reason = "scraper, dom_query (dom_smoothie)" },
+  { crate = "cssparser@0.37", reason = "lightningcss and parcel_selectors" },
   { crate = "cssparser-macros@0.6", reason = "lol_html" },
-  # phf 0.13 → 0.14: web_atoms 0.3 (ammonia) moved on; comrak, cssparser 0.36/0.37 and lol_html did not.
-  { crate = "phf@0.13", reason = "comrak, cssparser 0.36/0.37, lol_html" },
-  { crate = "phf_codegen@0.13", reason = "cssparser 0.36/0.37 and markup5ever 0.38/0.39 generation" },
+  # Older CSS and HTML parsers, PDF fonts and Pagefind emoji data retain phf 0.13.
+  { crate = "phf@0.13", reason = "cssparser 0.36/0.37, htmd, hayro-font, emojis" },
+  { crate = "phf_codegen@0.13", reason = "cssparser 0.36/0.37 and markup5ever 0.38 generation" },
   { crate = "phf_generator@0.13", reason = "phf_codegen 0.13" },
   { crate = "phf_shared@0.13", reason = "phf 0.13" },
   # hashbrown: indexmap 1 (serde_yaml via pagefind) and pagefind's own 0.16 beside 0.17.
@@ -96,12 +92,10 @@ skip = [
   { crate = "skrifa@0.44", reason = "usvg (resvg)" },
   { crate = "fearless_simd@0.7", reason = "vello_common via hayro" },
   # Smaller pairs.
-  { crate = "base64@0.22", reason = "fantoccini, headers, httpmock (dev)" },
-  { crate = "bit-set@0.8", reason = "dom_query, fancy-regex" },
+  { crate = "bit-set@0.8", reason = "fancy-regex via syntect" },
   { crate = "bit-vec@0.8", reason = "bit-set 0.8" },
   { crate = "getrandom@0.2", reason = "ring, redox_users" },
   { crate = "miniz_oxide@0.8", reason = "png" },
-  { crate = "windows-sys@0.60", reason = "notify" },
 ]
 skip-tree = [
   # ring still targets windows-sys 0.52, which brings the whole windows-targets 0.52 family.

@@ -1,5 +1,5 @@
 import { flushSync } from 'svelte';
-import type { ClientPage } from '../generated/ClientPage';
+import type { ClientPage } from '@aggr-model/ClientPage';
 import { extract, parseDocument } from '../model/extract';
 import { pageScope } from '../navigation/scope';
 import { page } from '../state/page.svelte';
@@ -53,9 +53,14 @@ export function applyFreshList(freshPage: ClientPage, doc: Document = document, 
   const next = withFreshList(current, freshPage);
   if (!next) return null;
   const held = win.scrollY > 0 ? anchor(doc) : null;
+  const active = doc.activeElement instanceof HTMLAnchorElement ? doc.activeElement.href : null;
   badges.resetMarks();
-  page.show({ model: next, content: page.content, href });
+  page.show({ model: next, bodyHtml: page.bodyHtml, href });
   flushSync();
+  if (active) {
+    const link = [...doc.querySelectorAll<HTMLAnchorElement>('[data-row-open]')].find((node) => node.href === active);
+    if (link && doc.activeElement !== link) link.focus({ preventScroll: true });
+  }
   if (held) {
     const restored = [...doc.querySelectorAll<HTMLElement>(ROWS)].find((row) => row.dataset.url === held.url);
     if (restored) win.scrollBy(0, restored.getBoundingClientRect().top - held.top);

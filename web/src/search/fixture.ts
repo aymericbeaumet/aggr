@@ -1,7 +1,7 @@
-import type { ClientRow } from '../generated/ClientRow';
+import type { ClientRow } from '@aggr-model/ClientRow';
 
 /** One row as the build encodes it into a search document's display metadata, for tests. */
-export const row: ClientRow = {
+const plain: ClientRow = {
   path: 'items/blog/2026/09/plain',
   url: 'items/blog/2026/09/plain/',
   link: 'https://blog.example/plain',
@@ -27,6 +27,11 @@ export const row: ClientRow = {
   },
 };
 
-/** `aggr_display` as Rust writes it: the JSON's UTF-8 bytes, hex-encoded. */
+/** Search carries the same typed row used by feed pages. */
+export function searchRow(value: ClientRow): ClientRow {
+  return value;
+}
+
+export const row = plain;
 export const hex = (value: unknown): string =>
   Array.from(new TextEncoder().encode(JSON.stringify(value)), (byte) => byte.toString(16).padStart(2, '0')).join('');

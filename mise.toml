@@ -1,25 +1,40 @@
+min_version = "2026.10.17"
+
 [settings]
 lockfile = true
 
-[tools]
-actionlint = "1.7.12"
-"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
-cmake = "4.4.4"
-node = "26.12.0"
-ninja = "1.13.2"
-chromedriver = "155.0.8059.39"
-rust = { version = "1.99.0", profile = "default" }
+[settings.task]
+# Setup provisions tools explicitly; CI installs only the subset each job needs.
+run_auto_install = false
 
-# Keep the browser and driver on the same Chrome for Testing release.
+[tools]
+"github:jdx/jactionlint" = "2.5.0"
+shellcheck = "0.11.0"
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
+cmake = "4.4.5"
+ninja = "1.13.2"
+rust = { version = "1.99.1", profile = "default" }
+
+# Keep the browser and driver on the same checksum-pinned Chrome for Testing release.
+[tools."http:chromedriver"]
+version = "157.0.8103.50"
+os = ["linux/x64", "macos", "windows/x64"]
+
+[tools."http:chromedriver".platforms]
+linux-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux64/chromedriver-linux64.zip", checksum = "sha256:59185c80d24d93dbd3d3fcf4f91038f9f7c434db31a03afa747e032252889aed", bin_path = "chromedriver-linux64" }
+macos-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-arm64/chromedriver-mac-arm64.zip", checksum = "sha256:a248565ad9769b52fd55e04c6e82eb157ca414c2d6eae3238135ef2228024845", bin_path = "chromedriver-mac-arm64" }
+macos-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-x64/chromedriver-mac-x64.zip", checksum = "sha256:59df949c3e7c0383bb8f0609c00107e4444c8778ddc1d61362d8c118a05e7bae", bin_path = "chromedriver-mac-x64" }
+windows-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/win64/chromedriver-win64.zip", checksum = "sha256:408d7da374064d0b01f1918d898b983029294f49be8bb0c23729920390e61376", bin_path = "chromedriver-win64" }
+
 [tools."http:chrome-for-testing"]
-version = "155.0.8059.39"
+version = "157.0.8103.50"
 os = ["linux/x64", "macos", "windows/x64"]
 
 [tools."http:chrome-for-testing".platforms]
-linux-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux64/chrome-linux64.zip", checksum = "sha256:55672d1f392fd3e7b7a08621b6e804e6bcb39d40cf155504abb74b3a021ea8ea", bin_path = "chrome-linux64" }
-macos-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-arm64/chrome-mac-arm64.zip", checksum = "blake3:eed1cf6778376cef1ff6598c8edbb115cabd41f97bede274008eff8b016dfccc", bin_path = "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS" }
-macos-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-x64/chrome-mac-x64.zip", checksum = "sha256:9e4da7961d4a426078f02e89ecfa569a7926ada2dc88aa53c0bd9ed0d46c3bb7", bin_path = "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS" }
-windows-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/win64/chrome-win64.zip", checksum = "sha256:59ab2a6e99bde9c0bc180414988394f9f5355a0d3764c704151ee8ecea235c7e", bin_path = "chrome-win64" }
+linux-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux64/chrome-linux64.zip", checksum = "sha256:d17167bc092eb495a3b768c7467f27e35f625aa03834233a1663af67dcb668c9", bin_path = "chrome-linux64" }
+macos-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-arm64/chrome-mac-arm64.zip", checksum = "sha256:aceb0578a1cc3631358b164dbbef04bf8936f96c690fb78c3ac25b7655e795e8", bin_path = "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS" }
+macos-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-x64/chrome-mac-x64.zip", checksum = "sha256:7b1c12bee8024f1193b28754aa0d46b7eaa08394de51bef84fd65a6cf08d61dc", bin_path = "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS" }
+windows-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/win64/chrome-win64.zip", checksum = "sha256:36088dd9c76c992f6e745fc20f94aca873f69c3331ce25ea3df36835cc4af73f", bin_path = "chrome-win64" }
 
 # BoringSSL's x64 assembly build needs NASM on Windows.
 [tools."http:nasm"]
@@ -28,3 +43,137 @@ os = ["windows/x64"]
 
 [tools."http:nasm".platforms]
 windows-x64 = { url = "https://www.nasm.us/pub/nasm/releasebuilds/{{ version }}/win64/nasm-{{ version }}-win64.zip", checksum = "sha256:161d0bfaff53c2f9e9f3e69fd0672323ebabafd1268976a5cec11be92a19aee7", bin_path = "nasm-{{ version }}" }
+
+[tools."http:typescript-native"]
+version = "7.0.2"
+
+[tools."http:typescript-native".platforms]
+linux-arm64 = { url = "https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.0.2.tgz", checksum = "sha256:c83d931ac9dd7549cde6e71246aa9d6a9812843023df3e277fe3b5dcf41dd0ea", bin_path = "package/lib", format = "tar.gz" }
+linux-x64 = { url = "https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-7.0.2.tgz", checksum = "sha256:7ecad6f67377e831856367ab062ef394f21506a611405bf8ac0ff039348637d3", bin_path = "package/lib", format = "tar.gz" }
+macos-arm64 = { url = "https://registry.npmjs.org/@typescript/typescript-darwin-arm64/-/typescript-darwin-arm64-7.0.2.tgz", checksum = "sha256:902e2fe1cf0799198ef902c6b8c310a450fef629a6baba41d45641ef75c04ebd", bin_path = "package/lib", format = "tar.gz" }
+macos-x64 = { url = "https://registry.npmjs.org/@typescript/typescript-darwin-x64/-/typescript-darwin-x64-7.0.2.tgz", checksum = "sha256:eba158cb54050f723d5ff781438f33de5640054440bb4f2bd170cfe9bc2eb551", bin_path = "package/lib", format = "tar.gz" }
+windows-arm64 = { url = "https://registry.npmjs.org/@typescript/typescript-win32-arm64/-/typescript-win32-arm64-7.0.2.tgz", checksum = "sha256:0a73534e6ee50cdbb2a29ac48657ca0ad13cf0f424cf63808e4df7baeb87b8be", bin_path = "package/lib", format = "tar.gz" }
+windows-x64 = { url = "https://registry.npmjs.org/@typescript/typescript-win32-x64/-/typescript-win32-x64-7.0.2.tgz", checksum = "sha256:61fc4e141d2bc687db580e71bbfa63b9c209f0310645d82ca1b457eb3a24fd19", bin_path = "package/lib", format = "tar.gz" }
+
+[tasks.default]
+description = "Run all Rust and frontend checks"
+depends = ["check"]
+
+[tasks.setup]
+description = "Install only this project's pinned native tools"
+run = ["mise install --locked rust cmake ninja", "cargo run --locked -p aggr-tools -- setup"]
+
+[tasks.build]
+description = "Build the CLI and embedded reader"
+run = "cargo build --locked"
+
+[tasks.release]
+description = "Build the optimized CLI"
+run = "cargo build --release --locked"
+
+[tasks.timings]
+description = "Build with Cargo's HTML timing report"
+run = "cargo build --locked --timings"
+
+[tasks.dev]
+description = "Run the demo with native compilation and fast reload"
+env = { AGGR_CONFIG = "{{env.AGGR_CONFIG | default(value='examples/aggr.toml')}}" }
+run = "cargo run --locked -- dev"
+
+[tasks.run]
+description = "Run aggr against examples/aggr.toml"
+run = "cargo run --locked -- --config examples/aggr.toml"
+
+[tasks.test]
+description = "Run Rust workspace tests"
+run = "cargo test --workspace --locked --no-fail-fast"
+
+[tasks.lint]
+description = "Run Clippy with warnings denied"
+run = "cargo clippy --workspace --locked --all-targets -- --deny warnings"
+
+[tasks.deps-check]
+description = "Check dependency licenses, advisories and sources"
+run = "cargo-deny --locked --all-features check"
+
+[tasks.workflow-check]
+description = "Check GitHub Actions workflows"
+run = ["shellcheck -x .github/actions/native-deps/*.sh", "bash .github/actions/native-deps/test-linux.sh", "bash .github/actions/native-deps/test-chrome.sh", "jactionlint --profile correctness --shellcheck shellcheck --pyflakes ''"]
+
+[tasks.fmt]
+description = "Format Rust code"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check Rust formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.check-rust]
+description = "Lint Rust, then run its tests"
+run = [{ task = "lint" }, { task = "test" }]
+
+[tasks.check]
+description = "Check formatting, workflows, Rust and the reader"
+# Finish Rust builds before the browser runs; keep executable generations stable during tests.
+run = [{ task = "fmt-check" }, { task = "workflow-check" }, { task = "check-rust" }, { task = "client-check" }]
+
+[tasks.client-build]
+description = "Compile the reader with native Rolldown"
+run = "cargo run --locked -p aggr-tools -- build"
+
+[tasks.vendor]
+description = "Verify or update frozen frontend sources"
+run = "cargo run --locked -p aggr-tools -- vendor"
+
+[tasks.client-typecheck]
+description = "Check Svelte and TypeScript without a JavaScript host"
+run = "cargo run --locked -p aggr-tools -- check"
+
+[tasks.client-test]
+description = "Run isolated reader tests in the real browser"
+run = "cargo run --locked -p aggr-tools -- client-test"
+
+[tasks.client-check]
+description = "Check and test the reader"
+run = [{ task = "client-typecheck" }, { task = "client-test" }]
+
+[tasks.browser-test]
+description = "Run browser contracts against AGGR_WEBDRIVER_URL"
+depends = ["build"]
+run = "cargo test --locked --test browser -- --ignored"
+
+[tasks.verify-release]
+description = "Check the installable CLI's commands"
+run = "cargo run --locked -p aggr-tools -- verify-release"
+
+[tasks.package]
+description = "Prepare and verify the publishable crates"
+run = "cargo run --locked -p aggr-tools -- package"
+
+[tasks.publish]
+description = "Publish missing crate versions in dependency order"
+run = "cargo run --locked -p aggr-tools -- publish"
+
+[tasks.publish-test]
+description = "Test publication without uploading"
+run = "cargo test --locked -p aggr-tools distribution::tests"
+
+[tasks.homebrew]
+description = "Prepare or publish a release formula"
+run = "cargo run --locked -p aggr-tools -- homebrew"
+
+[tasks.homebrew-test]
+description = "Test Homebrew publication without updating the tap"
+run = "cargo test --locked -p aggr-tools distribution::tests"
+
+[tasks.msrv]
+description = "Build with the declared minimum Rust version"
+run = "cargo run --locked -p aggr-tools -- msrv"
+
+[tasks.clean]
+description = "Remove Cargo build artifacts"
+run = "cargo clean"
+
+[tasks.install]
+description = "Install the CLI locally"
+run = "cargo install --path . --locked"

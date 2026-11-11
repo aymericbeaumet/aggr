@@ -22,7 +22,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: version
         env:
           TAG: ${{ github.ref_name }}
@@ -54,34 +54,44 @@ jobs:
           - { name: windows-arm64, os: windows-11-arm }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/native-deps
-      - uses: jdx/mise-action@v5
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
-          version: 2026.10.11
-          install_args: rust cmake ninja
+          version: 2026.11.6
+          install_args: --locked rust cmake ninja
       - name: Install Windows x64 assembler
         if: matrix.name == 'windows-amd64'
-        run: mise install http:nasm
-      - uses: Swatinem/rust-cache@v2
+        run: mise install --locked http:nasm
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
           # Release builds only ever run on tag refs, whose caches main and pull requests can
           # never restore; restore the branch caches but never add tag-scoped entries.
           save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-      - run: mise exec -- cargo build --release --locked
+      - run: mise run release
+      - name: Verify the installable CLI
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          binary=target/release/aggr
+          if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
+          test "$("$binary" --version)" = "aggr $VERSION"
+          "$binary" dev --help > dev-help.txt
+          grep -q -- '--no-watch' dev-help.txt
       - shell: bash
         env:
           ARCHIVE: aggr-${{ matrix.name }}
         run: |
           mkdir dist
-          cp LICENSE target/release/
+          cp LICENSE THIRD_PARTY_NOTICES target/release/
           if [[ "$ARCHIVE" == aggr-windows-* ]]; then
-            (cd target/release && 7z a "../../dist/$ARCHIVE.zip" aggr.exe LICENSE)
+            (cd target/release && 7z a "../../dist/$ARCHIVE.zip" aggr.exe LICENSE THIRD_PARTY_NOTICES)
           else
-            tar -C target/release -czf "dist/$ARCHIVE.tar.gz" aggr LICENSE
+            tar -C target/release -czf "dist/$ARCHIVE.tar.gz" aggr LICENSE THIRD_PARTY_NOTICES
           fi
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: aggr-${{ matrix.name }}
           path: dist/*
@@ -91,8 +101,8 @@ jobs:
     needs: [verify, build]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           merge-multiple: true
@@ -106,3 +116,21 @@ jobs:
             --target "$GITHUB_SHA" \
             --generate-notes \
             dist/*
+
+  publish-crates:
+    needs: release
+    uses: ./.github/workflows/publish.yml
+    permissions:
+      contents: read
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  publish-homebrew:
+    needs: release
+    uses: ./.github/workflows/homebrew.yml
+    permissions:
+      contents: read
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

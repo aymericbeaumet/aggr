@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, testTools } from "../../test/browser";
 import { POLL_INTERVAL, Poller, parseBuild } from './poll';
 
 /** A load whose outcome the test decides later. */
@@ -28,16 +28,16 @@ describe('parseBuild', () => {
 
 describe('Poller', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    testTools.useFakeTimers();
   });
   afterEach(() => {
-    vi.useRealTimers();
+    testTools.useRealTimers();
   });
 
   it('keeps one request in flight and shares it', async () => {
     const pending = deferred();
-    const load = vi.fn(() => pending.promise);
-    const onBuild = vi.fn();
+    const load = testTools.fn(() => pending.promise);
+    const onBuild = testTools.fn();
     const poller = new Poller({ load, onBuild, active: () => true });
     const first = poller.check();
     const second = poller.check();
@@ -51,8 +51,8 @@ describe('Poller', () => {
 
   it('queues one more check when asked to insist during a flight', async () => {
     const loads = [deferred(), deferred()];
-    const load = vi.fn(() => loads[load.mock.calls.length - 1].promise);
-    const onBuild = vi.fn();
+    const load = testTools.fn(() => loads[load.mock.calls.length - 1].promise);
+    const onBuild = testTools.fn();
     const poller = new Poller({ load, onBuild, active: () => true });
     const first = poller.check();
     void poller.check(true);
@@ -62,14 +62,14 @@ describe('Poller', () => {
     await Promise.resolve();
     expect(load).toHaveBeenCalledTimes(2);
     loads[1].resolve({ ...build, content_version: 'content-2' });
-    await vi.runAllTimersAsync();
+    await testTools.runAllTimersAsync();
     expect(onBuild).toHaveBeenLastCalledWith({ ...build, content_version: 'content-2' });
     expect(onBuild).toHaveBeenCalledTimes(2);
   });
 
   it('ignores a completion that lands after it was stopped', async () => {
     const pending = deferred();
-    const onBuild = vi.fn();
+    const onBuild = testTools.fn();
     const poller = new Poller({ load: () => pending.promise, onBuild, active: () => true });
     const check = poller.check();
     poller.stop();
@@ -79,11 +79,11 @@ describe('Poller', () => {
   });
 
   it('does not ask while inactive, and swallows failures', async () => {
-    const load = vi.fn(async () => {
+    const load = testTools.fn(async () => {
       throw new Error('offline');
     });
     let active = false;
-    const onBuild = vi.fn();
+    const onBuild = testTools.fn();
     const poller = new Poller({ load, onBuild, active: () => active });
     await poller.check();
     expect(load).not.toHaveBeenCalled();
@@ -97,14 +97,14 @@ describe('Poller', () => {
   });
 
   it('checks on the documented interval once started', async () => {
-    const load = vi.fn(async () => build);
+    const load = testTools.fn(async () => build);
     const poller = new Poller({ load, onBuild: () => {}, active: () => true });
     poller.start();
     poller.start();
-    await vi.advanceTimersByTimeAsync(POLL_INTERVAL * 2);
+    await testTools.advanceTimersByTimeAsync(POLL_INTERVAL * 2);
     expect(load).toHaveBeenCalledTimes(2);
     poller.stop();
-    await vi.advanceTimersByTimeAsync(POLL_INTERVAL * 2);
+    await testTools.advanceTimersByTimeAsync(POLL_INTERVAL * 2);
     expect(load).toHaveBeenCalledTimes(2);
   });
 
@@ -121,7 +121,7 @@ describe('Poller', () => {
       timeout: 100,
     });
     const check = poller.check();
-    await vi.advanceTimersByTimeAsync(100);
+    await testTools.advanceTimersByTimeAsync(100);
     await check;
     expect(signals[0].aborted).toBe(true);
   });

@@ -65,13 +65,20 @@ const editing = (target: Element | null) =>
 export function installKeyboardInset(): void {
   const viewport = window.visualViewport;
   if (!viewport) return;
-  const sync = () =>
+  const sync = (event?: Event) => {
+    // Focus events can precede activeElement updates; their destination is already known.
+    const focused = event instanceof FocusEvent
+      ? event.type === 'focusout' ? event.relatedTarget : event.target
+      : document.activeElement;
     document.documentElement.classList.toggle(
       'is-keyboard-open',
-      window.innerHeight - viewport.height > 120 && editing(document.activeElement),
+      window.innerHeight - viewport.height * viewport.scale > 120 &&
+        editing(focused instanceof Element ? focused : null),
     );
+  };
   viewport.addEventListener('resize', sync, { passive: true });
   for (const name of ['focusin', 'focusout']) document.addEventListener(name, sync, { passive: true });
+  sync();
 }
 
 const pictureFrame = (image: HTMLImageElement) =>

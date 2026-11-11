@@ -1,4 +1,4 @@
-import type { ClientRow } from '../generated/ClientRow';
+import type { ClientRow } from '@aggr-model/ClientRow';
 import { sitePath } from '../model/urls';
 
 /** What the cursor needs to know about a row: where it opens and what its shortcuts reach. */

@@ -1,0 +1,47 @@
+{
+  "base": "../",
+  "build": {
+    "app": "app-fixture",
+    "content": "content-fixture",
+    "version": "1.0.0"
+  },
+  "kind": "browse",
+  "page": {
+    "view": "directory",
+    "data": {
+      "groups": []
+    }
+  },
+  "path": "browse/",
+  "site": {
+    "assets": {
+      "app": null,
+      "css": null,
+      "imports": [],
+      "icon": "assets/favicon-32.png"
+    },
+    "config_url": null,
+    "discussions": [
+      {
+        "found": false,
+        "name": "hackernews",
+        "shortcut": "H",
+        "url": "https://hn.algolia.com/?q={url}"
+      }
+    ],
+    "entries": [],
+    "language": "en",
+    "pwa": false,
+    "title": "Reader",
+    "hermetic": false,
+    "preference_rules": {}
+  },
+  "title": "Browse",
+  "head": {
+    "title": "Browse",
+    "meta": [],
+    "links": [],
+    "schema": null,
+    "bootstrap": "../assets/app/bootstrap.js"
+  }
+}

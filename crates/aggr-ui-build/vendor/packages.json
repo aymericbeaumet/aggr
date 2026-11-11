@@ -1,0 +1,232 @@
+[
+  {
+    "name": "@jridgewell/gen-mapping",
+    "version": "0.3.13",
+    "license": "MIT",
+    "path": "packages/@jridgewell/gen-mapping",
+    "source": {
+      "url": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
+      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA=="
+    }
+  },
+  {
+    "name": "@jridgewell/remapping",
+    "version": "2.3.5",
+    "license": "MIT",
+    "path": "packages/@jridgewell/remapping",
+    "source": {
+      "url": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
+      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ=="
+    }
+  },
+  {
+    "name": "@jridgewell/resolve-uri",
+    "version": "3.1.2",
+    "license": "MIT",
+    "path": "packages/@jridgewell/resolve-uri",
+    "source": {
+      "url": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
+      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw=="
+    }
+  },
+  {
+    "name": "@jridgewell/sourcemap-codec",
+    "version": "1.6.0",
+    "license": "MIT",
+    "path": "packages/@jridgewell/sourcemap-codec",
+    "source": {
+      "url": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
+      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw=="
+    }
+  },
+  {
+    "name": "@jridgewell/trace-mapping",
+    "version": "0.3.31",
+    "license": "MIT",
+    "path": "packages/@jridgewell/trace-mapping",
+    "source": {
+      "url": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
+      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="
+    }
+  },
+  {
+    "name": "@sveltejs/acorn-typescript",
+    "version": "1.0.13",
+    "license": "MIT",
+    "path": "packages/@sveltejs/acorn-typescript",
+    "source": {
+      "url": "https://registry.npmjs.org/@sveltejs/acorn-typescript/-/acorn-typescript-1.0.13.tgz",
+      "integrity": "sha512-wgKggnhZVL9Bfx1OaKKTrYY9BFRk6C8UAkQNUcIv1+llzYrIqy+RZm5HPKzn0NpEBvTVhTqB4kQyllZywsRBRQ=="
+    }
+  },
+  {
+    "name": "@types/estree",
+    "version": "1.0.10",
+    "license": "MIT",
+    "path": "packages/@types/estree",
+    "source": {
+      "url": "https://registry.npmjs.org/@types/estree/-/estree-1.0.10.tgz",
+      "integrity": "sha512-lTyOMnOcmRBzdCv6/4zUZCrEhV0xrqQiUZBZtVcbmLHBXKLnN8q89v/wKRF/Q0HbwVsqbIG3o5HDoFl9sduM+g=="
+    }
+  },
+  {
+    "name": "acorn",
+    "version": "8.19.0",
+    "license": "MIT",
+    "path": "packages/acorn",
+    "source": {
+      "url": "https://registry.npmjs.org/acorn/-/acorn-8.19.0.tgz",
+      "integrity": "sha512-oJlA3XiRm7Cyk6qFD2Jn8ak9B7jSy0qy00ADO3+8dpT0LSjFihQYv4C02LFCSYJV3Q37xYwwRy5m+IpIiUzqWw=="
+    }
+  },
+  {
+    "name": "aria-query",
+    "version": "5.3.1",
+    "license": "Apache-2.0",
+    "path": "packages/aria-query",
+    "source": {
+      "url": "https://registry.npmjs.org/aria-query/-/aria-query-5.3.1.tgz",
+      "integrity": "sha512-Z/ZeOgVl7bcSYZ/u/rh0fOpvEpq//LZmdbkXyc7syVzjPAhfOa9ebsdTSjEBDU4vs5nC98Kfduj1uFo0qyET3g=="
+    }
+  },
+  {
+    "name": "axobject-query",
+    "version": "4.1.0",
+    "license": "Apache-2.0",
+    "path": "packages/axobject-query",
+    "source": {
+      "url": "https://registry.npmjs.org/axobject-query/-/axobject-query-4.1.0.tgz",
+      "integrity": "sha512-qIj0G9wZbMGNLjLmg1PT6v2mE9AH2zlnADJD/2tC6E00hgmhUOfEB6greHPAfLRSufHqROIUTkw6E+M3lH0PTQ=="
+    }
+  },
+  {
+    "name": "clsx",
+    "version": "2.1.1",
+    "license": "MIT",
+    "path": "packages/clsx",
+    "source": {
+      "url": "https://registry.npmjs.org/clsx/-/clsx-2.1.1.tgz",
+      "integrity": "sha512-eYm0QWBtUrBWZWG0d386OGAw16Z995PiOVo2B7bjWSbHedGl5e0ZWaq65kOGgUSNesEIDkB9ISbTg/JK9dhCZA=="
+    }
+  },
+  {
+    "name": "dedent-js",
+    "version": "1.0.1",
+    "license": "MIT",
+    "path": "packages/dedent-js",
+    "source": {
+      "url": "https://registry.npmjs.org/dedent-js/-/dedent-js-1.0.1.tgz",
+      "integrity": "sha512-OUepMozQULMLUmhxS95Vudo0jb0UchLimi3+pQ2plj61Fcy8axbP9hbiD4Sz6DPqn6XG3kfmziVfQ1rSys5AJQ=="
+    }
+  },
+  {
+    "name": "devalue",
+    "version": "5.9.4",
+    "license": "MIT",
+    "path": "packages/devalue",
+    "source": {
+      "url": "https://registry.npmjs.org/devalue/-/devalue-5.9.4.tgz",
+      "integrity": "sha512-sPAT4pztbu6586/hrhOnMKS17IJrvg12mXiSPSS3W5qDeN2RGgvZ0diZCm31dBbnevfVmujNO3IM2wrS4Y2Rhg=="
+    }
+  },
+  {
+    "name": "esm-env",
+    "version": "1.2.2",
+    "license": "MIT",
+    "path": "packages/esm-env",
+    "source": {
+      "url": "https://registry.npmjs.org/esm-env/-/esm-env-1.2.2.tgz",
+      "integrity": "sha512-Epxrv+Nr/CaL4ZcFGPJIYLWFom+YeV1DqMLHJoEd9SYRxNbaFruBwfEX/kkHUJf55j2+TUbmDcmuilbP1TmXHA=="
+    }
+  },
+  {
+    "name": "esrap",
+    "version": "2.4.0",
+    "license": "MIT",
+    "path": "packages/esrap",
+    "source": {
+      "url": "https://registry.npmjs.org/esrap/-/esrap-2.4.0.tgz",
+      "integrity": "sha512-CQPcneEHw/czj32uwQC52nYnax8H4SXt25FCM+LIwGZ49cMIxpOj3bP8wmzcI+Z0HIy5KkClaPhRLfCySzwHPA=="
+    }
+  },
+  {
+    "name": "is-reference",
+    "version": "3.0.3",
+    "license": "MIT",
+    "path": "packages/is-reference",
+    "source": {
+      "url": "https://registry.npmjs.org/is-reference/-/is-reference-3.0.3.tgz",
+      "integrity": "sha512-ixkJoqQvAP88E6wLydLGGqCJsrFUnqoH6HnaczB8XmDH1oaWU+xxdptvikTgaEhtZ53Ky6YXiBuUI2WXLMCwjw=="
+    }
+  },
+  {
+    "name": "locate-character",
+    "version": "3.0.0",
+    "license": "MIT",
+    "path": "packages/locate-character",
+    "source": {
+      "url": "https://registry.npmjs.org/locate-character/-/locate-character-3.0.0.tgz",
+      "integrity": "sha512-SW13ws7BjaeJ6p7Q6CO2nchbYEc3X3J6WrmTTDto7yMPqVSZTUyY5Tjbid+Ab8gLnATtygYtiDIJGQRRn2ZOiA=="
+    }
+  },
+  {
+    "name": "magic-string",
+    "version": "0.30.21",
+    "license": "MIT",
+    "path": "packages/magic-string",
+    "source": {
+      "url": "https://registry.npmjs.org/magic-string/-/magic-string-0.30.21.tgz",
+      "integrity": "sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ=="
+    }
+  },
+  {
+    "name": "scule",
+    "version": "1.3.0",
+    "license": "MIT",
+    "path": "packages/scule",
+    "source": {
+      "url": "https://registry.npmjs.org/scule/-/scule-1.3.0.tgz",
+      "integrity": "sha512-6FtHJEvt+pVMIB9IBY+IcCJ6Z5f1iQnytgyfKMhDKgmzYG+TeH/wx1y3l27rshSbLiSanrR9ffZDrEsmjlQF2g=="
+    }
+  },
+  {
+    "name": "svelte",
+    "version": "5.57.3",
+    "license": "MIT",
+    "path": "packages/svelte",
+    "source": {
+      "url": "https://registry.npmjs.org/svelte/-/svelte-5.57.3.tgz",
+      "integrity": "sha512-5mAftM3SoDV9X0zdF386F9p2pv8iKOwi/KfBS1XnBAkVCKFzVOLHUoa8iGWAt4buoicLmyWVRpuuD5wplXOQsg=="
+    }
+  },
+  {
+    "name": "svelte2tsx",
+    "version": "0.7.63",
+    "license": "MIT",
+    "path": "packages/svelte2tsx",
+    "source": {
+      "url": "https://registry.npmjs.org/svelte2tsx/-/svelte2tsx-0.7.63.tgz",
+      "integrity": "sha512-gRgz/V6wOx0NDZhm6OMD2VIh+/HrgZc3k6ibX93rkNPEkWNn/P3Uhb1fYCqOrimEUpQd8r65dhiHZIJXSQBeow=="
+    }
+  },
+  {
+    "name": "typescript",
+    "version": "6.0.3",
+    "license": "Apache-2.0",
+    "path": "packages/typescript",
+    "source": {
+      "url": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
+      "integrity": "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="
+    }
+  },
+  {
+    "name": "zimmerframe",
+    "version": "1.1.5",
+    "license": "MIT",
+    "path": "packages/zimmerframe",
+    "source": {
+      "url": "https://registry.npmjs.org/zimmerframe/-/zimmerframe-1.1.5.tgz",
+      "integrity": "sha512-msJxIvYDYcoNL+PJsu+7qmpDWsYmAxTY+2TNYXXF0hzBzBk0BMecOqDOG/EckUoKCuKwObfbugIl8QpqHDXeFA=="
+    }
+  }
+]

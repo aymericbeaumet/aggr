@@ -161,9 +161,14 @@ url = "gazette.xml"
         .success();
     let out = repository.join("_site");
     let pages = html_pages(&out.join("items"));
+    let has_title = |html: &str, title: &str| {
+        scraper::Html::parse_document(html)
+            .select(&scraper::Selector::parse(".itemhead-title").unwrap())
+            .any(|node| node.text().collect::<String>() == title)
+    };
     let french = pages
         .iter()
-        .find(|html| html.contains("<span class=\"itemhead-title\">Article en français</span>"))
+        .find(|html| has_title(html, "Article en français"))
         .expect("the French article page is built");
     assert!(french.contains("<html lang=\"en\">"), "{french}");
     assert!(
@@ -172,7 +177,7 @@ url = "gazette.xml"
     );
     let english = pages
         .iter()
-        .find(|html| html.contains("<span class=\"itemhead-title\">English article</span>"))
+        .find(|html| has_title(html, "English article"))
         .expect("the English article page is built");
     assert!(
         english.contains("<article class=\"item h-entry\" data-path=\""),

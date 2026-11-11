@@ -494,7 +494,7 @@ async fn preference_contracts(client: &Client, fixture: &Fixture) -> Result<()> 
         .await?;
     wait_for(
         client,
-        "document.querySelector('#preferences-status').textContent.includes('Import cancelled')",
+        "document.querySelector('#preferences-status').textContent.includes('Import canceled')",
     )
     .await?;
     std::fs::write(

@@ -62,7 +62,7 @@ Instagram APIs are a separate integration and are not enabled by adding an ordin
 
 ## Source adapters
 
-Every engine under `src/sources/` claims URLs with a predicate, and `sources/mod.rs` tries them
+Every engine under `crates/aggr-lib/src/sources/` claims URLs with a predicate, and `sources/mod.rs` tries them
 in this order before falling back to the generic feed path. A URL that no adapter claims is an
 ordinary feed or website; nothing here is public configuration.
 
@@ -125,7 +125,7 @@ box so the space is reserved before it loads, and it carries a flat stand-in pre
 ThumbHash. It gains no WebP renditions. A CDN that answers `auto=format` with AVIF regardless of
 `Accept` — Linear's, for one — is archived this way rather than skipped. Having no decoder also
 means AVIF cannot be compacted: under `media_download_strategy = "compressed"` it keeps its exact bytes, as
-colour-managed and high-bit-depth images do.
+color-managed and high-bit-depth images do.
 
 AVIF support stops there deliberately, and two gaps follow from never decoding it. An animated AVIF
 sequence is archived whole, bounded only by the file-size limit rather than by the frame and pixel
@@ -220,14 +220,14 @@ of the challenged web application; see [OpenReview ingestion](openreview.md). Ca
 can retain their safe prose and automatically load the sandboxed live original inside the reader; see
 [reader behavior](rendering.md#reader-behavior). Neither route executes publisher scripts during fetching.
 
-`wreq = 6.0.0-rc.31` and `wreq-util = 3.0.0-rc.14` are exact prerelease pins: both published
-packages use Apache-2.0 and declare Rust 1.85 compatibility, preserving aggr's Rust 1.96 minimum.
-The newer stable pair requires Rust 1.98; the older stable utility release has a different,
-GPL-3.0 license. Review the actual package licenses, compiler requirements, and platform builds
-before changing these pins.
+`wreq = 0.16.3` and `wreq-util = 0.2.1` are exact stable pins. Both published packages use
+Apache-2.0 and require Rust 1.98, which is aggr's minimum compiler version. Upstream restarted
+their version numbering after the earlier `6.0.0-rc` and `3.0.0-rc` series. The older stable
+utility release `0.1.0` uses GPL-3.0. Review actual package licenses, compiler requirements,
+and platform builds before changing these pins.
 
 Building from source additionally needs the CMake version pinned in `mise.toml`, a C/C++ toolchain,
-Git, and native libclang for bindgen. Run `make setup` for the mise tools. Linux CI installs
+Git, and native libclang for bindgen. Run `mise run setup` for the mise tools. Linux CI installs
 `libclang-dev build-essential`; macOS uses Xcode's native tools and libclang. Windows uses the native
 Visual Studio environment, mise's Ninja, and LLVM; `LIBCLANG_PATH` points to LLVM's `bin` directory.
 Windows x64 gets a pinned NASM through mise. Windows ARM64 uses clang-cl's integrated assembler
@@ -304,7 +304,10 @@ streams and advertises them from its HTML:
 The same names live below `sources/<slug>/`, `categories/<slug>/`, and `tags/<slug>/`. The
 human-facing `/sources/`, `/categories/`, and `/tags/` directories link to those stable
 per-collection routes; `/browse/` combines the directories. Feed entries point their primary URL at the local
-clean-reading page and carry the original URL through the format's provenance field.
+clean-reading page and carry the original URL through the format's provenance field. An RSS item's
+`<source>` names its publisher the way the reader does (`youtube.com/@channel`, `github.com/owner`,
+or a domain) and links to that publisher's `sources/<slug>/rss.xml`, so a client can label every
+item without knowing any platform's URL scheme.
 
 The syndication surface is the same on every host: the three feed formats carry each episode or
 video enclosure (`rel=enclosure` in Atom, `<enclosure>` in RSS, `attachments` in JSON Feed) with
@@ -376,7 +379,7 @@ repository's complete Git history.
 - Internal links never assume an origin root. They resolve relative to the generated page.
 - Canonical links, feed identifiers, linkset targets, OpenSearch templates, and sitemaps are emitted
   only when the public base URL is known from `--base-url`, or from `[site] url` during an
-  `aggr build --release`. Sitemaps additionally require the release indexing opt-in.
+  `aggr build`. Sitemaps additionally require the indexing opt-in.
 - Moving a published site to a new origin or mount path requires one rebuild so absolute identities
   remain truthful.
 - Item paths do not change after capture. Their current static pages remain published while the
@@ -476,9 +479,9 @@ original-page capture.
 Consecutive numbered citations stay inline, as does prose following a link. Intentional HTML
 line breaks remain intact; action-link layout rules must not split citations or ordinary prose.
 
-`--reprocess` can recover these semantics when the retained HTML still contains them. Language
+Automatic reprocessing during sync can recover these semantics when the retained HTML still contains them. Language
 metadata discarded by an older extraction needs an original-page extraction; it cannot be reliably
-reconstructed from the stored code alone. Extraction cache versions change with these rules.
+reconstructed from the stored code alone. Extraction fingerprints track implementation changes automatically.
 Reprocessing covers articles the current config still retains and runs before source fetching.
 A source removed from the config is dropped by retention first.
 

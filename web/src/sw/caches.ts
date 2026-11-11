@@ -24,7 +24,9 @@ export interface CacheNames {
   assets: string;
   /** Selected articles and their renditions: never evicted by the runtime caches. */
   offlinePages: string;
-  /** The revision each protected resource was stored at. */
+  /** Previous workers' unversioned protected bodies, read only during migration. */
+  legacyOfflinePages: string;
+  /** The revision each legacy protected resource was stored at. */
   offlineRevisions: string;
   /** The configured count, the saved article list and the active search manifest. */
   offlineSettings: string;
@@ -45,7 +47,8 @@ export function cacheNames(scope: string, version: string): CacheNames {
     shell: `${namespace}shell-${version}`,
     pages: `${namespace}pages`,
     assets: `${namespace}assets`,
-    offlinePages: `${namespace}offline-articles`,
+    offlinePages: `${namespace}offline-articles-v2`,
+    legacyOfflinePages: `${namespace}offline-articles`,
     offlineRevisions: `${namespace}offline-revisions`,
     offlineSettings: `${namespace}offline-settings`,
     offlineSearchPrefix: `${namespace}offline-search-`,
@@ -60,6 +63,7 @@ export function stale(names: CacheNames, name: string): boolean {
     name !== names.pages &&
     name !== names.assets &&
     name !== names.offlinePages &&
+    name !== names.legacyOfflinePages &&
     name !== names.offlineRevisions &&
     name !== names.offlineSettings &&
     !name.startsWith(names.offlineSearchPrefix)

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { decodeSelection, encodeSelection, sharedSelection, words } from './selection-share';
 
 describe('selection tokens', () => {

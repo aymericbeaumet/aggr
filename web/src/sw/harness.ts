@@ -117,7 +117,7 @@ export function harness(over: { config?: Partial<SwConfig>; timeouts?: Partial<T
     const url = key(input);
     requests.push(url);
     if (state.offline) throw new Error('offline');
-    // The catalogue is not part of the install. Tests that replace the network still receive it.
+    // The catalog is not part of the install. Tests that replace the network still receive it.
     if (url.endsWith('offline-catalog.json')) return Response.json(catalog);
     if (state.network) return state.network(url, init);
     if (url.endsWith('search-manifest.json')) return Response.json(manifest);

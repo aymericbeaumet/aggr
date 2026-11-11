@@ -1,8 +1,5 @@
 <script lang="ts">
-  // `item.html`'s chrome above the article content: identity, authors, the folding header,
-  // resource links and the access notice. The `<article>` root belongs to the page; it is
-  // where `language` matters (a `lang` attribute when the article's language differs).
-  import type { ClientArticle } from '../generated/ClientArticle';
+  import type { ClientArticle } from '@aggr-model/ClientArticle';
   import { urlFor } from '../model/urls';
   import Metadata from '../feed/Metadata.svelte';
 
@@ -23,7 +20,7 @@
 <header class="itemhead">
   <h1 class="p-name" tabindex="-1"><span class="itemhead-title">{#each words as word, index}{#if index}{' '}{/if}{#if word.includes('/')}<span class="itemhead-title-term">{word}</span>{:else}{word}{/if}{/each}</span></h1>
   <span class="itemhead-title-compact" aria-hidden="true">{header.title}</span>
-  <Metadata metadata={header.metadata} labels={header.labels} {base} />
+  <Metadata metadata={header.metadata} {base} labels={header.labels} />
   <span class="itemhead-progress" aria-hidden="true"></span>
   <span class="itemhead-fade" aria-hidden="true"></span>
 </header>

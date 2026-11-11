@@ -1,0 +1,1380 @@
+/* aggr default theme */
+
+:root {
+  --bg: #f5f6fa;
+  --panel: #ffffff;
+  --fg: #20232d;
+  --muted: #606879;
+  --faint: #d8dce8;
+  --control-border: #7b8394;
+  --accent: #8ea1ff;
+  --accent-strong: #4054c7;
+  --warm: #a44f2a;
+  --link: #111318;
+  --danger: #b33a32;
+  --code: #eceef7;
+  --search-bg: #e9e9e9;
+  --focus-surface: color-mix(in srgb, var(--fg) 14%, var(--bg));
+  --nav-bg: #291a1b;
+  --nav-fg: #fff5ee;
+  --max: 56rem;
+  --tap-target: 44px;
+  --bottom-nav-offset: 0px;
+  --now-playing-offset: 0px;
+  --mobile-safe-area: env(safe-area-inset-bottom, 0px);
+  --top-nav-offset: calc(var(--tap-target) + env(safe-area-inset-top));
+  --row-padding: 0.5rem;
+  --row-title-size: 1rem;
+  --row-source-gap: 0;
+  --row-meta-height: 1.5rem;
+  --preview-size: 4rem;
+  --rank-width: 5ch;
+  --reading-size: 1.125rem;
+  --reading-measure: 65ch;
+  --reading-font: var(--font);
+  --reading-line-height: 1.75;
+  --paragraph-spacing: 1.15em;
+  --paragraph-indent: 0;
+  --reading-align: start;
+  --reading-letter-spacing: normal;
+  --reading-word-spacing: normal;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+html[data-density="comfortable"] {
+  --row-padding: 1rem;
+  --row-title-size: 1.0625rem;
+  --row-source-gap: 0.15rem;
+  --row-meta-height: 1.75rem;
+  --preview-size: 4.5rem;
+}
+html[data-text-size="large"] { --reading-size: 1.25rem; }
+html[data-text-size="largest"] { --reading-size: 1.375rem; }
+html[data-reading-width="narrow"] { --reading-measure: 52ch; }
+html[data-font-family="serif"] { --reading-font: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif; }
+html[data-font-family="mono"] { --reading-font: var(--mono); }
+html[data-line-spacing="compact"] { --reading-line-height: 1.5; }
+html[data-line-spacing="relaxed"] { --reading-line-height: 2; }
+html[data-paragraph-spacing="compact"] { --paragraph-spacing: 0.65em; }
+html[data-paragraph-spacing="relaxed"] { --paragraph-spacing: 1.65em; }
+html[data-paragraph-indent="true"] { --paragraph-indent: 1em; }
+html[data-text-align="justify"] { --reading-align: justify; }
+html[data-letter-spacing="wide"] { --reading-letter-spacing: 0.04em; }
+html[data-word-spacing="wide"] { --reading-word-spacing: 0.15em; }
+html[data-reading-width="wide"] { --reading-measure: 80ch; }
+html[data-thumbnails="hide"] .preview-media { display: none; }
+
+html[data-theme="sepia"] {
+  --bg: #f4ecd8; --panel: #fbf5e8; --fg: #403726; --muted: #73654c;
+  --faint: #dacfba; --control-border: #8b795b; --accent-strong: #75532c;
+  --link: #302717; --code: #e9dec7; --search-bg: #e5e1d9;
+}
+html[data-theme="dark"] {
+    --bg: #11131a;
+    --panel: #181b24;
+    --fg: #e6e8f0;
+    --muted: #aab0be;
+    --faint: #303442;
+    --control-border: #7d879b;
+    --accent: #8ea1ff;
+    --accent-strong: #b4beff;
+    --warm: #e99a70;
+    --link: #f7f7fa;
+    --danger: #ff8a80;
+    --code: #222632;
+    --search-bg: #292929;
+    --nav-bg: #1d1213;
+    --nav-fg: #fff4ed;
+}
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]), html[data-theme="auto"] {
+    --bg: #11131a; --panel: #181b24; --fg: #e6e8f0; --muted: #aab0be;
+    --faint: #303442; --control-border: #7d879b; --accent: #8ea1ff; --accent-strong: #b4beff;
+    --warm: #e99a70; --link: #f7f7fa; --danger: #ff8a80; --code: #222632; --search-bg: #292929;
+    --nav-bg: #1d1213; --nav-fg: #fff4ed;
+  }
+}
+
+* { box-sizing: border-box; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+html {
+  -webkit-text-size-adjust: 100%;
+  color-scheme: light;
+  background: var(--nav-bg);
+  overscroll-behavior-y: auto;
+  scroll-padding-top: var(--article-header-offset, calc(var(--top-nav-offset) + 1rem));
+}
+html[data-theme="light"] { color-scheme: light; }
+html[data-theme="dark"] { color-scheme: dark; }
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]), html[data-theme="auto"] { color-scheme: dark; }
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.5 var(--font);
+}
+[hidden] { display: none !important; }
+::selection { background: color-mix(in srgb, var(--warm) 32%, transparent); color: var(--fg); }
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+a, button, input, select { -webkit-tap-highlight-color: color-mix(in srgb, var(--accent) 22%, transparent); }
+a:active, button:active { opacity: 0.68; }
+a:focus, button:focus, input:focus, select:focus, .table-scroll:focus { outline: none; }
+a:focus-visible, button:focus-visible { background: var(--focus-surface); text-decoration: underline; text-decoration-thickness: 0.18em; text-underline-offset: 0.2em; }
+input:focus-visible, select:focus-visible { background: var(--code); box-shadow: inset 0 -3px 0 var(--fg); }
+.table-scroll:focus-visible { background: var(--focus-surface); }
+button, input, select { accent-color: var(--accent); }
+code, pre, kbd { font-family: var(--mono); font-size: 0.92em; }
+code { background: var(--code); padding: 0 0.25em; border-radius: 3px; }
+pre { background: var(--code); padding: 0.75rem; overflow: auto; border-radius: 4px; }
+pre code { background: none; padding: 0; }
+.body .math { font-family: "STIX Two Math", "Cambria Math", "Latin Modern Math", "Times New Roman", serif; font-size: 1.04em; }
+.body .math-display { display: block; margin: 1rem 0; text-align: center; overflow-x: auto; }
+.body .code-snippet { display: block; }
+.body .code-snippet[data-language]::before { content: attr(data-language); display: block; margin-bottom: .65rem; color: var(--muted); font-family: var(--font); font-size: .7rem; font-weight: 400; line-height: 1.3; }
+.body pre code .syntax-comment { color: var(--muted); font-style: italic; }
+.body pre code .syntax-keyword, .body pre code .syntax-storage { color: var(--warm); }
+.body pre code .syntax-string { color: var(--accent-strong); }
+.body pre code .syntax-constant, .body pre code .syntax-entity.syntax-name { color: var(--warm); }
+.muted { color: var(--muted); }
+.error { color: var(--danger); }
+.ok { color: var(--accent-strong); }
+.skip-link {
+  position: fixed;
+  z-index: 10;
+  top: 0.5rem;
+  left: 0.5rem;
+  min-height: var(--tap-target);
+  padding: 0.55rem 0.75rem;
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--fg);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  transform: translateY(-200%);
+}
+.skip-link:focus { transform: translateY(0); }
+
+/* top bar */
+.top {
+  background: var(--nav-bg);
+  color: var(--nav-fg);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  padding-top: env(safe-area-inset-top);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--nav-fg) 16%, transparent);
+}
+.nav {
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 0 0.75rem;
+  padding-left: max(0.75rem, env(safe-area-inset-left));
+  padding-right: max(0.75rem, env(safe-area-inset-right));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0;
+  min-height: var(--tap-target);
+  line-height: 1.25rem;
+}
+.nav a { color: inherit; display: inline-flex; align-items: center; min-height: var(--tap-target); padding: 0 0.35rem; opacity: 0.85; }
+.nav a:hover, .nav a[aria-current] { opacity: 1; text-decoration: none; }
+.nav .menu-link { display: inline-flex; align-items: center; }
+.nav .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-inline-start: 0;
+  margin-right: 0;
+  padding-left: 0;
+  padding-right: 0.15rem;
+  font-weight: 700;
+  opacity: 1;
+}
+.brand-title { text-transform: lowercase; }
+/* The name is a home link, not a tab: it never picks up the current-page underline. */
+.nav .brand,
+.nav .brand:hover,
+.nav .brand:focus,
+.nav .brand:focus-visible,
+.nav .brand[aria-current] { text-decoration: none; }
+.brand-icon { display: block; width: 1em; height: 1em; object-fit: contain; object-position: center; align-self: center; flex: 0 0 auto; }
+.nav .config-link { padding-right: 0; }
+/* The arrow glyph has almost no left bearing, so a plain space between it and the label reads as
+   none. Give every external marker explicit room instead. */
+.config-link > span[aria-hidden="true"],
+.article-resources a > span[aria-hidden="true"],
+.interactive-reader figcaption a > span[aria-hidden="true"] { margin-inline-start: 0.2em; }
+.nav a:focus-visible { background: color-mix(in srgb, var(--nav-fg) 16%, var(--nav-bg)); text-decoration: underline; }
+html.is-shift-held a[href]:not(.brand):hover { text-decoration-line: underline !important; }
+.browse-intro { max-width: 65ch; margin: 0.45rem 0 0; line-height: 1.5; }
+.browse-groups { display: grid; gap: 2rem; }
+.browse-group { min-width: 0; scroll-margin-top: 1rem; }
+.browse-group h2 { margin: 0 0 0.45rem; color: var(--muted); font-size: 0.95rem; font-weight: 650; }
+.browse-entries { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 clamp(1rem, 3vw, 2rem); margin: 0; padding: 0; list-style: none; }
+.browse-entry { min-width: 0; padding: 0.35rem 0 0.65rem; border-top: 1px solid var(--faint); overflow-wrap: anywhere; }
+/* A directory runs to hundreds of entries: laying out only the ones on screen halves the time it
+   takes to appear. The estimate is a typical entry's height; `auto` keeps each real one once seen. */
+.browse-entry { content-visibility: auto; contain-intrinsic-size: auto 5rem; }
+.browse-entry-heading { display: flex; align-items: stretch; }
+.browse-entry-link { display: flex; align-items: center; flex: 1; min-width: 0; min-height: var(--tap-target); font-weight: 550; }
+.browse-entry-website { display: flex; align-items: center; justify-content: center; flex: 0 0 var(--tap-target); color: var(--muted); }
+.browse-entry-meta, .browse-entry-error { margin: 0; font-size: 0.8125rem; }
+.browse-entry-meta { display: flex; flex-wrap: wrap; column-gap: 0.4em; color: var(--muted); }
+.browse-entry-meta > span + span::before { content: "·"; margin-right: 0.4em; }
+.browse-entry-error { margin-top: 0.2rem; }
+
+/* keyboard help */
+.shortcut-help {
+  position: fixed;
+  inset: 0;
+  width: min(62rem, calc(100% - 2rem));
+  max-height: calc(100dvh - max(1rem, env(safe-area-inset-top)) - max(1rem, env(safe-area-inset-bottom)));
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  color: var(--fg);
+  background: var(--panel);
+  border: 1px solid var(--faint);
+  border-radius: 8px;
+  box-shadow: 0 1rem 3rem rgb(0 0 0 / 0.3);
+}
+.shortcut-help::backdrop { background: rgb(10 10 14 / 0.58); }
+.shortcut-help form { padding: 1rem 1.1rem 1.2rem; }
+.shortcut-help-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.shortcut-help-head h2 { margin: 0; font-size: 1.15rem; }
+.shortcut-help-head h2:focus { outline: none; }
+.shortcut-close { min-width: var(--tap-target); min-height: var(--tap-target); padding: 0; border: 0; color: var(--muted); background: transparent; font: 1.4rem/1 var(--font); cursor: pointer; }
+/* Two columns of groups; every group's key and description tracks are shared subgrid columns, so
+   keys and descriptions line up down each column across all of its groups. */
+.shortcut-groups { display: grid; grid-template-columns: repeat(2, max-content minmax(0, 1fr)); column-gap: 1rem; row-gap: 1.25rem; margin-top: 1rem; }
+.shortcut-groups section { display: grid; grid-column: span 2; grid-template-columns: subgrid; column-gap: 1rem; align-content: start; }
+.shortcut-groups section:nth-child(odd) dd { padding-right: 1rem; }
+.shortcut-groups h3 { grid-column: span 2; margin: 0 0 0.45rem; color: var(--muted); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.shortcut-list { display: contents; margin: 0; }
+.shortcut-list > div { display: contents; }
+.shortcut-list dt, .shortcut-list dd { margin: 0; padding: 0.3rem 0; }
+.shortcut-list dd { color: var(--muted); overflow-wrap: anywhere; }
+.shortcut-list kbd { display: inline-block; min-width: 1.6em; margin-right: 0.15rem; padding: 0.08rem 0.3rem; text-align: center; color: var(--fg); background: var(--code); border: 1px solid var(--faint); border-radius: 3px; box-shadow: 0 1px 0 var(--faint); }
+/* Alternatives for one action read as one mapping: they stay on a line and the key column, sized
+   to its widest content, grows to hold them rather than wrapping them into a second row. */
+.key-alternatives { display: inline-flex; align-items: center; flex-wrap: nowrap; white-space: nowrap; gap: 0.15rem 0; }
+.key-alternatives small { margin: 0 0.35rem 0 0.2rem; color: var(--muted); font-size: 0.78em; }
+.key-pair { display: inline-flex; align-items: center; white-space: nowrap; }
+/* A mapping that differs by platform shows the one the reader can actually press. The other
+   platform's is the fallback, so a page whose enhancement never ran still names a working key. */
+[data-platform-key="apple"] { display: none; }
+[data-platform="apple"] [data-platform-key="apple"] { display: inline-flex; }
+[data-platform="apple"] [data-platform-key="other"] { display: none; }
+.key-pair small { margin: 0 0.25rem 0 0.1rem; color: var(--muted); font-size: 0.78em; }
+
+/* content column */
+.reading-list-actions { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+.reading-list-actions a { display: inline-flex; align-items: center; min-height: var(--tap-target); text-decoration: underline; text-underline-offset: 0.15em; }
+.main {
+  /* Grow with the page, and keep a content-sized basis. A zero basis makes this flex item
+     the sticky containing block in Safari, so the feed search scrolls away with the list. */
+  flex: 1 0 auto;
+  width: 100%;
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 0.75rem 0.75rem 2rem;
+  padding-left: max(0.75rem, env(safe-area-inset-left));
+  padding-right: max(0.75rem, env(safe-area-inset-right));
+  padding-bottom: max(4rem, calc(env(safe-area-inset-bottom) + 3rem + var(--now-playing-offset)));
+}
+.main:focus { outline: none; }
+.main[data-navigation-focus]:focus-visible { outline: none; }
+.footer { position: fixed; right: max(0.75rem, env(safe-area-inset-right)); bottom: max(0.5rem, env(safe-area-inset-bottom)); z-index: 1; padding: 0.2rem 0.35rem; color: var(--muted); font-size: 0.72rem; background: var(--bg); }
+html[data-now-playing] .footer { bottom: calc(var(--now-playing-offset) + 0.5rem); }
+.footer a { color: inherit; }
+.page { min-width: 0; }
+.page-header { margin: 0.25rem 0 0.75rem; }
+.page-header h1 { margin: 0; font-size: 1.35rem; line-height: 1.25; }
+.page-header h1, .listhead h1, .itemhead h1 { max-width: 100%; overflow-wrap: anywhere; }
+.page-body { min-width: 0; }
+.listhead { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.5rem 1rem; margin: 0.25rem 0 0.5rem; }
+.listhead h1 { font-size: 1.15rem; margin: 0; }
+.listtools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 1rem; font-size: 0.85rem; color: var(--muted); }
+.listtools input[type=search] { min-height: var(--tap-target); font: inherit; padding: 0.45rem 0.6rem; border: 1px solid var(--control-border); border-radius: 4px; background: var(--panel); color: var(--fg); min-width: 16rem; }
+.listtools select, .preferences select, .preferences button { min-height: var(--tap-target); font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--control-border); border-radius: 4px; padding: 0.45rem 0.6rem; }
+.toggle { min-height: var(--tap-target); display: inline-flex; align-items: center; user-select: none; cursor: pointer; }
+.empty { color: var(--muted); padding: 1rem 0; }
+
+/* rows */
+.rows { list-style: none; margin: 0; padding: 0; }
+.row {
+  --row-divider: var(--faint);
+  --row-inset: 1.25rem;
+  /* Rows bleed past the column by this much, so their whole width answers a click or a tap. The
+     rule and the new-entry highlight stop at the column's edges, exactly as wide as the search
+     field, and the copy keeps the same clearance inside them on both sides. */
+  --row-bleed: 0.75rem;
+  --rank-font: 0.875rem/1.4 var(--mono);
+  position: relative;
+  isolation: isolate;
+  margin-inline: calc(-1 * var(--row-bleed));
+  padding: var(--row-padding) var(--row-inset);
+  scroll-margin-block: 4rem 6rem;
+  /* Off-screen rows stay in the document for the keyboard and for search, and skip layout.
+     `auto` remembers a row once it has been seen; 4.5rem is the desktop estimate. The phone
+     query raises the estimate, and print lays every row out. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 4.5rem;
+}
+/* The selection bar sits just outside the column, meeting the start of the rule. */
+.row::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  inset-inline-start: calc(var(--row-bleed) - 3px);
+  width: 3px;
+  background: var(--warm);
+  opacity: 0;
+  pointer-events: none;
+}
+.row.is-selected::before { opacity: 1; }
+.row::after, .row > .cell::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline: var(--row-bleed);
+  pointer-events: none;
+}
+.row::after {
+  top: auto;
+  height: 1px;
+  background: var(--row-divider);
+}
+.row > .cell::before {
+  z-index: -1;
+  transition: background-color 5s ease-out;
+}
+.row:has([data-row-open]), .article-more-card { cursor: pointer; }
+:is(.row, .article-more-card):where(:hover):not(:has(a:not(.title):hover, button:hover, input:hover, select:hover, textarea:hover, label:hover, summary:hover, [role="button"]:hover, [role="link"]:hover, [contenteditable]:hover)) .title { text-decoration: underline; }
+/* The whole row opens its article: one stretched link, with native modifier and middle clicks.
+   Both cards below stretch their link the same way, and both must contain it: an overlay with no
+   positioned ancestor of its own covers the article it sits under instead of its own card. */
+.row:has([data-row-open]), .article-more-card { position: relative; }
+.row [data-row-open]::after, .article-more-card .article-more-link::after { content: ""; position: absolute; inset: 0; z-index: 0; }
+.row :is(.meta, .preview-media), .row a:not(.title), .article-more-card .meta { position: relative; z-index: 1; }
+.row.is-selected .title,
+.row.is-selected .title:hover,
+.row.is-selected .title:focus-visible { text-decoration: none; }
+.row.is-selected .title:focus-visible { background: transparent; }
+.row:not(.is-selected) .title:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; background: transparent; }
+.row-content { display: flex; align-items: flex-start; gap: 0.75rem; }
+/* A rank hangs left by the digits it has beyond one, and a list says how many its widest rank has
+   in `--rank-indent`. The copy moves right by as much, so the widest rank keeps a single digit's
+   clearance inside the highlight. Set in the rank's own font, this spacer measures those digits
+   exactly; the negative margin takes back the gap the spacer adds. */
+.row-content::before { content: ""; flex: none; margin-inline-end: calc(var(--rank-indent, 0ch) - 0.75rem); font: var(--rank-font); }
+html:not([data-thumbnails="hide"]) .row-content { min-height: var(--preview-size); }
+.row-copy { flex: 1; min-width: 0; }
+.row-heading {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr);
+  grid-template-areas: "rank title";
+  align-items: baseline;
+  gap: var(--row-source-gap) 0.5rem;
+  min-width: 0;
+}
+.preview-media { display: block; flex: 0 0 var(--preview-size); width: var(--preview-size); height: var(--preview-size); aspect-ratio: 1; overflow: hidden; border-radius: 0.35rem; background: var(--image-preview, none) center / cover no-repeat var(--preview-color, var(--code)); }
+.preview-image { display: block; width: 100%; height: 100%; object-fit: cover; }
+.row.is-new > .cell::before { background-color: color-mix(in srgb, var(--warm) 22%, transparent); transition: none; }
+/* Recolor the existing separator immediately before the first 24h-old entry. */
+.row:not(.age-h24):has(+ .row.age-h24) {
+  --row-divider: color-mix(in srgb, var(--warm) 52%, var(--faint));
+}
+.rank { grid-area: rank; flex: 0 0 var(--rank-width); width: var(--rank-width); margin-inline-start: calc(2ch - var(--rank-width)); color: var(--muted); font: var(--rank-font); font-variant-numeric: tabular-nums; text-align: right; }
+.cell { min-width: 0; }
+.title { grid-area: title; display: block; color: var(--link); font-size: var(--row-title-size); font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+.domain { overflow-wrap: anywhere; }
+.domain, .meta a { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.meta { min-width: 0; color: var(--muted); font-size: 0.875rem; line-height: 1.2; display: flex; align-items: center; flex-wrap: wrap; gap: 0; }
+.meta > * { display: inline-flex; align-items: center; min-width: 0; min-height: var(--row-meta-height); overflow-wrap: anywhere; }
+.meta-field { gap: 0; flex-wrap: nowrap; max-width: 100%; }
+.meta-field > a { display: inline-flex; align-items: center; min-height: inherit; }
+.meta-tags { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0 0.35em; }
+.published-date { display: inline-flex; align-items: center; gap: 0.25em; flex-wrap: wrap; }
+.meta a { color: inherit; }
+.meta-field > .domain { display: block; align-content: center; }
+.meta > .meta-field + .meta-field::before { content: "·"; flex-shrink: 0; margin-inline: 0.35em; color: var(--muted); }
+.row .meta { padding-left: calc(1.25rem + 0.5rem); }
+/* pager */
+.pager { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 1rem; padding: 0.75rem 0; color: var(--muted); font-size: 0.9rem; }
+.pager[hidden], .pager a[hidden] { display: none; }
+.pager-side { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }
+.pager a, .pager button { display: inline-flex; align-items: center; min-height: var(--tap-target); }
+.pager button { width: auto; padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none; color: inherit; font: inherit; cursor: pointer; }
+.pager button:first-child { justify-self: start; }
+.pager button:last-child { justify-self: end; }
+.pager button:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 0.14em; }
+.pager button:disabled { opacity: 0.4; cursor: default; }
+.pager-side:last-child { justify-content: flex-end; }
+
+/* item page */
+.article-lead { margin: 0 0 1.5rem; }
+.article-lead img { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: 0.4rem; }
+.meta .published-date { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.meta .reading-stats { white-space: nowrap; }
+.item { overflow-anchor: none; font-size: var(--reading-size); max-width: var(--reading-measure); margin-inline: auto; }
+/* An article's page is as wide as the window, so its header can span it the way the navigation
+   above does; the margins that centered the column become padding and leave the same content box,
+   the one every width inside is measured from. */
+body[data-kind="item"] .main {
+  /* Margin notes query the page width. The container stays off list pages: it is a containing
+     block, and a sticky search inside it scrolls away in Safari. */
+  container: reader / inline-size;
+  --page-gutter: 1.25rem;
+  max-width: none;
+  padding-top: 0;
+  padding-left: max(var(--page-gutter), env(safe-area-inset-left), (100% - var(--max)) / 2 + var(--page-gutter));
+  padding-right: max(var(--page-gutter), env(safe-area-inset-right), (100% - var(--max)) / 2 + var(--page-gutter));
+}
+.itemhead { position: sticky; top: var(--top-nav-offset); z-index: 3; isolation: isolate; width: 100%; max-width: none; margin: 0 0 1.75rem; padding: calc(var(--header-padding-top, 1.5rem) * (1 - var(--header-progress, 0)) + 0.6rem * var(--header-progress, 0)) 0 calc(var(--header-padding-bottom, 0.7rem) * (1 - var(--header-progress, 0)) + 0.5rem * var(--header-progress, 0)); background: var(--bg); }
+.itemhead::before { content: ""; position: absolute; z-index: -1; inset: 0; background: var(--bg); }
+/* The track and the bar end with the text column, where the rules between paragraphs end; the
+   surface behind them runs on across the page. Below the bar the text scrolling underneath fades
+   into the background and blurs, more the nearer it gets to the bar: three stacked backdrops with
+   growing radii, each reaching less far down. The zone starts under the bar itself, so no row of
+   sharp text shows between the two. */
+.itemhead::after { content: ""; position: absolute; z-index: 1; left: 0; top: 100%; width: 100%; height: 1px; background: var(--faint); pointer-events: none; }
+.itemhead-progress { position: absolute; z-index: 2; left: 0; bottom: -2px; width: 100%; height: 2px; background: var(--warm); transform: scaleX(0); will-change: transform; transform-origin: left; pointer-events: none; }
+.itemhead-fade { position: absolute; top: 100%; left: 0; width: 100%; height: 3.25rem; background: linear-gradient(to bottom, var(--bg), color-mix(in srgb, var(--bg) 55%, transparent) 35%, transparent); -webkit-backdrop-filter: blur(1.5px); backdrop-filter: blur(1.5px); -webkit-mask-image: linear-gradient(to bottom, #000, transparent); mask-image: linear-gradient(to bottom, #000, transparent); opacity: min(1, calc(var(--header-progress, 0) * 8)); pointer-events: none; }
+.itemhead-fade::before, .itemhead-fade::after { content: ""; position: absolute; inset: 0 0 auto; -webkit-mask-image: linear-gradient(to bottom, #000, transparent); mask-image: linear-gradient(to bottom, #000, transparent); pointer-events: none; }
+.itemhead-fade::before { height: 66%; -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
+.itemhead-fade::after { height: 33%; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+/* The header's surface, edge and fade span the page, so a wide table borrowing the page margins
+   never shows beside it. They reach a little past a classic scrollbar's side; the page clips that
+   rather than letting it scroll. The progress bar keeps the column's width: it measures the text,
+   so it lines up with the rules that separate the text. */
+@supports (overflow-x: clip) {
+  body[data-kind="item"] .main { overflow-x: clip; }
+  .itemhead::before { inset-inline: calc(50% - 50vw); }
+  .itemhead-fade { left: calc(50% - 50vw); width: 100vw; }
+}
+.itemhead { --itemhead-title-size: clamp(1.65rem, 4vw, 2.25rem); }
+.itemhead h1 { max-width: none; font-size: var(--itemhead-title-size); line-height: 1.2; margin: 0 0 calc(var(--header-title-gap, 0.65rem) * (1 - var(--header-progress, 0)) + 0.2rem * var(--header-progress, 0)); letter-spacing: -0.025em; overflow-wrap: anywhere; text-wrap: pretty; }
+.itemhead-title { display: block; transform: scale(var(--title-scale)); transform-origin: top left; }
+.itemhead-title-term { display: inline-block; width: max-content; max-width: 100%; vertical-align: top; }
+/* The title as the folded header shows it: laid out, and so measurable, but only shown by the fold. */
+.itemhead-title-compact { position: absolute; top: 0; inset-inline: 0; visibility: hidden; pointer-events: none; font-size: calc(var(--itemhead-title-size) * 0.6); font-weight: 700; line-height: 1.25; letter-spacing: -0.01em; overflow-wrap: anywhere; text-wrap: pretty; }
+.itemhead h1:focus { outline: none; }
+/* Inline tags use the space left by preceding metadata and can wrap between words. */
+.itemhead .meta { display: block; }
+.itemhead .meta-field:has(> .meta-tags), .itemhead .meta-tags, .itemhead .meta-tags .tag { display: inline; }
+.tag { color: inherit; background: none; border: 0; padding: 0; border-radius: 0; font-weight: 400; }
+.article-resources { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.45rem 1rem; margin: -0.25rem 0 1.5rem; font-size: 0.8125rem; line-height: 1.5; }
+.article-resources-label { color: var(--muted); }
+.article-resources a { color: var(--warm); font-weight: 400; overflow-wrap: anywhere; }
+.article-resources a:hover, .article-resources a:focus-visible { text-decoration: underline; }
+.views { display: flex; flex-wrap: wrap; gap: 0 1rem; margin: 0.6rem 0; padding: 0.4rem 0; border-top: 1px solid var(--faint); border-bottom: 1px solid var(--faint); font-size: 0.875rem; }
+.views a { display: inline-flex; align-items: center; min-height: var(--tap-target); }
+.views [aria-current] { font-weight: 600; color: var(--fg); }
+.video-player { position: relative; width: 100%; aspect-ratio: 16 / 9; margin-bottom: 1.5rem; overflow: hidden; border: 1px solid var(--faint); border-radius: 0.5rem; background: var(--image-preview, none) center / cover no-repeat var(--code); }
+.video-player[data-video-provider="twitch"] { aspect-ratio: 4 / 3; }
+.video-preview { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.video-player iframe { position: absolute; inset: 0; display: block; width: 100%; height: 100%; border: 0; transform-origin: top left; }
+.video-preview-label { position: absolute; inset: 0; display: grid; place-items: center; padding-bottom: 5rem; font-size: 1.2rem; color: var(--muted); }
+.video-preview img { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* A body link that is only a video becomes the same facade; the archived poster fills it. */
+.body .video-player { margin: 1.5em 0; }
+.body .video-preview > .article-picture { position: absolute; inset: 0; inline-size: 100%; max-inline-size: none; aspect-ratio: auto; margin: 0; border-radius: 0; }
+.body .video-preview > .article-picture img { height: 100%; object-fit: cover; }
+.video-preview-play { position: absolute; inset: 50% auto auto 50%; display: grid; place-items: center; width: 3.5rem; height: 2.5rem; border: 1px solid rgb(255 255 255 / 0.3); border-radius: 0.65rem; background: rgb(0 0 0 / 0.7); color: white; transform: translate(-50%, -50%); pointer-events: none; }
+.video-preview-play svg { width: 1.5rem; height: 1.5rem; fill: currentColor; }
+.video-preview:is(:hover, :focus-visible) .video-preview-play { background: rgb(0 0 0 / 0.9); }
+.body { max-width: none; min-width: 0; overflow-wrap: anywhere; font-size: var(--reading-size); line-height: var(--reading-line-height); font-family: var(--reading-font); text-align: var(--reading-align); letter-spacing: var(--reading-letter-spacing); word-spacing: var(--reading-word-spacing); }
+.body a { color: var(--accent-strong); font-style: normal; text-decoration: underline; text-decoration-thickness: 0.08em; text-underline-offset: 0.14em; }
+.body a:hover { text-decoration-thickness: 0.13em; }
+.body a:focus-visible { text-decoration-thickness: 0.18em; background: var(--code); }
+.body img, .body video, .body iframe { max-width: 100%; height: auto; }
+.body img:not(.progressive-image):not([width][height]) { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: var(--code); }
+.body video, .body iframe { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: var(--code); }
+.body audio { display: block; width: 100%; height: 54px; }
+.body .article-picture {
+  position: relative;
+  isolation: isolate;
+  display: block;
+  inline-size: min(100%, var(--image-width, 100%));
+  max-inline-size: 100%;
+  aspect-ratio: var(--image-ratio);
+  margin: 1.5em auto;
+  overflow: hidden;
+  border-radius: 0.35rem;
+  background: var(--image-placeholder, var(--code));
+}
+/* High-density screens: prefer a sharp smaller image over stretching a modest master 2×. */
+@media (min-resolution: 2dppx) {
+  .body :not(.video-preview) > .article-picture:not(.article-badge) { inline-size: min(100%, calc(var(--image-width, 200vw) / 1.5)); }
+}
+.body .article-picture.article-badge { display: inline-block; margin: 0.25em 0.25em 0.25em 0; vertical-align: middle; border-radius: 0; }
+.progressive-image, .preview-image, .article-lead img { color: transparent; }
+.is-error .progressive-image, .is-error .preview-image, .article-lead.is-error img { color: inherit; }
+.body .article-picture::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  inset: -0.75rem;
+  background-color: var(--image-placeholder, var(--code));
+  background-image: var(--image-preview, none);
+  background-position: center;
+  background-size: cover;
+  filter: blur(0.6rem);
+  transform: scale(1.03);
+}
+.body .progressive-image {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  margin-inline: auto;
+  object-fit: contain;
+  border-radius: inherit;
+}
+.body :not(.article-picture) > .progressive-image { margin-block: 1.5em; }
+.body .article-picture .progressive-image { margin-block: 0; }
+.body figure > :is(.article-picture, .progressive-image) { margin-block: 0; }
+.body figure { margin: 1.5em 0; }
+.body figcaption { margin-top: 0.5em; color: var(--muted); font-size: 0.875em; line-height: 1.5; }
+.body > :first-child { margin-top: 0; }
+.body > :last-child { margin-bottom: 0; }
+.body p, .body ul, .body ol { margin-block: var(--paragraph-spacing); }
+.body p { text-indent: var(--paragraph-indent); widows: 3; orphans: 3; }
+.body :is(li, figcaption, .footnotes, aside, .margin-note, [data-margin-note]) p,
+.body p:has(> :is(img, picture, video, iframe):first-child) { text-indent: 0; }
+.body ul, .body ol { padding-inline-start: 1.55em; }
+.body li + li { margin-top: 0.25em; }
+.body li > :is(ul, ol) { margin-block: 0.25em 0; }
+.body li > p { margin-block: 0.25em; }
+.body li > p:first-child { margin-block-start: 0; }
+.body li > p:last-child { margin-block-end: 0; }
+.body :is(h1, h2, h3, h4, h5, h6) { line-height: 1.3; margin: 1.75em 0 0.6em; text-wrap: pretty; break-after: avoid; }
+/* Headings are anchors, not links: a hover marker sits in the margin without moving the title. */
+.body :is(h1, h2, h3, h4, h5, h6)[id] { position: relative; cursor: pointer; }
+/* The whole heading is the way back to it, so it points like one; the marker beside it stays the
+   visible affordance and the thing a reader can copy. */
+.body :is(h1, h2, h3, h4, h5, h6)[id] { cursor: pointer; }
+.body :is(h1, h2, h3, h4, h5, h6)[id] :is(a:not(.heading-anchor), button, code) { cursor: auto; }
+.body .heading-anchor { position: absolute; right: 100%; top: 0; margin-right: 0.3em; color: var(--muted); font-weight: 400; text-decoration: none; opacity: 0; cursor: pointer; }
+.body :is(h1, h2, h3, h4, h5, h6):hover > .heading-anchor, .body .heading-anchor:focus-visible { opacity: 1; }
+.body :is(h1, h2, h3, h4, h5, h6)[id]:target > .heading-anchor { opacity: 1; color: var(--accent-strong); }
+.body .article-figure { margin: 1.5em 0; }
+.body .article-figure > .article-picture { margin-block: 0; }
+.body figcaption { margin-top: 0.6em; color: var(--muted); font-size: 0.85em; font-style: italic; line-height: 1.5; text-align: center; text-wrap: pretty; }
+.body blockquote { margin: 1.5em 0; padding-inline-start: 1em; border-inline-start: 3px solid var(--faint); color: var(--fg); }
+.body pre { margin-block: 1.5em; max-width: 100%; font-size: 0.875em; line-height: 1.6; tab-size: 4; text-align: left; overflow-wrap: normal; }
+/* A wide table squashed into the reading measure is unreadable, so it borrows the page margins
+   and scrolls only once it outgrows those too. The table itself stays a single layout box so its
+   header and body columns line up. */
+.body .table-scroll {
+  --table-bleed: max(0px, (100cqi - 100%) / 2);
+  box-sizing: border-box;
+  width: calc(100% + 2 * var(--table-bleed));
+  margin-block: 1.5em;
+  margin-inline: calc(-1 * var(--table-bleed));
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+.body table {
+  width: 100%;
+  max-width: none;
+  margin-block: 1.5em;
+  border-collapse: collapse;
+  font-size: 0.9em;
+  line-height: 1.5;
+}
+.body .table-scroll > table { margin-block: 0; }
+.body :is(td, th) { min-width: 6.5rem; }
+.body th { text-align: start; background: var(--code); }
+/* A header aggr supplied because the source table had none carries no information. */
+.body thead:not(:has(th:not(:empty))) { display: none; }
+.body > hr:first-child { display: none; }
+.body > hr:first-child + * { margin-top: 0; }
+.body hr { margin-block: 2em; border: 0; border-top: 1px solid var(--faint); }
+.body td, .body th { border: 1px solid var(--faint); padding: 0.25em 0.5em; }
+
+/* Comrak's standard footnotes stay compact and easy to navigate on every viewport. */
+.body :is(.footnote-ref, .citation-ref) { font-size: 0.72em; line-height: 0; vertical-align: super; }
+.body :is(.footnote-ref, .citation-ref) a, .body .footnote-backref { color: var(--accent-strong); text-decoration: none; }
+.body .footnotes { clear: both; margin-top: 1.75rem; padding-top: 0.65rem; color: var(--muted); border-top: 1px solid var(--faint); font-size: 0.875rem; line-height: 1.5; }
+.body .footnotes ol { margin: 0; padding-inline-start: 1.4rem; }
+/* Following a note, or a note's way back, says which one: the pair lights up wherever it is,
+   whether the notes are a list under the article or margin notes beside it. `:target` carries it
+   without JavaScript; `data-footnote-active` pairs the halves the fragment cannot reach. */
+.body .footnotes li:target,
+.body .footnotes li[data-footnote-active],
+.body .footnote-margin-note[data-footnote-active] { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.body .footnote-ref:has(a:target) + .footnote-margin-note { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.body :is(.footnote-ref, .citation-ref) a:target,
+.body :is(.footnote-ref, .citation-ref)[data-footnote-active] a {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 0.25em;
+  padding-inline: 0.25em;
+}
+.body .footnotes p { margin-block: 0.35rem; }
+
+/* Semantic notes become sidenotes only when the reading column has a real gutter. */
+.body :where(.margin-note, [data-margin-note], aside[role="note"]) {
+  margin: 0.9em 0;
+  padding: 0.6em 0.75em;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--accent) 6%, var(--panel));
+  border-left: 3px solid var(--faint);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+.body :where(.margin-note, [data-margin-note], aside[role="note"]) > :first-child { margin-top: 0; }
+.body :where(.margin-note, [data-margin-note], aside[role="note"]) > :last-child { margin-bottom: 0; }
+.body .footnote-margin-note { display: none; }
+.margin-note-number { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.article-footer { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 1.25rem; max-width: none; margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid var(--faint); }
+.article-more-section { min-width: 0; }
+.article-more-heading { margin: 0 0 .65rem; color: var(--fg); font-size: 1rem; font-weight: 650; line-height: 1.3; }
+.article-more { display: grid; gap: .65rem; }
+/* Each card stacks its raised metadata within itself, so nothing in it can paint over the sticky
+   article header it scrolls under. */
+.article-more-card { isolation: isolate; min-width: 0; padding: .8rem; border: 1px solid var(--faint); border-radius: .4rem; background: var(--panel); }
+.article-more-card .row-content { --preview-size: 3.5rem; }
+.article-more-card .row-content:not(:has(.preview-media)) { min-height: 0; }
+.interactive-reader { margin: 0 0 1.5rem; }
+.interactive-frame { position: relative; width: 100%; height: clamp(24rem, 70svh, 48rem); overflow: hidden; background: var(--code); border: 1px solid var(--faint); border-radius: .4rem; }
+.interactive-frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.article-more-link.title { margin-bottom: .3rem; font-size: var(--row-title-size); line-height: 1.3; }
+.sha { font-family: var(--mono); }
+
+/* preferences */
+.preferences { max-width: 44rem; }
+.preferences input[type="number"] { width: 5.5rem; min-height: var(--tap-target); padding: 0.45rem 0.6rem; border: 1px solid var(--control-border); border-radius: 4px; color: var(--fg); background: var(--panel); font: inherit; }
+.preferences input[type="checkbox"] { width: 1.25rem; height: 1.25rem; accent-color: var(--accent-strong); }
+.preferences .setting small { font-weight: 400; }
+.preferences-intro { margin: 0.35rem 0 1rem; color: var(--muted); font-size: 0.875rem; }
+.preferences-body { display: grid; gap: 1.6rem; }
+.preferences-group { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; min-width: 0; padding: 0.6rem 1rem; border: 1px solid var(--faint); border-radius: 0.65rem; background: color-mix(in srgb, var(--panel) 65%, var(--bg)); }
+.preferences-group h2 { margin: 0; padding: 0.4rem 0 0.55rem; font-size: 0.875rem; color: var(--muted); font-weight: 650; }
+.preferences-group p { margin: 0; }
+.setting { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem 1rem; min-width: 0; min-height: var(--tap-target); padding-block: 0.55rem; }
+.setting + .setting { border-top: 1px solid var(--faint); }
+.setting > span { min-width: 0; }
+.setting strong { font-weight: 500; }
+.setting select { min-width: min(8rem, 100%); max-width: 100%; }
+.setting input[type="checkbox"] { width: 1.3rem; height: 1.3rem; flex-shrink: 0; margin: 0.7rem; }
+.setting strong, .setting small { display: block; }
+.setting small { max-width: 34rem; margin-top: 0.15rem; color: var(--muted); font-size: 0.875rem; font-weight: 400; }
+.setting-label, .preferences-group-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; min-width: 0; }
+.setting-label > label { font-weight: 500; }
+.preference-help { display: inline-block; font-weight: 400; }
+.preference-help summary { display: grid; place-items: center; width: 1.5rem; height: 1.5rem; border: 1px solid var(--control-border); border-radius: 50%; color: var(--muted); font-size: 0.8rem; line-height: 1; cursor: help; list-style: none; }
+.preference-help summary::-webkit-details-marker { display: none; }
+.preference-help summary:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+@media (pointer: coarse) {
+  .preference-help summary { width: var(--tap-target); height: var(--tap-target); }
+}
+.preference-help-text { position: absolute; z-index: 3; left: 1rem; right: 1rem; margin-top: 0.4rem; padding: 0.65rem; border: 1px solid var(--faint); border-radius: 0.4rem; background: var(--panel); color: var(--fg); box-shadow: 0 3px 12px #0002; font-size: 0.875rem; line-height: 1.5; }
+.preference-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-top: 0.45rem; }
+.preferences-transfer > .preference-actions { padding-block: 0.3rem; }
+.preferences-reset { border-top: 1px solid var(--faint); }
+.preferences-import { display: grid; gap: 0.5rem; min-width: 0; padding-block: 0.5rem; }
+.preferences-import input { max-width: 100%; min-width: 0; font: inherit; }
+#preferences-link { width: 100%; min-width: 0; min-height: var(--tap-target); margin-block: 0.5rem; padding: 0.45rem 0.6rem; border: 1px solid var(--control-border); border-radius: 4px; color: var(--fg); background: var(--panel); font: inherit; }
+.preferences [role="status"] { color: var(--muted); font-size: 0.875rem; overflow-wrap: anywhere; }
+.preferences button { cursor: pointer; white-space: nowrap; }
+.preferences button:disabled { cursor: not-allowed; opacity: 0.58; }
+.preferences .text-button { width: fit-content; border: 0; background: none; padding-left: 0; text-decoration: underline; text-underline-offset: 0.2em; }
+.preferences .text-button:focus-visible { background: var(--code); text-decoration-thickness: 0.18em; }
+
+@media (min-width: 40.0625rem) {
+  body { font-size: 16px; line-height: 1.5; }
+  .main { padding-top: 0.55rem; }
+  body[data-kind="item"] .main { --page-gutter: 2rem; }
+  .page-header { margin-bottom: 0.6rem; }
+  .views { margin-block: 0.4rem; padding-block: 0.2rem; }
+  .itemhead { margin-bottom: 2.25rem; --header-padding-top: 2rem; --header-padding-bottom: 0.9rem; --header-title-gap: 0.75rem; }
+  .article-footer { margin-top: 3rem; }
+  html:not([data-density="comfortable"]) {
+    --row-padding: 0.2rem;
+    --row-title-size: 1rem;
+    --row-meta-height: 1.125rem;
+    --preview-size: 2.75rem;
+  }
+  html:not([data-density="comfortable"]) .row-heading {
+    gap: 0.05rem 0.45rem;
+  }
+  html:not([data-density="comfortable"]) .row-heading .title { line-height: 1.25; }
+  html:not([data-density="comfortable"]) .row .meta { padding-left: calc(1.25rem + 0.45rem); }
+  html:not([data-density="comfortable"]) .meta { font-size: 0.8rem; }
+}
+
+@media (min-width: 72.0625rem) {
+  @container reader (min-width: 54rem) {
+    html:not([data-reading-width="wide"]):not([data-text-size="largest"]) .body > :where(.margin-note, [data-margin-note], aside[role="note"]),
+    html:not([data-reading-width="wide"]):not([data-text-size="largest"]) .body .footnote-margin-note {
+      display: block;
+      float: right;
+      clear: right;
+      width: 13rem;
+      margin: 0.15rem -15rem 0.75rem 1rem;
+      padding: 0.1rem 0 0.1rem 0.75rem;
+      background: transparent;
+    }
+    html:not([data-reading-width="wide"]):not([data-text-size="largest"]) .body.has-margin-notes > .footnotes { display: none; }
+  }
+}
+
+@media (max-width: 40rem) {
+  :root { --rank-width: 3ch; }
+  .row::before { display: none; }
+  .row.is-selected .title:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; }
+  html { scroll-padding-bottom: calc(var(--bottom-nav-offset) + var(--now-playing-offset) + 1rem); }
+  .main { padding-bottom: calc(var(--bottom-nav-offset) + var(--now-playing-offset) + 0.75rem); }
+  html:not([data-density="comfortable"]) { --row-padding: 0.3rem; }
+  html[data-density="comfortable"] { --row-padding: 0.65rem; }
+  .meta > span { min-width: 0; overflow-wrap: anywhere; }
+  .listtools input[type=search] { min-width: 0; width: 100%; }
+  .nav .brand { min-width: 0; }
+  .brand-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nav .config-link { white-space: nowrap; }
+  .article-more { grid-template-columns: 1fr; }
+  .shortcut-groups { grid-template-columns: max-content minmax(0, 1fr); }
+  .shortcut-groups section:nth-child(odd) dd { padding-right: 0; }
+  /* One line of alternatives needs room it does not have here, and a dialog that fits the screen
+     is worth more than a mapping on one line. */
+  .key-alternatives { flex-wrap: wrap; white-space: normal; }
+}
+
+@media (max-width: 22.5rem) {
+  .preview-media { flex-basis: 3.5rem; width: 3.5rem; height: 3.5rem; }
+  .setting { align-items: flex-start; flex-wrap: wrap; }
+  .setting select { max-width: 100%; }
+}
+
+@media (max-width: 30rem) {
+  .pager { gap: 0.5rem; font-size: 0.8125rem; }
+  .pager-side { gap: 0 0.5rem; }
+}
+
+@media (pointer: coarse) {
+  /* A touch leaves `:hover` on whatever was tapped last: on a touch screen it underlines nothing. */
+  a:hover:not(.body a) { text-decoration: none; }
+  :is(.row, .article-more-card):where(:hover):not(:has(a:not(.title):hover, button:hover, input:hover, select:hover, textarea:hover, label:hover, summary:hover, [role="button"]:hover, [role="link"]:hover, [contenteditable]:hover)) .title { text-decoration: none; }
+  a, button, input, select { touch-action: manipulation; }
+  input, select, button { font-size: 16px; }
+  .nav a, .page-header a {
+    display: inline-flex;
+    align-items: center;
+    min-width: var(--tap-target);
+    min-height: var(--tap-target);
+  }
+  /* Tags read as a line of words: a tall row and a box as wide as it is high would space them
+     unevenly, so each keeps its own width and a comfortable height. */
+  .tag { display: inline-flex; align-items: center; min-height: 1.75rem; }
+  /* A row is one target: its metadata and thumbnail let a tap through to the row's own link,
+     and only their own links keep it. */
+  .row :is(.meta, .preview-media), .article-more-card .meta { pointer-events: none; }
+  .row :is(.meta, .preview-media) a, .article-more-card .meta a { pointer-events: auto; }
+  .row .title { min-height: var(--tap-target); padding: 0.2rem 0; }
+  .meta .domain { min-height: 2rem; }
+  .meta .domain a { display: inline-block; min-height: 2rem; align-content: center; }
+  .meta > * { min-height: 2rem; }
+  html[data-density="comfortable"] .meta .domain,
+  html[data-density="comfortable"] .meta .domain a,
+  html[data-density="comfortable"] .meta > * { min-height: var(--tap-target); }
+  .views a, .pager a {
+    justify-content: center;
+    min-width: var(--tap-target);
+    min-height: var(--tap-target);
+    padding-left: 0.2rem;
+    padding-right: 0.2rem;
+  }
+  .body .footnote-ref a { position: relative; }
+  .body .footnote-ref a::before { content: ""; position: absolute; width: var(--tap-target); height: var(--tap-target); inset: 50% auto auto 50%; transform: translate(-50%, -50%); }
+  .body .footnote-backref { display: inline-flex; align-items: center; justify-content: center; min-width: var(--tap-target); min-height: var(--tap-target); }
+}
+
+.video-player.is-loading iframe { opacity: 0; }
+.video-player.is-loaded iframe { opacity: 1; }
+/* The frame leaves the card for the seat while it is still loading. Hide it there too, and let the poster show through the seat. */
+#now-playing-picture.is-loading { background: transparent; }
+#now-playing-picture.is-loading :is(iframe, video) { opacity: 0; }
+.native-video video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.native-audio { display: grid; grid-template-columns: minmax(0, 1fr); box-sizing: border-box; min-height: 19rem; margin: 0 0 1.5rem; padding: 0; overflow: hidden; border: 1px solid color-mix(in srgb, var(--warm) 28%, var(--faint)); border-radius: 1rem; background: color-mix(in srgb, var(--warm) 4%, var(--panel)); }
+.native-audio.has-artwork { grid-template-columns: minmax(0, 38.2fr) minmax(0, 61.8fr); }
+/* The artwork sits inset on the player's own background; the ThumbHash paints only inside the inset. */
+.audio-cover { position: relative; display: grid; place-items: center; box-sizing: border-box; min-width: 0; min-height: 0; padding: 0.75rem; background: var(--image-preview, none) center / contain no-repeat; background-origin: content-box; background-clip: content-box; }
+.audio-cover.is-loaded, .preview-media.is-loaded:not(.is-error) { background-image: none; }
+.audio-artwork { display: block; width: 100%; height: auto; max-height: 100%; margin: 0; object-fit: contain; border-radius: 0.5rem; }
+.audio-panel { display: grid; align-content: center; gap: 0.5rem; min-width: 0; padding: 1rem; }
+.audio-panel > .audio-heading, .audio-panel > .audio-controls, .audio-panel > .audio-tools { justify-self: center; width: 100%; max-width: 24rem; }
+.native-audio audio { display: block; justify-self: center; min-width: 0; width: 100%; max-width: 24rem; height: 54px; }
+.native-audio.is-enhanced audio:not([data-native-visible]) { display: none; }
+.audio-heading { min-width: 0; }
+.audio-heading { display: grid; gap: 0.2rem; text-align: center; }
+.audio-show, .audio-episode { margin: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.audio-show { -webkit-line-clamp: 1; color: var(--muted); font-size: 0.72rem; line-height: 1rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.audio-episode { -webkit-line-clamp: 3; font-size: 1rem; line-height: 1.3rem; font-weight: 680; text-wrap: balance; }
+/* Announced to assistive technology; shown only when playback needs the reader's attention. */
+.audio-status { margin: 0; color: var(--danger); font-size: 0.78rem; line-height: 1.25rem; }
+.native-audio:not([data-audio-state="error"]) .audio-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.audio-controls:not([hidden]) { display: grid; gap: 0.5rem; min-width: 0; }
+.audio-transport { display: flex; align-items: center; justify-content: center; gap: 0.35rem; }
+.audio-toggle { display: grid; place-items: center; width: 3rem; height: 3rem; padding: 0; flex: none; border: 0; border-radius: 50%; background: var(--warm); color: var(--panel); cursor: pointer; }
+.audio-toggle svg { width: 1.3rem; height: 1.3rem; fill: currentColor; }
+.audio-pause-icon { display: none; }
+.native-audio[data-audio-state="playing"] .audio-pause-icon, .native-audio[data-audio-state="loading"] .audio-pause-icon { display: block; }
+.native-audio[data-audio-state="playing"] .audio-play-icon, .native-audio[data-audio-state="loading"] .audio-play-icon { display: none; }
+.audio-timeline { min-width: 0; }
+.audio-timeline input { display: block; box-sizing: border-box; width: 100%; min-height: 2.75rem; margin: 0; padding: 0; accent-color: var(--warm); cursor: pointer; }
+.audio-times { display: grid; grid-template-columns: 1fr auto 1fr; gap: 0.5rem; color: var(--muted); font: 0.75rem/1.25 var(--mono); font-variant-numeric: tabular-nums; }
+.audio-times > :last-child { text-align: end; }
+.audio-ends-at { color: var(--fg); }
+.audio-tools:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0.5rem 0.75rem; min-width: 0; }
+.audio-tools button, .audio-tools select { box-sizing: border-box; min-height: 2.75rem; border: 1px solid var(--faint); border-radius: 0.45rem; padding: 0.2rem 0.5rem; color: var(--fg); background: var(--panel); font: 0.75rem var(--font); cursor: pointer; }
+/* A circling arrow with the jump length at its center, the shape every podcast player uses. */
+.audio-skip { display: grid; place-items: center; flex: none; width: 2.75rem; height: 2.75rem; padding: 0; border: 0; border-radius: 50%; color: var(--fg); background: transparent; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.audio-skip > * { grid-area: 1 / 1; }
+.audio-skip svg { width: 2.1rem; height: 2.1rem; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.audio-skip span { padding-top: 0.2rem; font: 700 0.62rem/1 var(--font); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.audio-skip[data-audio-skip="-30"], .audio-skip[data-audio-skip="30"] { color: var(--muted); }
+@media (hover: hover) { .audio-skip:not(:disabled):hover { background: color-mix(in srgb, var(--warm) 10%, transparent); } }
+.audio-skip:not(:disabled):active { background: color-mix(in srgb, var(--warm) 16%, transparent); transform: scale(0.94); }
+.audio-speed { display: flex; align-items: center; justify-content: center; gap: 0.5rem; min-width: 0; color: var(--muted); font-size: 0.75rem; }
+.audio-tools select { min-width: 0; width: 5rem; max-width: 100%; }
+.audio-volume { display: flex; flex: 1 1 8rem; max-width: 12rem; align-items: center; gap: 0.5rem; min-width: 0; color: var(--muted); font-size: 0.75rem; }
+.audio-volume button { display: grid; place-items: center; flex: none; width: 2.75rem; padding: 0; }
+.audio-volume svg { width: 1.2rem; height: 1.2rem; fill: currentColor; }
+.audio-volume-wave { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.audio-volume input { min-width: 0; width: 100%; min-height: 2.75rem; margin: 0; padding: 0; accent-color: var(--warm); }
+.native-audio button:disabled, .native-audio input:disabled { opacity: 0.45; cursor: default; }
+.native-audio[data-audio-state="error"] .audio-controls, .native-audio[data-audio-state="error"] .audio-tools { display: none; }
+/* A phone stacks the player the way a podcast app does: artwork above, then the titles and the
+   controls at full width, where five transport buttons fit side by side. */
+@media (max-width: 38rem) {
+  .native-audio, .native-audio.has-artwork { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  /* Both halves keep a fixed box, so neither the artwork arriving nor the controls replacing the
+     native player moves what follows. */
+  .audio-cover { justify-self: center; box-sizing: border-box; width: min(100%, 13rem); aspect-ratio: 1; padding: 1rem 1rem 0; }
+  .audio-panel { align-content: start; min-height: 17rem; padding: 0.75rem; }
+}
+@media (max-width: 380px) {
+  .audio-panel { padding-inline: 0.5rem; }
+  .audio-transport { gap: 0.25rem; }
+  .audio-toggle { width: 2.75rem; height: 2.75rem; }
+}
+
+/* Parked audio stays in the document so it keeps playing. Clipped rather than display:none,
+   which some browsers treat as a reason to suspend media. */
+#now-playing-audio { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+#now-playing-audio audio { width: 1px; height: 1px; }
+/* Former holding area. The live picture is `#now-playing-picture`. */
+#now-playing-park { position: fixed; left: 0; bottom: 0; z-index: 4; width: 12.5rem; aspect-ratio: 16 / 9; overflow: hidden; opacity: 0; pointer-events: none; }
+#now-playing-park iframe, #now-playing-park video { width: 100%; height: 100%; border: 0; }
+/* The picture stays in this seat for the whole session. The seat scales between the article and
+   the bar; the player inside keeps the size it started at, because resizing or reparenting a
+   provider frame reloads it and the elapsed time stops. Under the header while it covers the
+   article, above the bar while it is docked. */
+#now-playing-picture { position: fixed; z-index: 3; margin: 0; box-sizing: border-box; overflow: hidden; border-radius: 0.5rem; background: #000; }
+#now-playing-picture[data-at="dock"], #now-playing-picture[data-glide] { z-index: 6; border-radius: 0.45rem; }
+.now-playing-fit { transform-origin: top left; }
+#now-playing-picture iframe, #now-playing-picture video { display: block; width: 100%; height: 100%; border: 0; object-fit: contain; background: #000; }
+
+.now-playing {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+  grid-template-areas: "seek seek seek seek seek seek" "episode transport transport time speed close";
+  align-items: center;
+  column-gap: 0.65rem;
+  row-gap: 0.1rem;
+  box-sizing: border-box;
+  padding: 0.15rem max(0.75rem, env(safe-area-inset-right)) calc(0.4rem + env(safe-area-inset-bottom)) max(0.75rem, env(safe-area-inset-left));
+  border-top: 1px solid color-mix(in srgb, var(--warm) 28%, var(--faint));
+  background: var(--panel);
+  color: var(--fg);
+  box-shadow: 0 -8px 24px #00000014;
+}
+/* The picture takes a fixed 16:9 beside the controls, about 200px wide, so a video does not become a second page. */
+.now-playing[data-visual] {
+  grid-template-columns: 12.5rem minmax(0, 1fr) auto auto auto auto;
+  grid-template-areas: "stage seek seek seek seek seek" "stage episode transport time speed close";
+}
+.now-playing-stage { grid-area: stage; position: relative; width: 12.5rem; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 0.45rem; background: #000; }
+.now-playing-stage iframe, .now-playing-stage video {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  transform: none !important;
+  opacity: 1 !important;
+  border: 0;
+  object-fit: contain;
+  background: #000;
+}
+.now-playing-seek { grid-area: seek; width: 100%; height: 1.25rem; margin: 0; accent-color: var(--warm); cursor: pointer; }
+.now-playing-episode { grid-area: episode; display: flex; align-items: center; gap: 0.65rem; min-width: 0; color: inherit; text-decoration: none; }
+.now-playing-art, .now-playing-mark { display: block; width: var(--tap-target); height: var(--tap-target); flex: none; border-radius: 0.45rem; object-fit: cover; background: color-mix(in srgb, var(--warm) 14%, var(--panel)); }
+.now-playing-titles { display: grid; gap: 0.1rem; min-width: 0; }
+.now-playing-show, .now-playing-title, .now-playing-status { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.now-playing-show { color: var(--muted); font-size: 0.68rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.now-playing-title { font-size: 0.92rem; font-weight: 650; line-height: 1.2; }
+.now-playing-status { color: var(--danger); font-size: 0.75rem; }
+.now-playing-episode:hover .now-playing-title, .now-playing-episode:focus-visible .now-playing-title { text-decoration: underline; text-underline-offset: 0.15em; }
+.now-playing-transport { grid-area: transport; display: flex; align-items: center; justify-content: center; gap: 0.1rem; }
+.now-playing-volume { display: flex; align-items: center; gap: 0.1rem; }
+.now-playing-mute { display: grid; place-items: center; width: var(--tap-target); height: var(--tap-target); padding: 0; border: 0; border-radius: 0.5rem; color: var(--fg); background: transparent; cursor: pointer; }
+.now-playing-mute svg { width: 1.15rem; height: 1.15rem; fill: currentColor; }
+.now-playing-mute[aria-pressed="true"] .audio-volume-wave { display: none; }
+.now-playing-level { width: 4.5rem; height: var(--tap-target); margin: 0; accent-color: var(--warm); cursor: pointer; }
+.now-playing .audio-toggle, .now-playing .audio-skip { width: var(--tap-target); height: var(--tap-target); color: var(--fg); }
+.now-playing[data-audio-state="playing"] .audio-pause-icon, .now-playing[data-audio-state="loading"] .audio-pause-icon { display: block; }
+.now-playing[data-audio-state="playing"] .audio-play-icon, .now-playing[data-audio-state="loading"] .audio-play-icon { display: none; }
+.now-playing-time { grid-area: time; color: var(--muted); font: 0.75rem/1 var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.now-playing-speed, .now-playing-close {
+  display: grid;
+  place-items: center;
+  min-width: var(--tap-target);
+  min-height: var(--tap-target);
+  padding: 0 0.45rem;
+  border: 0;
+  border-radius: 0.5rem;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font: 600 0.8rem/1 var(--font);
+  font-variant-numeric: tabular-nums;
+}
+.now-playing-speed { grid-area: speed; }
+.now-playing-close { grid-area: close; color: var(--fg); font-size: 1.35rem; font-weight: 400; }
+.now-playing button:disabled, .now-playing input:disabled { opacity: 0.45; cursor: default; }
+.now-playing a:focus-visible, .now-playing button:focus-visible, .now-playing input:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; }
+@media (hover: hover) {
+  .now-playing-speed:hover, .now-playing-close:hover, .now-playing-mute:hover { background: color-mix(in srgb, var(--warm) 10%, transparent); color: var(--fg); }
+}
+/* The tab bar already includes the home indicator, so the bar sits on it without a second inset. */
+@media (max-width: 40rem) {
+  .now-playing {
+    bottom: var(--bottom-nav-offset);
+    padding-bottom: 0.35rem;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: "seek seek seek seek" "episode episode time close" "transport transport transport speed";
+  }
+  .now-playing-transport { justify-content: start; }
+  .now-playing[data-visual] {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: "stage stage stage stage" "seek seek seek seek" "episode episode time close" "transport transport transport speed";
+  }
+  .now-playing[data-visual] .now-playing-stage { width: 100%; max-height: 30vh; }
+}
+html.is-keyboard-open .now-playing,
+html.is-keyboard-open #now-playing-picture[data-at="dock"],
+html.is-keyboard-open #now-playing-picture[data-glide] { visibility: hidden; }
+
+@media (prefers-reduced-motion: no-preference) {
+  a, button { transition: opacity 80ms ease, background-color 120ms ease, color 120ms ease; }
+  html:not([data-motion="off"]) .now-playing:not([data-visual]) { animation: now-playing-in 220ms ease-out; }
+  html:not([data-motion="off"]) .now-playing[data-visual] { animation: now-playing-fade 220ms ease-out; }
+  html:not([data-motion="off"]) .preview-media.is-loading .preview-image { opacity: 0; }
+  html:not([data-motion="off"]) .preview-media.is-loading.is-loaded .preview-image { opacity: 1; transition: opacity 180ms ease-out; }
+  html:not([data-motion="off"]) .article-picture.is-loading .progressive-image { opacity: 0; }
+  html:not([data-motion="off"]) .article-picture.is-loading.is-loaded .progressive-image { opacity: 1; transition: opacity 220ms ease-out; }
+  html:not([data-motion="off"]) .article-lead.is-loading img { opacity: 0; }
+  html:not([data-motion="off"]) .article-lead.is-loading.is-loaded img { opacity: 1; transition: opacity 220ms ease-out; }
+
+  html:not([data-motion="off"]) .video-player.is-loaded iframe { opacity: 1; transition: opacity 180ms ease-out; }
+  html:not([data-motion="off"]) .article-picture.is-loaded::before { transition: opacity 180ms ease-out; }
+}
+.body .article-picture.is-loaded::before { opacity: 0; }
+
+@keyframes now-playing-in { from { opacity: 0; transform: translateY(0.35rem); } }
+@keyframes now-playing-fade { from { opacity: 0; } }
+html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="off"] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+/* Only show the fixed attribution when it fits in the gutter beside the reading column. */
+@media (max-width: 72rem), (max-height: 30rem) {
+  .footer { display: none; }
+}
+
+@media (max-height: 30rem) {
+  .itemhead { position: relative; top: auto; }
+}
+
+@media print {
+  .now-playing, #now-playing-picture { display: none; }
+  .itemhead { --header-progress: 0 !important; position: static; padding-top: 0; }
+  .itemhead::before { display: none; }
+  .itemhead h1 { height: auto; font-size: 2rem; }
+  .itemhead-title-compact { display: none !important; }
+  .video-player { break-inside: avoid; }
+  .video-player:has(iframe) { display: none; }
+  .video-preview-play { display: none; }
+.body { max-width: none; font-size: 11pt; }
+  .body pre { white-space: pre-wrap; }
+  .body figure, .body img, .body tr { break-inside: avoid; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .skip-link { transition: none; }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --muted: #454b59;
+    --faint: #a2a8b6;
+    --control-border: #555d6d;
+  }
+  html[data-theme="dark"] {
+    --muted: #c6cad4;
+    --faint: #697184;
+    --control-border: #aeb6c7;
+  }
+  a { text-decoration-thickness: 0.1em; }
+}
+
+@media (prefers-contrast: more) and (prefers-color-scheme: dark) {
+  html:not([data-theme]), html[data-theme="auto"] {
+    --muted: #c6cad4;
+    --faint: #697184;
+    --control-border: #aeb6c7;
+  }
+}
+
+@media (forced-colors: active) {
+  .top { border: 1px solid CanvasText; box-shadow: none; }
+  .row.is-new > .cell::before { outline: 2px solid Highlight; outline-offset: -2px; }
+  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, .table-scroll:focus-visible, .preferences-transfer summary:focus-visible { background: Highlight; color: HighlightText; text-decoration: underline; }
+  .row.is-selected .title:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+  .row::before { background: Highlight; forced-color-adjust: none; }
+}
+
+/* The fixed wrapper measures the floating tab surface and its home-indicator clearance. */
+.mobile-tabs { display: none; }
+[data-site-navigation] a { transition: none; -webkit-tap-highlight-color: transparent; }
+/* Navigation stays visible; search belongs to the feed it filters. */
+.nav { gap: 0 0.25rem; }
+.nav-primary, .nav-actions { display: flex; flex-wrap: wrap; align-items: center; min-width: 0; }
+.nav-actions { margin-left: auto; justify-content: flex-end; }
+.nav a { white-space: nowrap; }
+.nav .menu-link, .nav .config-link { font-weight: 400; opacity: 1; }
+.nav a[aria-current] { text-decoration: underline; text-underline-offset: .18em; }
+.nav-separator { opacity: .5; font-weight: 400; }
+/* The search is already against the header, so sticking there does not move it when the feed
+   scrolls. `--feed-heading` is the scoped title's height, measured on the page; without it the
+   bar still sticks under the header once that title has scrolled away. */
+body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data-kind="tag"]) .main { padding-top: 0; }
+body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data-kind="tag"]) .listhead {
+  --row-bleed: 0.75rem;
+  position: sticky; top: var(--top-nav-offset); z-index: 4; margin: 0; padding: 0.25rem 0 0.5rem; background: var(--bg);
+}
+/* The current-item bar is 3px into the row bleed, outside these sticky boxes. */
+body:is([data-kind="river"], [data-kind="source"], [data-kind="category"], [data-kind="tag"]) .listhead::before,
+.feed-toolbar::before {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  background: var(--bg);
+  inset-block: 0;
+  inset-inline-start: calc(-1 * var(--row-bleed));
+  width: var(--row-bleed);
+}
+.feed-toolbar {
+  --feed-toolbar-pad: 0.6rem;
+  --row-bleed: 0.75rem;
+  position: sticky;
+  top: calc(var(--top-nav-offset) + var(--feed-heading, 0px));
+  z-index: 4;
+  min-width: 0;
+  margin: 0 0 1rem;
+  padding: var(--feed-toolbar-pad) 0;
+  background: var(--bg);
+}
+/* Stop the cover on the search field's bottom border. The padding under the field stays clear,
+   so the bar remains visible until it reaches that line. */
+.feed-toolbar::before { inset-block-end: var(--feed-toolbar-pad); }
+.feed-search { display: flex; align-items: center; margin: 0; width: 100%; min-width: 0; }
+/* One selector list for the server-rendered field and the mounted one, so their geometry cannot drift. */
+.feed-search input[type="search"], .search-input-line #q { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; color: var(--fg); background: var(--search-bg, var(--code)); border: 1px solid var(--faint); border-radius: .35rem; padding: .55rem 2.75rem .55rem .7rem; font: inherit; }
+.feed-search input::placeholder, .search-input-line input::placeholder { color: var(--muted); opacity: 1; }
+.feed-search #q:focus-visible, .search-input-line #q:focus-visible { box-shadow: none; border-color: var(--warm); }
+@media (prefers-contrast: more) {
+  .feed-search input[type="search"], .search-input-line #q { border-color: var(--control-border); }
+}
+@media (forced-colors: active) {
+  .feed-search input[type="search"], .search-input-line #q { border-color: ButtonBorder; }
+}
+/* Mounted search controls (web/src/search/Controls.svelte). Rules that were scoped to the component stay under
+   .search-control; the status paragraphs render next to it, so they keep their own class. */
+.search-control { position: relative; }
+.search-command { position: relative; width: 100%; min-width: 0; }
+.search-control form { margin: 0; width: 100%; }
+.search-control .search-input-line { position: relative; width: 100%; }
+.search-control .search-clear { position: absolute; inset-block: 0; right: 0; display: grid; place-items: center; width: 44px; min-height: 44px; padding: 0; border: 0; border-radius: .35rem; color: var(--muted); background: transparent; font-size: 1.5rem; line-height: 1; }
+.search-completions { position: absolute; z-index: 20; top: 100%; inset-inline: 0; max-height: min(24rem, 55vh); overflow-y: auto; border: 1px solid var(--faint); border-radius: .4rem; background: var(--bg); box-shadow: 0 6px 20px #0002; padding: .3rem; }
+.search-completion { display: flex; justify-content: space-between; align-items: center; gap: .75rem; min-height: 44px; padding: .4rem .65rem; border-radius: .25rem; cursor: pointer; }
+.search-completion[data-selected] { background: var(--code); }
+.search-control .completion-label { min-width: 0; overflow-wrap: anywhere; }
+.search-control small { flex: none; color: var(--muted); }
+.search-control .search-query-help { position: absolute; z-index: 21; bottom: calc(100% + .4rem); inset-inline-start: 0; box-sizing: border-box; max-width: min(38rem, 100%); padding: .5rem .65rem; border: 1px solid var(--faint); border-radius: .35rem; color: var(--muted); background: var(--bg); box-shadow: 0 3px 12px #0002; font-size: .75rem; line-height: 1.5; }
+.search-control .search-query-help[hidden] { display: none; }
+.search-error { font-size: .85rem; margin: .4rem 0; }
+.search-error { color: var(--warm); }
+.meta .source-resolved { color: var(--warm); }
+@media (max-width: 40rem) {
+  .nav { column-gap: 0.2rem; }
+  .nav-primary, .nav-actions { column-gap: 0.1rem; }
+  /* Like a native tab bar, the pill sinks into the home-indicator zone and keeps only the
+     clearance the indicator itself needs, rather than sitting on top of the whole inset. */
+  :root { --mobile-tab-gap: max(8px, calc(var(--mobile-safe-area) - 16px)); --bottom-nav-offset: calc(60px + var(--mobile-tab-gap)); }
+  .nav { flex-wrap: nowrap; }
+  .nav .brand { flex: 1; overflow: hidden; }
+  .nav .nav-primary, .footer { display: none; }
+  .nav-actions { flex: none; }
+  .mobile-tabs {
+    position: fixed; inset: auto 0 0; z-index: 5; isolation: isolate;
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    padding: 4px max(20px, calc(env(safe-area-inset-right) + 4px)) calc(4px + var(--mobile-tab-gap)) max(20px, calc(env(safe-area-inset-left) + 4px));
+    color: var(--muted); pointer-events: auto; touch-action: manipulation;
+  }
+  /* The keyboard covers the bottom of the screen; the bar would float on top of it, over the
+     results being typed for. It keeps its box so nothing else moves. */
+  html.is-keyboard-open .mobile-tabs { visibility: hidden; }
+  .mobile-tabs::before {
+    content: ""; position: absolute; z-index: -1;
+    inset: 0 max(16px, env(safe-area-inset-right)) var(--mobile-tab-gap) max(16px, env(safe-area-inset-left));
+    border: 1px solid color-mix(in srgb, var(--fg) 16%, var(--faint)); border-radius: 999px;
+    /* Opaque on purpose. A blur under a fixed bar resamples the scrolling page on every frame. */
+    background: var(--bg); box-shadow: 0 3px 16px #0002;
+  }
+  .mobile-tabs a {
+    display: grid; grid-template-rows: 24px 14px; align-content: center; justify-items: center; gap: 2px;
+    height: 52px; min-width: 0; padding: 0 3px; border-radius: 999px; color: inherit;
+    font-size: 10px; font-weight: 500; line-height: 14px; text-decoration: none;
+    letter-spacing: 0.01em; pointer-events: auto;
+    touch-action: manipulation; -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+  }
+  .mobile-tabs a > svg { display: block; width: 24px; height: 24px; align-self: center; }
+  .mobile-tabs a > span { display: block; line-height: 14px; white-space: nowrap; }
+  .mobile-tabs a:is(:hover, :focus, :active) { text-decoration: none; }
+  .mobile-tabs a[aria-current] { color: var(--warm); background: color-mix(in srgb, var(--fg) 10%, transparent); }
+  .mobile-tabs a:active, .mobile-tabs a[data-pressed] { opacity: 1; background: color-mix(in srgb, var(--warm) 20%, var(--bg)); }
+  .mobile-tabs a:focus-visible { outline: 2px solid var(--warm); outline-offset: -3px; }
+  /* A pressed row lights up as a whole, the way a native list cell does, instead of dimming only
+     its title. */
+  .row:has([data-row-open]:active), .article-more-card:has(.article-more-link:active) { background: color-mix(in srgb, var(--fg) 7%, transparent); }
+  .row [data-row-open]:active, .article-more-link:active { opacity: 1; }
+  .row[data-opening], .article-more-card[data-opening] { background: color-mix(in srgb, var(--fg) 7%, transparent); }
+  article[data-swipe-navigation] :is(p, h1, h2, h3, h4, h5, h6, li, blockquote):not(:has(pre, table, .table-scroll, audio, video, iframe, object, embed, canvas, [data-no-swipe])) { touch-action: pan-y pinch-zoom; }
+  .mobile-tabs[data-keyboard-open] { visibility: hidden; pointer-events: none; }
+  /* Touch reading: links read as links by color, without the desktop underline, and taps do not
+     flash the platform's default highlight rectangle. */
+  .body a, .body a:hover { text-decoration: none; }
+  .body a:focus-visible { text-decoration: underline; text-decoration-thickness: 0.12em; }
+  :is(a, button, summary, [role="button"]) { -webkit-tap-highlight-color: transparent; }
+  .feed-toolbar { margin-bottom: 0; }
+  .feed-search input[type="search"] { font-size: 1rem; }
+  .row .rank { display: none; }
+  .row-content::before { display: none; }
+  .row-heading { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }
+  html .row .row-copy > .meta { padding-left: 0; }
+  .row { --mobile-preview-size: 3rem; min-height: var(--tap-target); padding-block: max(var(--row-padding), 0.625rem); }
+  /* The feed keeps every row for the keyboard and for search. Only those near the screen are laid out. */
+  .row { content-visibility: auto; contain-intrinsic-size: auto 8rem; }
+  html[data-density="comfortable"] .row { --mobile-preview-size: 3.5rem; }
+  html .row .row-content { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 0.25rem 0.625rem; min-height: 0; }
+  html:not([data-thumbnails="hide"]) .row .row-content:has(.preview-media) { grid-template-columns: minmax(0, 1fr) var(--mobile-preview-size); }
+  .row .row-copy { display: contents; }
+  .row .row-heading { grid-column: 1; grid-row: 1; }
+  .row .row-heading .title { min-height: 0; padding: 0; line-height: 1.35; }
+  .row .preview-media { grid-column: 2; grid-row: 1; width: var(--mobile-preview-size); height: var(--mobile-preview-size); }
+  .row .row-copy > .meta { grid-column: 1 / -1; }
+  .row .meta { grid-row: 2; gap: 0 0.65em; font-size: 0.8125rem; line-height: 1.35; }
+  .row .meta > *, .row .meta .domain, .row .meta .domain a { min-height: 1.5rem; }
+  .row .meta > .meta-field:has(> .domain) { flex-basis: 100%; font-size: 0.875rem; }
+  .row .meta > .meta-field + .meta-field::before { content: none; }
+  /* A wrapped metadata line would start with its separator; spacing alone keeps the fields apart. */
+  .itemhead .meta > .meta-field + .meta-field::before { content: ""; margin-inline: 0.4em; }
+}
+
+.media-timing { min-block-size: 1.5em; margin: 0.4rem 0 1rem; color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+
+.document-reader { margin: 1.5rem 0; }
+.media-frame { position: relative; isolation: isolate; overflow: hidden; aspect-ratio: var(--media-ratio, 16 / 9); border-radius: 0.4rem; background: var(--image-placeholder, var(--code)); }
+.media-frame::before { content: ""; position: absolute; z-index: -1; inset: -0.5rem; background: var(--image-preview, none) center / cover; filter: blur(0.5rem); }
+.document-frame { aspect-ratio: auto; height: min(78vh, 64rem); height: min(78svh, 64rem); min-height: 24rem; border: 1px solid var(--faint); }
+.document-placeholder { position: absolute; inset: 0; display: grid; place-content: center; color: var(--muted); text-align: center; }
+.document-placeholder svg { width: 3rem; height: 4rem; margin: 0 auto 0.5rem; fill: none; stroke: currentColor; stroke-width: 1.2; }
+.document-viewer { position: absolute; inset: 0; display: block; width: 100%; height: 100%; border: 0; }
+.document-fallback { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .5rem; min-height: 100%; padding: 1.5rem; background: var(--code); color: var(--fg); text-align: center; }
+.document-fallback p { margin: 0; }
+.document-fallback a { display: inline-flex; align-items: center; min-height: var(--tap-target); }
+.document-reader figcaption, .interactive-reader figcaption { margin-top: 0.5rem; color: var(--muted); font-size: 0.875rem; font-style: italic; text-align: center; }
+@media print { .document-frame { display: none; } }
+
+@media (forced-colors: active) {
+  .mobile-tabs::before { border-color: CanvasText; background: Canvas; }
+  .mobile-tabs a[aria-current] { color: LinkText; outline: 1px solid LinkText; outline-offset: -2px; }
+  .mobile-tabs a:active, .mobile-tabs a[data-pressed] { background: Highlight; color: HighlightText; }
+}
+@media print {
+  .mobile-tabs { display: none; }
+  .row, .browse-entry { content-visibility: visible; }
+}
+
+/* ---------------------------------------------------------------- platform behavior */
+
+/* Cross-document navigation animates itself; motion preferences still win. */
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-motion="off"]) { view-transition-name: none; }
+  html:not([data-motion="off"]) .top { view-transition-name: top-nav; }
+  html:not([data-motion="off"]) .mobile-tabs { view-transition-name: mobile-tabs; }
+}
+/* A transition that takes time is a transition the reader waits on. Named elements still
+   snapshot, and the swap itself is immediate. */
+html::view-transition-group(*),
+html::view-transition-old(*),
+html::view-transition-new(*) { animation-duration: 0s; animation-delay: 0s; }
+html[data-motion="off"]::view-transition-group(*),
+html[data-motion="off"]::view-transition-old(*),
+html[data-motion="off"]::view-transition-new(*) { animation: none; }
+
+/* A page that takes longer than a glance to arrive says so along the top edge, rather than leaving
+   the reader to wonder whether the tap registered. */
+html[data-navigating]::before {
+  content: ""; position: fixed; z-index: 30; inset: env(safe-area-inset-top, 0px) 0 auto; height: 2px;
+  background: var(--warm); transform-origin: left; pointer-events: none;
+  animation: aggr-navigating 1.2s cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+}
+@keyframes aggr-navigating {
+  from { transform: scaleX(0.08); }
+  to { transform: scaleX(0.85); }
+}
+
+/* Reading progress and the folding article header follow the scroll position directly, with no
+   script and no per-frame work where the browser has scroll timelines; the script stands in
+   where it has not. */
+@property --header-progress {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+
+@supports (animation-timeline: scroll(root)) {
+  /* The bar reports where the reader is rather than moving on its own, so it stays under
+     reduced motion; the blanket duration override would otherwise detach it from the scroll. */
+  body[data-kind="item"] .itemhead-progress {
+    animation: aggr-reading-progress linear both;
+    animation-duration: auto !important;
+    animation-timeline: scroll(root block);
+  }
+  body[data-kind="item"] .itemhead {
+    animation: aggr-header-fold linear both;
+    animation-timeline: scroll(root block);
+    animation-range: 0 10rem;
+  }
+}
+
+/* What the fold does depends only on `--header-progress`: the scroll timeline sets it where
+   the browser has one, and the script sets it elsewhere, so both get the same header. */
+/* The title is scaled rather than re-typeset: shrinking its font would re-wrap the lines, and
+   the header would jump by a whole line in the middle of the fold. The whole title stays in
+   view. Once the script has measured it, the large title hands over to a compact copy set at
+   0.6em across the full width, the way a native large title gives way to the inline one: one
+   fades out before the other fades in, so the two never overlap, and the box closes from one
+   height to the other. */
+body[data-kind="item"] .itemhead-title { display: block; transform-origin: left top; transform: scale(calc(1 - 0.4 * var(--header-progress, 0))); }
+body[data-kind="item"] .itemhead[style*="--compact-height"] .itemhead-title { opacity: clamp(0, calc((0.5 - var(--header-progress, 0)) / 0.15), 1); }
+/* The compact copy sits where the title does: under the header's own folding top padding. */
+body[data-kind="item"] .itemhead[style*="--compact-height"] .itemhead-title-compact { visibility: visible; top: calc(var(--header-padding-top, 1.5rem) * (1 - var(--header-progress, 0)) + 0.6rem * var(--header-progress, 0)); opacity: clamp(0, calc((var(--header-progress, 0) - 0.5) / 0.15), 1); }
+@supports (height: calc-size(auto, size)) {
+  body[data-kind="item"] .itemhead h1 { height: calc-size(auto, size * (1 - 0.4 * var(--header-progress, 0))); overflow: hidden; }
+  body[data-kind="item"] .itemhead[style*="--compact-height"] h1 { height: calc-size(auto, size - (size - var(--compact-height)) * var(--header-progress, 0)); }
+}
+/* Without calc-size (Safari) the script measures the natural heights once per resize, so the
+   folding title does not leave its full height standing empty under it. */
+@supports not (height: calc-size(auto, size)) {
+  body[data-kind="item"] .itemhead[style*="--title-height"] h1 { height: calc(var(--title-height) * (1 - 0.4 * var(--header-progress, 0))); overflow: hidden; }
+  body[data-kind="item"] .itemhead[style*="--title-height"][style*="--compact-height"] h1 { height: calc(var(--title-height) - (var(--title-height) - var(--compact-height)) * var(--header-progress, 0)); }
+}
+
+@keyframes aggr-reading-progress {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@keyframes aggr-header-fold {
+  to { --header-progress: 1; }
+}
+
+/* ---------------------------------------------------------------- search results */
+
+/* A live query hides the static feed it replaces. */
+body[data-searching] [data-static-feed] { display: none; }
+
+/* The syntax reminder answers a question the reader is in the middle of asking, so it waits for
+   both halves of asking it: the field has their attention and the pointer is on it. Hovering on
+   the way past is not a question, and touch and keyboard never open it at all. */
+.search-query-help { display: none; }
+@media (hover: hover) and (pointer: fine) {
+  .search-control:has(#q:hover:focus) .search-query-help { display: block; }
+}
+
+.search-completions[hidden], .search-error[hidden], .search-clear[hidden] { display: none; }
+
+/* ---------------------------------------------------------------- interactive originals */
+
+.interactive-viewer { display: block; width: 100%; height: 100%; border: 0; }
+
+/* The preference controls are grouped only so they can be disabled until the script that saves
+   them is running; the grouping itself should be invisible. */
+.preferences-controls { display: flex; flex-direction: column; gap: 0.85rem; min-width: 0; margin: 0; padding: 0; border: 0; }
+.preferences-controls:disabled { opacity: 0.6; }
+
+/* Persistent status and passage sharing stay outside the replaced article. */
+.selection-share { position: absolute; z-index: 20; padding: .25rem; border: 1px solid var(--faint); border-radius: .4rem; background: var(--bg); box-shadow: 0 2px 8px #0002; }
+.selection-share button { color: var(--fg); background: var(--bg); border: 0; padding: .35rem .7rem; cursor: pointer; }
+.connection-status { position: fixed; right: 1rem; bottom: calc(var(--bottom-nav-offset, 0px) + var(--now-playing-offset, 0px) + 1rem); z-index: 25; max-width: min(30rem, calc(100vw - 2rem)); padding: .55rem .8rem; border: 1px solid var(--faint); border-radius: .5rem; background: var(--bg); color: var(--fg); box-shadow: 0 2px 8px #0002; }
+.connection-status button { color: inherit; font: inherit; background: transparent; border: 0; cursor: pointer; }
+.pull-refresh {
+  position: fixed; top: calc(env(safe-area-inset-top, 0px) + .75rem); left: 50%; z-index: 30;
+  width: 44px; height: 44px; display: grid; place-items: center; pointer-events: none;
+  border: 1px solid var(--faint); border-radius: 50%; background: var(--bg); color: var(--fg);
+  box-shadow: 0 2px 8px #0002; opacity: 0; transform: translate3d(-50%, -40px, 0);
+  contain: layout style; will-change: transform, opacity;
+}
+.pull-refresh svg { grid-area: 1 / 1; }
+.pull-refresh-ring { stroke: var(--muted); stroke-dasharray: 100; stroke-dashoffset: 100; transform: rotate(-90deg); transform-origin: center; }
+.pull-refresh-symbol { transform-origin: center; }
+html[data-pull-state="armed"] .pull-refresh { color: var(--accent-strong); }
+html[data-pull-state="settling"] .pull-refresh,
+html[data-pull-state="refreshing"] .pull-refresh { transition: transform 220ms cubic-bezier(.2, .8, .2, 1), opacity 180ms ease-out; }
+html[data-pull-state="tracking"], html[data-pull-state="pulling"],
+html[data-pull-state="armed"] { overscroll-behavior-y: none; }
+@media (prefers-reduced-motion: no-preference) {
+  html[data-pull-state="refreshing"]:not([data-motion="off"]) .pull-refresh-symbol { animation: pull-refresh-spin 800ms linear infinite; }
+}
+@keyframes pull-refresh-spin { from { transform: rotate(180deg); } to { transform: rotate(540deg); } }
+
+.search-saved-status { color: var(--muted); font-size: .75rem; }

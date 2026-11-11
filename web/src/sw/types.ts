@@ -34,7 +34,7 @@ export interface SearchManifest {
 
 /**
  * `self.AGGR_SW`, defined by `sw.js` before it imports this worker: the cache version, the
- * application and content versions, and the revisioned install-time lists. The article catalogue
+ * application and content versions, and the revisioned install-time lists. The article catalog
  * is a separate file, fetched only when a download count is set.
  */
 export interface SwConfig {
@@ -87,6 +87,8 @@ export interface WorkerEnv {
   clients: ClientsLike;
   skipWaiting(): Promise<void>;
   navigationPreload?: { enable(): Promise<void> } | null;
+  /** Shared by overlapping worker generations where Web Locks are available. */
+  locks?: Pick<LockManager, 'request'> | null;
   config: SwConfig;
   /** Test hook; production uses the defaults from `caches.ts`. */
   timeouts?: Partial<Timeouts>;

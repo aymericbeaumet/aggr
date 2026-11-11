@@ -1,4 +1,4 @@
-/** The shapes search works with: the build's catalogue and Pagefind's runtime, as it sees them. */
+/** The shapes search works with: the build's catalog and Pagefind's runtime, as it sees them. */
 
 /** One value of a facet, with its readable label and how many documents carry it. */
 export type Facet = { value: string; label: string; count: number };

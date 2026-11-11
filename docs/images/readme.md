@@ -1,9 +1,9 @@
 # README captures
 
 `reader-desktop.png` and `reader-mobile.png` are the reader as it ships, captured from a two-source
-instance created by `aggr init` and served by `aggr dev`, at a device scale factor of 1.
+instance created by `aggr init` and served by `cargo run -- dev`, at a device scale factor of 1.
 
-To retake them, run `aggr dev` against an instance whose articles you may publish, then screenshot
+To retake them, run `cargo run -- dev` against an instance whose articles you may publish, then screenshot
 `http://127.0.0.1:7319/` at 1180×760 and 390×760 with the same theme in both. Keep unrelated
 browser chrome and personal information out of the frame, keep the files small enough that the
 README loads quickly on a phone, and describe the real capture in the alt text.

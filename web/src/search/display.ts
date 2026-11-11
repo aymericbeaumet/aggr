@@ -1,4 +1,4 @@
-import type { ClientRow } from '../generated/ClientRow';
+import type { ClientRow } from '@aggr-model/ClientRow';
 import type { PagefindResult } from './types';
 
 /**
@@ -35,7 +35,7 @@ function decode(result: PagefindResult): ClientRow | null {
     const bytes = Uint8Array.from(hex.match(/../g) || [], (part) => Number.parseInt(part, 16));
     const value: unknown = JSON.parse(new TextDecoder().decode(bytes));
     return isClientRow(value) ? value : null;
-  } catch {
+  } catch (error) {
     return null;
   }
 }
@@ -49,20 +49,12 @@ export function displayRow(result: PagefindResult): ClientRow | null {
   return row;
 }
 
-const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'" };
-
 /** Pagefind's excerpt as text: its `<mark>`s and any other markup gone, entities decoded. */
 export function excerptText(html: string): string {
-  return html
-    .replace(/<[^>]*>/g, '')
-    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, name: string) => {
-      const lower = name.toLowerCase();
-      if (lower.startsWith('#x')) return String.fromCodePoint(Number.parseInt(lower.slice(2), 16));
-      if (lower.startsWith('#')) return String.fromCodePoint(Number(lower.slice(1)));
-      return ENTITIES[lower] ?? entity;
-    })
-    .replace(/\s+/g, ' ')
-    .trim();
+  // Template contents stay inert; only their text leaves this detached fragment.
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  return (template.content.textContent || '').replace(/\s+/g, ' ').trim();
 }
 
 /**

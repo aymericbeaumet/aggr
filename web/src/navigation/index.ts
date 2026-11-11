@@ -1,16 +1,12 @@
 import { flushSync } from 'svelte';
 import { extract, parseDocument } from '../model/extract';
-import { sitePath } from '../model/urls';
 import { page } from '../state/page.svelte';
 import { selection } from '../state/selection.svelte';
 import { tabIntent } from '../state/tabIntent.svelte';
 import { arrive, settle, trackScrolling } from './arrive';
-import { PageCache, type Fetched } from './cache';
-import { patchHead } from './head';
+import { PageCache, type Fetched, type Priority } from './cache';
 import { address, linkIn, routable } from './routable';
-import { pageScope } from './scope';
 import { ScrollMemory, newKey } from './scroll';
-import { Speculation, frugal } from './speculation';
 import { markCurrentTab, markTabForKind, tabUnder } from './tabs';
 
 /**
@@ -34,9 +30,6 @@ export type GoOptions = {
   from?: HTMLAnchorElement | null;
 };
 
-/** What every arriving page sets up for itself, under the signal that the next arrival aborts. */
-export type PageMount = (signal: AbortSignal) => void;
-
 /** A page fetched longer ago than this is fetched again rather than shown. */
 const PAGE_LIFETIME = 5 * 60_000;
 
@@ -50,10 +43,9 @@ let entry = '';
 let token = 0;
 /** Whether a page is on its way: until it lands, the one on screen is no longer current. */
 let pending = false;
-let mounts: PageMount[] = [];
 const memory = new ScrollMemory();
-const speculation = new Speculation();
 let cache: PageCache | null = null;
+const pendingPrefetch = new Set<string>();
 
 const root = (): URL => rootUrl ?? new URL(page.root || document.baseURI);
 
@@ -64,7 +56,7 @@ const stateWith = (fields: Record<string, unknown>) => ({
 });
 
 /**
- * The page on screen took an address of its own (a search query, canonicalised): the entry it
+ * The page on screen took an address of its own (a search query, canonicalized): the entry it
  * is shown at follows, with no navigation, so the next link or Back still measures from here.
  */
 function replaceAddress(href: string): void {
@@ -78,39 +70,23 @@ function replaceAddress(href: string): void {
   if (installed) current = address(location.href);
 }
 
-/** Addresses the reader has asked for. Their fetch outranks a guess still in flight. */
-const intent = new Set<string>();
-
-/** Parses waiting to happen, one per frame, so a burst of guesses cannot stall a tap. */
-const parseQueue: Array<() => void> = [];
-let draining = false;
-
-function drainParses(): void {
-  const next = parseQueue.shift();
-  if (!next) {
-    draining = false;
-    return;
+async function request(key: string, priority: Priority): Promise<Fetched> {
+  const controller = new AbortController();
+  // Keep the deadline through the body: receiving headers does not make a stalled page usable.
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(key, {
+      headers: { accept: 'text/html' },
+      credentials: 'same-origin',
+      priority,
+      signal: controller.signal,
+    });
+    const type = response.headers.get('content-type') || '';
+    if (!response.ok || !type.includes('text/html')) throw new Error('not a page');
+    return { url: response.url || key, html: await response.text() };
+  } finally {
+    clearTimeout(timer);
   }
-  next();
-  requestAnimationFrame(drainParses);
-}
-
-function enqueueParse(run: () => void): void {
-  parseQueue.push(run);
-  if (draining) return;
-  draining = true;
-  requestAnimationFrame(drainParses);
-}
-
-async function request(key: string): Promise<Fetched> {
-  const response = await fetch(key, {
-    headers: { accept: 'text/html' },
-    credentials: 'same-origin',
-    priority: intent.has(key) ? 'high' : 'low',
-  });
-  const type = response.headers.get('content-type') || '';
-  if (!response.ok || !type.includes('text/html')) throw new Error('not a page');
-  return { url: response.url || key, html: await response.text() };
 }
 
 function pages(): PageCache {
@@ -124,12 +100,11 @@ function parseNow(key: string, record: ReturnType<PageCache['peek']>): void {
   record.parsed = parseDocument(record.fetched.html);
 }
 
-/**
- * Fetch a page the reader is about to open, and parse it before the tap. Guesses are counted
- * and bounded, and their parse waits a frame; intent is not, and is parsed the moment it arrives.
- */
-function prefetch(href: string, guess = false): void {
+/** Fetch and parse a page when the reader points, focuses or touches its link. */
+function prefetch(href: string): void {
   if (!installed) return;
+  const connection = navigator.connection;
+  if (connection?.saveData || ['slow-2g', '2g'].includes(connection?.effectiveType || '')) return;
   let url: URL;
   try {
     url = new URL(href, location.href);
@@ -139,25 +114,22 @@ function prefetch(href: string, guess = false): void {
   const key = address(url.href);
   if (!routable(url, root()) || key === current) return;
   const store = pages();
-  if (guess && (frugal(navigator.connection) || !speculation.admit(store.has(key)))) return;
-  if (!guess) intent.add(key);
-  const record = store.load(url.href);
+  if (!store.has(key) && pendingPrefetch.size >= 2) return;
+  const record = store.load(key, 'low');
   const parse = () => parseNow(key, record);
   if (record.fetched) {
-    if (guess) enqueueParse(parse);
-    else parse();
+    parse();
     return;
   }
-  record.page.then(() => (guess ? enqueueParse(parse) : parse())).catch(() => {});
+  pendingPrefetch.add(key);
+  record.page.then(parse).catch(() => {}).finally(() => pendingPrefetch.delete(key));
 }
 
 /** Leave the page on screen: keep its place and its cursor, and end what it set up. */
 function leave(): void {
-  if (pageScope.aborted) return;
   memory.remember(entry, window.scrollY);
   if (page.kind !== 'item') memory.leaveList(current, window.scrollY);
   selection.save(current);
-  pageScope.abort();
 }
 
 let slow: ReturnType<typeof setTimeout> | undefined;
@@ -165,6 +137,9 @@ let slow: ReturnType<typeof setTimeout> | undefined;
 /** Say a page is on its way once it has taken longer than a glance, and stop saying so. */
 function waiting(on: boolean): void {
   clearTimeout(slow);
+  const content = document.getElementById('content');
+  if (on) content?.setAttribute('aria-busy', 'true');
+  else content?.removeAttribute('aria-busy');
   if (on) slow = setTimeout(() => document.documentElement.setAttribute('data-navigating', ''), 150);
   else document.documentElement.removeAttribute('data-navigating');
 }
@@ -218,25 +193,6 @@ function fallback(href: string, traverse: boolean): void {
   else location.assign(href);
 }
 
-/** Run what the page on screen sets up for itself. */
-function mountPage(): void {
-  const signal = pageScope.renew();
-  for (const mount of mounts) {
-    try {
-      mount(signal);
-    } catch (error) {
-      console.error('aggr: page', error);
-    }
-  }
-}
-
-/** Bring the body's attributes (`data-kind`) in line with the page arriving. */
-function syncBody(next: HTMLElement): void {
-  const body = document.body;
-  for (const name of body.getAttributeNames()) if (!next.hasAttribute(name)) body.removeAttribute(name);
-  for (const name of next.getAttributeNames()) body.setAttribute(name, next.getAttribute(name) || '');
-}
-
 /** Show the page at `href`. */
 async function go(href: string, { replace = false, traverse = false, from = null }: GoOptions = {}): Promise<void> {
   const url = new URL(href, location.href);
@@ -256,8 +212,7 @@ async function go(href: string, { replace = false, traverse = false, from = null
   pending = true;
   phase = 'fetching';
   acknowledge(from);
-  intent.add(address(url.href));
-  const record = pages().load(url.href);
+  const record = pages().load(address(url.href));
   // A page already in memory is on screen before the click handler returns. Waiting would
   // cost a frame, which is the whole of the delay a reader can feel.
   const show = (fetched: Fetched): void => {
@@ -267,27 +222,35 @@ async function go(href: string, { replace = false, traverse = false, from = null
     tabIntent.route = null;
     pending = false;
     waiting(false);
+    const destination = new URL(fetched.url, url.href);
+    if (!routable(destination, root())) {
+      fallback(url.href, traverse);
+      return;
+    }
+    destination.hash = url.hash;
     const doc = record.parsed ?? parseDocument(fetched.html);
     // The parsed page is taken apart by the swap; the next visit parses its own copy.
     record.parsed = null;
-    const extracted = extract(doc, document);
+    const extracted = extract(doc);
     if (!extracted || extracted.model.build.app !== page.model?.build.app) {
       fallback(url.href, traverse);
       return;
     }
     phase = 'rendering';
     if (!traverse) {
+      const nextEntry = newKey();
+      try {
+        if (replace) history.replaceState({ aggr: { key: nextEntry } }, '', destination.href);
+        else history.pushState({ aggr: { key: nextEntry } }, '', destination.href);
+      } catch {
+        fallback(url.href, traverse);
+        return;
+      }
       leave();
-      const destination = new URL(fetched.url);
-      destination.hash = url.hash;
-      entry = newKey();
-      if (replace) history.replaceState({ aggr: { key: entry } }, '', destination.href);
-      else history.pushState({ aggr: { key: entry } }, '', destination.href);
+      entry = nextEntry;
     }
     current = address(location.href);
-    patchHead(document, doc);
-    syncBody(extracted.body);
-    page.show({ model: extracted.model, content: extracted.content, href: location.href });
+    page.show({ model: extracted.model, bodyHtml: extracted.bodyHtml, href: location.href });
     flushSync();
     opening = null;
     const saved = traverse
@@ -296,7 +259,6 @@ async function go(href: string, { replace = false, traverse = false, from = null
         ? memory.place(current)
         : undefined;
     arrive(saved, url.hash);
-    mountPage();
     phase = 'settled';
   };
   if (record.fetched) {
@@ -323,52 +285,22 @@ function pushFragment(hash: string): void {
   history.pushState({ aggr: { key: entry } }, '', hash);
 }
 
-/** The tabs and the neighbouring articles: where a reader is most likely to go from here. */
-function nearest(): string[] {
-  const base = root();
-  const links = ['', 'browse/', 'preferences/'].map((route) => new URL(route, base).href);
-  const view = page.model?.page;
-  if (view?.view === 'article') {
-    for (const neighbour of [view.data.next, view.data.previous]) {
-      if (neighbour) links.push(new URL(sitePath(neighbour.url), base).href);
-    }
-  }
-  return links;
-}
-
-/** Warm the tabs and a few rows already on screen. The rest wait until the reader moves. */
-const FIRST_SCREEN = 3;
-
-function speculate(signal: AbortSignal): void {
-  speculation.reset();
-  const refresh = () => {
-    if (document.hidden || frugal(navigator.connection)) return;
-    for (const href of nearest()) prefetch(href);
-  };
-  const timer = setInterval(refresh, PAGE_LIFETIME / 2);
-  document.addEventListener('visibilitychange', refresh, { signal });
-  signal.addEventListener('abort', () => clearInterval(timer));
-  // Tabs were fetched when the reader started. Warm a few rows already on screen.
-  requestAnimationFrame(() => {
-    if (signal.aborted || frugal(navigator.connection)) return;
-    for (const href of nearest()) prefetch(href, true);
-    const height = window.innerHeight || document.documentElement.clientHeight;
-    let warmed = 0;
-    for (const link of document.querySelectorAll('.rows .row [data-row-open]')) {
-      if (warmed >= FIRST_SCREEN) return;
-      if (!(link instanceof HTMLAnchorElement)) continue;
-      const rect = link.getBoundingClientRect();
-      if (rect.bottom <= 0 || rect.top >= height) continue;
-      prefetch(link.href, true);
-      warmed += 1;
-    }
-  });
-}
-
 function tabLinks(bar: Element): HTMLAnchorElement[] {
   return [...bar.querySelectorAll(':scope > a[data-route]')].filter(
     (node): node is HTMLAnchorElement => node instanceof HTMLAnchorElement,
   );
+}
+
+function tabBarAt(x: number, y: number): Element | null {
+  if (document.fullscreenElement || document.querySelector('dialog[open]')) return null;
+  const bar = document.querySelector('.mobile-tabs');
+  if (!bar) return null;
+  const style = getComputedStyle(bar);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.pointerEvents === 'none') return null;
+  const box = bar.getBoundingClientRect();
+  if (box.width <= 0 || box.height <= 0 || x < box.left || x >= box.right || y < box.top || y >= box.bottom) return null;
+  const topmost = document.elementFromPoint?.(x, y);
+  return topmost && !bar.contains(topmost) ? null : bar;
 }
 
 /** Light `link` now: the column under the finger, before its page has been fetched. */
@@ -403,13 +335,20 @@ function releaseTab(): void {
  */
 function installTabActivation(): void {
   let swallowed = false;
+  // During scrolling, a compatibility click can retain the row that was under the fixed bar.
+  document.addEventListener('click', (event) => {
+    const bar = tabBarAt(event.clientX, event.clientY);
+    if (bar && event.target instanceof Node && !bar.contains(event.target)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, { capture: true });
   document.addEventListener(
     'touchstart',
     (event) => {
       swallowed = false;
-      const target = event.target;
-      const tabs = target instanceof Element ? target.closest('.mobile-tabs') : null;
       const touch = event.touches.length === 1 ? event.touches[0] : null;
+      const tabs = touch ? tabBarAt(touch.clientX, touch.clientY) : null;
       if (!tabs || !touch) {
         if (tabGesture) releaseTab();
         return;
@@ -463,7 +402,7 @@ function installTabActivation(): void {
       tabGesture = null;
       swallowed = false;
       if (!gesture && !cancel) return;
-      // Cancelling the release cancels the click the platform would have sent after it, so one
+      // Canceling the release cancels the click the platform would have sent after it, so one
       // tap stays one navigation and a drag off the bar does not land on whatever is underneath.
       if (cancel || event.touches.length || !gesture) {
         if (event.touches.length) releaseTab();
@@ -480,6 +419,8 @@ function installTabActivation(): void {
         return;
       }
       event.preventDefault();
+      // Scrolling may have canceled the pointer, so no pointerup remains to clear its feedback.
+      for (const pressed of gesture.bar.querySelectorAll('[data-pressed]')) pressed.removeAttribute('data-pressed');
       link.click();
     },
     { passive: false },
@@ -488,11 +429,10 @@ function installTabActivation(): void {
 
 let tabGesture: { bar: Element; rtl: boolean } | null = null;
 
-/** Install once the app owns the page. `mount` runs for the page on screen and every next one. */
-function install(mount: PageMount[]): void {
+/** Install document-level navigation once the app owns the page. */
+function install(): void {
   if (installed || !('pushState' in history) || typeof DOMParser !== 'function') return;
   installed = true;
-  mounts = mount;
   rootUrl = new URL(page.root || document.baseURI);
   current = address(location.href);
   history.scrollRestoration = 'manual';
@@ -573,6 +513,10 @@ function install(mount: PageMount[]): void {
     },
     { passive: true },
   );
+  document.addEventListener('focusin', (event) => {
+    const hit = linkIn(event, root());
+    if (hit) prefetch(hit.url.href);
+  });
   // Keyboard activation of a link is a click as well; Enter on a focused link fires one.
 
   window.addEventListener('popstate', (event) => {
@@ -607,13 +551,6 @@ function install(mount: PageMount[]): void {
     }
   });
   installTabActivation();
-  mountPage();
-  // The three tabs are where a reader goes next. Fetch them in this turn, at intent priority,
-  // so the first tap finds them parsed instead of waiting out a guess scheduled after paint.
-  if (!frugal(navigator.connection)) {
-    const base = root();
-    for (const route of ['', 'browse/', 'preferences/']) prefetch(new URL(route, base).href);
-  }
   phase = 'settled';
 }
 
@@ -621,13 +558,11 @@ export const navigation = {
   install,
   go,
   prefetch,
-  speculate,
   pushFragment,
   replaceAddress,
   /** Forget every fetched page, e.g. when the content version changed. */
   clear(): void {
     cache?.clear();
-    speculation.reset();
   },
   get phase(): Phase {
     return phase;

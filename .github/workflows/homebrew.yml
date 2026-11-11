@@ -1,0 +1,49 @@
+name: publish Homebrew
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag (vX.Y.Z)
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-tap-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.11.6
+          install_args: --locked rust cmake ninja
+      - run: mise run homebrew-test
+      - name: Prepare and test the release formula
+        run: |
+          mise run homebrew -- "$TAG" --output "$RUNNER_TEMP/aggr.rb"
+          brew tap-new --no-git local/aggr-ci
+          cp "$RUNNER_TEMP/aggr.rb" "$(brew --repository local/aggr-ci)/Formula/aggr.rb"
+          brew install local/aggr-ci/aggr
+          brew test local/aggr-ci/aggr
+      - name: Update the shared Homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: mise run homebrew -- "$TAG"

@@ -1,8 +1,9 @@
 [package]
 name = "aggr"
+default-run = "aggr"
 version = "2.0.0"
 edition = "2024"
-rust-version = "1.96.0"
+rust-version = "1.98.0"
 license = "MIT"
 description = "Git-native feed reader: aggr.toml in, static site out, history on a branch"
 authors = ["Aymeric Beaumet <hi@aymericbeaumet.com>"]
@@ -10,35 +11,40 @@ repository = "https://github.com/aymericbeaumet/aggr"
 readme = "readme.md"
 keywords = ["rss", "atom", "feed", "reader", "static-site"]
 categories = ["command-line-utilities", "web-programming"]
+include = ["/src/main.rs", "/src/dev_worker.rs", "/readme.md", "/LICENSE", "/THIRD_PARTY_NOTICES", "/Cargo.lock"]
+
+[workspace]
+members = ["crates/aggr-lib", "crates/aggr-ui-model", "crates/aggr-ui-build", "crates/aggr-tools"]
+
+[features]
+dev-worker = []
+
+[[bin]]
+name = "aggr-dev-worker"
+path = "src/dev_worker.rs"
+required-features = ["dev-worker"]
+test = false
+bench = false
 
 [dependencies]
-ammonia = "4"
-anyhow = "1"
-base64 = "0.23"
-bytes = "1"
-chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive", "env"] }
-clap_complete = "4"
-comrak = { version = "0.56", default-features = false }
-dom_smoothie = "0.18"
-directories = "6"
-encoding_rs = "0.8"
-env_logger = "0.11"
-# 3.x drops media it does not consider content; src/sources/feed.rs restores it from the XML.
-feed-rs = "3"
-futures-util = "0.3"
-glob = "0.3"
-hayro = { version = "0.8.0", features = ["embed-fonts"] }
-hex = "0.4"
-htmd = "0.5"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico", "tiff", "qoi"] }
-log = "0.4"
-minijinja = { version = "2", features = ["loader", "json"] }
-notify = "8"
-pagefind = { version = "1.5.2", default-features = false }
-quick-xml = "0.42"
-regex = "1"
-reqwest = { version = "0.13", default-features = false, features = [
+aggr-lib = { path = "crates/aggr-lib", version = "2.0.0" }
+env_logger = "0.11.11"
+log = "0.4.35"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+anyhow = "1.0.104"
+assert_cmd = "2.2.2"
+chrono = { version = "0.4.45", features = ["serde"] }
+fantoccini = { version = "0.22.1", default-features = false }
+futures-util = "0.3.34"
+hex = "0.4.3"
+httpmock = "0.9.0"
+hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico", "tiff", "qoi"] }
+predicates = "3.1.4"
+regex = "1.13.1"
+reqwest = { version = "0.13.5", default-features = false, features = [
   "rustls-no-provider",
   "gzip",
   "brotli",
@@ -47,39 +53,16 @@ reqwest = { version = "0.13", default-features = false, features = [
   "http2",
   "stream",
 ] }
-rust-embed = { version = "8", features = ["debug-embed"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-scraper = "0.27"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml_ng = "0.10"
-sha1 = "0.11"
-sha2 = "0.11"
-slug = "0.1"
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
-tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal"] }
-toml = "1"
-url = { version = "2", features = ["serde"] }
-unicode-normalization = "0.1"
-unicode-segmentation = "1"
-walkdir = "2"
-# These Apache-2.0 releases support the project's MSRV; newer releases require Rust 1.98.
-wreq = { version = "=6.0.0-rc.31", default-features = false, features = ["webpki-roots", "tokio-rt", "gzip", "brotli", "stream"] }
-wreq-util = { version = "=3.0.0-rc.14", default-features = false, features = ["emulation"] }
-thumbhash = "0.1.0"
-resvg = { version = "0.48.1", default-features = false, features = ["text"] }
-
-[dev-dependencies]
-ts-rs = { version = "12", features = ["serde-json-impl"] }
-assert_cmd = "2"
-fantoccini = { version = "0.22", default-features = false }
-httpmock = "0.8"
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
-insta = "1"
-png = "0.18"
-predicates = "3"
-tokio = { version = "1", features = ["test-util"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+scraper = "0.29.0"
+serde_json = "1.0.154"
+serde_yaml_ng = "0.10.0"
+sha1 = "0.11.0"
+slug = "0.1.6"
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["time"] }
+url = { version = "2.5.8", features = ["serde"] }
+walkdir = "2.5.0"
 
 [profile.dev]
 # Generic image decoders are instantiated in aggr itself, not just their dependency crates.
@@ -94,6 +77,25 @@ opt-level = 0
 opt-level = 3
 
 [profile.dev.package.regex-automata]
+opt-level = 3
+
+# These run on every UI edit; keep native compiler and JavaScript execution fast in dev.
+[profile.dev.package.rquickjs-sys]
+opt-level = 3
+
+[profile.dev.package.rolldown]
+opt-level = 3
+
+[profile.dev.package.oxc_parser]
+opt-level = 3
+
+[profile.dev.package.oxc_transformer]
+opt-level = 3
+
+[profile.dev.package.oxc_codegen]
+opt-level = 3
+
+[profile.dev.package.lightningcss]
 opt-level = 3
 
 # Asset validation hashes retained bytes even when their decoded metadata is cached.

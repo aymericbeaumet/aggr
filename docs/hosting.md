@@ -5,7 +5,7 @@ static-host agnostic. GitHub is the turnkey path, not a requirement.
 
 ## Installing the binary
 
-Install a prebuilt binary with
+Install the published v2.0.0 binary with
 [mise's GitHub backend](https://mise.jdx.dev/dev-tools/backends/github.html):
 
 ```sh
@@ -13,11 +13,23 @@ mise use -g github:aymericbeaumet/aggr@2.0.0
 aggr --version
 ```
 
+Git must also be installed to manage the archive. Linux release binaries are built on Ubuntu
+24.04 and require glibc 2.39 or newer. On an older Linux distribution, follow the
+[mise source setup](native-toolchain.md#reproduce-the-development-environment), run
+`mise run release`, and use `target/release/aggr`. Source builds require Rust 1.98 or newer and
+the [native build dependencies](interoperability.md#http-extraction-and-native-builds).
+
 Or download the archive for your OS and architecture from
 [GitHub Releases](https://github.com/aymericbeaumet/aggr/releases/latest), verify it against the
 release's `SHA256SUMS`, and put the extracted `aggr` executable on your `PATH`. Release binaries
 are available for Linux, macOS, and Windows on amd64 and arm64. Change the version after reviewing
 the [migration guide](sources.md#upgrading-from-112-to-20) when moving between major releases.
+
+The Homebrew formula and crates.io packages have not been published yet. The
+[distribution pipeline](distribution.md) prepares those installation channels; use mise or the
+release downloads until publication completes. The native reader build and `dev --demo` in this
+source checkout are newer than the v2.0.0 binary. The released binary supports `aggr init` and
+`aggr dev`, as shown in the [local quickstart](../readme.md#try-locally).
 
 ## Adding aggr to an existing GitHub repository
 
@@ -110,7 +122,6 @@ Configure the provider's scheduler to run this from a normal Git checkout:
 
 ```sh
 aggr build \
-  --release \
   --base-url "https://reads.example.net/" \
   --out _site
 ```
@@ -159,14 +170,14 @@ If you want search engines to index your public reader, opt in explicitly:
 indexing = true
 ```
 
-This takes effect only in `aggr build --release`. Development and preview builds always use
-`noindex,follow`, even with indexing enabled. An enabled release build emits a sitemap when its
+This takes effect in every `aggr build`. Preview preserves the same indexing metadata but sends
+an HTTP `X-Robots-Tag: noindex` header. An enabled build emits a sitemap when its
 public URL is known. At an origin root, `robots.txt` permits crawling and advertises that sitemap;
 with indexing disabled it still permits crawling so engines can read the page's `noindex` directive.
 An instance under a subpath does not write `robots.txt`, since that file only governs an origin
 when served at its root. The templates keep `page.indexable` in their robots metadata.
 
-Every published article keeps its self-canonical URL and visibly labelled original URL. Original
+Every published article keeps its self-canonical URL and visibly labeled original URL. Original
 provenance also appears in structured data, feeds, portable representations, and `linkset.json`.
 The canonical identifies the local snapshot; it does not claim authorship of the upstream work.
 

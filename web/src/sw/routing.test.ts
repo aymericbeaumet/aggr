@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { PAGE_LIMIT, trim } from './caches';
-import { harness, scope } from './harness';
+import { harness, scope, tick } from './harness';
 import { assetResponse, classify, handleFetch, immutable, pageResponse, type RequestLike } from './routing';
 import type { FetchEventLike } from './types';
 
@@ -94,7 +94,11 @@ describe('pageResponse', () => {
     const { ctx, state, storage } = harness();
     const url = `${scope}items/a/`;
     await (await storage.open(ctx.names.pages)).put(url, new Response('visited'));
-    await (await storage.open(ctx.names.offlinePages)).put(url, new Response('protected'));
+    await (await storage.open(ctx.names.legacyOfflinePages)).put(url, new Response('protected'));
+    await (await storage.open(ctx.names.offlineRevisions)).put(url, new Response('r'));
+    await (await storage.open(ctx.names.offlineSettings)).put(`${scope}__offline_articles`, Response.json([
+      { url: 'items/a/', title: 'Legacy article', resources: [{ url: 'items/a/', revision: 'r' }] },
+    ]));
     state.offline = true;
     expect(await (await pageResponse(ctx, new Request(url))).text()).toBe('protected');
   });
@@ -119,7 +123,7 @@ describe('assetResponse and trim', () => {
   it('answers from any cache before the network and remembers new assets within the bound', async () => {
     const { ctx, requests, storage } = harness();
     const url = `${scope}assets/images/${sha1}.webp`;
-    await (await storage.open(ctx.names.offlinePages)).put(url, new Response('protected image'));
+    await (await storage.open(ctx.names.assets)).put(url, new Response('protected image'));
     expect(await (await assetResponse(ctx, new Request(url), ctx.names.assets, 2)).text()).toBe('protected image');
     expect(requests).toHaveLength(0);
     for (const name of ['one', 'two', 'three']) {
@@ -146,21 +150,62 @@ describe('assetResponse and trim', () => {
 describe('handleFetch', () => {
   const event = (url: string, init: RequestInit = {}) => {
     let responded: Promise<Response> | undefined;
+    const background: Promise<unknown>[] = [];
     const fetchEvent: FetchEventLike = {
       request: new Request(new URL(url, scope).href, init),
       preloadResponse: Promise.resolve(undefined),
       respondWith: (response) => {
         responded = response;
       },
-      waitUntil: () => {},
+      waitUntil: (task) => { background.push(task); },
     };
-    return { fetchEvent, responded: () => responded };
+    return { fetchEvent, responded: () => responded, background };
   };
+
+  it.each([
+    ['page', 'items/a/', { accept: 'text/html' }],
+    ['asset', `assets/images/${sha1}.webp`, {}],
+    ['mutable', 'updates.json', {}],
+  ] as const)('returns a network %s while its cache write is pending', async (_, path, headers) => {
+    const { ctx, storage } = harness();
+    const open = storage.open.bind(storage);
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    storage.open = async (name) => {
+      const cache = await open(name);
+      return { ...cache, put: async (request, response) => { await pending; await cache.put(request, response); } };
+    };
+    const fetched = event(`${scope}${path}`, { headers });
+    handleFetch(ctx, fetched.fetchEvent);
+    try {
+      const response = await Promise.race([fetched.responded(), tick().then(() => null)]);
+      expect(response).toBeInstanceOf(Response);
+      expect(await response?.text()).toBe(`${scope}${path}`);
+      expect(fetched.background).toHaveLength(1);
+      expect(await Promise.race([Promise.all(fetched.background).then(() => true), tick().then(() => false)])).toBe(false);
+    } finally {
+      release();
+      await fetched.responded();
+      await Promise.all(fetched.background);
+    }
+    expect(await storage.match(`${scope}${path}`)).toBeTruthy();
+  });
+
+  it('keeps cache failures out of both the response and background lifetime', async () => {
+    const { ctx, state } = harness();
+    state.quota = () => true;
+    const fetched = event(`${scope}items/a/`, { headers: { accept: 'text/html' } });
+    handleFetch(ctx, fetched.fetchEvent);
+    expect(await (await fetched.responded())?.text()).toBe(`${scope}items/a/`);
+    expect(fetched.background).toHaveLength(1);
+    await expect(Promise.all(fetched.background)).resolves.toEqual([undefined]);
+  });
 
   it('answers mutable files from any cached copy when the network fails, else with a network error', async () => {
     const { ctx, state, storage } = harness();
     const url = `${scope}feed.xml`;
     await (await storage.open(ctx.names.shell)).put(url, new Response('<feed/>'));
+    await (await storage.open(ctx.names.shell)).put(ctx.offlinePage, new Response('offline document'));
     state.offline = true;
     const cached = event(url);
     handleFetch(ctx, cached.fetchEvent);
@@ -168,6 +213,31 @@ describe('handleFetch', () => {
     const missing = event(`${scope}updates.json`);
     handleFetch(ctx, missing.fetchEvent);
     expect((await missing.responded())?.type).toBe('error');
+    const differentQuery = event(`${url}?format=json`);
+    handleFetch(ctx, differentQuery.fetchEvent);
+    expect((await differentQuery.responded())?.type).toBe('error');
+    await (await storage.open(ctx.names.pages)).put(`${url}?format=json`, new Response('{"items":[]}'));
+    const matchingQuery = event(`${url}?format=json`);
+    handleFetch(ctx, matchingQuery.fetchEvent);
+    expect(await (await matchingQuery.responded())?.text()).toBe('{"items":[]}');
+  });
+
+  it('falls back to the same mutable file on server errors and preserves uncached error responses', async () => {
+    const { ctx, state, storage } = harness();
+    const url = `${scope}updates.json`;
+    await (await storage.open(ctx.names.shell)).put(ctx.offlinePage, new Response('offline document'));
+    state.network = async () => new Response('unavailable', { status: 503 });
+    const missing = event(url);
+    handleFetch(ctx, missing.fetchEvent);
+    expect((await missing.responded())?.status).toBe(503);
+    await (await storage.open(ctx.names.pages)).put(url, Response.json({ version: 'earlier' }));
+    const cached = event(url);
+    handleFetch(ctx, cached.fetchEvent);
+    expect(await (await cached.responded())?.json()).toEqual({ version: 'earlier' });
+    state.network = async () => new Response('gone', { status: 404 });
+    const gone = event(url);
+    handleFetch(ctx, gone.fetchEvent);
+    expect((await gone.responded())?.status).toBe(404);
   });
 
   it('ignores requests outside the scope and routes HTML through the page strategy', async () => {

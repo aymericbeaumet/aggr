@@ -1,0 +1,40 @@
+name: publish crates
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        description: crates.io token permitted to publish aggr-ui-model, aggr-ui-build, aggr-lib and aggr
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-io-publish
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/native-deps
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.11.6
+          install_args: --locked rust cmake ninja
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: linux-x64
+          save-if: false
+      - run: mise run publish-test
+      - name: Publish missing crate versions
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: mise run publish

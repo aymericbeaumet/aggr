@@ -1,115 +1,96 @@
 # Client development and search
 
-Rust and MiniJinja render the complete static reader. The browser client is a Svelte 5 +
-TypeScript application in `web/`, compiled ahead of time by Vite and committed under
-`src/theme/static/app/`, where the binary embeds it like any other static file. Site
-generation never executes JavaScript or invokes a frontend compiler, so `cargo build`, `aggr sync`,
-`aggr build` and `aggr dev` need no Node. Search is a build-time Pagefind index; there is no
-search service.
+Svelte 5 and TypeScript in `web/` own the complete reader: static page markup, browser hydration,
+search rows, and navigation. Rust prepares archive data and sanitizes article bodies. A single
+component tree renders both the published HTML and its interactive browser version. Every page
+works with JavaScript disabled. Search remains a build-time Pagefind index, with no search service.
 
-## The page model
+## Build and runtime
 
-Every HTML page embeds the model it was rendered from in `<script id="aggr-page">`:
-`ClientPage` in [`src/site/client.rs`](../src/site/client.rs), with the site, the build versions
-and one of five views: `list` (rows, paginator, scope), `article` (header row, authors, resources,
-access notice, neighbours and recommendations), `preferences`, `offline` and `static`. Field
-names are snake_case like the templates, URLs are site paths the client joins onto `base`, and
-`cargo test` exports the TypeScript types with ts-rs into `web/src/generated/` (CI fails when
-they are stale). The article body is not in the model: it stays in the HTML as
-`<div data-article-content>`, together with the media figure.
+`cargo build` exports the shared page types from `crates/aggr-ui-model` into ignored
+`web/.generated/types/` and calls the Rust UI-build library. Native Rolldown produces the browser
+bundles, bootstrap, service worker, and an isolated server renderer in
+Cargo's `OUT_DIR`. Generated types and bundles are not committed. `mise.toml` and `mise.lock` pin
+build tools; `Cargo.lock` and the checked-in vendor inventory pin dependencies.
+Mise also owns the development tasks in `mise.toml`, shared by local work and CI.
+The complete toolchain is native. See [native tooling](native-toolchain.md) for its build and cache contract.
 
-## Boot and navigation
+The binary embeds that output. Installed commands need no frontend source files:
+Rust calls the synchronous Svelte renderer in QuickJS with no network, filesystem, or process
+bindings. Each rendering thread reuses its own runtime, with memory, stack, and execution limits.
+The embedded asset fingerprint participates in publication caches and application versions.
 
-The static page is the first paint. The stylesheet and the entry's modulepreloads are linked
-before the blocking bootstrap script, so that first paint does not wait to discover them;
-`#aggr-preferences` stays immediately above the script, which still applies stored settings
-before paint. Feed rows use `content-visibility` at every width, so off-screen entries skip
-layout and stay addressable; printing lays them out. The deferred module reads the model, captures the article
-content (or a static page's `<main>`), mounts `App` into a detached `<div id="app">`, swaps it
-over the rendered one in the same task and flushes effects, so nothing paints in between; the
-captured element is moved into the new tree, never re-parsed. Lists and articles are rendered by
-components; browse and error pages are adopted whole; preferences and offline pages exist only in
-the client. If `#aggr-page` is missing or malformed the page stays static.
+## Page model and hydration
 
-Navigation fetches the target page, extracts its model, its content element and its `<head>`
-metadata with `DOMParser`, and re-renders `<main>` from state while the header and tab bar
-persist. A link inside the archive is fetched as soon as it is pressed or hovered, and a page
-already in memory is swapped in that same turn. The three tabs are fetched as soon as the reader
-starts. After paint, the reader warms the first three rows already on screen. An article's
-neighbours carry `rel="prefetch"`. Guesses
-are bounded to 16 requests and a 24-page, five-minute cache, and off on Save-Data or slow
-connections. The search catalogue waits for an idle slice, and loads
-at once when the field is focused. Scroll positions are kept per history entry, so Back returns to the same place and
-list cursor. A non-HTML response, a page without a model or one built by another app version
-falls back to ordinary navigation, and without JavaScript every link is an ordinary link.
-A podcast, native video, or YouTube, Vimeo, or Twitch player that has started keeps playing across
-those page changes. Audio is parked outside the page. A picture is seated once, at the size it
-started, and that seat scales between the article and the now-playing bar (persistent chrome, beside
-the status bar). The provider frame keeps its parent and layout size, so the elapsed time and the
-bar's transport continue. Starting it does not move keyboard focus into the frame. A player or
-interactive viewer that takes focus is handed back to the page over the next few frames, fullscreen
-and Twitch excepted, and playback sliders and selects do not swallow reader shortcuts. System media keys play, pause, and seek a recording the bar can drive,
-and previous and next skip 15 and 30 seconds. Parked audio can be muted from the bar. Twitch keeps
-the keys it draws itself. Dismissing the bar or leaving the site stops it. Media that never
-started is released with the page.
+Every page embeds its typed model in `<script id="aggr-page">`. The contract includes head metadata,
+page identity, prepared display data, and a discriminated view. Rust prepares URLs and display
+values before the first paint. Article HTML is sanitized in Rust, passed separately to SSR, and
+appears once in the document. Hydration claims that opaque body element instead of serializing
+article text again. Browser-local preferences are applied after hydration; the small bootstrap
+still applies visual settings before paint.
 
-## Components and parity
-
-Components that mirror a MiniJinja partial (`Header`, `ListHead`, `Toolbar`, `Row`, `Metadata`,
-`Pager`, `RelatedCard`, `ArticleHeader`, `ArticleFooter`, and `App` for whole pages) must render
-exactly what the partial renders. `cargo test` writes fixtures to `web/test/parity/` (a props
-JSON and the partial's HTML per case; `AGGR_UPDATE_PARITY=1 cargo test --bin aggr parity`
-refreshes them after a template or model change) and vitest renders each component with
-`svelte/server`, normalises both sides (comments, attribute order, whitespace, hashed asset
-names) and compares. These components carry no `<style>`: `style.css` is the only stylesheet,
-so class names stay identical on both sides. Search results reuse `Row` from Pagefind's opaque
-per-document metadata, which is the same `ClientRow` JSON.
-
-Everything else is the platform. The reading progress bar and the folding article header are
-scroll-driven animations, with a small script standing in where scroll timelines or `calc-size()`
-are missing. Rows open through a stretched link, so modifier and middle clicks behave natively.
-Keyboard help is a `<dialog>` opened by an invoker command. Anything without universal support
-sits behind `@supports` or a feature check and degrades to plain HTML.
+The browser hydrates the same components that produced the page. Navigation extracts the next
+model and sanitized article body, then updates the component tree; Svelte owns head metadata and
+page chrome. Search metadata carries typed rows, rendered with the same `Row.svelte` as feeds.
+There are no parallel Rust templates, HTML search fragments, or template parity fixtures.
+Malformed models and incompatible application versions fall back to ordinary navigation.
+Persistent playback stays outside the changing page content.
 
 ## Development
 
 ```sh
-make setup                       # mise tools and locked client packages
-make client-check                 # svelte-check + vitest
-make client-build                 # rebuild the committed bundle under src/theme/static/app/
-make client-dev                   # Vite dev server with HMR
-AGGR_VITE_URL=http://127.0.0.1:5173 make run ARGS="dev"
+mise run setup                     # install pinned tools and locked dependencies
+mise exec -- cargo run --locked -- dev # local config, or demo when no config exists
+mise run dev                       # demo archive
+AGGR_CONFIG=/path/to/aggr.toml mise run dev
+mise run check                     # Rust, TypeScript, component and launcher checks
 ```
 
-`mise.toml` and `mise.lock` pin the development tools. `Cargo.lock` and
-`web/package-lock.json` pin the Rust and client packages. Run `make setup` after
-changing any of those files.
+`cargo run -- dev` starts the Rust supervisor with a stable local origin. Frontend edits compile
+an immutable UI bundle which the running Rust renderer loads directly, then reload the page.
+Rust edits compile a replacement
+worker while the last successful generation continues serving. A failed compilation leaves that
+worker available. Successful replacements retain archive snapshots safely and reload the browser.
+Configuration and archive changes use the worker's snapshot/reload stream. Ctrl-C shuts down the
+stack. `--port` selects the public port; `mise run dev -- --port 3000` forwards options.
 
-With `AGGR_VITE_URL` set, the development server replaces the compiled module tag in its HTML
-with Vite's client and the source entry, so component edits hot-swap; static HTML, media and data
-stay served by aggr. The setting accepts a local HTTP origin only and has no effect on builds.
-Hashed assets — `assets/app` bundles, Rust `url_for` names, content-addressed media and Pagefind
-fragments — are served `Cache-Control: public, max-age=31536000, immutable`. HTML stays
-`no-store` and does not send `Clear-Site-Data`: the reload script already drops the reader's own
-caches, and wiping the HTTP cache on every document made the next paint wait on files that had
-not changed.
-`make check` runs the frontend checks alongside the Rust ones; CI also rebuilds the bundle and
-fails if the committed output or the generated types differ.
-The frontend installs TypeScript 6 for `tsc` and an aliased TypeScript 7 for Svelte's `--tsgo`
-checker; both are needed until `svelte-check` can use TypeScript 7 alone. The checker writes
-temporary files under ignored `web/.svelte-check/`.
+Cached articles appear first, and completed sources become visible during cold sync. Development
+uses an isolated cache and never commits or pushes the archive. `build` validates the complete
+publication. Installed binaries include preview and live reload using embedded assets. In source
+checkouts, `--no-watch` chooses the embedded assets without contributor compilation.
 
-Vite content-hashes the client bundle and lists it in `static/app/.vite/manifest.json`; Rust
-publishes those files verbatim (chunk names are referenced inside the bundle) and resolves the
-entry, its stylesheet and its eager imports through the manifest. Every other static file is
-hashed by Rust. Hashed names are never rewritten inside file contents.
+`mise run client-check` exports the typed contract, runs Svelte/TypeScript checks, and executes
+isolated browser tests. `cargo test -p aggr-tools` checks the supervisor and release helpers. Rust tests exercise the embedded renderer and publication behavior;
+frontend tests render the actual components. Browser contracts cover hydration and navigation.
+For focused frontend work, use these tasks:
 
-A prerendered page runs before anyone has seen it, so the client waits for `prerenderingchange`
-before writing session state, history or a worker registration.
+| Task | Purpose |
+| --- | --- |
+| `mise run client-typecheck` | Svelte and TypeScript checks |
+| `mise run client-build` | Compile the reader assets |
+| `mise run client-test` | Component and browser-state tests |
+| `cargo test -p aggr-tools` | Native build, distribution and supervisor tests |
+
+The native TypeScript checker consumes Svelte-aware virtual sources and maps diagnostics to the
+original files. It is installed directly by mise; projection helpers run in isolated QuickJS.
+
+Rolldown hashes executable assets and lists their paths in `assets.json`; Rust publishes them verbatim.
+After hydration, shared stylesheet and preload URLs stay fixed across navigation so changing page
+depth never detaches the live stylesheet. Server HTML keeps portable relative asset URLs.
+HTML remains `no-store` in development. Navigation keeps a bounded cache and starts at most two
+prefetches after pointer, focus or touch intent; there are no startup, idle or viewport page downloads.
+Prefetches use low network priority and pause when Data Saver or a 2G connection is reported.
+Requested navigation stays high priority. Its 15-second deadline includes the response body, so a
+stalled transfer releases its slot and can fall back to ordinary navigation or a previously read page.
+A prerendered page waits for activation before changing history or registering a worker.
+
+Touch suggestions select on release and yield to scrolling. Their height follows the visible
+viewport above the keyboard, including browser panning. Installed pull-to-refresh yields to nested
+scrollers, controls, selection and zoom; the app's Search shortcut opens the focused feed search.
 
 ## Preferences
 
-`src/config/preferences.rs` holds one typed table. It produces the validation rules embedded as
+`crates/aggr-lib/src/config/preferences.rs` holds one typed table. It produces the validation rules embedded as
 JSON in `#aggr-preferences` and the form schema the client renders on `/preferences/`. Nothing
 redeclares a setting: adding one there adds its control, its validation and its default everywhere.
 The form is a static import of the preferences page, in the eager bundle with the shell. Opening
@@ -122,20 +103,30 @@ sync, and import and export. Values live in `localStorage` under `aggr:<setting>
 ## Offline
 
 The service worker separates automatically cached pages from selected offline downloads. Its
-script carries the app shell, not the article catalogue: `offline-catalog.json` is fetched only
+script carries the app shell, not the article catalog: `offline-catalog.json` is fetched only
 when a download count is set, and individual collection pages are cached when opened. A new
 worker copies shell files whose revision matches instead of downloading them again. The
 offline preference saves complete article pages and their retained image renditions; readiness
-requires every retained file. Partial and quota failures remain visible. Any positive download
-limit also saves the complete archive search manifest, including its versioned catalogue, runtime
+requires every retained file. Updates stage immutable resource revisions, then publish the complete
+selection in one cache write. A failed or canceled update keeps the previous complete downloads;
+partial and quota failures remain visible. Uncommitted files are never served, and unused revisions
+are removed after each update. Downloads made by older workers remain readable and move locally
+into the revisioned cache on a successful update, without downloading unchanged files again.
+Overlapping updates and clearing downloads share a queue and, where available, a browser Web Lock.
+Any positive download
+limit also saves the complete archive search manifest, including its versioned catalog, runtime
 and fragments. Only a fully committed index becomes active, and a previous complete index remains
-available during an update. Online/offline transitions select the matching catalogue and runtime;
+available during an update. Online/offline transitions select the matching catalog and runtime;
 search results mark saved articles and omit previews that are unavailable offline.
+
+Network responses stream immediately while cache writes and eviction finish under the fetch
+event's lifetime. Only document requests can fall back to the HTML offline page. JSON, feeds and
+stylesheets fall back to their exact cached URL, including its query, or return a network error.
 
 ## Browser regression tests
 
 The browser suite uses a local ChromeDriver and a temporary, pinned article archive. `mise.toml`
-pins ChromeDriver and Chrome for Testing to the same release. `make setup` installs both through
+pins ChromeDriver and Chrome for Testing to the same release. `mise run setup` installs both through
 mise on supported desktop platforms. Point `AGGR_CHROME_BINARY` at the mise-installed browser:
 
 ```sh
@@ -166,11 +157,11 @@ Chrome 154 on macOS produced these measurements over local HTTP without compress
 | Regression budget with cacheable versioned assets | 786,432 |
 
 The sample ends 750 ms after worker control, before typing or navigation. It also verifies zero
-external HTTP requests and zero automatic article, collection, search-index or offline-catalogue
+external HTTP requests and zero automatic article, collection, search-index or offline-catalog
 downloads. With cacheable assets, each asset is requested at most once: worker installation reuses
 the browser's HTTP cache. Search works afterward. These are controlled fixture bytes, not
 deployed-site timings; compression and hosting cache headers change the transfer size. The
-samples predate the smaller install shell: collection pages and the article catalogue are no
+samples predate the smaller install shell: collection pages and the article catalog are no
 longer part of service-worker installation.
 
 ```sh
@@ -204,19 +195,23 @@ The parser and controller live in `web/src/search/`.
 Unqualified words search the indexed title and full text. Quoted phrases match together; a leading
 minus excludes a word, phrase, or facet. `category:`, `source:`, `tag:`, and `type:` accept stable
 identifiers or unique matching labels. Source links, completion, and canonicalized queries always
-use the hostname identifier, for example `source:"hnrss.org"`; friendly source names are presentation
-labels in source directories and optional manual aliases. Publisher and `via` labels beneath article
-titles use the same canonical hostname, never subscription paths. Other facets can insert readable unique labels. Duplicate labels
-or labels colliding with another identifier retain their stable identifiers; exact identifiers win,
-and ambiguous manual aliases produce an explanation.
+use canonical publisher identifiers, for example `source:"hnrss.org"` or
+`source:"youtube.com/@Micode"`. Friendly source names are presentation labels and optional manual
+aliases. `via` uses the same normalized label as the source directory: a resolved Spotify show
+named `Underscore_` reads as `spotify.com/underscore`, while its query and collection identity
+remains `open.spotify.com/show/<id>`. Without a resolved name, the catalog path remains visible.
+Other facets can insert readable unique labels. Duplicate labels or labels colliding with another
+identifier retain their stable identifiers; exact identifiers win, and ambiguous manual aliases
+produce an explanation.
 Source includes both the publisher and every configured or retained feed that supplied the article.
-A canonical article has denormalized source memberships: it appears once globally and once in each
-matching hostname collection. Publisher and feed IDs both use the lowercase/punycode hostname,
-excluding trailing dots, conventional `www.`, paths, and ports. Other subdomains remain distinct;
-provider aliases do not merge actual domains. All subscriptions or accounts on one host aggregate
-into one source filter, and publisher/feed memberships collapse when their hosts match. Feed hosts
-come from configured URLs or persisted endpoint/site metadata, never archived slugs. An origin with
-no trusted HTTP(S) metadata contributes no guessed membership; a known article publisher still does.
+A canonical article appears once globally and once in each matching publisher collection.
+Ordinary publisher IDs use the lowercase/punycode hostname without trailing dots, conventional
+`www.`, or ports. Other subdomains remain distinct. Shared platforms also keep the account path;
+platform aliases resolve through `crates/aggr-lib/src/platform.rs`, while opaque catalog IDs retain the host
+that issued them. Subscriptions belonging to one publisher share a source filter, and duplicate
+publisher/feed memberships collapse. Feed identities come from configured URLs or persisted
+endpoint/site metadata, never archived slugs. An origin with no trusted HTTP(S) metadata contributes
+no guessed membership; a known article publisher still does.
 Archived source IDs, article paths, original URLs, and discussion provenance remain unchanged.
 Repeated positive values
 within a facet mean any of those values; different facets combine with AND. Exclusions remove matches.
@@ -262,8 +257,8 @@ while the manifest loads must not discard the vocabulary needed to complete that
 The vocabulary comes from `search-catalog.json`, which contains only the index version, base,
 document count, and facets. Focusing the
 field or completing an unresolved qualifier does not initialize Pagefind or fetch its index chunks.
-`make client-test` exercises the query and session contracts with Node’s built-in test runner;
-no runtime dependency or browser bundle is introduced.
+`mise run client-check` checks types with native TypeScript and exercises query and session
+contracts in Chrome through the Rust test runner.
 Once a valid query is entered, runtime initialization overlaps the existing typing delay. Fully
 resolved filter queries also use Pagefind's supported preload API; partial text does not speculate
 on potentially broad prefix matches. Clearing, replacing, or abandoning the query cancels pending
@@ -278,13 +273,13 @@ Display metadata remains opaque to Pagefind's text tokenizer. Archived points an
 are shared by static and search metadata, including explicit zero values; missing counts stay absent.
 Hacker News points, comment counts, and the discussion score are omitted from that shared view.
 
-Completion caches normalized aliases and ranking by immutable catalogue identity; detecting a
+Completion caches normalized aliases and ranking by immutable catalog identity; detecting a
 finished facet token does not build or sort a suggestion list. A persistent search session coalesces
-catalogue requests and keeps two recently used independent Pagefind instances across navigation.
+catalog requests and keeps two recently used independent Pagefind instances across navigation.
 Evicted instances remain alive only while their queries, hydration, preload, or facet requests finish;
 the last operation releases their worker resources and cached results. Application disposal cancels
-shared catalogue requests and retires instances after their active operations finish. JavaScript module code remains subject to
-the browser's import cache. Content updates and online/offline changes revalidate the catalogue;
+shared catalog requests and retires instances after their active operations finish. JavaScript module code remains subject to
+the browser's import cache. Content updates and online/offline changes revalidate the catalog;
 failed content revalidation retains the usable index, while network transitions reselect the current
 online index or the worker's committed offline index. Page disposal cancels only its own work. Result hydration is cached by
 query-specific result reference, not document ID. Pagefind can mutate and return the same fragment

@@ -103,14 +103,19 @@ The command never rewrites history, force-pushes, deletes originals, or runs Git
 ```toml
 [cache]
 media_max_bytes = 2147483648     # 2 GiB, compressed publication copies and responsive renditions
-response_max_bytes = 268435456  # 256 MiB, cached original-page responses and extractions
+response_max_bytes = 268435456  # 256 MiB, page responses and disposable lookup/validation state
 ```
 
 These positive byte limits apply separately to each repository build cache and each isolated dev
-cache. Successful sync/build boundaries enforce them. Obsolete media-processing generations are
+cache. The response limit is shared by original pages, extracted content, discussion lookups,
+image-validation receipts, and capture, recording, image-failure, and feed-parser state. This keeps
+metadata bounded as old articles and sources leave the current archive. Sync/build boundaries enforce
+the limits, including fetch-only and unsuccessful syncs. Obsolete media-processing generations are
 removed first; inactive entries are evicted before those used during the current process, oldest
 first. If the active set exceeds its limit, it is also evictable. Cache hits do not rewrite files
 or timestamps. A missing or evicted entry is regenerated from the retained input when needed.
+The shared response/state cache also keeps at most 65,536 files, limiting filesystem overhead from
+small receipts even when their combined logical bytes are below the byte limit.
 
 Cache maintenance never prunes the archive. Media encoding keys track the processing policy and
 codec dependencies, so changing only aggr's release version does not invalidate every image.

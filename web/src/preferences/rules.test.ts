@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { applyDataset, coerce, defaults, parseSchema, positiveInteger, readPreferences, valid } from './rules';
 
 const schema = parseSchema(

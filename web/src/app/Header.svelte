@@ -1,7 +1,5 @@
 <script lang="ts">
-  // `base.html`'s `<header class="top">` and `<nav class="mobile-tabs">`: the persistent
-  // navigation, whose links and `aria-current` follow the page kind.
-  import type { ClientSite } from '../generated/ClientSite';
+  import type { ClientSite } from '@aggr-model/ClientSite';
   import { urlFor } from '../model/urls';
   import { tabIntent } from '../state/tabIntent.svelte';
 
@@ -36,13 +34,8 @@
   ] as const;
   const [feed, browse, preferences] = tabs;
 
-  // A press names its tab before the page arrives. Until then that choice wins over the page
-  // still on screen, so the bar does not go blank between contact and the swap.
-  const chosen = $derived(tabIntent.route);
-  const current = (tab: (typeof tabs)[number]) => {
-    if (chosen !== null) return tab.route === chosen ? 'page' : undefined;
-    return (tab.kinds as readonly string[]).includes(kind) ? 'page' : undefined;
-  };
+  const current = (tab: (typeof tabs)[number]) =>
+    (tabIntent.route !== null ? tabIntent.route === tab.route : (tab.kinds as readonly string[]).includes(kind)) ? 'page' : undefined;
 </script>
 
 <header class="top" data-nosnippet>

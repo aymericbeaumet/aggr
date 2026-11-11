@@ -1,0 +1,46 @@
+---
+source: crates/aggr-lib/src/site/outputs.rs
+assertion_line: 2420
+expression: "instance_descriptor(&site, &build(), at(9)).unwrap()"
+---
+{
+  "$schema": "https://raw.githubusercontent.com/aymericbeaumet/aggr/v1/docs/aggr-instance.schema.json",
+  "schema_version": 1,
+  "type": "aggr-instance",
+  "profile": "https://github.com/aymericbeaumet/aggr/blob/v1/docs/interoperability.md#aggr-network",
+  "network": "https://github.com/aymericbeaumet/aggr#network",
+  "url": "https://example.test/reads/",
+  "name": "Example & Reader",
+  "language": "en-GB",
+  "updated": "2026-09-02T09:30:00Z",
+  "generator": {
+    "name": "aggr",
+    "version": "1.2.3",
+    "url": "https://github.com/aymericbeaumet/aggr"
+  },
+  "source": {
+    "config": "https://raw.githubusercontent.com/owner/reader/deadbeef/aggr.toml",
+    "repository": "https://github.com/owner/reader",
+    "data": "https://github.com/owner/reader/tree/aggr"
+  },
+  "feeds": {
+    "atom": "https://example.test/reads/atom.xml",
+    "rss": "https://example.test/reads/rss.xml",
+    "json": "https://example.test/reads/feed.json"
+  },
+  "collections": {
+    "browse": "https://example.test/reads/browse/",
+    "sources": "https://example.test/reads/sources/",
+    "tags": "https://example.test/reads/tags/",
+    "categories": "https://example.test/reads/categories/"
+  },
+  "discovery": {
+    "search": "https://example.test/reads/?q=",
+    "search_manifest": "https://example.test/reads/search-manifest.json",
+    "opml": "https://example.test/reads/sources.opml",
+    "opensearch": "https://example.test/reads/opensearch.xml",
+    "linkset": "https://example.test/reads/linkset.json",
+    "sitemap": "https://example.test/reads/sitemap.xml",
+    "webmanifest": "https://example.test/reads/manifest.webmanifest"
+  }
+}

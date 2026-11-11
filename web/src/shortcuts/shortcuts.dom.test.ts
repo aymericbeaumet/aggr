@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it } from "../../test/browser";
 import type { CursorRow } from '../selection/cursor';
 import { selection } from '../state/selection.svelte';
 import { installShortcuts } from './index';

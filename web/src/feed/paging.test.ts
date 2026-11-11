@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import type { PaginatorCtx } from '../generated/PaginatorCtx';
+import { describe, expect, it } from "../../test/browser";
+import type { PaginatorCtx } from '@aggr-model/PaginatorCtx';
 import { feedPageUrl, sliceFeed } from './paging';
 
 const root = 'https://x.test/reads/';
@@ -56,7 +56,7 @@ describe('sliceFeed', () => {
     expect(edge.next).toEqual({ href: `${root}page/2/`, visible: true });
   });
 
-  it('crosses static pages backwards onto the last slice of the previous one', () => {
+  it('crosses static pages backward onto the last slice of the previous one', () => {
     const second = sliceFeed(
       paginator({ current_index: 2, previous: './', next: 'page/3/', offset: 50 }),
       50,

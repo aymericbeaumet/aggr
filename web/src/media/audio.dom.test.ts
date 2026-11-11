@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, testTools } from "../../test/browser";
 import { enhanceAudio } from './audio';
 import { resetPlayback } from './now-playing';
 
@@ -41,15 +41,14 @@ const CARD = `<div class="native-audio has-artwork" data-audio-player data-audio
 type Fake = {
   card: HTMLElement;
   audio: HTMLAudioElement;
-  play: ReturnType<typeof vi.fn>;
-  pause: ReturnType<typeof vi.fn>;
-  load: ReturnType<typeof vi.fn>;
+  play: ReturnType<typeof testTools.fn>;
+  pause: ReturnType<typeof testTools.fn>;
+  load: ReturnType<typeof testTools.fn>;
   metadata(duration: number): void;
 };
 
 /**
- * jsdom has no media pipeline: playback, timing and volume are stood in for on the element so
- * the bindings can be exercised.
+ * Control playback, timing and volume without downloading an actual recording.
  */
 function fixture(src = 'episode.mp3'): Fake {
   const card = document.createElement('div');
@@ -71,18 +70,18 @@ function fixture(src = 'episode.mp3'): Fake {
     ended: { get: () => state.ended, configurable: true },
     error: { get: () => state.error, configurable: true },
   });
-  const play = vi.fn(() => {
+  const play = testTools.fn(() => {
     paused = false;
     audio.dispatchEvent(new Event('play'));
     audio.dispatchEvent(new Event('playing'));
     return Promise.resolve();
   });
-  const pause = vi.fn(() => {
+  const pause = testTools.fn(() => {
     if (paused) return;
     paused = true;
     audio.dispatchEvent(new Event('pause'));
   });
-  const load = vi.fn();
+  const load = testTools.fn();
   Object.assign(audio, { play, pause, load });
   return {
     card: root,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { PageCache, type Fetched } from './cache';
 
 const page = (key: string): Fetched => ({ url: key, html: `<p>${key}</p>` });
@@ -54,6 +54,7 @@ describe('PageCache', () => {
     expect(second).not.toBe(first);
     expect(await second.page).toEqual(page('a'));
     expect(second.ready).toBe(true);
+    expect(second.fetched).toEqual(page('a'));
     expect(cache.peek('a')).toBe(second);
     expect(requests).toBe(2);
   });

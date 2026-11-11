@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use fantoccini::{Client, Locator};
 use serde_json::{Value, json};
 
@@ -125,13 +125,31 @@ async fn service_worker_contracts(client: &Client, fixture: &Fixture) -> Result<
       const done = arguments[arguments.length-1];
       fetch('manifest.webmanifest').then(r=>r.json()).then(manifest=>done({id:manifest.id || null,
         one:new URL(manifest.start_url, location.origin+'/reader/manifest.webmanifest').href,
-        two:new URL(manifest.start_url, location.origin+'/other/manifest.webmanifest').href}));
+        two:new URL(manifest.start_url, location.origin+'/other/manifest.webmanifest').href,
+        search:new URL(manifest.shortcuts.find(shortcut=>shortcut.name==='Search').url, new URL('manifest.webmanifest',location.href)).href}));
     "#,
             vec![],
         )
         .await?;
     assert_eq!(identities["id"], Value::Null);
     assert_ne!(identities["one"], identities["two"]);
+    assert_eq!(
+        identities["search"],
+        json!(format!("{}?focus-search=1", fixture.base))
+    );
+    client
+        .goto(
+            identities["search"]
+                .as_str()
+                .context("search shortcut URL")?,
+        )
+        .await?;
+    wait_for(client, "document.activeElement?.id === 'q'").await?;
+    assert_eq!(
+        client.execute("return location.search", vec![]).await?,
+        json!(""),
+        "launch intent is consumed after focusing search"
+    );
     Ok(())
 }
 
@@ -239,4 +257,64 @@ async fn offline_reading_contracts(client: &Client, fixture: &Fixture) -> Result
     fixture.offline.store(false, Ordering::Relaxed);
     set_offline(client, false).await?;
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome WebDriver"]
+async fn failed_offline_selection_commit_preserves_downloads_and_removes_staged_resources()
+-> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fixture = Fixture::new()?;
+    // Fail selection growth after one article was saved successfully. Shrinking also clears any
+    // initial downloads requested by the fixture defaults.
+    let worker = fixture.out.join("sw.js");
+    let mut script = std::fs::read_to_string(&worker)?;
+    script.push_str(
+        r#"
+const putSelection = Cache.prototype.put;
+Cache.prototype.put = async function(request, response) {
+  const url = new URL(typeof request === 'string' ? request : request.url, self.location.href);
+  if (url.pathname.endsWith('/__offline_articles_v2')) {
+    const previous = await this.match(request);
+    if (previous && (await previous.json()).length > 0 && (await response.clone().json()).length > 1) {
+      throw new DOMException('Selection storage is full', 'QuotaExceededError');
+    }
+  }
+  return putSelection.call(this, request, response);
+};
+"#,
+    );
+    std::fs::write(worker, script)?;
+    let client = browser_client().await?;
+    let result = catch_panics(async {
+        phone_session(&client).await?;
+        client.goto(&fixture.base).await?;
+        wait_booted(&client).await?;
+        wait_controlled(&client).await?;
+        client.execute("window.__offlineStatus=null;navigator.serviceWorker.addEventListener('message',event=>{if(event.data?.type==='AGGR_OFFLINE_STATUS')window.__offlineStatus=event.data});localStorage.setItem('aggr:offline-items','1');window.dispatchEvent(new StorageEvent('storage',{key:'aggr:offline-items'}))", vec![]).await?;
+        wait_for(&client, "window.__offlineStatus?.requested === 1 && !window.__offlineStatus.downloading && window.__offlineStatus.saved.length === 1 && window.__offlineStatus.failed === 0 && window.__offlineStatus.search?.phase === 'ready'").await?;
+        let saved = client.execute("return new URL(window.__offlineStatus.saved[0].url, location.href).href", vec![]).await?;
+        let inventory = r#"
+const done=arguments[arguments.length-1];
+caches.keys().then(async names => {
+  const name=names.find(name=>name.includes('offline-articles-v2'));
+  const cache=await caches.open(name);
+  const keys=await cache.keys();
+  done(await Promise.all(keys.sort((a,b)=>a.url.localeCompare(b.url)).map(async key=>{const bytes=await (await cache.match(key)).arrayBuffer();const digest=await crypto.subtle.digest('SHA-256',bytes);return {url:key.url,size:bytes.byteLength,hash:Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('')};})));
+}).catch(error=>done({error:String(error)}));
+"#;
+        let before = client.execute_async(inventory, vec![]).await?;
+        assert!(before.as_array().is_some_and(|entries| !entries.is_empty()), "{before}");
+        client.execute("localStorage.setItem('aggr:offline-items','2');window.dispatchEvent(new StorageEvent('storage',{key:'aggr:offline-items'}))", vec![]).await?;
+        wait_for(&client, "window.__offlineStatus?.requested === 2 && !window.__offlineStatus.downloading && window.__offlineStatus.failed > 0 && window.__offlineStatus.saved.length === 1").await?;
+        assert_eq!(client.execute_async(inventory, vec![]).await?, before, "failed commit must keep exactly the previous protected resources");
+        fixture.offline.store(true, Ordering::Relaxed);
+        set_offline(&client, true).await?;
+        client.goto(saved.as_str().unwrap()).await?;
+        wait_booted(&client).await?;
+        wait_for(&client, "!!document.querySelector('article.item')").await?;
+        Ok(())
+    }).await;
+    report_failure(&client, "offline-selection-quota", &result).await;
+    finish(client, result).await
 }

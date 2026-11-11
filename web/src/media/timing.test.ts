@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { clock, duration, endsAt, wallClock } from './timing';
 
 describe('duration', () => {
@@ -53,7 +53,7 @@ describe('endsAt', () => {
     expect(endsAt({ phase: 'playing', position: 10, duration: Infinity, speed: 1 }, now)).toEqual({});
   });
 
-  it('never runs backwards past the end or before the start', () => {
+  it('never runs backward past the end or before the start', () => {
     expect(endsAt({ phase: 'playing', position: 900, duration: 700, speed: 1 }, now).remaining).toBe(0);
     expect(endsAt({ phase: 'playing', position: -30, duration: 700, speed: 1 }, now).remaining).toBe(700);
   });

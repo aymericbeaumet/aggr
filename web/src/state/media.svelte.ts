@@ -1,4 +1,4 @@
-import type { Consumption } from '../generated/Consumption';
+import type { Consumption } from '@aggr-model/Consumption';
 
 /**
  * The lengths native players have reported, by the article's original link. The build writes

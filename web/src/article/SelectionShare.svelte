@@ -12,7 +12,7 @@
 
   const hidden = $derived(anchor === null);
 
-  // Measured once shown: centred over the selection, kept inside the viewport, above the box.
+  // Measured once shown: centered over the selection, kept inside the viewport, above the box.
   $effect(() => {
     const box = anchor;
     if (!box || !element) return;

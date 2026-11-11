@@ -1,8 +1,8 @@
 <script lang="ts">
   // `index.html`'s `<div class="listhead">`: the heading of a scoped list (a source with its
   // profile link, `/category` or `#tag`) and the source's error notice.
-  import type { ClientScope } from '../generated/ClientScope';
-  import type { ClientSourceError } from '../generated/ClientSourceError';
+  import type { ClientScope } from '@aggr-model/ClientScope';
+  import type { ClientSourceError } from '@aggr-model/ClientSourceError';
   import { formatDate } from '../dates/format';
 
   let {

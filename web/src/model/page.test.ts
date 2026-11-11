@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { isClientPage, readModel } from './page';
 
 const model = {
@@ -8,7 +8,7 @@ const model = {
   title: 'Reader',
   site: { title: 'Reader', language: 'en', pwa: false, discussions: [], entries: [], config_url: null, assets: { app: null, css: null, imports: [] } },
   build: { version: '1.0.0', app: 'a', content: 'c' },
-  page: { view: 'static' },
+  page: { view: 'not_found' },
 };
 
 describe('isClientPage', () => {

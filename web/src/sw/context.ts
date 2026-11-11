@@ -16,6 +16,8 @@ import type {
 export interface WorkerState {
   /** Article downloads run one configuration at a time. */
   offlineQueue: Promise<OfflineStatus | void>;
+  /** Cache writes, selection commits and pruning share one transaction at a time. */
+  offlineStoreQueue: Promise<OfflineStatus | void>;
   /** The latest download result, broadcast with every search progress update. */
   offlineStatus: OfflineStatus | null;
   offlineGeneration: number;
@@ -29,7 +31,7 @@ export interface WorkerState {
   searchAbort: AbortController | null;
   searchGeneration: number;
   searchStatus: SearchStatus;
-  /** The article catalogue for this worker, once a positive download count has loaded it. */
+  /** The article catalog for this worker, once a positive download count has loaded it. */
   offlineCatalog: OfflineItem[] | null;
   /** The count from the latest `AGGR_OFFLINE_CONFIG`, `null` until one arrives. */
   configurationCount: number | null;
@@ -46,6 +48,7 @@ export interface WorkerContext {
   readonly clients: ClientsLike;
   readonly skipWaiting: () => Promise<void>;
   readonly navigationPreload: { enable(): Promise<void> } | null;
+  readonly locks: Pick<LockManager, 'request'> | null;
   readonly config: SwConfig;
   readonly timeouts: Timeouts;
   readonly names: CacheNames;
@@ -80,6 +83,7 @@ export function createContext(env: WorkerEnv): WorkerContext {
     clients: env.clients,
     skipWaiting: () => env.skipWaiting(),
     navigationPreload: env.navigationPreload ?? null,
+    locks: env.locks ?? null,
     config: env.config,
     timeouts: { ...DEFAULT_TIMEOUTS, ...env.timeouts },
     names: cacheNames(env.scope, env.config.version),
@@ -87,6 +91,7 @@ export function createContext(env: WorkerEnv): WorkerContext {
     offlinePage: `${path}offline.html`,
     state: {
       offlineQueue: Promise.resolve(),
+      offlineStoreQueue: Promise.resolve(),
       offlineStatus: null,
       offlineGeneration: 0,
       offlineAbort: null,
