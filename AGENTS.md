@@ -165,6 +165,8 @@ Native OS libraries and compilers remain system prerequisites.
   `git.rs`. Add the unit test next to the function; add a `tests/cli.rs` scenario when git or
   the CLI surface is involved.
 - `anyhow` with `.context()`; no `unwrap` outside tests.
+- Vendored security fixes must cover source and executed bundles. Record them with `mise run vendor -- patch`,
+  keep their adversarial regressions, and rebase them when upstream changes; see [native tooling](docs/native-toolchain.md).
 - Image-quality fixtures with fixed publication dates must pin `SOURCE_DATE_EPOCH` so crossing
   the publication compression window cannot change their assertions.
 - Browser fixtures expecting next/discovery cards need distinct substantial article bodies; changing

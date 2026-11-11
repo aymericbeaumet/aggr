@@ -1,3 +1,4 @@
+import { create_tag_scanner } from '../utils/tag_scanner.js';
 /** @import { Processed, Preprocessor, MarkupPreprocessor, PreprocessorGroup } from './public.js' */
 /** @import { SourceUpdate, Source } from './private.js' */
 /** @import { DecodedSourceMap, RawSourceMap } from '@jridgewell/remapping' */
@@ -250,10 +251,8 @@ function stringify_tag_attributes(attributes) {
 	return value;
 }
 
-const regex_style_tags =
-	/<!--[^]*?-->|<style((?:\s+[^=>'"/\s]+=(?:"[^"]*"|'[^']*'|[^>\s]+)|\s+[^=>'"/\s]+)*\s*)(?:\/>|>([\S\s]*?)<\/style>)/g;
-const regex_script_tags =
-	/<!--[^]*?-->|<script((?:\s+[^=>'"/\s]+=(?:"[^"]*"|'[^']*'|[^>\s]+)|\s+[^=>'"/\s]+)*\s*)(?:\/>|>([\S\s]*?)<\/script>)/g;
+const style_tags = create_tag_scanner('style', 'preprocess');
+const script_tags = create_tag_scanner('script', 'preprocess');
 
 /**
  * Calculate the updates required to process all instances of the specified tag.
@@ -264,7 +263,7 @@ const regex_script_tags =
  */
 async function process_tag(tag_name, preprocessor, source) {
 	const { filename, source: markup } = source;
-	const tag_regex = tag_name === 'style' ? regex_style_tags : regex_script_tags;
+	const tag_scanner = tag_name === 'style' ? style_tags : script_tags;
 
 	/**
 	 * @type {string[]}
@@ -297,7 +296,7 @@ async function process_tag(tag_name, preprocessor, source) {
 			slice_source(content, tag_offset, source)
 		);
 	}
-	const { string, map } = await replace_in_code(tag_regex, process_single_tag, source);
+	const { string, map } = await replace_in_code(tag_scanner, process_single_tag, source);
 	return { string, map, dependencies };
 }
 

@@ -516,15 +516,41 @@ export function log_inconsistent_branches(effect) {
 }
 
 /**
+ * @param {string} source
+ * @param {string} prefix
+ * @param {string} suffix
+ */
+function unwrap_derived_calls(source, prefix, suffix) {
+	const parts = [];
+	let copied = 0;
+	let opening = -1;
+	for (let i = 0; i < source.length; i++) {
+		const character = source[i];
+		if (character === '\n' || character === '\r' || character === '\u2028' || character === '\u2029') {
+			opening = -1;
+		} else if (opening === -1 && source.startsWith(prefix, i)) {
+			opening = i;
+			i += prefix.length - 1;
+		} else if (opening !== -1 && i > opening + prefix.length && source.startsWith(suffix, i)) {
+			parts.push(source.slice(copied, opening), source.slice(opening + prefix.length, i));
+			copied = i + suffix.length;
+			opening = -1;
+			i += suffix.length - 1;
+		}
+	}
+	parts.push(source.slice(copied));
+	return parts.join('');
+}
+
+/**
  * Stringify a derived function, removing `$.track_reactivity_loss` and `$.get` etc
  * @param {Function} fn
  */
 export function stringify_derived(fn) {
-	return `{${fn
+	const source = fn
 		.toString()
 		.replace(/^async \(\) => /, '')
-		.replace(/^\(/, '')
-		.replace(/\$\.get\((.+?)\)/g, (_, name) => name)
-		.replace(/\$\.track_reactivity_loss\((.+?)\)\(\)/g, (_, name) => name)
-		.replace(/\)$/, '')}}`;
+		.replace(/^\(/, '');
+	const unwrapped = unwrap_derived_calls(source, '$.get(', ')');
+	return `{${unwrap_derived_calls(unwrapped, '$.track_reactivity_loss(', ')()').replace(/\)$/, '')}}`;
 }

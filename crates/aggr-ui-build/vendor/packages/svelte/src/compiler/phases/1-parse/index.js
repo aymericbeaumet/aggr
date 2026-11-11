@@ -1,3 +1,4 @@
+import { create_tag_scanner } from '../../utils/tag_scanner.js';
 /** @import { AST } from '#compiler' */
 /** @import { Location } from 'locate-character' */
 /** @import * as ESTree from 'estree' */
@@ -11,8 +12,7 @@ import { is_reserved } from '../../../utils.js';
 import * as state from '../../state.js';
 import { is_whitespace } from './utils/whitespace.js';
 
-const regex_lang_attribute =
-	/<!--[^]*?-->|<script\s+(?:[^>]*|(?:[^=>'"/]+=(?:"[^"]*"|'[^']*'|[^>\s]+)\s+)*)lang=(["'])?([^"' >]+)\1[^>]*>/g;
+const script_languages = create_tag_scanner('script', 'lang');
 
 export class Parser {
 	/**
@@ -79,12 +79,8 @@ export class Parser {
 		this.loose = loose;
 		this.template = template.trimEnd();
 
-		let match_lang;
-
-		do match_lang = regex_lang_attribute.exec(template);
-		while (match_lang && match_lang[0][1] !== 's'); // ensure it starts with '<s' to match script tags
-
-		regex_lang_attribute.lastIndex = 0; // reset matched index to pass tests - otherwise declare the regex inside the constructor
+		const match_lang = script_languages.exec(template);
+		script_languages.lastIndex = 0;
 
 		this.ts = match_lang?.[2] === 'ts';
 

@@ -1,7 +1,21 @@
 import { on } from '../events/index.js';
 import { ReactiveValue } from './reactive-value.js';
 
-const parenthesis_regex = /\(.+\)/;
+/** @param {string} query */
+function has_parenthesized_content(query) {
+	let opening = -1;
+	for (let i = 0; i < query.length; i++) {
+		const character = query[i];
+		if (character === '\n' || character === '\r' || character === '\u2028' || character === '\u2029') {
+			opening = -1;
+		} else if (character === '(' && opening === -1) {
+			opening = i;
+		} else if (character === ')' && opening !== -1 && i > opening + 1) {
+			return true;
+		}
+	}
+	return false;
+}
 
 // these keywords are valid media queries but they need to be without parenthesis
 //
@@ -41,7 +55,7 @@ export class MediaQuery extends ReactiveValue {
 	 */
 	constructor(query, fallback) {
 		let final_query =
-			parenthesis_regex.test(query) ||
+			has_parenthesized_content(query) ||
 			// we need to use `some` here because technically this `window.matchMedia('random,screen')` still returns true
 			query.split(/[\s,]+/).some((keyword) => non_parenthesized_keywords.has(keyword.trim()))
 				? query

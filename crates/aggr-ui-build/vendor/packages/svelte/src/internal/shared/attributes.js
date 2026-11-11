@@ -50,6 +50,28 @@ export function clsx(value) {
 
 const whitespace = [...' \t\n\r\f\u00a0\u000b\ufeff'];
 
+/** @param {string} value */
+function strip_style_comments(value) {
+	const parts = [];
+	let copied = 0;
+	let opening = -1;
+	for (let i = 0; i < value.length; i++) {
+		const character = value[i];
+		if (character === '\n' || character === '\r' || character === '\u2028' || character === '\u2029') {
+			opening = -1;
+		} else if (opening === -1 && character === '/' && value[i + 1] === '*') {
+			opening = i++;
+		} else if (opening !== -1 && character === '*' && value[i + 1] === '/') {
+			parts.push(value.slice(copied, opening));
+			copied = i + 2;
+			opening = -1;
+			i++;
+		}
+	}
+	parts.push(value.slice(copied));
+	return parts.join('');
+}
+
 /**
  * @param {any} value
  * @param {string | null} [hash]
@@ -144,9 +166,7 @@ export function to_style(value, styles) {
 
 		if (value) {
 			// strip comments; surrounding whitespace is handled by the trims below (which is much faster than doing it through regex)
-			value = String(value)
-				.replaceAll(/\/\*.*?\*\//g, '')
-				.trim();
+			value = strip_style_comments(String(value)).trim();
 
 			/** @type {boolean | '"' | "'"} */
 			var in_str = false;

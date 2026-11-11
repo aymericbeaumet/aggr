@@ -265,7 +265,37 @@
 
   var nonASCIIwhitespace = /[\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]/;
 
-  var skipWhiteSpace = /(?:\s|\/\/.*|\/\*[^]*?\*\/)*/g;
+  // Scan comments once: a repeated comment opener must not trigger regexp backtracking.
+  var skipWhiteSpace = {
+    lastIndex: 0,
+    exec: function(input) {
+      var start = this.lastIndex, pos = start;
+      if (start > input.length) {
+        this.lastIndex = 0;
+        return null
+      }
+      while (pos < input.length) {
+        if (/\s/.test(input.charAt(pos))) {
+          pos++;
+        } else if (input.charCodeAt(pos) === 47 && input.charCodeAt(pos + 1) === 47) {
+          pos += 2;
+          while (pos < input.length && !isNewLine(input.charCodeAt(pos))) { pos++; }
+        } else if (input.charCodeAt(pos) === 47 && input.charCodeAt(pos + 1) === 42) {
+          var end = input.indexOf("*/", pos + 2);
+          // Leave an unterminated comment for the tokenizer to diagnose.
+          if (end < 0) { break }
+          pos = end + 2;
+        } else {
+          break
+        }
+      }
+      this.lastIndex = pos;
+      var match = [input.slice(start, pos)];
+      match.index = start;
+      match.input = input;
+      return match
+    }
+  };
 
   var ref = Object.prototype;
   var hasOwnProperty = ref.hasOwnProperty;

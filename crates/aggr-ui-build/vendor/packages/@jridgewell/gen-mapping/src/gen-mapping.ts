@@ -398,6 +398,9 @@ function assert<T>(_val: unknown): asserts _val is T {
 }
 
 function getIndex<T>(arr: T[][], index: number): T[] {
+  if (!Number.isInteger(index) || index < 0 || index >= 0xffffffff) {
+    throw new RangeError('Mapping index must be a nonnegative array index');
+  }
   for (let i = arr.length; i <= index; i++) {
     arr[i] = [];
   }
@@ -414,10 +417,7 @@ function getColumnIndex(line: SourceMapSegment[], genColumn: number): number {
 }
 
 function insert<T>(array: T[], index: number, value: T) {
-  for (let i = array.length; i > index; i--) {
-    array[i] = array[i - 1];
-  }
-  array[index] = value;
+  array.splice(index, 0, value);
 }
 
 function removeEmptyFinalLines(mappings: SourceMapSegment[][]) {

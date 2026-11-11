@@ -207,6 +207,9 @@ function addSegmentInternal(skipable, map, genLine, genColumn, source, sourceLin
 function assert(_val) {
 }
 function getIndex(arr, index) {
+  if (!Number.isInteger(index) || index < 0 || index >= 0xffffffff) {
+    throw new RangeError("Mapping index must be a nonnegative array index");
+  }
   for (let i = arr.length; i <= index; i++) {
     arr[i] = [];
   }
@@ -221,10 +224,7 @@ function getColumnIndex(line, genColumn) {
   return index;
 }
 function insert(array, index, value) {
-  for (let i = array.length; i > index; i--) {
-    array[i] = array[i - 1];
-  }
-  array[index] = value;
+  array.splice(index, 0, value);
 }
 function removeEmptyFinalLines(mappings) {
   const { length } = mappings;

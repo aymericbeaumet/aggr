@@ -1,3 +1,4 @@
+import { create_tag_scanner } from '../utils/tag_scanner.js';
 /** @import { VariableDeclarator, Node, Identifier, AssignmentExpression, LabeledStatement, ExpressionStatement } from 'estree' */
 /** @import { Visitors } from 'zimmerframe' */
 /** @import { ComponentAnalysis } from '../phases/types.js' */
@@ -20,7 +21,7 @@ import { validate_component_options } from '../validate-options.js';
 import { is_reserved, is_svg, is_void } from '../../utils.js';
 import { regex_is_valid_identifier } from '../phases/patterns.js';
 
-const regex_style_tags = /(<style[^>]+>)([\S\s]*?)(<\/style>)/g;
+const style_tags = create_tag_scanner('style', 'migrate');
 const style_placeholder = '/*$$__STYLE_CONTENT__$$*/';
 
 let has_migration_task = false;
@@ -129,7 +130,7 @@ export function migrate(source, { filename, use_ts } = {}) {
 		// Since we don't care about CSS in this migration, we'll just ignore it.
 		/** @type {Array<[number, string]>} */
 		const style_contents = [];
-		source = source.replace(regex_style_tags, (_, start, content, end, idx) => {
+		source = source.replace(style_tags, (_, start, content, end, idx) => {
 			style_contents.push([idx + start.length, content]);
 			return start + style_placeholder + end;
 		});

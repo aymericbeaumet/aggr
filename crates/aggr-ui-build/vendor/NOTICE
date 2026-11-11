@@ -25,3 +25,4 @@ typescript 6.0.3 — Apache-2.0
 zimmerframe 1.1.5 — MIT
 
 Each package retains its upstream license and notice files.
+Local security fixes are recorded in patches.json. Package versions and source checksums identify the original upstream archives.

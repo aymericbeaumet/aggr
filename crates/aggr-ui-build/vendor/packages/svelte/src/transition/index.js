@@ -24,8 +24,19 @@ function cubic_in_out(t) {
  * @returns {[number, string]}
  */
 function split_css_unit(value) {
-	const split = typeof value === 'string' && value.match(/^\s*(-?[\d.]+)([^\s]*)\s*$/);
-	return split ? [parseFloat(split[1]), split[2] || 'px'] : [/** @type {number} */ (value), 'px'];
+	if (typeof value === 'string') {
+		const trimmed = value.trim();
+		let end = trimmed[0] === '-' ? 1 : 0;
+		const start = end;
+		while (end < trimmed.length && (trimmed[end] === '.' || (trimmed[end] >= '0' && trimmed[end] <= '9'))) {
+			end++;
+		}
+		if (end > start) {
+			const unit = trimmed.slice(end);
+			if (!/\s/.test(unit)) return [parseFloat(trimmed.slice(0, end)), unit || 'px'];
+		}
+	}
+	return [/** @type {number} */ (value), 'px'];
 }
 
 /**

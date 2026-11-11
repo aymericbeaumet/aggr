@@ -17,7 +17,7 @@ export function slice_source(code_slice, offset, { file_basename, filename, get_
 }
 
 /**
- * @param {RegExp} re
+ * @param {ReturnType<typeof import('../utils/tag_scanner.js').create_tag_scanner>} re
  * @param {(...match: any[]) => Promise<MappedCode>} get_replacement
  * @param {string} source
  */
@@ -61,7 +61,7 @@ function perform_replacements(replacements, source) {
 }
 
 /**
- * @param {RegExp} regex
+ * @param {ReturnType<typeof import('../utils/tag_scanner.js').create_tag_scanner>} regex
  * @param {(...match: any[]) => Promise<MappedCode>} get_replacement
  * @param {Source} location
  * @returns {Promise<MappedCode>}
