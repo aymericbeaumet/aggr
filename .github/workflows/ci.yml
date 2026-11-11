@@ -77,17 +77,11 @@ jobs:
           # so a new dependency graph must also succeed without a warm cache.
           shared-key: linux-x64
           save-if: false
-      - name: Install pinned Chrome
+      - name: Verify pinned Chrome runtime
         shell: bash
         run: |
-          set -euo pipefail
-          browser_dir="$(mise where http:chrome-for-testing)/chrome-linux64"
-          mapfile -t dependencies < "$browser_dir/deb.deps"
-          sudo apt-get update -qq
-          sudo apt-get satisfy -y --no-install-recommends "${dependencies[@]}"
-          "$browser_dir/chrome" --version
+          bash .github/actions/native-deps/chrome.sh
           mise exec -- chromedriver --version
-          echo "AGGR_CHROME_BINARY=$browser_dir/chrome" >> "$GITHUB_ENV"
       - name: Test reader and offline browser contracts
         shell: bash
         env:
@@ -152,13 +146,9 @@ jobs:
           version: 2026.11.6
           install_args: --locked rust cmake ninja http:typescript-native http:chromedriver http:chrome-for-testing
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Install the pinned browser's native dependencies
+      - name: Verify pinned Chrome runtime
         shell: bash
-        run: |
-          browser_dir="$(mise where http:chrome-for-testing)/chrome-linux64"
-          mapfile -t dependencies < "$browser_dir/deb.deps"
-          sudo apt-get update -qq
-          sudo apt-get satisfy -y --no-install-recommends "${dependencies[@]}"
+        run: bash .github/actions/native-deps/chrome.sh
       - run: mise run client-check
 
   # Licenses, RustSec advisories, duplicate versions and registry sources of the dependency tree,

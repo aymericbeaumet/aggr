@@ -31,6 +31,9 @@ Linux CI first compiles and runs C/C++ programs, then loads libclang and creates
 its public API. A working host SDK supplies the exact verified `LIBCLANG_PATH`; a missing or
 broken SDK triggers the native package installation and the same checks again. This avoids an
 unnecessary package download when the runner already has working compiler support.
+Browser jobs similarly require the mise-pinned Chrome to render a local page headlessly within
+a timeout before reusing its host libraries. A failed launch installs the browser archive's
+declared native dependencies and retries; checking its version alone is insufficient.
 Chrome for Testing and ChromeDriver are pinned together on Linux x64, macOS and Windows x64;
 Google does not publish the corresponding Linux or Windows ARM64 browser packages.
 
