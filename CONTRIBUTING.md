@@ -1,7 +1,8 @@
 # Contributing
 
-For development commands and client ownership, see [client development](docs/client.md)
-and [AGENTS.md](AGENTS.md). Run `mise run check` before submitting a change. The reader lives in
+Start with [the mise development setup](docs/native-toolchain.md#reproduce-the-development-environment),
+then see [client development](docs/client.md) and [AGENTS.md](AGENTS.md).
+Run `mise run check` before submitting a change. The reader lives in
 `web/`; Cargo builds its assets and shared types automatically using the native Rust toolchain.
 
 ## Contribution license

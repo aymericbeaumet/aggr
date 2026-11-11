@@ -34,6 +34,7 @@ pub fn setup() -> Result<()> {
         Command::new("mise")
             .current_dir(crate::root())
             .arg("install")
+            .arg("--locked")
             .args(selected),
     ))?;
     crate::command(without_credentials(

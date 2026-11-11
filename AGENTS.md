@@ -20,10 +20,10 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   handlers and `data:`/`javascript:` URLs before storage; ammonia sanitizes before display;
   comrak renders with raw HTML off. Never serve stored HTML unsanitized.
 - No data leaves the user's repository except the fetches they configured.
-- Fetching is the only step that touches the network: after a sync the build is hermetic, a pure
-  function of the archive and the binary. Rendering must never make a request, so anything a page
-  needs — article text, images, previews, durations, discussions, the search index — is resolved
-  during the fetch and stored. A build that would need the network drops the feature instead.
+- Article rendering never makes network requests. Sync resolves article text, optional preserved
+  media, durations and discussions; rendering uses those local inputs. Ordinary `build` syncs
+  first. Default pages may load publisher media; `--hermetic` requires local automatic resources
+  and fails before publication when assets are missing.
 - The CLI and archive preparation are Rust. Svelte 5 components in `web/` own all reader markup,
   shared by server rendering and browser hydration. Cargo calls the native Rolldown build library and
   generates TypeScript from `crates/aggr-ui-model` into ignored `web/.generated/types/`. The binary
@@ -153,7 +153,9 @@ mise exec -- cargo run --locked -- sync --dry-run -vv  # fetch without writing, 
 ```
 
 Keep development tool versions and tasks in `mise.toml`, with versions locked in `mise.lock`.
-Use the same mise tasks locally and in CI; all custom tooling is Rust. See [native tooling](docs/native-toolchain.md).
+Use locked installs and the same mise tasks locally and in CI; refresh all supported platforms
+when changing tool pins. All custom tooling is Rust. See [native tooling](docs/native-toolchain.md)
+for frontend compatibility constraints and the separate TypeScript compiler API and native checker.
 Native OS libraries and compilers remain system prerequisites.
 
 ## Conventions

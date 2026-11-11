@@ -39,8 +39,8 @@ Persistent playback stays outside the changing page content.
 ## Development
 
 ```sh
-mise run setup                     # install pinned tools and locked packages
-cargo run -- dev                   # local config, or demo when no config exists
+mise run setup                     # install pinned tools and locked dependencies
+mise exec -- cargo run --locked -- dev # local config, or demo when no config exists
 mise run dev                       # demo archive
 AGGR_CONFIG=/path/to/aggr.toml mise run dev
 mise run check                     # Rust, TypeScript, component and launcher checks

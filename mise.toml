@@ -1,3 +1,5 @@
+min_version = "2026.10.17"
+
 [settings]
 lockfile = true
 
@@ -6,32 +8,32 @@ lockfile = true
 run_auto_install = false
 
 [tools]
-actionlint = "1.7.12"
+jactionlint = "2.5.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"
-cmake = "4.4.4"
+cmake = "4.4.5"
 ninja = "1.13.2"
 rust = { version = "1.99.1", profile = "default" }
 
 # Keep the browser and driver on the same checksum-pinned Chrome for Testing release.
 [tools."http:chromedriver"]
-version = "155.0.8059.84"
+version = "157.0.8103.50"
 os = ["linux/x64", "macos", "windows/x64"]
 
 [tools."http:chromedriver".platforms]
-linux-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux64/chromedriver-linux64.zip", checksum = "sha256:4fe2433044363e5233d642e70fa50278b471bda08032d922402c8bd7c6d743fd", bin_path = "chromedriver-linux64" }
-macos-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-arm64/chromedriver-mac-arm64.zip", checksum = "sha256:6db09f1272851bdcd5137d04797b5506993291e8499e8fa8153ab1c571bba20c", bin_path = "chromedriver-mac-arm64" }
-macos-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-x64/chromedriver-mac-x64.zip", checksum = "sha256:70cd983d37e887a76fcdedf479a2959f0b41d1161f813c6c442ab094395e9bdb", bin_path = "chromedriver-mac-x64" }
-windows-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/win64/chromedriver-win64.zip", checksum = "sha256:0e629a3ef7f2be8562b857253053ebb0f871f55240f80124cd31974380ad1f3a", bin_path = "chromedriver-win64" }
+linux-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux64/chromedriver-linux64.zip", checksum = "sha256:59185c80d24d93dbd3d3fcf4f91038f9f7c434db31a03afa747e032252889aed", bin_path = "chromedriver-linux64" }
+macos-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-arm64/chromedriver-mac-arm64.zip", checksum = "sha256:a248565ad9769b52fd55e04c6e82eb157ca414c2d6eae3238135ef2228024845", bin_path = "chromedriver-mac-arm64" }
+macos-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-x64/chromedriver-mac-x64.zip", checksum = "sha256:59df949c3e7c0383bb8f0609c00107e4444c8778ddc1d61362d8c118a05e7bae", bin_path = "chromedriver-mac-x64" }
+windows-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/win64/chromedriver-win64.zip", checksum = "sha256:408d7da374064d0b01f1918d898b983029294f49be8bb0c23729920390e61376", bin_path = "chromedriver-win64" }
 
 [tools."http:chrome-for-testing"]
-version = "155.0.8059.84"
+version = "157.0.8103.50"
 os = ["linux/x64", "macos", "windows/x64"]
 
 [tools."http:chrome-for-testing".platforms]
-linux-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux64/chrome-linux64.zip", checksum = "sha256:cf0f049892dea22e6a6db26d47ed0d7776b7158edcbec4634086633df8bafcbc", bin_path = "chrome-linux64" }
-macos-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-arm64/chrome-mac-arm64.zip", checksum = "sha256:13b9e98ce56f5ce18e100a009f455c9285f399e7c9dc8a76fdf2f3a9755bb5f2", bin_path = "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS" }
-macos-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-x64/chrome-mac-x64.zip", checksum = "sha256:d805a173118daa5f6f5cf464500789e1e00022a9a6aed8abfec821ab828fa862", bin_path = "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS" }
-windows-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/win64/chrome-win64.zip", checksum = "sha256:507f2a031441d10c62b5e3d4e863f09ac1198a571c1419976cbd8387f639afde", bin_path = "chrome-win64" }
+linux-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux64/chrome-linux64.zip", checksum = "sha256:d17167bc092eb495a3b768c7467f27e35f625aa03834233a1663af67dcb668c9", bin_path = "chrome-linux64" }
+macos-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-arm64/chrome-mac-arm64.zip", checksum = "sha256:aceb0578a1cc3631358b164dbbef04bf8936f96c690fb78c3ac25b7655e795e8", bin_path = "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS" }
+macos-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-x64/chrome-mac-x64.zip", checksum = "sha256:7b1c12bee8024f1193b28754aa0d46b7eaa08394de51bef84fd65a6cf08d61dc", bin_path = "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS" }
+windows-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/win64/chrome-win64.zip", checksum = "sha256:36088dd9c76c992f6e745fc20f94aca873f69c3331ce25ea3df36835cc4af73f", bin_path = "chrome-win64" }
 
 # BoringSSL's x64 assembly build needs NASM on Windows.
 [tools."http:nasm"]
@@ -58,7 +60,7 @@ depends = ["check"]
 
 [tasks.setup]
 description = "Install only this project's pinned native tools"
-run = ["mise install rust cmake ninja", "cargo run --locked -p aggr-tools -- setup"]
+run = ["mise install --locked rust cmake ninja", "cargo run --locked -p aggr-tools -- setup"]
 
 [tasks.build]
 description = "Build the CLI and embedded reader"
@@ -95,7 +97,7 @@ run = "cargo-deny --locked --all-features check"
 
 [tasks.workflow-check]
 description = "Check GitHub Actions workflows"
-run = "actionlint"
+run = "jactionlint --profile correctness"
 
 [tasks.fmt]
 description = "Format Rust code"
@@ -110,9 +112,9 @@ description = "Lint Rust, then run its tests"
 run = [{ task = "lint" }, { task = "test" }]
 
 [tasks.check]
-description = "Check formatting, Rust and the reader"
+description = "Check formatting, workflows, Rust and the reader"
 # Finish Rust builds before the browser runs; keep executable generations stable during tests.
-run = [{ task = "fmt-check" }, { task = "check-rust" }, { task = "client-check" }]
+run = [{ task = "fmt-check" }, { task = "workflow-check" }, { task = "check-rust" }, { task = "client-check" }]
 
 [tasks.client-build]
 description = "Compile the reader with native Rolldown"
