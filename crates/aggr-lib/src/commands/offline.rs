@@ -343,7 +343,10 @@ mod tests {
             "header-secret",
             "password",
         ] {
-            assert!(!json.contains(secret), "snapshot exposed {secret}");
+            assert!(
+                !json.contains(secret),
+                "snapshot exposed credential material"
+            );
         }
         let captured: SourceSnapshot = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
