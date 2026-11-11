@@ -1,17 +1,39 @@
 # aggr [![ci](https://github.com/aymericbeaumet/aggr/actions/workflows/ci.yml/badge.svg)](https://github.com/aymericbeaumet/aggr/actions/workflows/ci.yml)
 
-[**Live demo**](https://aggr.aymericbeaumet.com) · [Create your reader](#create-your-reader)
+[**Read the live demo**](https://aggr.aymericbeaumet.com) · [Try locally](#try-locally) · [Create your reader](#create-your-reader)
 
-Your own git-backed snapshot of the feeds you follow.
+**A feed reader with a Markdown archive in Git.**
 
 Give aggr a website URL. It finds the feed, saves each new item as Markdown in your Git
-repository, and publishes a static site you can search and read on any device. The copy remains
-after the original page is gone. The published site is static files.
+repository, and publishes a static site you can search and read on your phone or computer.
+Keep the captured text after the original page disappears, inspect its history with Git, or
+take the Markdown into another tool. The reader needs no database or always-running application
+server; a scheduled job updates the archive and any static host can serve it.
 
 <p>
   <img alt="The aggr reader on a desktop browser: a numbered feed of articles with their source, category, age and reading time" src="docs/images/reader-desktop.png" width="61%">
   <img alt="The same reader on a phone: the same articles, with feed, browse and preferences tabs along the bottom" src="docs/images/reader-mobile.png" width="20%">
 </p>
+
+## Try locally
+
+With [mise](https://mise.jdx.dev/) and Git installed, create a small reader:
+
+```sh
+mise use -g github:aymericbeaumet/aggr@2.0.0
+mkdir reads && cd reads && git init
+aggr init
+aggr dev
+```
+
+Open **http://127.0.0.1:7319**. `aggr init` writes a starter configuration; edit `aggr.toml` to
+choose your sources. `aggr dev` previews the reader without committing or pushing. Stop with
+Ctrl-C, then run `aggr build` to save articles on a local `aggr` branch and write the site to
+`_site/`. A build also pushes the archive when an `origin` remote is configured.
+
+The mise command installs a prebuilt binary. [Installation](docs/hosting.md#installing-the-binary)
+also covers manual downloads, source builds, and platform requirements. You can
+[browse the hosted demo](https://aggr.aymericbeaumet.com) without installing anything.
 
 ## Create your reader
 
@@ -29,42 +51,13 @@ Original-page extraction and local media are settings you turn on when you want 
 GitHub setup publishes the reader and its archive publicly. See [sources](docs/sources.md),
 [hosting](docs/hosting.md), and [build budgets](docs/build-budget.md).
 
-Install with Homebrew, mise, or Cargo:
+For the contributor preview with fast template reload and automatic Rust restarts, follow the
+mise setup in [contributing](CONTRIBUTING.md), then run `mise run dev` from this repository;
+see [client development](docs/client.md). The source build also supports `aggr dev --demo`,
+which uses an isolated OS cache. That flag is not available in the published v2.0.0 binary.
 
-```sh
-brew install aymericbeaumet/tap/aggr
-# or:
-mise use -g github:aymericbeaumet/aggr@2.0.0
-# or (builds from source):
-cargo install --locked aggr
-```
-
-Homebrew and mise install prebuilt binaries. Cargo needs Rust and the
-[native build prerequisites](docs/interoperability.md#http-extraction-and-native-builds); it does not need
-Node. See [installation](docs/hosting.md#installing-the-binary) for platform requirements and
-manual downloads. To try the reader:
-
-```sh
-aggr dev --demo                      # open http://127.0.0.1:7319
-```
-
-The demo uses an isolated OS cache and leaves your current directory unchanged. Native preview
-works in release binaries without Node. To keep an archive of your own:
-
-```sh
-mkdir reads && cd reads && git init
-aggr init
-aggr dev                             # preview; Ctrl-C to stop
-aggr build                          # saves the archive and writes _site/
-```
-
-The build records articles on a local `aggr` branch. It pushes that branch when an `origin`
-remote is configured. `aggr dev` provides the local reader without committing or pushing.
-For the contributor preview with fast template reload and automatic Rust restarts, use
-`cargo run -- dev` from this repository; see [client development](docs/client.md).
-`cargo run --release -- dev` supports the same workflow with an optimized binary.
-
-Rust applications can use [`aggr-lib`](crates/aggr-lib/README.md), the library behind the CLI.
+Rust applications can use [`aggr-lib`](crates/aggr-lib/README.md), the library behind the CLI,
+as a path dependency from this checkout until its first crates.io publication.
 
 ## How is it different?
 
@@ -108,7 +101,7 @@ run takes, is in [benchmarks](docs/benchmarks.md).
 [Sources](docs/sources.md) · [Reader](docs/reading.md) · [Commands](docs/commands.md) ·
 [Hosting](docs/hosting.md) · [Rendering](docs/rendering.md) · [Git model](docs/git-model.md) ·
 [Interoperability](docs/interoperability.md) · [Performance](docs/performance.md) ·
-[Releases](docs/distribution.md)
+[Sharing a reader](docs/sharing.md) · [Releases](docs/distribution.md)
 
 Rust prepares the archive and renders a shared Svelte application embedded in the binary.
 Cargo builds the UI automatically with the native Rust toolchain. See [contributing](CONTRIBUTING.md) and

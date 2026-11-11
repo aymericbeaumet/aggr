@@ -5,6 +5,10 @@ workflows. Its Rust import name is `aggr_lib`. The root `aggr` package provides 
 logging, the Tokio runtime, and dispatch through the library. `aggr-ui-model` holds the shared
 Rust/TypeScript page contract. See the [library example](../crates/aggr-lib/README.md).
 
+The crates.io packages have not been published yet. To use the library now, check out this
+repository, complete the [mise source setup](native-toolchain.md#reproduce-the-development-environment),
+and add `aggr-lib` as a path dependency pointing to `crates/aggr-lib` in that checkout.
+
 Workspace builds compile the reader from `web/` with the native `aggr-ui-build` library. Published library
 archives contain the precompiled reader and embedded defaults, schema, and starter configuration;
 consumers need Rust and the [native build prerequisites](interoperability.md).

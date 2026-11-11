@@ -1,8 +1,10 @@
 # Releases and installation
 
-The `aggr` CLI installs through Homebrew, mise, or Cargo. `aggr-lib` exposes its engine to Rust
-applications; `aggr-ui-model` is the shared reader contract and `aggr-ui-build` compiles its UI. All four crates are published through
-the [crates workflow](../.github/workflows/publish.yml); see [library packaging](library.md).
+The published `aggr` v2.0.0 CLI installs through mise or GitHub release downloads. This checkout
+adds the Homebrew and crates.io publication pipelines; neither channel has been published yet.
+`aggr-lib` exposes the engine to Rust applications; `aggr-ui-model` is the shared reader contract
+and `aggr-ui-build` compiles its UI. The [crates workflow](../.github/workflows/publish.yml)
+publishes all four crates; see [library packaging](library.md).
 
 ## Release pipeline
 
@@ -36,14 +38,21 @@ preparation runs without the registry token.
 
 Once the workflow files are available on the default branch, **Actions → publish crates → Run
 workflow** can publish the versions in the selected branch or tag. Already published versions
-are skipped. **Actions → publish Homebrew → Run workflow** accepts an existing stable release
-tag, such as `v2.0.0`, and uses its `SHA256SUMS`. An identical formula update is a no-op, an older
+are skipped. **Actions → publish Homebrew → Run workflow** accepts a stable release tag produced
+by the native release pipeline above and uses its `SHA256SUMS`. Its archives must contain
+`THIRD_PARTY_NOTICES`, and its CLI must support `dev --no-watch`; the workflow installs and tests
+that binary before publishing the formula. The existing v2.0.0 archives predate both requirements
+and cannot be used for this Homebrew rollout. Keep that release immutable and publish a new
+version before enabling this channel. An identical formula update is a no-op, an older
 version cannot replace a newer one, and concurrent tap changes cause the update to fail safely.
 These workflows can be retried independently after correcting a token or publication failure.
 
-For an initial rollout, the GitHub release must exist before the Homebrew workflow runs. Cargo
-installation becomes available after all four crates have been published. Installation commands
-and platform prerequisites are in [hosting](hosting.md#installing-the-binary).
+For an initial rollout, the new GitHub release must exist before the Homebrew workflow runs.
+After the tap update succeeds, users can run `brew install aymericbeaumet/tap/aggr`. Cargo
+installation (`cargo install --locked aggr`) becomes available after all four crates have been
+published. Update the installation documentation when each channel becomes available.
+Current installation commands and platform prerequisites are in
+[hosting](hosting.md#installing-the-binary).
 
 ## Local verification
 
