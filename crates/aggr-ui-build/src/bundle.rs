@@ -47,19 +47,22 @@ pub struct BundleOutput {
 }
 
 fn normalized(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| {
-        let mut normalized = PathBuf::new();
-        for component in path.components() {
-            match component {
-                std::path::Component::CurDir => {}
-                std::path::Component::ParentDir => {
-                    normalized.pop();
-                }
-                component => normalized.push(component.as_os_str()),
+    // Rolldown treats verbatim drive prefixes as module syntax after slash normalization.
+    dunce::canonicalize(path).unwrap_or_else(|_| lexically_normalized(path))
+}
+
+fn lexically_normalized(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
             }
+            component => normalized.push(component.as_os_str()),
         }
-        normalized
-    })
+    }
+    dunce::simplified(&normalized).to_path_buf()
 }
 
 fn optimize_css(source: &str, minify: bool) -> Result<String> {
@@ -288,7 +291,7 @@ impl Plugin for SveltePlugin {
 /// The blocking boundary is safe to call from an existing async runtime.
 pub fn bundle(root: &Path, options: BundleOptions) -> Result<BundleOutput> {
     crate::verify_vendor()?;
-    let root = root.to_path_buf();
+    let root = normalized(root);
     std::thread::spawn(move || {
         static LOCK: Mutex<()> = Mutex::new(());
         static POOL: OnceLock<std::result::Result<rayon::ThreadPool, String>> = OnceLock::new();
@@ -397,8 +400,7 @@ async fn bundle_async(root: &Path, mut options: BundleOptions) -> Result<BundleO
                 ".svelte".into(),
             ]),
             modules: Some(vec![
-                vendor_root()
-                    .join("packages")
+                normalized(&vendor_root().join("packages"))
                     .to_string_lossy()
                     .into_owned(),
             ]),
@@ -502,6 +504,68 @@ async fn bundle_async(root: &Path, mut options: BundleOptions) -> Result<BundleO
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn resolver_paths_simplify_drive_prefixes_without_corrupting_unc_paths() {
+        for (input, expected) in [
+            (r"C:\aggr\entry.ts", r"C:\aggr\entry.ts"),
+            (r"\\?\C:\aggr\entry.ts", r"C:\aggr\entry.ts"),
+            (r"\\server\share\entry.ts", r"\\server\share\entry.ts"),
+            (
+                r"\\?\UNC\server\share\entry.ts",
+                r"\\?\UNC\server\share\entry.ts",
+            ),
+            (r"\\?\C:\aggr\NUL", r"\\?\C:\aggr\NUL"),
+        ] {
+            assert_eq!(lexically_normalized(Path::new(input)), Path::new(expected));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolver_paths_preserve_literal_posix_backslashes() {
+        assert_eq!(
+            lexically_normalized(Path::new(r"/project\name/./missing/../entry.ts")),
+            Path::new(r"/project\name/entry.ts"),
+        );
+    }
+
+    #[test]
+    fn canonical_roots_resolve_disk_modules_and_virtual_aliases() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        fs::write(
+            root.join("entry.ts"),
+            "import {answer} from 'virtual'; import {state} from './state.svelte'; export const total = answer + state.count;",
+        ).unwrap();
+        fs::write(
+            root.join("state.svelte.ts"),
+            "export const state = $state({ count: 1 });",
+        )
+        .unwrap();
+        let virtual_path = root.join("generated/virtual.ts");
+        let output = bundle(
+            &root,
+            BundleOptions {
+                entry: root.join("entry.ts"),
+                global_name: Some("CanonicalPaths".into()),
+                aliases: BTreeMap::from([("virtual".into(), virtual_path.clone())]),
+                virtual_modules: BTreeMap::from([(
+                    virtual_path,
+                    "export const answer: number = 42;".into(),
+                )]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            ctx.eval::<(), _>(output.code).unwrap();
+            assert_eq!(ctx.eval::<i32, _>("CanonicalPaths.total").unwrap(), 43);
+        });
+    }
 
     #[test]
     fn scroll_animations_keep_a_separate_timeline_longhand() {

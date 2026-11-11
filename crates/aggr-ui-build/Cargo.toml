@@ -10,6 +10,7 @@ include = ["/src/**", "/vendor/**", "/README.md", "/LICENSE"]
 
 [dependencies]
 anyhow = "1.0.104"
+dunce = "1.0.5"
 hex = "0.4.3"
 lightningcss = { version = "=1.0.0-alpha.72", default-features = false }
 oxc_allocator = "=0.158.0"
