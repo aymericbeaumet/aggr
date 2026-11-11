@@ -94,7 +94,10 @@ runs:
         else
           actual="$(shasum -a 256 "$archive" | awk '{ print $1 }')"
         fi
-        [ -n "$expected" ] && [ "$actual" = "$expected" ] || { echo "checksum mismatch for $archive" >&2; exit 1; }
+        if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+          echo "checksum mismatch for $archive" >&2
+          exit 1
+        fi
         if [ "$os" = windows ]; then unzip -oq "$archive" -d bin; else tar -xzf "$archive" -C bin; fi
 
         echo "$dir" >> "$GITHUB_PATH"

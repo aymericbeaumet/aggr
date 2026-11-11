@@ -43,6 +43,8 @@ HTTP tools also require the new archive's SHA-256 in `mise.toml`. CI pins third-
 to full commit hashes, and Dependabot proposes updates to those pins.
 `mise run workflow-check` uses pinned jactionlint with its `correctness` profile, the
 [documented migration path](https://jactionlint.jdx.dev/actionlint) from actionlint.
+Its ShellCheck is also pinned and required, so local and CI checks agree. Optional Pyflakes
+discovery is disabled: there are no `shell: python` steps or managed Python checker.
 The MSRV check is the deliberate second Rust toolchain: `mise run msrv` selects the exact
 `package.rust-version` from `Cargo.toml` through mise, while its task runner uses the normal
 project toolchain. CI installs both explicitly; the Rust installer verifies release manifests.
