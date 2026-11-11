@@ -27,6 +27,10 @@ on macOS, Visual Studio's C++ build tools and LLVM on Windows, and a C/C++ build
 libclang on Linux. See [native build requirements](interoperability.md#http-extraction-and-native-builds).
 Mise supplies CMake, Ninja and, on Windows x64, NASM. This pins project tools and dependency
 inputs; it does not promise identical binary bytes across different host SDKs or operating systems.
+Linux CI first compiles and runs C/C++ programs, then loads libclang and creates an index through
+its public API. A working host SDK supplies the exact verified `LIBCLANG_PATH`; a missing or
+broken SDK triggers the native package installation and the same checks again. This avoids an
+unnecessary package download when the runner already has working compiler support.
 Chrome for Testing and ChromeDriver are pinned together on Linux x64, macOS and Windows x64;
 Google does not publish the corresponding Linux or Windows ARM64 browser packages.
 

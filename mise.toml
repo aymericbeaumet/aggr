@@ -98,7 +98,7 @@ run = "cargo-deny --locked --all-features check"
 
 [tasks.workflow-check]
 description = "Check GitHub Actions workflows"
-run = ["shellcheck --version", "jactionlint --profile correctness --shellcheck shellcheck --pyflakes ''"]
+run = ["shellcheck -x .github/actions/native-deps/*.sh", "bash .github/actions/native-deps/test-linux.sh", "jactionlint --profile correctness --shellcheck shellcheck --pyflakes ''"]
 
 [tasks.fmt]
 description = "Format Rust code"

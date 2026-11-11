@@ -7,12 +7,10 @@ description: >-
 runs:
   using: composite
   steps:
-    - name: Install native TLS build dependencies (Linux)
+    - name: Verify native TLS build dependencies (Linux)
       if: runner.os == 'Linux'
       shell: bash
-      run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends libclang-dev build-essential
+      run: bash "$GITHUB_ACTION_PATH/linux.sh"
 
     - name: Configure native Windows compiler environment
       if: runner.os == 'Windows'
