@@ -30,7 +30,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 clap_complete = "4.6.11"
 comrak = { version = "0.59.0", default-features = false }
-dom_smoothie = "0.18.2"
+dom_smoothie = "0.19.0"
 directories = "6.0.0"
 encoding_rs = "0.8.42"
 # 3.x drops media it does not consider content; src/sources/feed.rs restores it from the XML.
