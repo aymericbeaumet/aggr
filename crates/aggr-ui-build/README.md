@@ -1,6 +1,6 @@
 # aggr-ui-build
 
-Node-free compilation of aggr's Svelte reader. The crate executes the official Svelte 5.57.2
+Node-free compilation of aggr's Svelte reader. The crate executes the official Svelte 5
 compiler in an isolated QuickJS runtime, strips module TypeScript with OXC, bundles JavaScript
 with Rolldown, and optimizes extracted CSS with Lightning CSS. Runtime, compiler and checker
 sources are version-locked under `vendor/packages`; their upstream licenses are retained.

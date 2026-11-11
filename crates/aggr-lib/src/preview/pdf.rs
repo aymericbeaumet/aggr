@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use hayro::hayro_interpret::{InterpreterSettings, util::TransformExt};
+use hayro::hayro_interpret::{InterpreterSettings, RenderContent, util::TransformExt};
 use hayro::hayro_syntax::{Pdf, object::Object};
 use hayro::kurbo::Affine;
 use hayro::vello_cpu::color::palette::css::WHITE;
@@ -66,7 +66,7 @@ pub(super) fn thumbnail(bytes: &[u8], alt: Option<String>) -> Result<super::Thum
         page,
         &RenderCache::new(),
         &InterpreterSettings {
-            render_annotations: false,
+            render_content: RenderContent::PAGE,
             ..InterpreterSettings::default()
         },
         &RenderSettings::default(),

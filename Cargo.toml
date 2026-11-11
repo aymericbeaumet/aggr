@@ -29,8 +29,8 @@ bench = false
 [dependencies]
 aggr-lib = { path = "crates/aggr-lib", version = "2.0.0" }
 env_logger = "0.11.11"
-log = "0.4.34"
-tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros"] }
+log = "0.4.35"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
 anyhow = "1.0.104"
@@ -60,7 +60,7 @@ serde_yaml_ng = "0.10.0"
 sha1 = "0.11.0"
 slug = "0.1.6"
 tempfile = "3.27.0"
-tokio = { version = "1.54.0", features = ["time"] }
+tokio = { version = "1.54.1", features = ["time"] }
 url = { version = "2.5.8", features = ["serde"] }
 walkdir = "2.5.0"
 

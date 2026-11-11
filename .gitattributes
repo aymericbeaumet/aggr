@@ -4,4 +4,4 @@
 *.png binary
 *.ttf binary
 # Vendor receipts cover exact upstream bytes, including original line endings.
-/crates/aggr-ui-build/vendor/** -text
+/crates/aggr-ui-build/vendor/** -text whitespace=cr-at-eol

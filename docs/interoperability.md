@@ -220,7 +220,7 @@ of the challenged web application; see [OpenReview ingestion](openreview.md). Ca
 can retain their safe prose and automatically load the sandboxed live original inside the reader; see
 [reader behavior](rendering.md#reader-behavior). Neither route executes publisher scripts during fetching.
 
-`wreq = 0.16.1` and `wreq-util = 0.2.0` are exact stable pins. Both published packages use
+`wreq = 0.16.3` and `wreq-util = 0.2.1` are exact stable pins. Both published packages use
 Apache-2.0 and require Rust 1.98, which is aggr's minimum compiler version. Upstream restarted
 their version numbering after the earlier `6.0.0-rc` and `3.0.0-rc` series. The older stable
 utility release `0.1.0` uses GPL-3.0. Review actual package licenses, compiler requirements,

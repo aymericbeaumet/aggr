@@ -184,7 +184,7 @@ fn compile(source: &str, filename: &str, server: bool, module: bool) -> Result<C
         .map_err(anyhow::Error::msg)
 }
 
-/// Compile one component with the official Svelte 5.57.2 compiler.
+/// Compile one component with the pinned official Svelte 5 compiler.
 pub fn compile_component(source: &str, filename: &str, server: bool) -> Result<Compiled> {
     compile(source, filename, server, false)
 }
