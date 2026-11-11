@@ -58,7 +58,7 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 ] }
 rquickjs = "0.14.0"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-scraper = "0.27.0"
+scraper = "0.29.0"
 serde = { version = "1.0.229", features = ["derive"] }
 # Keep emitted bytes independent of Cargo feature unification with the native bundler.
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
