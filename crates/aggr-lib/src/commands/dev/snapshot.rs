@@ -98,6 +98,10 @@ fn directory(path: &Path, create: bool) -> Result<PathBuf> {
             bail!("unsafe dev snapshot directory {}", path.display());
         }
         current.push(component);
+        // A bare Windows drive prefix is not a directory; inspect after adding the root.
+        if matches!(component, Component::Prefix(_)) {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
                 bail!(
@@ -158,6 +162,17 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn snapshot_directory_validates_rooted_windows_paths_after_the_volume_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        assert_eq!(directory(temp.path(), false).unwrap(), canonical);
+        assert_eq!(directory(&canonical, false).unwrap(), canonical);
+        let scratch = canonical.join("nested").join("scratch");
+        assert_eq!(directory(&scratch, true).unwrap(), scratch);
+    }
 
     fn write(root: &Path, name: &str, bytes: &[u8]) {
         let path = root.join(name);

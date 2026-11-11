@@ -152,10 +152,20 @@ fn report_warnings(file: &Path, warnings: &Value) -> usize {
     warnings.len()
 }
 
+fn checker_command(binary: &Path, project: &Path, config: &Path) -> std::process::Command {
+    // Native TypeScript slash-normalizes verbatim drive paths into invalid //?/ paths.
+    let mut command = std::process::Command::new(dunce::simplified(binary));
+    command
+        .current_dir(dunce::simplified(project))
+        .args(["--noEmit", "--pretty", "false", "-p"])
+        .arg(dunce::simplified(config));
+    command
+}
+
 fn check(root: &Path, binary: &Path) -> Result<()> {
     aggr_ui_model::export_types(root.join("web/.generated/types"))?;
     let directory = tempfile::tempdir()?;
-    let project = directory.path().canonicalize()?;
+    let project = dunce::canonicalize(directory.path())?;
     let project = project.as_path();
     let runtime = Runtime::new()?;
     runtime.set_memory_limit(768 * 1024 * 1024);
@@ -227,7 +237,7 @@ fn check(root: &Path, binary: &Path) -> Result<()> {
             }
         }
     }
-    let vendor = vendor_root().join("packages");
+    let vendor = dunce::simplified(&vendor_root()).join("packages");
     application.extend([
         vendor.join("svelte/types/index.d.ts"),
         vendor.join("svelte2tsx/svelte-shims-v4.d.ts"),
@@ -245,10 +255,7 @@ fn check(root: &Path, binary: &Path) -> Result<()> {
         let config = project.join(format!("tsconfig.{name}.json"));
         let options = json!({"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"bundler","lib":libs,"strict":true,"skipLibCheck":true,"isolatedModules":true,"verbatimModuleSyntax":true,"noEmit":true,"types":[],"typeRoots":[vendor],"allowImportingTsExtensions":true,"paths":{"svelte":[vendor.join("svelte/types/index.d.ts")],"svelte/*":[vendor.join("svelte/*")],"@aggr-model/*":[project.join(".generated/types/*")]}},"files":sources});
         std::fs::write(&config, serde_json::to_vec_pretty(&options)?)?;
-        let output = std::process::Command::new(binary)
-            .current_dir(project)
-            .args(["--noEmit", "--pretty", "false", "-p"])
-            .arg(&config)
+        let output = checker_command(binary, project, &config)
             .output()
             .with_context(|| format!("checking {name} with native TypeScript"))?;
         failed |= !output.status.success();
@@ -298,7 +305,7 @@ fn check(root: &Path, binary: &Path) -> Result<()> {
 
 pub async fn run(args: Vec<String>) -> Result<()> {
     ensure!(args.is_empty(), "usage: aggr-tools check");
-    let root = crate::root().canonicalize()?;
+    let root = dunce::canonicalize(crate::root())?;
     let binary = executable()?;
     tokio::task::spawn_blocking(move || check(&root, &binary)).await?
 }
@@ -306,6 +313,41 @@ pub async fn run(args: Vec<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn checker_paths_simplify_drive_prefixes_but_preserve_unc_and_reserved_paths() {
+        for (input, expected) in [
+            (r"C:\aggr", r"C:\aggr"),
+            (r"\\?\C:\aggr", r"C:\aggr"),
+            (r"\\server\share", r"\\server\share"),
+            (r"\\?\UNC\server\share", r"\\?\UNC\server\share"),
+            (r"\\?\C:\aggr\NUL", r"\\?\C:\aggr\NUL"),
+        ] {
+            let config = Path::new(input).join("tsconfig.reader.json");
+            let command = checker_command(
+                Path::new(r"\\?\C:\tools\tsc.exe"),
+                Path::new(input),
+                &config,
+            );
+            assert_eq!(command.get_program(), Path::new(r"C:\tools\tsc.exe"));
+            assert_eq!(command.get_current_dir(), Some(Path::new(expected)));
+            assert_eq!(
+                command.get_args().last(),
+                Some(Path::new(expected).join("tsconfig.reader.json").as_os_str())
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checker_paths_preserve_literal_posix_backslashes() {
+        let project = Path::new(r"/project\name");
+        let config = project.join("tsconfig.reader.json");
+        let command = checker_command(Path::new("/tools/tsc"), project, &config);
+        assert_eq!(command.get_current_dir(), Some(project));
+        assert_eq!(command.get_args().last(), Some(config.as_os_str()));
+    }
 
     #[test]
     fn generated_diagnostics_map_to_original_component_positions() {
@@ -318,7 +360,8 @@ mod tests {
     #[test]
     fn native_checker_validates_component_template_props() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let root = directory.path();
+        let canonical = directory.path().canonicalize()?;
+        let root = canonical.as_path();
         std::fs::create_dir_all(root.join("web/src"))?;
         std::fs::create_dir_all(root.join("web/test"))?;
         for helper in ["projector.ts", "projector-path.ts"] {

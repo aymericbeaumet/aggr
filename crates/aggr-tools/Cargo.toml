@@ -14,6 +14,7 @@ anyhow = "1.0.104"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 base64 = "0.23.1"
 bytes = "1.12.1"
+dunce = "1.0.5"
 fantoccini = { version = "0.22.1", default-features = false }
 flate2 = "1.1.11"
 futures-util = "0.3.34"

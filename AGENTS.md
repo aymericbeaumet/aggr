@@ -221,6 +221,8 @@ Native OS libraries and compilers remain system prerequisites.
   player binding captures the destination, so changing the DOM afterward cannot redirect it.
 - Keep downloadable development tools in `mise.toml` and `mise.lock`, including the browser
   matching ChromeDriver and Windows x64 NASM. CI may install native OS libraries separately.
+- Simplify canonical Windows paths at external-tool boundaries with `dunce`. Filesystem ancestor
+  walks must append the root separator before inspecting a drive prefix; retain symlink checks.
 
 ## Reader and ingestion invariants
 

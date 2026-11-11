@@ -113,6 +113,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "bytes",
+ "dunce",
  "fantoccini",
  "flate2",
  "futures-util",
