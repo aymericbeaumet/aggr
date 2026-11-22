@@ -1,8 +1,0 @@
-{
-  "component": "Toolbar",
-  "props": {
-    "base": "./",
-    "kind": "river",
-    "scope": null
-  }
-}

@@ -1,6 +1,5 @@
 <script lang="ts">
-  // `_item.html`: one feed entry. Keep this structure aligned with search result rows.
-  import type { ClientRow } from '../generated/ClientRow';
+  import type { ClientRow } from '@aggr-model/ClientRow';
   import { ageBand } from '../dates/format';
   import { sitePath, urlFor } from '../model/urls';
   import { clock } from '../state/clock.svelte';
@@ -36,7 +35,7 @@
     row.language && row.language.toLowerCase() !== language.toLowerCase() ? row.language : undefined,
   );
   const href = $derived(urlFor(base, row.url));
-  // The band the build painted, recoloured as the article ages while the app runs.
+  // The band the build painted, recolored as the article ages while the app runs.
   const published = $derived(Date.parse(row.metadata.date));
   const band = $derived(
     clock.now !== null && !Number.isNaN(published) ? ageBand(published, clock.now) : row.age_band,
@@ -53,6 +52,7 @@
           <span class="rank" aria-hidden="true">{rank}.</span>
           <a class="title p-name u-url" data-row-open {href} {lang}>{row.title}</a>
         </div>
+
         <Metadata metadata={row.metadata} {base} />
         {#if saved}<div class="search-saved-status" data-saved-offline="true">Saved offline</div>{/if}
       </div>

@@ -168,10 +168,10 @@ export function installShortcuts(): void {
         const direction = event.key === 'j' ? 1 : -1;
         if (isArticle()) {
           const view = page.model?.page;
-          const neighbour = view?.view === 'article' ? (direction === 1 ? view.data.next : view.data.previous) : null;
+          const neighbor = view?.view === 'article' ? (direction === 1 ? view.data.next : view.data.previous) : null;
           event.preventDefault();
           // Stepping past either end of the archive returns to the feed rather than stopping dead.
-          void navigation.go(new URL(neighbour ? sitePath(neighbour.url) : '', page.root).href);
+          void navigation.go(new URL(neighbor ? sitePath(neighbor.url) : '', page.root).href);
           return;
         }
         if (reveal(selection.move(direction, here))) event.preventDefault();

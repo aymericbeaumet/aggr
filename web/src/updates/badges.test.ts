@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { acknowledge, badgedTitle, detect, lastSeenKey, newEntriesKey, readPending, siteEntries } from './badges';
 
 const root = 'https://reader.test/reader/';

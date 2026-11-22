@@ -2,7 +2,8 @@
   // The `[data-search-results]` region of `_feed_toolbar.html`: the live status, the result
   // rows (the same `Row` the feed draws, keyed by URL so a refresh keeps the rows that stay),
   // the empty message and the pager. Static and hidden until the state has results.
-  import type { ClientRow } from '../generated/ClientRow';
+  import { untrack } from 'svelte';
+  import type { ClientRow } from '@aggr-model/ClientRow';
   import Row from '../feed/Row.svelte';
   import { sitePath } from '../model/urls';
   import { cursorRow } from '../selection/cursor';
@@ -40,7 +41,10 @@
   $effect(() => {
     if (!results) return;
     const address = search.address || shown.href;
-    if (address) selection.sync(rows.map((row) => cursorRow(row, shown.root)), address);
+    if (address) {
+      const choices = rows.map((row) => cursorRow(row, shown.root));
+      untrack(() => selection.sync(choices, address));
+    }
   });
 
   // Results may arrive in stages: a title that had the keyboard keeps it, found again by URL.

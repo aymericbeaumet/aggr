@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from "../../test/browser";
 import { indexText, locate, wordRange } from './selection-share';
 
 function body(html: string): HTMLElement {

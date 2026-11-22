@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { displayRow, excerptText, isClientRow, resultRow } from './display';
 import { hex, row } from './fixture';
 
@@ -23,5 +23,33 @@ describe('display decoding', () => {
     expect(highlighted?.excerpt).toBe('the <borrow> checker & more');
     expect(resultRow({ url: '/x/', excerpt: 'no marks here', meta: { aggr_display: encoded } })?.excerpt).toBe(row.excerpt);
     expect(excerptText('a&#39;b &#x41; <b>c</b>')).toBe("a'b A c");
+  });
+
+  it('parses quoted angle brackets and incomplete markup as HTML', () => {
+    expect(excerptText('before <mark title="a > b">matched</mark><!-- hidden --> after <unfinished'))
+      .toBe('before matched after');
+  });
+
+  it('preserves encoded angle brackets as literal text and decodes entities once', () => {
+    expect(excerptText('&lt;img src=x onerror=alert(1)&gt; &amp;lt;mark&amp;gt; &copy;&nbsp;&eacute;'))
+      .toBe('<img src=x onerror=alert(1)> &lt;mark&gt; © é');
+  });
+
+  it('uses HTML numeric character-reference rules without throwing on invalid code points', () => {
+    expect(excerptText('&#0; &#xD800; &#1114112; &#x80; &#x1F680;'))
+      .toBe('� � � € 🚀');
+  });
+
+  it('never activates elements while extracting their text', () => {
+    let constructions = 0;
+    customElements.define('aggr-excerpt-probe', class extends HTMLElement {
+      constructor() {
+        super();
+        constructions++;
+      }
+    });
+    expect(excerptText('<aggr-excerpt-probe>matched text</aggr-excerpt-probe>')).toBe('matched text');
+    expect(constructions).toBe(0);
+    expect(document.querySelector('aggr-excerpt-probe')).toBeNull();
   });
 });

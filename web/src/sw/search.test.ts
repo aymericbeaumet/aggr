@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { digest, files, harness, indexBase, manifest, scope, version } from './harness';
 import { completeSearch, configureOfflineSearch, validSearchManifest, verifiedSearchResponse } from './search';
 import type { SearchManifest } from './types';

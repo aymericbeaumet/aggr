@@ -1,9 +1,9 @@
-import type { ClientPage } from '../generated/ClientPage';
+import type { ClientPage } from '@aggr-model/ClientPage';
 
-/** The page on screen: its model, the region it adopted and the address it is shown at. */
+/** The page on screen: its typed model, opaque prose and address. */
 export type Shown = {
   model: ClientPage;
-  content: Element | null;
+  bodyHtml: string;
   href: string;
 };
 
@@ -11,15 +11,12 @@ class PageState {
   current = $state.raw<Shown | null>(null);
   /** Absolute URL of the site root, fixed for the visit; `''` until the app boots. */
   root = '';
-  /** The site icon as the static head resolved it, for the brand link; `null` when unknown. */
-  icon: string | null = null;
-
   get model(): ClientPage | null {
     return this.current?.model ?? null;
   }
 
-  get content(): Element | null {
-    return this.current?.content ?? null;
+  get bodyHtml(): string {
+    return this.current?.bodyHtml ?? '';
   }
 
   /** The address the page is shown at, with its query; null on the server. */

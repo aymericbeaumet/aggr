@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { canonicalQuery, dateMatches, parseQuery, queryFromHref, queryURL, quoteValue, stripSearch, tokenize } from './query';
 
 describe('query parsing', () => {

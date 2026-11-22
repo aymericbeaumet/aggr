@@ -1,7 +1,7 @@
 <script lang="ts">
   // `index.html`'s `<nav class="pager">`. The river's pager also carries the static page
   // geometry the client slices the feed with, and hides itself when there is a single page.
-  import type { PaginatorCtx } from '../generated/PaginatorCtx';
+  import type { PaginatorCtx } from '@aggr-model/PaginatorCtx';
   import { sitePath, urlFor } from '../model/urls';
   import type { Slicing } from './paging';
 

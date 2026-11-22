@@ -1,0 +1,115 @@
+/** @import { Expression, Statement } from 'estree' */
+/** @import { AST } from '#compiler' */
+/** @import { ComponentContext } from '../types' */
+import { unwrap_optional } from '../../../../utils/ast.js';
+import { custom_renderer, source } from '../../../../state.js';
+import * as b from '#compiler/builders';
+import { add_svelte_meta, build_expression, Memoizer } from './shared/utils.js';
+
+/**
+ * @param {AST.RenderTag} node
+ * @param {ComponentContext} context
+ */
+export function RenderTag(node, context) {
+	context.state.template.push_comment();
+
+	const call = unwrap_optional(node.expression);
+
+	/** @type {Expression[]} */
+	let args = [];
+
+	const memoizer = new Memoizer();
+
+	for (let i = 0; i < call.arguments.length; i++) {
+		const arg = /** @type {Expression} */ (call.arguments[i]);
+		const metadata = node.metadata.arguments[i];
+		let expression = build_expression(context, arg, metadata);
+		const memoized = memoizer.add(expression, metadata);
+
+		if (expression !== memoized) {
+			expression = b.call('$.get', memoized);
+		}
+
+		args.push(b.thunk(expression));
+	}
+
+	memoizer.apply();
+
+	/** @type {Statement[]} */
+	const statements = memoizer.deriveds(context.state.analysis.runes);
+
+	const callee = /** @type {Expression} */ (call.callee);
+
+	let snippet_function = build_expression(context, callee, node.metadata.expression);
+
+	const meta = {
+		snippetName: source.slice(
+			/** @type {number} */ (callee.start),
+			/** @type {number} */ (callee.end)
+		)
+	};
+
+	if (node.metadata.dynamic) {
+		// In custom renderer components, validate that the snippet is compatible
+		// with the current renderer before rendering it
+		if (custom_renderer) {
+			snippet_function = b.call('$.validate_snippet_renderer', snippet_function);
+		}
+
+		// If we have a chain expression then ensure a nullish snippet function gets turned into an empty one
+		if (node.expression.type === 'ChainExpression') {
+			snippet_function = b.logical('??', snippet_function, b.id('$.noop'));
+		}
+
+		statements.push(
+			add_svelte_meta(
+				b.call('$.snippet', context.state.node, b.thunk(snippet_function), ...args),
+				node,
+				'render',
+				meta
+			)
+		);
+	} else {
+		// In custom renderer components, validate that the snippet is compatible
+		// with the current renderer before rendering it
+		if (custom_renderer) {
+			snippet_function = b.call('$.validate_snippet_renderer', snippet_function);
+		}
+
+		statements.push(
+			add_svelte_meta(
+				(node.expression.type === 'CallExpression' ? b.call : b.maybe_call)(
+					snippet_function,
+					context.state.node,
+					...args
+				),
+				node,
+				'render',
+				meta
+			)
+		);
+	}
+
+	const async_values = memoizer.async_values();
+	const blockers = memoizer.blockers();
+
+	if (async_values || blockers) {
+		context.state.init.push(
+			b.stmt(
+				b.call(
+					'$.async',
+					context.state.node,
+					blockers,
+					memoizer.async_values(),
+					b.arrow([context.state.node, ...memoizer.async_ids()], b.block(statements))
+				)
+			)
+		);
+
+		if (context.state.is_standalone) {
+			context.state.init.push(b.stmt(b.call('$.next')));
+		}
+	} else {
+		context.state.init.push(statements.length === 1 ? statements[0] : b.block(statements));
+	}
+}

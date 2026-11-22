@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
-import type { ClientPage } from '../generated/ClientPage';
+import { describe, expect, it } from "../../test/browser";
+import type { ClientPage } from '@aggr-model/ClientPage';
 import { row } from '../search/fixture';
+import { fixture } from '../../test/fixtures';
 import { shouldApply, withFreshList } from './feed';
 
 describe('shouldApply', () => {
@@ -17,7 +18,8 @@ const list = (content: string, rows: typeof row[], entries: string[]): ClientPag
   path: '',
   kind: 'river',
   title: 'reader',
-  site: { title: 'reader', language: 'en', pwa: true, discussions: [], entries, config_url: null, assets: { app: null, css: null, imports: [] } },
+  head: fixture('page-river').head,
+  site: { ...fixture('page-river').site, title: 'reader', language: 'en', pwa: true, discussions: [], entries, config_url: null, assets: { app: null, css: null, imports: [], icon: 'assets/favicon-32.png' } },
   build: { version: '1.0.0', app: 'app-1', content },
   page: { view: 'list', data: { rows, paginator: { offset: 0, first: '', last: '', previous: null, next: null, page: 1, pages: 1 } as never, scope: null, error: null } },
 });
@@ -40,7 +42,7 @@ describe('withFreshList', () => {
 
   it('has nothing to swap unless both sides are lists', () => {
     const current = list('content-1', [row], []);
-    const article: ClientPage = { ...current, page: { view: 'static' } };
+    const article: ClientPage = { ...current, page: { view: 'not_found', data: { data_branch: 'data', archive_url: null } } };
     expect(withFreshList(article, current)).toBeNull();
     expect(withFreshList(current, article)).toBeNull();
   });

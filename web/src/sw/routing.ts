@@ -3,7 +3,8 @@
 
 import { ASSET_LIMIT, PAGE_LIMIT, trim } from './caches';
 import type { WorkerContext } from './context';
-import type { FetchEventLike } from './types';
+import { protectedResponse } from './protected';
+import type { ExtendableEventLike, FetchEventLike } from './types';
 
 export type Route = 'page' | 'asset' | 'mutable';
 
@@ -44,20 +45,50 @@ async function fromNetwork(ctx: WorkerContext, request: Request, timeout: number
 
 /** The last good copy of this page, else the page that explains why there is none. */
 async function lastKnown(ctx: WorkerContext, request: Request): Promise<Response | undefined> {
-  const protectedPages = await ctx.caches.open(ctx.names.offlinePages);
   return (
-    (await protectedPages.match(request, { ignoreSearch: true })) ||
-    (await ctx.caches.match(request, { ignoreSearch: true })) ||
-    (await ctx.caches.match(ctx.offlinePage))
+    (await protectedResponse(ctx, request, true)) ||
+    (await runtimeResponse(ctx, request, { ignoreSearch: true })) ||
+    (await runtimeResponse(ctx, ctx.offlinePage))
   );
+}
+
+/** Protected caches contain staged revisions too, so only their committed lookup may read them. */
+async function runtimeResponse(ctx: WorkerContext, request: RequestInfo, options?: CacheQueryOptions): Promise<Response | undefined> {
+  const names = [ctx.names.shell, ctx.names.pages, ctx.names.assets,
+    ...(await ctx.caches.keys()).filter((name) => name.startsWith(ctx.names.offlineSearchPrefix))];
+  for (const name of names) {
+    const response = await (await ctx.caches.open(name)).match(request, options);
+    if (response) return response;
+  }
+  return undefined;
 }
 
 /** A promise held to the same deadline a fetch of our own would get; `null` when it passes. */
 function beforeDeadline<T>(promise: Promise<T>, timeout: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout>;
   const deadline = new Promise<null>((resolve) => {
-    setTimeout(() => resolve(null), timeout);
+    timer = setTimeout(() => resolve(null), timeout);
   });
-  return Promise.race([promise, deadline]);
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+/** Keep response bodies streaming to the reader while storage finishes within the event's lifetime. */
+async function remember(
+  ctx: WorkerContext,
+  request: Request,
+  response: Response,
+  name: string,
+  limit: number,
+  event?: ExtendableEventLike,
+): Promise<void> {
+  const copy = response.clone();
+  const stored = (async () => {
+    const cache = await ctx.caches.open(name);
+    await cache.put(request, copy);
+    await trim(ctx.caches, name, limit);
+  })().catch(() => {});
+  if (event) event.waitUntil(stored);
+  else await stored;
 }
 
 /** Pages: fresh when the network answers, the last copy when it does not. */
@@ -65,6 +96,7 @@ export async function pageResponse(
   ctx: WorkerContext,
   request: Request,
   preload?: Promise<Response | undefined>,
+  event?: ExtendableEventLike,
 ): Promise<Response> {
   const timeout = ctx.timeouts.network;
   try {
@@ -77,9 +109,7 @@ export async function pageResponse(
     if (response === undefined) response = await fromNetwork(ctx, request, timeout);
     else if (response === null) return (await lastKnown(ctx, request)) || fromNetwork(ctx, request, timeout);
     if (response.ok) {
-      const cache = await ctx.caches.open(ctx.names.pages);
-      await cache.put(request, response.clone()).catch(() => {});
-      void trim(ctx.caches, ctx.names.pages, PAGE_LIMIT).catch(() => {});
+      await remember(ctx, request, response, ctx.names.pages, PAGE_LIMIT, event);
       return response;
     }
     // A host in trouble is no better than a host that cannot be reached: an error body must not
@@ -99,35 +129,43 @@ export async function assetResponse(
   request: Request,
   name: string,
   limit: number,
+  event?: ExtendableEventLike,
 ): Promise<Response> {
-  const protectedPages = await ctx.caches.open(ctx.names.offlinePages);
-  const cached = (await protectedPages.match(request)) || (await ctx.caches.match(request));
+  const cached = (await protectedResponse(ctx, request)) || (await runtimeResponse(ctx, request));
   if (cached) return cached;
   const response = await ctx.fetch(request);
   if (response.ok) {
-    const cache = await ctx.caches.open(name);
-    await cache.put(request, response.clone()).catch(() => {});
-    void trim(ctx.caches, name, limit).catch(() => {});
+    await remember(ctx, request, response, name, limit, event);
   }
   return response;
 }
 
 /** Mutable files: current when possible, any cached copy otherwise, and a network error last. */
-export function mutableResponse(ctx: WorkerContext, request: Request): Promise<Response> {
-  return pageResponse(ctx, request).catch(async () => (await ctx.caches.match(request)) || Response.error());
+export async function mutableResponse(ctx: WorkerContext, request: Request, event?: ExtendableEventLike): Promise<Response> {
+  // JSON, stylesheets and feeds need their own exact resource, never an HTML offline document
+  // or another query's representation. Protected resources remain visible only after commit.
+  const cached = async () => (await protectedResponse(ctx, request)) || runtimeResponse(ctx, request);
+  try {
+    const response = await fromNetwork(ctx, request, ctx.timeouts.network);
+    if (response.ok) await remember(ctx, request, response, ctx.names.pages, PAGE_LIMIT, event);
+    if (response.status >= 500) return (await cached()) || response;
+    return response;
+  } catch {
+    return (await cached()) || Response.error();
+  }
 }
 
 export function handleFetch(ctx: WorkerContext, event: FetchEventLike): void {
   const { request } = event;
   switch (classify(request, ctx.origin, ctx.scopePath)) {
     case 'page':
-      event.respondWith(pageResponse(ctx, request, event.preloadResponse));
+      event.respondWith(pageResponse(ctx, request, event.preloadResponse, event));
       return;
     case 'asset':
-      event.respondWith(assetResponse(ctx, request, ctx.names.assets, ASSET_LIMIT));
+      event.respondWith(assetResponse(ctx, request, ctx.names.assets, ASSET_LIMIT, event));
       return;
     case 'mutable':
-      event.respondWith(mutableResponse(ctx, request));
+      event.respondWith(mutableResponse(ctx, request, event));
       return;
     case null:
       return;

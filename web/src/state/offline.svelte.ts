@@ -4,7 +4,7 @@ import { search } from './search.svelte';
 /**
  * What the service worker has committed for use without a network, as it last reported it
  * (`AGGR_OFFLINE_STATUS`, relayed by `offline/client.svelte.ts`). Search reads which index
- * version is saved, so that offline it selects that catalogue and runtime rather than the live
+ * version is saved, so that offline it selects that catalog and runtime rather than the live
  * one; the offline page lists the saved articles.
  */
 class Offline {

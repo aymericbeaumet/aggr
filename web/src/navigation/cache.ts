@@ -1,5 +1,6 @@
 /** A page as it came off the network. */
 export type Fetched = { url: string; html: string };
+export type Priority = 'high' | 'low';
 
 export type PageRecord = {
   time: number;
@@ -35,7 +36,7 @@ export class PageCache {
   private readonly onReady: CacheOptions['onReady'];
 
   constructor(
-    private readonly request: (key: string) => Promise<Fetched>,
+    private readonly request: (key: string, priority: Priority) => Promise<Fetched>,
     options: CacheOptions = {},
   ) {
     this.limit = options.limit ?? 24;
@@ -65,18 +66,20 @@ export class PageCache {
   }
 
   /** The page at `key`: from memory while it is fresh or on its way, else from the network. */
-  load(key: string): PageRecord {
+  load(key: string, priority: Priority = 'high'): PageRecord {
     const cached = this.pages.get(key);
     if (cached && !(cached.ready && this.now() - cached.time >= this.lifetime)) {
       this.remember(key, cached);
       return cached;
     }
-    const record = this.create(key);
+    const record = this.create(key, priority);
     if (cached) {
-      record.page = record.page.catch(() => {
+      record.page = record.page.catch(async () => {
+        const fallback = await cached.page;
         record.time = cached.time;
         record.ready = true;
-        return cached.page;
+        record.fetched = fallback;
+        return fallback;
       });
     }
     record.page.catch(() => {
@@ -86,7 +89,7 @@ export class PageCache {
     return record;
   }
 
-  private create(key: string): PageRecord {
+  private create(key: string, priority: Priority): PageRecord {
     const record: PageRecord = {
       time: this.now(),
       page: Promise.reject(new Error('unset')),
@@ -95,7 +98,7 @@ export class PageCache {
       parsed: null,
     };
     record.page.catch(() => {});
-    record.page = this.request(key).then((page) => {
+    record.page = this.request(key, priority).then((page) => {
       record.fetched = page;
       record.ready = true;
       this.onReady?.(key, record, page);

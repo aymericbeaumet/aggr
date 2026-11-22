@@ -1,13 +1,10 @@
 <script lang="ts">
-  // `_feed_toolbar.html`: the complete search shell (the toolbar and the result container it
-  // is followed by), rendered whole so search only fills it in. Without JavaScript the form
-  // still submits to `?q=`, which lands on this feed. The server render is the static page's:
-  // every binding starts at the value the template writes and diverges only as the state does.
   import { flushSync } from 'svelte';
-  import type { ClientScope } from '../generated/ClientScope';
+  import type { ClientScope } from '@aggr-model/ClientScope';
   import { urlFor } from '../model/urls';
   import { navigation } from '../navigation';
-  import Completions, { completionKeydown } from '../search/Completions.svelte';
+  import Completions from '../search/Completions.svelte';
+  import { completionKeydown } from '../search/completion-keys';
   import Results from '../search/Results.svelte';
   import { search } from '../state/search.svelte';
   import { selection } from '../state/selection.svelte';
@@ -25,6 +22,7 @@
 
   function input(event: Event): void {
     const target = event.currentTarget as HTMLInputElement;
+    if (event.type === 'change' && target.value === search.text) return;
     search.text = target.value;
     search.cursor = caret(target);
     search.drive((driver) => driver.changed());
@@ -92,9 +90,6 @@
 
   function blur(): void {
     search.focused = false;
-    // A composition can finish outside the field and leave this set. The next focus would then
-    // swallow its own keys.
-    search.composing = false;
     search.driver?.blur();
   }
 
@@ -113,7 +108,7 @@
           <label class="sr-only" for="q">Search articles</label>
           <div class="search-input-line">
             <!-- svelte-ignore a11y_role_has_required_aria_props -->
-            <input id="q" type="search" name="q" {value} placeholder="Search articles, sources, categories…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded={expanded ? 'true' : 'false'} aria-autocomplete="list" aria-activedescendant={expanded ? `search-completion-${search.highlighted}` : undefined} aria-describedby="search-query-help" data-page-search aria-keyshortcuts="Meta+K Control+K" oninput={input} onkeydown={keydown} onkeyup={moved} onclick={moved} onselect={moved} onfocus={focus} onblur={blur} oncompositionstart={(event) => composition(true, event)} oncompositionend={(event) => composition(false, event)}>
+            <input id="q" type="search" name="q" {value} placeholder="Search articles, sources, categories…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded={expanded ? 'true' : 'false'} aria-autocomplete="list" aria-activedescendant={expanded ? `search-completion-${search.highlighted}` : undefined} aria-describedby="search-query-help" data-page-search aria-keyshortcuts="Meta+K Control+K" oninput={input} onchange={input} onkeydown={keydown} onkeyup={moved} onclick={moved} onselect={moved} onfocus={focus} onblur={blur} oncompositionstart={(event) => composition(true, event)} oncompositionend={(event) => composition(false, event)}>
             <button type="button" class="search-clear" aria-label="Clear search" hidden={!search.clearable} onclick={() => search.drive((driver) => driver.clear())}>×</button>
           </div>
         </form>

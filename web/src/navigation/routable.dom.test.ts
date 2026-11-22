@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { linkDestination, linkIn } from './routable';
 
 const root = new URL('https://x.test/reads/');
@@ -28,7 +28,7 @@ describe('linkIn', () => {
     link.append(inner);
     document.body.append(link);
     const hits: Array<ReturnType<typeof linkIn>> = [];
-    inner.addEventListener('click', (event) => hits.push(linkIn(event, root)));
+    inner.addEventListener('click', (event) => { hits.push(linkIn(event, root)); event.preventDefault(); });
     inner.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     expect(hits[0]?.link).toBe(link);
     expect(hits[0]?.url.href).toBe('https://x.test/reads/items/a/');

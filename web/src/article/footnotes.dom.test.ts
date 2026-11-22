@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from "../../test/browser";
 import { installFootnotes, pairFootnote } from './footnotes';
 
 // The markup `src/content/render.rs` writes: comrak's footnote with the margin note the build
@@ -88,11 +88,11 @@ describe('installFootnotes', () => {
 
   it('leaves a reference link alone when its margin note is not on screen', () => {
     const root = region();
+    root.querySelector<HTMLElement>('.footnote-margin-note')!.hidden = true;
     installFootnotes(root, new AbortController().signal);
     const link = root.querySelector<HTMLAnchorElement>('#fnref-1');
     const event = new MouseEvent('click', { bubbles: true, cancelable: true });
     link?.dispatchEvent(event);
-    // jsdom lays nothing out, so the note has no client rects: the link keeps its jump.
     expect(event.defaultPrevented).toBe(false);
   });
 });

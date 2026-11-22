@@ -39,6 +39,9 @@ async fn feed_row_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
         .await?;
         client.goto(&fixture.base).await?;
         wait_booted_with(client, "!!document.querySelector('.row [data-row-open]')").await?;
+        // Device emulation changes the compositor's hit regions as well as the page's layout.
+        // Hit-testing starts after the enhanced viewport has had a chance to paint.
+        client.execute_async("const done=arguments[arguments.length-1];requestAnimationFrame(()=>requestAnimationFrame(()=>done(true)))", vec![]).await?;
         assert_eq!(client.execute("return document.querySelector('.row.is-selected') === document.querySelector('.row:not([hidden])') && !document.activeElement.matches('[data-row-open]') && scrollY === 0", vec![]).await?, true,
             "initial selection marks the first visible row without moving focus or scrolling");
         if !mobile {
@@ -84,7 +87,9 @@ async fn feed_row_contracts(client: &Client, fixture: &Fixture) -> Result<()> {
           const separator = {balanced:rule.marginLeft === rule.marginRight, content:rule.content};
           const hit = at((fieldRect.left + linkRect.left) / 2, linkRect.top + linkRect.height / 2);
           row.classList.remove('is-selected');
-          return {stretched:blank.every(probe => probe === title), reachable, before, after, marker, separator:{outsideLink:!hit.closest('a'), ...separator}, article:title.href, category:category.href};
+          const describe = node => node ? {tag:node.tagName,classes:node.className,html:node.outerHTML.slice(0,240),box:box(node).toJSON()} : null;
+          const diagnostics = {viewport:{width:innerWidth,height:innerHeight,scroll:scrollY,visual:visualViewport?.toJSON?.() ?? {width:visualViewport?.width,height:visualViewport?.height,offsetTop:visualViewport?.offsetTop,offsetLeft:visualViewport?.offsetLeft,scale:visualViewport?.scale}},row:rowBox.toJSON(),blank:blank.map(describe),category:{target:describe(category),hit:describe(middle(category))},original:{target:describe(original),hit:describe(middle(original))},separator:describe(hit)};
+          return {stretched:blank.every(probe => probe === title), reachable, before, after, marker, diagnostics, separator:{outsideLink:!hit?.closest('a'), ...separator}, article:title.href, category:category.href};
         "#, vec![]).await?;
         assert_eq!(
             row_actions["stretched"], true,

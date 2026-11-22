@@ -1,6 +1,5 @@
 <script lang="ts">
-  // `item.html`'s `<footer class="article-footer">`: the next article and the recommendations.
-  import type { ClientRow } from '../generated/ClientRow';
+  import type { ClientRow } from '@aggr-model/ClientRow';
   import RelatedCard from '../feed/RelatedCard.svelte';
 
   let {

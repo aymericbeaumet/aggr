@@ -207,12 +207,16 @@ async fn archive_pages_swap_in_place_and_nothing_outside_the_archive_is_fetched(
             client.execute("return !document.querySelector('script[type=speculationrules]')", vec![]).await? == true,
             "no speculation rules compete with the reader's own fetching"
         );
-        // Once the page has settled, the tabs and the rows the reader lingers on are fetched
-        // ahead; a link that leaves the archive never is, whichever ones the fixture renders.
-        wait_for(&client, r#"(() => {
+        // Visible articles wait for intent; focused internal links may be prepared for a tap.
+        anyhow::ensure!(client.execute(r#"
           const fetched = new Set(performance.getEntriesByType('resource').filter(entry => entry.initiatorType === 'fetch').map(entry => entry.name));
-          return [...document.querySelectorAll('.mobile-tabs a[data-route], .rows .row [data-row-open]')].every(link => fetched.has(link.href) || link.href.split('#')[0] === location.href.split('#')[0]);
-        })()"#).await?;
+          return [...document.querySelectorAll('.rows .row [data-row-open]')].every(link => !fetched.has(link.href));
+        "#, vec![]).await? == true, "visible rows do not trigger article downloads");
+        let intended = client.execute("return [...document.querySelectorAll('.nav-primary a[data-route], .rows .row [data-row-open]')].map(link => link.href).filter(href => href !== location.href)", vec![]).await?;
+        for href in intended.as_array().context("internal links")? {
+            client.execute("[...document.querySelectorAll('.nav-primary a[data-route], .rows .row [data-row-open]')].find(link => link.href === arguments[0]).focus({preventScroll:true})", vec![href.clone()]).await?;
+            wait_for(&client, &format!("performance.getEntriesByType('resource').some(entry => entry.initiatorType === 'fetch' && entry.name === {href})")).await?;
+        }
         let outward = client.execute(r#"
           const fetched = new Set(performance.getEntriesByType('resource').map(entry => entry.name));
           const outward = [...document.querySelectorAll('a[target="_blank"], .u-bookmark-of, .config-link')];

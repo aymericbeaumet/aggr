@@ -1,19 +1,17 @@
 import type { Attachment } from 'svelte/attachments';
-import type { ClientRow } from '../generated/ClientRow';
+import type { ClientRow } from '@aggr-model/ClientRow';
 import { navigation } from '../navigation';
 import { page } from '../state/page.svelte';
 import { isInstalled, markExternalLinks } from './external-links';
 import { installFootnotes } from './footnotes';
 import { installHeadings } from './headings';
-import { neighbourDestination } from './neighbours';
+import { neighborDestination } from './neighbors';
 import { installSelectionShare } from './selection-share';
 import { installSwipes } from './swipes';
 
 /**
- * Everything the reader adds to an article's adopted content region: the media figure and the
- * body are server markup no component renders, so behaviour attaches to them here, after the
- * nodes have been moved in, and ends when the wrapper is torn down. Players are a chunk of
- * their own, fetched only for a region that holds media.
+ * Article-local behavior belongs to the component's lifetime. Sanitized prose remains opaque;
+ * the media controller loads only when the article has a player to drive.
  */
 
 export type EnhanceOptions = {
@@ -47,7 +45,7 @@ export function enhance(options: EnhanceOptions): Attachment<HTMLElement> {
     });
     safely('swipes', () =>
       installSwipes(node, signal, (direction) => {
-        void navigation.go(neighbourDestination(root, direction === 1 ? options.next : options.previous));
+        void navigation.go(neighborDestination(root, direction === 1 ? options.next : options.previous));
       }),
     );
     if (node.querySelector(MEDIA)) {

@@ -84,14 +84,14 @@ source media fields too. In a disposable checkout containing the selected data o
 
 ```sh
 GITHUB_ACTIONS=true aggr build --clean --data-ref 76a5f2ba581940085d55209be31590aba2559d6c \
-  --release --base-url https://aggr.example/ --report /tmp/aggr-cold.json
+  --base-url https://aggr.example/ --report /tmp/aggr-cold.json
 GITHUB_ACTIONS=true aggr build --data-ref 76a5f2ba581940085d55209be31590aba2559d6c \
-  --release --base-url https://aggr.example/ --report /tmp/aggr-warm.json
+  --base-url https://aggr.example/ --report /tmp/aggr-warm.json
 ```
 
 The controlled browser fixture transferred **832,826 uncompressed HTTP response bytes**, including
 headers and service-worker installation. It made no automatic article, collection, search-index or
-offline-catalogue downloads. See the [first-visit measurement](client.md#first-visit-budget) for its
+offline-catalog downloads. See the [first-visit measurement](client.md#first-visit-budget) for its
 scope and reproduction. Public-demo mobile Web Vitals and complete GitHub job time have not been measured for these changes.
 
 ## Public demo: September 20, 2026

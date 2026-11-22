@@ -1,40 +1,28 @@
-/// <reference types="node" />
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { load, fixture, render } from '../../test/fixtures';
 import { flushSync } from 'svelte';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, testTools } from "../../test/browser";
 import { mountApp } from '../app/boot';
-import type { ClientPage } from '../generated/ClientPage';
+import type { ClientPage } from '@aggr-model/ClientPage';
 import { row } from '../search/fixture';
 import { fresh } from '../state/fresh.svelte';
 import { page } from '../state/page.svelte';
+import { selection } from '../state/selection.svelte';
+import { cursorRow } from '../selection/cursor';
 import { badges } from './badges';
 import { FeedUpdater, applyFreshList } from './feed';
 
-const directory = resolve(process.cwd(), 'test/parity');
-
-function load(name: string): ClientPage {
-  const fixture = JSON.parse(readFileSync(resolve(directory, `${name}.json`), 'utf8')) as { props: { page: ClientPage } };
-  document.head.innerHTML = '';
-  const script = document.createElement('script');
-  script.id = 'aggr-page';
-  script.type = 'application/json';
-  script.textContent = JSON.stringify(fixture.props.page);
-  document.head.append(script);
-  document.body.innerHTML = `<div id="app">${readFileSync(resolve(directory, `${name}.html`), 'utf8')}</div>`;
-  return fixture.props.page;
-}
 
 /** The river fixture as a newer build would render it: one more row on top. */
 function newer(model: ClientPage): ClientPage {
   if (model.page.view !== 'list') throw new Error('not a list');
   const arrival = { ...row, path: 'items/blog/2026/09/arrival', url: 'items/blog/2026/09/arrival/', title: 'Just arrived' };
-  return {
+  const next: ClientPage = {
     ...model,
     build: { ...model.build, content: 'content-next' },
     site: { ...model.site, entries: [arrival.url, ...model.site.entries] },
     page: { view: 'list', data: { ...model.page.data, rows: [arrival, ...model.page.data.rows] } },
   };
+  return next;
 }
 
 const FEED = 'ol.rows:not(.search-results)';
@@ -48,7 +36,7 @@ describe('the live feed', () => {
     fresh.marked = [];
     fresh.visible = true;
     scrolledTo(0);
-    window.scrollBy = vi.fn();
+    window.scrollBy = testTools.fn();
   });
 
   it('replaces the rows in the page state and keeps the nodes of the rows already shown', () => {
@@ -78,7 +66,63 @@ describe('the live feed', () => {
   it('has nothing to swap on a page that is not a list', () => {
     const model = load('page-river');
     mountApp(document);
-    expect(applyFreshList({ ...model, page: { view: 'static' } })).toBeNull();
+    expect(applyFreshList({ ...model, page: { view: 'not_found', data: { data_branch: 'data', archive_url: null } } })).toBeNull();
+  });
+
+  it('updates ranks when a new row shifts retained nodes down the list', () => {
+    const model = load('page-river');
+    mountApp(document);
+    const before = rows();
+    applyFreshList(newer(model));
+    const after = rows();
+    expect(after.slice(1)).toEqual(before);
+    expect(after.map((node) => node.querySelector('.rank')?.textContent)).toEqual(
+      after.map((_, index) => `${index + 1}.`),
+    );
+  });
+
+  it('updates a source warning through recovery and failure without replacing search or selection', () => {
+    const model = load('page-source-error');
+    if (model.page.view !== 'list') throw new Error('not a list');
+    mountApp(document);
+    selection.configure(new URL(page.root).pathname, sessionStorage);
+    const toolbar = document.querySelector('.feed-toolbar');
+    const input = document.querySelector<HTMLInputElement>('#q')!;
+    input.setSelectionRange(2, 5);
+    const selected = rows()[1];
+    selection.select(cursorRow(model.page.data.rows[1], page.root), page.href!);
+    flushSync();
+    selected.querySelector<HTMLAnchorElement>('[data-row-open]')!.focus();
+    const warning = document.querySelector('.listhead .error')!.cloneNode(true) as HTMLElement;
+    const recovered = structuredClone(model);
+    if (recovered.page.view !== 'list') throw new Error('not a list');
+    recovered.page.data.error = null;
+    recovered.build.content = 'recovered';
+    const recoveredContent = document.querySelector('main')!.cloneNode(true) as HTMLElement;
+    recoveredContent.querySelector('.listhead .error')!.remove();
+    recoveredContent.querySelector<HTMLElement>('.listhead')!.dataset.rustState = 'recovered';
+    applyFreshList(recovered);
+    expect(document.querySelector('.listhead .error')).toBeNull();
+    expect(document.querySelector('.feed-toolbar')).toBe(toolbar);
+    expect(document.querySelector('#q')).toBe(input);
+    expect([input.selectionStart, input.selectionEnd]).toEqual([2, 5]);
+    expect(document.querySelector('.row.is-selected')).toBe(selected);
+    expect(document.activeElement).toBe(selected.querySelector('[data-row-open]'));
+
+    const failed = structuredClone(recovered);
+    if (failed.page.view !== 'list') throw new Error('not a list');
+    failed.page.data.error = { message: 'HTTP 429', since: '2026-10-19T00:00:00Z' };
+    failed.build.content = 'failed-again';
+    const failedContent = document.querySelector('main')!.cloneNode(true) as HTMLElement;
+    warning.title = 'HTTP 429';
+    warning.textContent = '⚠ HTTP 429';
+    failedContent.querySelector('.listhead .listtools')!.append(warning);
+    applyFreshList(failed);
+    expect(document.querySelector('.listhead .error')?.textContent).toContain('⚠ HTTP 429');
+    expect(document.querySelector('.feed-toolbar')).toBe(toolbar);
+    expect(document.querySelector('#q')).toBe(input);
+    expect([input.selectionStart, input.selectionEnd]).toEqual([2, 5]);
+    expect(document.querySelector('.row.is-selected')).toBe(selected);
   });
 
   it('lights the pending entries that are on screen', async () => {
@@ -115,7 +159,7 @@ describe('the live feed', () => {
     expect(page.model?.build.content).toBe(model.build.content);
     // Back to the window: the swap may go ahead where they left off.
     document.dispatchEvent(new Event('visibilitychange'));
-    await vi.waitFor(() => expect(page.model?.build.content).toBe('content-next'));
+    await testTools.waitFor(() => expect(page.model?.build.content).toBe('content-next'));
     expect(loads).toEqual([page.href]);
     expect(rows()[0].dataset.path).toBe('items/blog/2026/09/arrival');
   });
@@ -123,14 +167,14 @@ describe('the live feed', () => {
   it('swaps at once at the top of the list, and not for a version the page already shows', async () => {
     const model = load('page-river');
     mountApp(document);
-    const load_ = vi.fn(async () => newer(model));
+    const load_ = testTools.fn(async () => newer(model));
     const updater = new FeedUpdater({ load: load_ });
     updater.install(document, window);
     updater.notice(model.build.content);
     await Promise.resolve();
     expect(load_).not.toHaveBeenCalled();
     updater.notice('content-next');
-    await vi.waitFor(() => expect(page.model?.build.content).toBe('content-next'));
+    await testTools.waitFor(() => expect(page.model?.build.content).toBe('content-next'));
     expect(load_).toHaveBeenCalledTimes(1);
   });
 });

@@ -16,8 +16,11 @@ repository. Check the license shipped with the exact revision you use.
 
 ## Third-party material
 
-Dependencies and vendored assets retain their own licenses. The browser client is
-first-party with no third-party code; the bundled font keeps its adjacent license file.
+Dependencies and vendored assets retain their own licenses. The reader bundles Svelte and its runtime dependencies. Their original licenses and notices
+are retained under `crates/aggr-ui-build/vendor` and emitted as a hashed public notices asset.
+The native compiler also retains the upstream Svelte, projection and TypeScript source licenses;
+`vendor/packages.json` records exact versions and upstream archive integrity. The bundled font
+keeps its adjacent license file.
 `cargo deny check` checks Rust dependency licenses against [deny.toml](../deny.toml),
 whose allow-list is exhaustive so that copyleft code cannot enter the binary
 unnoticed.
@@ -28,7 +31,7 @@ an archive.
 
 ## Contributions and distribution
 
-Original contributions arrive under the same MIT terms, with explicit acknowledgement
+Original contributions arrive under the same MIT terms, with explicit acknowledgment
 as described in [CONTRIBUTING.md](../CONTRIBUTING.md). Contributors keep copyright;
 inbound and outbound terms are identical, so no copyright assignment is required.
 

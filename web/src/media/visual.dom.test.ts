@@ -1,5 +1,5 @@
 import { flushSync, mount, unmount } from 'svelte';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, testTools } from "../../test/browser";
 import NowPlaying from '../app/NowPlaying.svelte';
 import { enhanceAudio } from './audio';
 import { enhanceVideoFacade } from './facades';
@@ -32,8 +32,8 @@ function videoCard(src = 'clip.mp4'): { frame: HTMLElement; video: HTMLVideoElem
   video.setAttribute('src', src);
   video.setAttribute('aria-label', 'Clip');
   video.dataset.durationSeconds = '90';
-  video.pause = vi.fn();
-  video.load = vi.fn();
+  video.pause = testTools.fn();
+  video.load = testTools.fn();
   frame.append(video);
   document.body.append(frame);
   return { frame, video };
@@ -43,10 +43,10 @@ function videoCard(src = 'clip.mp4'): { frame: HTMLElement; video: HTMLVideoElem
 function play(video: HTMLVideoElement): void {
   let paused = false;
   Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
-  video.pause = vi.fn(() => {
+  video.pause = testTools.fn(() => {
     paused = true;
   });
-  video.load = vi.fn();
+  video.load = testTools.fn();
   video.dispatchEvent(new Event('play'));
   video.dispatchEvent(new Event('playing'));
 }
@@ -195,8 +195,7 @@ describe('visual now playing', () => {
     expect(frame).toBeInstanceOf(HTMLIFrameElement);
     if (!(frame instanceof HTMLIFrameElement)) return;
     frame.focus();
-    // jsdom records the iframe as focused without delivering the focus event to the element.
-    // A browser click is a window blur with the frame already active, which is handed back
+    // Model the provider taking focus: a window blur with its frame active is handed back
     // on the next frame.
     if (document.activeElement === frame) {
       window.dispatchEvent(new Event('blur'));
@@ -278,6 +277,7 @@ describe('visual now playing', () => {
     try {
       const target = dock();
       const { preview } = player('twitch', 'https://player.twitch.tv/?video=99');
+      (preview.parentElement as HTMLElement).getBoundingClientRect = () => new DOMRect(0, -200, 320, 180);
       enhanceVideoFacade(preview, new AbortController().signal);
       preview.click();
       flushSync();
@@ -316,14 +316,14 @@ describe('visual now playing', () => {
     if (!(audio instanceof HTMLAudioElement)) throw new Error('missing audio');
     let paused = true;
     Object.defineProperty(audio, 'paused', { configurable: true, get: () => paused });
-    audio.play = vi.fn(() => {
+    audio.play = testTools.fn(() => {
       paused = false;
       audio.dispatchEvent(new Event('play'));
       audio.dispatchEvent(new Event('playing'));
       return Promise.resolve();
     });
-    audio.pause = vi.fn();
-    audio.load = vi.fn();
+    audio.pause = testTools.fn();
+    audio.load = testTools.fn();
     enhanceAudio(card, new AbortController().signal);
     card.querySelector<HTMLButtonElement>('[data-audio-toggle]')?.click();
     expect(frame?.isConnected).toBe(false);

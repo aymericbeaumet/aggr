@@ -84,9 +84,9 @@ url = "https://www.example.com/blog/feed.xml"   # -> sources/example-com/
 ```
 
 Some hosts carry thousands of unrelated publishers, so there the account's path is part of who is
-publishing and stays in the name. That list lives in `src/platform.rs` and covers YouTube, X,
+publishing and stays in the name. That list lives in `crates/aggr-lib/src/platform.rs` and covers YouTube, X,
 GitHub, GitLab, Codeberg, Reddit, Medium, Bluesky, Twitch, Vimeo and SoundCloud, the podcast
-catalogues (Spotify, Apple Podcasts, Pocket Casts, Overcast, Castbox), and the `@handle` convention
+catalogs (Spotify, Apple Podcasts, Pocket Casts, Overcast, Castbox), and the `@handle` convention
 on any host. Each platform is named by its own domain, so a short, mobile or regional alias resolves
 to it: `youtu.be` and `m.youtube.com` are `youtube.com`, `open.spotify.com` is `spotify.com`, and
 `pca.st` is `pocketcasts.com`.
@@ -106,11 +106,11 @@ A platform's own pages are not accounts, so a link to one reads as the platform 
 GitLab's and Forgejo's reserved-name lists in their own source, the top-level paths of the other
 platforms' `robots.txt`, and the platform's API documentation where it names a content path
 robots.txt leaves out. A robots.txt also blocks individual members, so any entry that serves a
-profile stays an account. `src/platform/reserved.rs` records each list's source and what was
+profile stays an account. `crates/aggr-lib/src/platform/reserved.rs` records each list's source and what was
 dropped from it. A route missing from those sources still reads as an account, which is the
 safer mistake: a guessed route would quietly fold a real publisher into its host.
 
-A catalogue names its shows with identifiers nobody reads, so the reader sees the show's own title
+A catalog names its shows with identifiers nobody reads, so the reader sees the show's own title
 in that slot (`spotify.com/underscore`) while the identity underneath stays the real path.
 
 Two feeds from one publisher arrive at the same name, so the path that differs is added to tell
@@ -236,11 +236,12 @@ to its `[[sources]]` table. This flag is not inherited by the contained sources.
 
 Two different things can be out of date. Items the source still lists are re-fetched by
 `sync --refresh` using the current content and media policies. Items the source has stopped listing
-can still be improved from what aggr already retained: `sync --reprocess` re-derives every stored body
-from its retained HTML companion, so content cleanup added in a later release reaches the archive
-without a single extra request. Both discard hand edits, and both write ordinary commits.
+are improved automatically during sync: changed extraction code or inputs re-derive bodies from
+complete retained HTML companions, so cleanup added in a later release reaches the archive
+without extra requests. Both paths can replace body edits and write ordinary commits only when
+archive bytes change.
 
-`--reprocess` recovers anything still present in the retained HTML. It cannot recover content that
+Automatic reprocessing recovers anything still present in the retained HTML. It cannot recover content that
 article extraction discarded before storing — that needs the original page, and so needs the item
 to be listed again.
 
@@ -270,9 +271,9 @@ YouTube may withhold or rate-limit captions. Feed capture does not request video
 
 Extraction retains article images, figure captions, inline links, footnotes, tables, and code
 indentation, with syntax colors for recognized code languages. A code block whose language cannot
-be determined is left unlabelled rather than guessed at. Cleanup that only needs the stored
+be determined is left unlabeled rather than guessed at. Cleanup that only needs the stored
 Markdown is reapplied on every build, so an archive written by an older release reads correctly;
-cleanup that needs the original HTML reaches an existing item through `--reprocess`. Custom source
+cleanup that needs the original HTML reaches an existing item through automatic reprocessing during sync. Custom source
 headers stay on the configured origin; redirected or linked article and image requests on other
 origins do not receive those headers.
 
@@ -311,6 +312,34 @@ url = "https://heavy.example/feed.xml"
 media_download_strategy = { mode = "compressed", quality = 60, max_axis = 1280 }
 ```
 
+### Progressive JPEG publication
+
+Remote media remains the default. To retain originals and publish eligible images as progressive
+JPEGs, opt into both local preservation and the publication format:
+
+```toml
+[defaults]
+media_download_strategy = "original"
+
+[site]
+media_image_format = "progressive-jpeg"
+```
+
+`media_image_format` defaults to `"original"`, which keeps the existing publication encoding
+policy. The JPEG option changes published copies, never archived masters. It does not download
+remote images during rendering. Use `sync --backfill-media` to fill missing media in an existing
+archive after enabling preservation.
+
+Eligible opaque, 8-bit still images use progressive JPEG at quality 85, with responsive sizes.
+For full-resolution publication, masters above 32 megapixels keep their original bytes with
+bounded responsive JPEG copies.
+Older images eligible for publication compression retain its quality 72 and 1,600-pixel bound.
+A replacement is used only when smaller; transparency, animations, embedded color profiles,
+high-bit-depth images and AVIF keep their existing bytes. Previews use the same opt-in format.
+Derived copies live in a bounded disposable cache. Their published URLs include a content hash,
+so unchanged bytes keep their URL and changed bytes get a new one. Publisher-hosted images remain
+under the publisher's caching policy.
+
 ### Article images
 
 A compressed master is resized to fit `max_axis` with the same high-quality filter the renditions
@@ -330,7 +359,8 @@ bodies and hand edits. Per-feed limits apply before and after backfill; newly sa
 older article families to be removed when the configured byte limit is exceeded.
 
 Under `"original"`, for every accepted JPEG, PNG, GIF, or WebP image, aggr keeps the exact publisher
-response as the master. At build time, when the bounded publication budget permits it, safe static
+response as the master. With the default publication format, when the bounded publication budget
+permits it, safe static
 8-bit images also get responsive
 320, 640, 960, 1280, and 1600-pixel renditions where useful, plus a full-width rendition. These
 are resized once with a high-quality filter, encoded as lossless WebP, then decoded and
@@ -354,7 +384,7 @@ longer than 400 frames are left alone rather than spend a re-encode on every fra
 Expect little from `"compressed"` on a long animation that is heavy in bytes but modest in
 dimensions; what shrinks it is a smaller `max_axis`, not a lower `quality`, which JPEG uses and
 GIF does not. The images a compressed archive cannot reduce at all, and therefore still stores as
-publisher bytes, are colour-managed and high-bit-depth originals, animated WebP and APNG, which
+publisher bytes, are color-managed and high-bit-depth originals, animated WebP and APNG, which
 aggr can decode but not write, and AVIF, which it archives without decoding.
 
 SVG diagrams become passive local PNGs with a bundled font; scripts, external images,

@@ -18,7 +18,7 @@ export const messages = {
   saved: 'Saved in this browser.',
   sessionOnly: 'Applied for this session; browser storage is unavailable.',
   review: 'Review the imported settings before applying them.',
-  cancelled: 'Import cancelled. Your preferences were not changed.',
+  canceled: 'Import canceled. Your preferences were not changed.',
   reset: 'Default preferences restored.',
   resetSessionOnly: 'Defaults applied for this session; browser storage is unavailable.',
   invalidLink: 'This preferences link is invalid or unsupported. Nothing was changed.',
@@ -128,7 +128,7 @@ class Preferences {
   }
 
   /** Drop the pending import, saying why. */
-  cancel(message: string = messages.cancelled): void {
+  cancel(message: string = messages.canceled): void {
     this.pending = null;
     this.status = message;
   }
@@ -159,7 +159,7 @@ class Preferences {
 
 export const preferences = new Preferences();
 
-/** The browser chrome follows the header: its colour is whatever the theme gave `--nav-bg`. */
+/** The browser chrome follows the header: its color is whatever the theme gave `--nav-bg`. */
 export function refreshThemeColor(doc: Document): void {
   const meta = doc.getElementById('theme-color');
   const view = doc.defaultView;

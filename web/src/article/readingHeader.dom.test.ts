@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, testTools } from "../../test/browser";
 import { foldProgress, installReadingHeader } from './readingHeader';
 
 describe('reading header without scroll timelines', () => {
   afterEach(() => {
-    vi.restoreAllMocks();
+    testTools.restoreAllMocks();
     document.body.innerHTML = '';
     delete document.body.dataset.kind;
   });
@@ -19,10 +19,10 @@ describe('reading header without scroll timelines', () => {
     document.body.dataset.kind = 'item';
     document.body.innerHTML = '<header class="itemhead"><h1><span class="itemhead-title">T</span></h1><span class="itemhead-progress"></span></header>';
     const header = document.querySelector('.itemhead') as HTMLElement;
-    vi.spyOn(CSS, 'supports').mockReturnValue(false);
-    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    testTools.spyOn(CSS, 'supports').mockReturnValue(false);
+    testTools.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
     Object.defineProperty(window, 'scrollY', { value: 80, configurable: true });
-    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    testTools.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
       callback(0);
       return 1;
     });

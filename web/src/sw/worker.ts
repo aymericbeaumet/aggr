@@ -20,11 +20,13 @@ export function lifecycle(ctx: WorkerContext): WorkerHandlers {
     install(event) {
       event.waitUntil(
         (async () => {
+          const existing = await ctx.caches.keys();
+          const hadShell = existing.includes(ctx.names.shell);
           const cache = await ctx.caches.open(ctx.names.shell);
           const prefix = `${ctx.names.namespace}shell-`;
-          const previous = (await ctx.caches.keys()).filter((name) => name.startsWith(prefix) && name !== ctx.names.shell);
+          const previous = existing.filter((name) => name.startsWith(prefix));
           // Required shell failures keep the previous working worker installed.
-          await Promise.all(
+          const installed = await Promise.allSettled(
             ctx.config.precache.map(async (entry) => {
               const url = offlineUrl(ctx, entry.url);
               try {
@@ -53,6 +55,11 @@ export function lifecycle(ctx: WorkerContext): WorkerHandlers {
               }
             }),
           );
+          const failed = installed.find((result) => result.status === 'rejected');
+          if (failed?.status === 'rejected') {
+            if (!hadShell) await ctx.caches.delete(ctx.names.shell);
+            throw failed.reason;
+          }
           await ctx.skipWaiting();
         })(),
       );
@@ -61,14 +68,14 @@ export function lifecycle(ctx: WorkerContext): WorkerHandlers {
     activate(event) {
       event.waitUntil(
         (async () => {
-          if (ctx.navigationPreload) await ctx.navigationPreload.enable();
+          if (ctx.navigationPreload) await ctx.navigationPreload.enable().catch(() => {});
           const names = await ctx.caches.keys();
           await Promise.all(names.filter((name) => stale(ctx.names, name)).map((name) => ctx.caches.delete(name)));
           await ctx.clients.claim();
           const settings = await ctx.caches.open(ctx.names.offlineSettings);
           const saved = await settings.match(offlineUrl(ctx, '__offline_count'));
           const count = saved ? Number(await saved.text()) : ctx.config.offline_count;
-          if (validOfflineCount(count)) await configureOffline(ctx, count);
+          await configureOffline(ctx, validOfflineCount(count) ? count : ctx.config.offline_count);
         })(),
       );
     },

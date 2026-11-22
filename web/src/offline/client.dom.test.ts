@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, testTools } from "../../test/browser";
 import { offline } from '../state/offline.svelte';
 import { search, type SearchDriver } from '../state/search.svelte';
 import type { OfflineStatus } from '../sw/messages';
@@ -45,7 +45,7 @@ describe('the worker relay', () => {
   });
 
   it('tells search when a committed index changes, and only then', () => {
-    const refresh = vi.fn();
+    const refresh = testTools.fn();
     search.driver = { refresh } as unknown as SearchDriver;
     offline.receive(status(null));
     expect(offline.search).toBeNull();

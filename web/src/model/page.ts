@@ -1,7 +1,7 @@
-import type { ClientPage } from '../generated/ClientPage';
+import type { ClientPage } from '@aggr-model/ClientPage';
 import { parse } from './parse';
 
-const VIEWS = new Set(['list', 'article', 'preferences', 'offline', 'static']);
+const VIEWS = new Set(['list', 'article', 'preferences', 'offline', 'directory', 'not_found']);
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);

@@ -1,0 +1,362 @@
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand};
+use clap::{CommandFactory as _, FromArgMatches as _};
+
+const ABOUT: &str =
+    "Git-native feed reader and readable web archive: aggr.toml in, static site out.";
+
+const LONG_ABOUT: &str = "\
+aggr reads `aggr.toml`, fetches items from feeds and other sources, stores every item as a
+Markdown file (plus stripped source HTML when available) on an append-only git branch, and
+renders a searchable static archive.
+
+Typical loop:
+
+    aggr dev --demo      # try the reader without creating a project
+    git init            # start a project when you want to keep its archive
+    aggr init --github   # write aggr.toml and the GitHub workflow
+    aggr dev             # preview without committing or pushing
+    aggr build           # sync, then render the site into _site/
+
+Everything the site shows comes from the data branch, so a pinned data commit can be rendered
+without refetching its sources. The storage engine uses ordinary Git; GitHub is the turnkey host,
+not a requirement. A run that finds nothing new leaves no trace.";
+
+#[derive(Debug, Parser)]
+#[command(name = "aggr", version, about = ABOUT, long_about = LONG_ABOUT)]
+#[command(
+    after_help = "Use aggr dev --demo to try the reader. In a source checkout, cargo run -- dev starts contributor tools; --no-watch uses embedded assets."
+)]
+pub struct Cli {
+    /// Path to the configuration file.
+    #[arg(long, global = true, default_value = crate::config::DEFAULT_FILE, env = "AGGR_CONFIG")]
+    pub config: PathBuf,
+
+    /// Increase log verbosity (-v: info, -vv: debug, -vvv: trace).
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+impl Cli {
+    pub fn parse_for_run() -> Self {
+        match Self::try_development_from(
+            std::env::args_os(),
+            std::path::Path::new(crate::config::DEFAULT_FILE).is_file(),
+        ) {
+            Ok(cli) => cli,
+            Err(error) => error.exit(),
+        }
+    }
+
+    fn try_development_from<I, T>(
+        arguments: I,
+        local_config_exists: bool,
+    ) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString>,
+    {
+        let arguments: Vec<std::ffi::OsString> = arguments.into_iter().map(Into::into).collect();
+        let matches = Self::command().try_get_matches_from(arguments)?;
+        let default_config =
+            matches.value_source("config") == Some(clap::parser::ValueSource::DefaultValue);
+        let mut cli = Self::from_arg_matches(&matches)?;
+        if default_config
+            && !local_config_exists
+            && let Command::Dev(args) = &mut cli.command
+        {
+            args.demo = true;
+        }
+        Ok(cli)
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Write a commented aggr.toml (and optionally the GitHub workflow) in the current directory.
+    Init(InitArgs),
+    /// Fetch, commit to the data branch, and push. This is what CI runs.
+    Sync(SyncArgs),
+    /// Sync and render, or render a pinned data ref without syncing.
+    Build(BuildArgs),
+    /// Sync in an isolated cache and render pages on demand with live reload.
+    Dev(DevArgs),
+    /// Remove disposable local caches and owned generated output; preserve archived articles.
+    Clean(CleanArgs),
+    /// Inspect archive storage or remove reproducible image renditions.
+    Storage(StorageArgs),
+    /// Validate the configuration and probe every source.
+    Check,
+    /// Generate shell completions.
+    Completions {
+        /// Shell to generate completions for.
+        shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Debug, Args, Default)]
+pub struct InitArgs {
+    /// Also write .github/workflows/aggr.yml.
+    #[arg(long)]
+    pub github: bool,
+    /// Write every option with its default value instead of the minimal file.
+    #[arg(long)]
+    pub defaults: bool,
+    /// Overwrite existing files.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Args, Default, Clone)]
+pub struct FetchArgs {
+    /// Fetch and report, but do not write anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Rewrite items that already exist (hand edits are lost).
+    #[arg(long)]
+    pub refresh: bool,
+    /// Force local reprocessing even when the extraction code and retained inputs are unchanged.
+    #[arg(long, hide = true)]
+    pub reprocess: bool,
+    /// Fill opted-in media without rewriting retained article bodies.
+    #[arg(long, conflicts_with_all = ["refresh", "reprocess"])]
+    pub backfill_media: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct StorageArgs {
+    #[command(subcommand)]
+    pub command: StorageCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StorageCommand {
+    /// Report archive, Git, output, and disposable cache sizes without fetching.
+    Inspect {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove verified generated renditions, preserving original images and history.
+    PruneRenditions {
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+        /// Commit and safely push the changes; without this flag only report them.
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
+#[derive(Debug, Args, Default, Clone)]
+pub struct SyncArgs {
+    #[command(flatten)]
+    pub fetch: FetchArgs,
+    /// Write fetched data locally, but do not commit or push it.
+    #[arg(long)]
+    pub fetch_only: bool,
+    /// Clean disposable local caches and generated output before syncing; keep the archive.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub clean: bool,
+}
+
+#[derive(Debug, Args, Default)]
+pub struct CleanArgs {
+    /// List exact cleanup targets without creating, changing, or removing any files.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Generated output directory to clean instead of the configured site output; requires .aggr-site.
+    #[arg(long, value_name = "DIR")]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Default, Clone)]
+pub struct BuildArgs {
+    /// Clean disposable local caches and owned output before building; keep the archive.
+    #[arg(long)]
+    pub clean: bool,
+    /// Output directory.
+    #[arg(long, value_name = "DIR")]
+    pub out: Option<PathBuf>,
+    /// Absolute URL the site will be served from (e.g. <https://user.github.io/repo/>).
+    #[arg(long, value_name = "URL", env = "AGGR_BASE_URL")]
+    pub base_url: Option<String>,
+    /// Render this data-branch ref without syncing, committing, or pushing.
+    #[arg(long, value_name = "REF")]
+    pub data_ref: Option<String>,
+    /// Render locally available data without fetching or modifying the archive.
+    #[arg(long)]
+    pub offline: bool,
+    /// Build offline and require all automatically loaded reader resources to be local.
+    #[arg(long)]
+    pub hermetic: bool,
+    /// Write a JSON build report outside the generated site.
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Default)]
+pub struct DevArgs {
+    /// Preview the embedded reader without watching contributor source files.
+    #[arg(long)]
+    pub no_watch: bool,
+    /// Try the embedded starter in an isolated cache, without creating a project.
+    #[arg(long)]
+    pub demo: bool,
+    /// Clean this project's disposable caches and dev data before starting; keep the archive.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub clean: bool,
+    /// Canonical site URL (defaults to the configured site URL).
+    #[arg(long, value_name = "URL", env = "AGGR_BASE_URL")]
+    pub base_url: Option<String>,
+    #[command(flatten)]
+    pub fetch: FetchArgs,
+    /// Port to listen on.
+    #[arg(long, short, default_value_t = 7319)]
+    pub port: u16,
+}
+
+impl DevArgs {
+    pub(crate) fn build_args(&self) -> BuildArgs {
+        BuildArgs {
+            clean: false,
+            out: None,
+            base_url: self.base_url.clone(),
+            data_ref: None,
+            ..Default::default()
+        }
+    }
+}
+
+impl BuildArgs {
+    pub fn is_offline(&self) -> bool {
+        self.offline || self.hermetic || self.data_ref.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    #[test]
+    fn command_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn explicit_reprocessing_remains_compatible_but_is_not_required_in_help() {
+        let commands = ["sync", "dev"];
+        for command in commands {
+            let cli = Cli::try_parse_from(["aggr", command, "--reprocess"]).unwrap();
+            assert!(match cli.command {
+                Command::Sync(args) => args.fetch.reprocess,
+                Command::Dev(args) => args.fetch.reprocess,
+                _ => false,
+            });
+            let mut cli = Cli::command();
+            let help = cli
+                .find_subcommand_mut(command)
+                .unwrap()
+                .render_long_help()
+                .to_string();
+            assert!(!help.contains("--reprocess"));
+        }
+    }
+
+    #[test]
+    fn completions_are_generated_for_every_supported_shell() {
+        use clap_complete::Shell;
+        for shell in [
+            Shell::Bash,
+            Shell::Zsh,
+            Shell::Fish,
+            Shell::PowerShell,
+            Shell::Elvish,
+        ] {
+            let mut script = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "aggr", &mut script);
+            let script = String::from_utf8(script).unwrap();
+            assert!(
+                !script.trim().is_empty(),
+                "{shell}: empty completion script"
+            );
+            assert!(script.contains("aggr"), "{shell}: {script}");
+        }
+    }
+
+    #[test]
+    fn dev_has_local_defaults() {
+        let dev = Cli::try_parse_from(["aggr", "dev"]).unwrap();
+        let Command::Dev(dev) = dev.command else {
+            panic!("expected dev");
+        };
+        assert_eq!(dev.port, 7319);
+        assert!(!dev.no_watch);
+        assert!(Cli::try_parse_from(["aggr", "dev", "--out", "_site"]).is_err());
+        assert!(Cli::try_parse_from(["aggr", "dev", "--data-ref", "HEAD"]).is_err());
+
+        let after_subcommand =
+            Cli::try_parse_from(["aggr", "dev", "--config", "/tmp/reader/aggr.toml"]).unwrap();
+        assert_eq!(
+            after_subcommand.config,
+            PathBuf::from("/tmp/reader/aggr.toml")
+        );
+    }
+
+    #[test]
+    fn contributor_startup_requires_a_command_and_respects_explicit_configuration() {
+        for local_config_exists in [false, true] {
+            assert!(Cli::try_development_from(["aggr"], local_config_exists).is_err());
+            assert!(Cli::try_development_from(["aggr", "-v"], local_config_exists).is_err());
+        }
+        let demo = Cli::try_development_from(["aggr", "dev"], false).unwrap();
+        assert!(matches!(demo.command, Command::Dev(_)));
+        assert!(matches!(&demo.command, Command::Dev(args) if args.demo));
+        assert_eq!(demo.config, PathBuf::from("aggr.toml"));
+        let local = Cli::try_development_from(["aggr", "dev"], true).unwrap();
+        assert_eq!(local.config, PathBuf::from("aggr.toml"));
+        for arguments in [
+            vec!["aggr", "--config", "reader with spaces.toml", "dev"],
+            vec!["aggr", "dev", "--config", "reader with spaces.toml"],
+        ] {
+            let explicit = Cli::try_development_from(arguments, false).unwrap();
+            assert_eq!(explicit.config, PathBuf::from("reader with spaces.toml"));
+        }
+        let build = Cli::try_development_from(["aggr", "build"], false).unwrap();
+        assert_eq!(build.config, PathBuf::from("aggr.toml"));
+    }
+
+    #[test]
+    fn installed_cli_supports_a_demo_without_source_watching() {
+        let cli = Cli::try_parse_from(["aggr", "dev", "--no-watch", "--demo"]).unwrap();
+        assert!(matches!(cli.command, Command::Dev(args) if args.no_watch && args.demo));
+    }
+
+    #[test]
+    fn fetch_is_a_sync_mode_instead_of_a_command() {
+        let cli = Cli::try_parse_from(["aggr", "sync", "--fetch-only", "--refresh"]).unwrap();
+        let Command::Sync(sync) = cli.command else {
+            panic!("expected sync");
+        };
+        assert!(sync.fetch_only);
+        assert!(sync.fetch.refresh);
+        assert!(Cli::try_parse_from(["aggr", "fetch"]).is_err());
+    }
+
+    #[test]
+    fn cleanup_is_explicit_and_never_combined_with_a_fetch_dry_run() {
+        let commands = ["sync", "build", "dev"];
+        for command in commands {
+            assert!(Cli::try_parse_from(["aggr", command, "--clean"]).is_ok());
+        }
+        assert!(Cli::try_parse_from(["aggr", "clean", "--dry-run"]).is_ok());
+        let commands = ["sync", "dev"];
+        for command in commands {
+            assert!(Cli::try_parse_from(["aggr", command, "--clean", "--dry-run"]).is_err());
+        }
+    }
+}

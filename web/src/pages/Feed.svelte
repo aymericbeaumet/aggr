@@ -1,10 +1,7 @@
 <script lang="ts">
-  // `index.html`'s content block: the heading of a scoped list, the search shell, the rows and
-  // the pager. In the browser the river is sliced by the page-size preference and the rows on
-  // screen feed the keyboard cursor; a server render shows the complete static page.
-  import type { ClientList } from '../generated/ClientList';
-  import type { ClientPage } from '../generated/ClientPage';
-  import type { ClientRow } from '../generated/ClientRow';
+  import type { ClientList } from '@aggr-model/ClientList';
+  import type { ClientPage } from '@aggr-model/ClientPage';
+  import type { ClientRow } from '@aggr-model/ClientRow';
   import ListHead from '../feed/ListHead.svelte';
   import Pager from '../feed/Pager.svelte';
   import Row from '../feed/Row.svelte';
@@ -49,7 +46,10 @@
   // unless the results have it; clearing the query hands it back.
   $effect(() => {
     const href = shown.href;
-    if (href && !searching) selection.sync(visible.map((row) => cursorRow(row, shown.root)), href);
+    if (href && !searching) {
+      const rows = visible.map((row) => cursorRow(row, shown.root));
+      untrack(() => selection.sync(rows, href));
+    }
   });
 
   // The rows in front of the reader: the pending entries among them light up and are announced,
@@ -61,9 +61,8 @@
     untrack(() => badges.reveal(onScreen));
   });
 
-  // The list arrived at this address: the search field follows its `?q=`. The catalogue waits
-  // for an idle slice (Pagefind itself waits for a valid query) and loads at once on focus.
-  // Leaving ends the page's work.
+  // The list arrived at this address: the search field follows its `?q=`, and the search module
+  // warms its catalog (Pagefind itself waits for a valid query). Leaving ends the page's work.
   $effect(() => {
     const href = shown.href;
     const root = shown.root;
@@ -86,7 +85,7 @@
 <div data-static-feed hidden={searching}>
 {#if list.rows.length}
 <ol class="rows" role="list" start={offset + 1} style="--rank-indent: {indent}ch">
-{#each list.rows as row, index (row.path)}<Row {row} rank={offset + index + 1} base={page.base} language={page.site.language} hidden={hidden(index)} selected={selected(row)} fresh={marked(row)} />{/each}
+{#each list.rows as row, index (row.path)}<Row {row} rank={offset + index + 1} base={page.base}  language={page.site.language} hidden={hidden(index)} selected={selected(row)} fresh={marked(row)} />{/each}
 </ol>
 {:else}
 <p class="empty">Nothing here yet.</p>

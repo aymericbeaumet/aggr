@@ -1,28 +1,9 @@
-mod cache;
-mod cli;
-mod commands;
-mod config;
-mod content;
-mod discussions;
-mod document;
-mod git;
-mod http;
-mod media;
-mod media_duration;
-mod model;
-mod platform;
-mod preview;
-mod site;
-mod sources;
-mod store;
-mod threads;
+use aggr_lib::{cli, commands};
 
 use std::process::ExitCode;
 
-use clap::Parser;
-
 fn main() -> ExitCode {
-    let cli = cli::Cli::parse();
+    let cli = cli::Cli::parse_for_run();
     let level = match cli.verbose {
         0 => "warn",
         1 => "info",

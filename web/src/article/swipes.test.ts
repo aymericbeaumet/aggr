@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { swipeOutcome, touchCapable, vertical } from './swipes';
 
 describe('touchCapable', () => {
@@ -25,7 +25,7 @@ describe('swipeOutcome', () => {
 });
 
 describe('vertical', () => {
-  it('recognises a scroll once the finger has clearly moved up or down', () => {
+  it('recognizes a scroll once the finger has clearly moved up or down', () => {
     expect(vertical(-10, -320)).toBe(true);
     expect(vertical(5, 13)).toBe(true);
     expect(vertical(40, 10)).toBe(false);

@@ -1,5 +1,5 @@
 import { flushSync, mount, unmount } from 'svelte';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, testTools } from "../../test/browser";
 import NowPlaying from '../app/NowPlaying.svelte';
 import { enhanceAudio } from './audio';
 import { dismiss, resetPlayback } from './now-playing';
@@ -21,7 +21,7 @@ const CARD = `<div class="native-audio has-artwork" data-audio-player data-audio
 type Started = {
   card: HTMLElement;
   audio: HTMLAudioElement;
-  pause: ReturnType<typeof vi.fn>;
+  pause: ReturnType<typeof testTools.fn>;
   /** Load the length and press play. Call after any setup that must precede promotion. */
   begin(): void;
 };
@@ -31,6 +31,7 @@ function arm(src = 'episode.mp3'): Started {
   holder.innerHTML = CARD.replaceAll('episode.mp3', src);
   document.body.append(holder);
   const card = holder.firstElementChild as HTMLElement;
+  card.getBoundingClientRect = () => new DOMRect(0, -200, 200, 100);
   const audio = card.querySelector('audio') as HTMLAudioElement;
   let paused = true;
   let length = NaN;
@@ -45,20 +46,20 @@ function arm(src = 'episode.mp3'): Started {
     ended: { get: () => false, configurable: true },
     error: { get: () => null, configurable: true },
   });
-  const pause = vi.fn(() => {
+  const pause = testTools.fn(() => {
     if (paused) return;
     paused = true;
     audio.dispatchEvent(new Event('pause'));
   });
   Object.assign(audio, {
-    play: vi.fn(() => {
+    play: testTools.fn(() => {
       paused = false;
       audio.dispatchEvent(new Event('play'));
       audio.dispatchEvent(new Event('playing'));
       return Promise.resolve();
     }),
     pause,
-    load: vi.fn(),
+    load: testTools.fn(),
   });
   enhanceAudio(card, new AbortController().signal);
   return {

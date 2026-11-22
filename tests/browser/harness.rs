@@ -74,14 +74,7 @@ impl Fixture {
         let root = self.directory.path();
         git(root, &["fetch", "-q", ".aggr/data", "aggr:aggr"])?;
         let output = aggr_command(root)
-            .args([
-                "build",
-                "--data-ref",
-                "aggr",
-                "--release",
-                "--base-url",
-                &self.base,
-            ])
+            .args(["build", "--data-ref", "aggr", "--base-url", &self.base])
             .output()?;
         if !output.status.success() {
             bail!(
@@ -210,14 +203,7 @@ impl Fixture {
         )?;
         let out = root.join("_site");
         let output = aggr_command(root)
-            .args([
-                "build",
-                "--data-ref",
-                "aggr",
-                "--release",
-                "--base-url",
-                &base,
-            ])
+            .args(["build", "--data-ref", "aggr", "--base-url", &base])
             .output()?;
         if !output.status.success() {
             bail!("fixture build: {}", String::from_utf8_lossy(&output.stderr));

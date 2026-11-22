@@ -1,11 +1,11 @@
 <script lang="ts">
-  // The preferences form, part of the app shell: every control comes from the typed table in
+  // The preferences form, loaded with the page: every control comes from the typed table in
   // src/config/preferences.rs, through the page model's schema, and shows the loaded state.
   // The markup keeps the ids, classes and `data-preference` attributes `style.css` and the
   // browser suite address.
   import { flushSync, onMount } from 'svelte';
-  import type { PreferenceField } from '../generated/PreferenceField';
-  import type { PreferenceSchema } from '../generated/PreferenceSchema';
+  import type { PreferenceField } from '@aggr-model/PreferenceField';
+  import type { PreferenceSchema } from '@aggr-model/PreferenceSchema';
   import type { PreferenceValue } from './rules';
   import { openShortcutHelp } from '../shortcuts/help';
   import { page as shown } from '../state/page.svelte';
@@ -16,7 +16,8 @@
 
   const values = $derived(preferences.values ?? {});
   const fields = $derived(new Map(schema.groups.flatMap((group) => group.fields.map((field) => [field.key, field] as const))));
-  const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+  let canShare = $state(false);
+  let ready = $state(false);
   const root = () => shown.root || document.baseURI;
 
   let link = $state('');
@@ -75,12 +76,16 @@
     if (!('command' in HTMLButtonElement.prototype)) openShortcutHelp();
   }
 
-  onMount(() => importFragment());
+  onMount(() => {
+    ready = true;
+    canShare = typeof navigator.share === 'function';
+    importFragment();
+  });
 </script>
 
 {#snippet help(id: string, label: string, explanation: string)}<details class="preference-help"><summary aria-label={label} title={explanation}>?</summary><span {id} class="preference-help-text">{explanation}</span></details>{/snippet}
 
-<fieldset id="preferences-controls" class="preferences-controls">
+<fieldset id="preferences-controls" class="preferences-controls" disabled={!ready} hidden={!ready}>
 {#each schema.groups as group (group.id)}
 <section class="preferences-group" aria-labelledby="{group.id}-heading">
   <h2 id="{group.id}-heading">{group.title}</h2>

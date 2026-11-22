@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "../../test/browser";
 import { facetPage, facetUrl, isSiteReference, sitePath, urlFor } from './urls';
 
 describe('sitePath', () => {
@@ -46,4 +46,10 @@ describe('facetUrl', () => {
     expect(facetUrl('./', 'Web Dev', 'tag')).toBe('./?q=tag%3A%22Web+Dev%22');
     expect(facetUrl('./', 'say "hi"', 'tag')).toBe('./?q=tag%3A%22say+%5C%22hi%5C%22%22');
   });
+});
+
+import { sourceSet } from './urls';
+it('rebases generated source sets without splitting CDN URL commas', () => {
+  expect(sourceSet('../../', 'assets/small.webp 640w, https://cdn.test/image,width=1280,height=720/photo.webp 1280w'))
+    .toBe('../../assets/small.webp 640w, https://cdn.test/image,width=1280,height=720/photo.webp 1280w');
 });

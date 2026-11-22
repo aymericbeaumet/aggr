@@ -5,19 +5,28 @@ static-host agnostic. GitHub is the turnkey path, not a requirement.
 
 ## Installing the binary
 
-Install a prebuilt binary with
+Install the v3.0.0 binary with
 [mise's GitHub backend](https://mise.jdx.dev/dev-tools/backends/github.html):
 
 ```sh
-mise use -g github:aymericbeaumet/aggr@2.0.0
+mise use -g github:aymericbeaumet/aggr@3.0.0
 aggr --version
 ```
+
+Git must also be installed to manage the archive. Linux release binaries are built on Ubuntu
+24.04 and require glibc 2.39 or newer. On an older Linux distribution, follow the
+[mise source setup](native-toolchain.md#reproduce-the-development-environment), run
+`mise run release`, and use `target/release/aggr`. Source builds require Rust 1.98 or newer and
+the [native build dependencies](interoperability.md#http-extraction-and-native-builds).
 
 Or download the archive for your OS and architecture from
 [GitHub Releases](https://github.com/aymericbeaumet/aggr/releases/latest), verify it against the
 release's `SHA256SUMS`, and put the extracted `aggr` executable on your `PATH`. Release binaries
 are available for Linux, macOS, and Windows on amd64 and arm64. Change the version after reviewing
 the [migration guide](sources.md#upgrading-from-112-to-20) when moving between major releases.
+
+The release also has publication jobs for Homebrew and crates.io. Check their status for the
+selected tag before using these channels. See the [release pipeline](distribution.md).
 
 ## Adding aggr to an existing GitHub repository
 
@@ -38,14 +47,17 @@ The generated workflow requests a run at minutes 7 and 37 of every hour (UTC), a
 nested TOML configuration changes on the repository's actual default branch. Push events
 from other branches are ignored; scheduled and manual runs remain available.
 
-The generated workflow uses `@v2`. On every run, this stable workflow reference resolves the
-greatest published `v2.x.y` binary, so compatible releases reach instances without a workflow
-edit. The `@v1` workflow continues to use the latest published v1 binary (v1.12.0); it does not
-read a v2 configuration. [Migrate the config](sources.md#upgrading-from-112-to-20) before changing
-an existing workflow from `@v1` to `@v2`. These reusable workflows are rolling major channels:
-pinning only the workflow tag does not also pin the binary. A custom job can use the composite
-action at an immutable `@vX.Y.Z` tag with the same exact `version` input when both pieces must
-be frozen.
+The v3 CLI generates a workflow using `@v3`. It selects the greatest published v3 binary on
+each run. Instances using `@v2` continue receiving v2 binaries, and `@v1` selects v1.
+For a custom job that must freeze both workflow and binary, pin the composite action to
+an immutable `@vX.Y.Z` tag and pass that same exact `version` input.
+
+**Upgrading a v2 instance.** Change the reusable workflow reference from `@v2` to `@v3` when
+you want the new reader. The v2 source configuration and archive can be reused. In custom jobs
+and scripts, change `aggr build --release` to `aggr build`, which now always produces publication
+output. To preview that output locally, run `aggr build` and serve `_site/`. For a live preview,
+run `aggr dev`. In a contributor checkout, `aggr dev --no-watch` serves the embedded reader.
+If upgrading from v1, first [migrate the source configuration](sources.md#upgrading-from-112-to-20).
 
 Private repositories need a GitHub plan that supports private Pages. To build without Pages and
 keep the result as a workflow artifact, add the input to the generated job:
@@ -53,7 +65,7 @@ keep the result as a workflow artifact, add the input to the generated job:
 ```yaml
 jobs:
   aggr:
-    uses: aymericbeaumet/aggr/.github/workflows/aggr.yml@v2
+    uses: aymericbeaumet/aggr/.github/workflows/aggr.yml@v3
     with:
       pages: false
 ```
@@ -110,7 +122,6 @@ Configure the provider's scheduler to run this from a normal Git checkout:
 
 ```sh
 aggr build \
-  --release \
   --base-url "https://reads.example.net/" \
   --out _site
 ```
@@ -159,14 +170,14 @@ If you want search engines to index your public reader, opt in explicitly:
 indexing = true
 ```
 
-This takes effect only in `aggr build --release`. Development and preview builds always use
-`noindex,follow`, even with indexing enabled. An enabled release build emits a sitemap when its
+This takes effect in every `aggr build`. Preview preserves the same indexing metadata but sends
+an HTTP `X-Robots-Tag: noindex` header. An enabled build emits a sitemap when its
 public URL is known. At an origin root, `robots.txt` permits crawling and advertises that sitemap;
 with indexing disabled it still permits crawling so engines can read the page's `noindex` directive.
 An instance under a subpath does not write `robots.txt`, since that file only governs an origin
 when served at its root. The templates keep `page.indexable` in their robots metadata.
 
-Every published article keeps its self-canonical URL and visibly labelled original URL. Original
+Every published article keeps its self-canonical URL and visibly labeled original URL. Original
 provenance also appears in structured data, feeds, portable representations, and `linkset.json`.
 The canonical identifies the local snapshot; it does not claim authorship of the upstream work.
 

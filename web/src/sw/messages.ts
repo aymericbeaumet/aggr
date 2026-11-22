@@ -29,7 +29,7 @@ export interface OfflineStatus {
   type: 'AGGR_OFFLINE_STATUS';
   /** The configured download limit. */
   requested: number;
-  /** How many catalogue articles that limit covers. */
+  /** How many catalog articles that limit covers. */
   total: number;
   /** Articles whose page and every rendition are stored. */
   saved: SavedArticle[];
@@ -54,7 +54,7 @@ export interface ClaimMessage {
   type: 'claim';
 }
 
-/** Save the first `count` catalogue articles, and the search index when `count` is positive. */
+/** Save the first `count` catalog articles, and the search index when `count` is positive. */
 export interface OfflineConfigMessage {
   type: 'AGGR_OFFLINE_CONFIG';
   count: number;
@@ -70,7 +70,7 @@ export interface BuildRequest {
 
 export type PageMessage = ClaimMessage | OfflineConfigMessage | OfflineStatusRequest | BuildRequest;
 
-/** The most articles a configuration may select; the catalogue never lists more. */
+/** The most articles a configuration may select; the catalog never lists more. */
 export const OFFLINE_COUNT_LIMIT = 1000;
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

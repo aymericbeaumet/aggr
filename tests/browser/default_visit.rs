@@ -101,7 +101,7 @@ async fn default_visit_downloads_only_the_reader_shell_until_intent() -> Result<
         anyhow::ensure!(idle["external"] == serde_json::json!([]), "unexpected external requests: {idle}");
         let served = fixture.served_bytes.load(std::sync::atomic::Ordering::Relaxed);
         eprintln!("default first visit: {served} uncompressed HTTP response bytes including worker requests; {} browser timing transfer bytes", idle["transfer"]);
-        anyhow::ensure!(served <= 1024 * 1024, "default fixture visit exceeded 1 MiB including worker installation: {served} bytes");
+        anyhow::ensure!(served <= 1024 * 1024, "default fixture visit exceeded 1 MiB including worker installation: {served} bytes; assets: {:?}", fixture.media.asset_requests.lock().expect("fixture asset requests"));
         screenshot(&client, "default-first-visit").await?;
         client.find(Locator::Css("#q")).await?.send_keys("article").await?;
         wait_for(&client, "document.querySelector('#list')?.getAttribute('aria-busy') === 'false' && document.querySelectorAll('#list .row').length > 0").await?;

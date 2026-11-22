@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from "../../test/browser";
 import { announcer } from '../state/announcer.svelte';
 import { fresh } from '../state/fresh.svelte';
 import { Badges, lastSeenKey, newEntriesKey } from './badges';

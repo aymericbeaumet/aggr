@@ -4,7 +4,7 @@ import { dateMatches, FACET_FIELDS, type FilterKind, type Query } from './query'
 import type { Catalog, Facet, Matches, Pagefind, PagefindModule, PagefindResult, ResultRef } from './types';
 
 /**
- * The index behind the field. Pagefind builds and serves it; this loads the catalogue, brings
+ * The index behind the field. Pagefind builds and serves it; this loads the catalog, brings
  * the runtime up on demand, and applies every clause to complete result-ID sets before
  * anything is counted or paged.
  */
@@ -23,18 +23,18 @@ const RETAINED_VERSIONS = 2;
 export type Filters = Record<string, { any?: string[]; none?: string[] }>;
 
 /** Turn the parsed query's facet and date clauses into Pagefind's filter shape. */
-export function buildFilters(query: Query, catalogue: Catalog): Filters {
+export function buildFilters(query: Query, catalog: Catalog): Filters {
   const filters: Filters = {};
   for (const field of FACET_FIELDS) {
     const clauses = query.clauses.filter((clause) => clause.kind === 'facet' && clause.field === field);
-    const resolve = (value: string) => resolveFacet(value, catalogue.facets[field] ?? [], field).value;
+    const resolve = (value: string) => resolveFacet(value, catalog.facets[field] ?? [], field).value;
     const any = [...new Set(clauses.filter((clause) => !clause.exclude).map((clause) => resolve(clause.value)))];
     const none = [...new Set(clauses.filter((clause) => clause.exclude).map((clause) => resolve(clause.value)))];
     if (any.length || none.length) filters[field] = { ...(any.length ? { any } : {}), ...(none.length ? { none } : {}) };
   }
   const dates = query.clauses.filter((clause) => clause.kind === 'date');
   if (dates.length) {
-    const days = (catalogue.facets['published-day'] ?? [])
+    const days = (catalog.facets['published-day'] ?? [])
       .map((facet) => facet.value)
       .filter((value) => dates.every((clause) => dateMatches(clause, value)));
     filters['published-day'] = { any: days.length ? days : ['__no_published_day__'] };
@@ -73,7 +73,7 @@ export function limiter(size: number): <T>(task: () => Promise<T>) => Promise<T>
 /** One page of hydrated results and the count they were cut from. */
 export type SearchPage = { results: PagefindResult[]; total: number; page: number; pages: number; size: number };
 
-/** One immutable catalogue and its lazily initialized runtime. */
+/** One immutable catalog and its lazily initialized runtime. */
 export type Index = {
   readonly manifest: Catalog;
   /** No new work; the runtime is released once what is under way has finished. */
@@ -317,10 +317,10 @@ export function createIndex(base: string, manifest: Catalog, importAPI: ImportAP
   };
 }
 
-/** A session keeps catalogue and runtime versions coherent across page navigation. */
+/** A session keeps catalog and runtime versions coherent across page navigation. */
 export type Session = {
   load(refresh?: boolean): Promise<Index>;
-  /** The content may have changed: the next load revalidates the catalogue. */
+  /** The content may have changed: the next load revalidates the catalog. */
   stale(): void;
   /** The network came or went: returns whether that changed which index is current. */
   network(online?: boolean): boolean;
@@ -330,7 +330,7 @@ export type Session = {
 /** Node has no `onLine`; anywhere it is unknown, the network is assumed. */
 export const isOnline = (): boolean => typeof navigator === 'undefined' || navigator.onLine !== false;
 
-const defaultImport: ImportAPI = (url) => import(/* @vite-ignore */ url) as Promise<PagefindModule>;
+const defaultImport: ImportAPI = (url) => import(url) as Promise<PagefindModule>;
 
 export function createSession(base: string, importAPI: ImportAPI = defaultImport, online = isOnline()): Session {
   const versions = new Map<string, Index>();
@@ -349,9 +349,9 @@ export function createSession(base: string, importAPI: ImportAPI = defaultImport
       try {
         const saved = offline.search;
         if (!online && (!saved?.activeVersion || !saved.base)) throw new Error('A complete offline search index is not saved.');
-        const catalogueBase = online ? base : new URL(saved?.base ?? '', base).href;
-        const response = await fetch(new URL('search-catalog.json', catalogueBase).href, { cache: 'no-store', signal: lifetime.signal });
-        if (!response.ok) throw new Error('Search catalogue unavailable.');
+        const catalogBase = online ? base : new URL(saved?.base ?? '', base).href;
+        const response = await fetch(new URL('search-catalog.json', catalogBase).href, { cache: 'no-store', signal: lifetime.signal });
+        if (!response.ok) throw new Error('Search catalog unavailable.');
         const manifest = (await response.json()) as Catalog;
         lifetime.signal.throwIfAborted();
         if (token !== generation) return load();
@@ -364,7 +364,7 @@ export function createSession(base: string, importAPI: ImportAPI = defaultImport
           !manifest.facets ||
           (!online && manifest.version !== saved?.activeVersion)
         ) {
-          throw new Error('Invalid search catalogue.');
+          throw new Error('Invalid search catalog.');
         }
         const key = JSON.stringify([manifest.version, bundle.href]);
         current = versions.get(key) ?? createIndex(base, manifest, importAPI, lifetime.signal);

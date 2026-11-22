@@ -1,38 +1,37 @@
 # Rendering
 
-aggr renders its reader from the MiniJinja templates and static files under `src/theme/`,
-compiled into the binary. There is one design: no theme setting, no template override, and no
-`[site.params]` (that table is rejected). Changing the reader means changing this repository.
-A development binary reads those files from the source tree, so `aggr dev` picks up template,
-CSS and client edits without recompiling. Feed rows show the title and its metadata. An item's
-excerpt still feeds descriptions, collection feeds, and search documents.
+aggr prepares archive display data in Rust and renders the reader with shared Svelte components
+under `web/`. Cargo compiles and embeds the UI; installed binaries render it in isolated QuickJS
+runtimes without Node. There is one design: no theme setting, template override, or `[site.params]`.
+Changing the reader means changing this repository. The native compiler swaps renderer and asset
+bundles in the running server for fast reload. See [client development](client.md).
 
-## Template data and URLs
+Publication and lazy development share archive preparation, page rendering, and one inventory of
+fixed pages and collections. Publication writes the complete site; ordinary dev resolves those
+same routes on request and defers article media and search until needed. Its Axum HTTP adapter
+serves atomic snapshots, keeping the last good generation when preparation fails.
 
-Every page receives `site`, `page`, and `build`. Collection pages receive `items` and paginator
-metadata; an article page receives `item`, including its rendered `body_html`. The complete field
-definitions live in [`src/site/context.rs`](../src/site/context.rs).
+## Page data and URLs
 
-`site.indexing` is true only for release builds with `[site] indexing = true`; it defaults to false.
-`page.indexable` additionally excludes utility pages. The base template does this:
+Rust's display contexts live in `crates/aggr-lib/src/site/context.rs`; the serialized contract lives in
+`crates/aggr-ui-model`. `crates/aggr-lib/src/site/page.rs` prepares the head, URLs, directories and page model.
+Article HTML is sanitized and passed separately from the JSON model.
 
-```jinja
-<meta name="robots" content="{{ 'index,follow' if page.indexable else 'noindex,follow' }}">
-```
+`site.indexing` follows `[site] indexing = true`; utility pages
+remain excluded. The shared head component emits the corresponding robots metadata.
 
-Preview and development builds always request `noindex`. Local search and feeds remain available
+Preview requests `noindex` through HTTP headers without changing generated HTML. Local search and feeds remain available
 regardless of this setting; see [public hosting](hosting.md#publication-and-search-indexing).
 
 Items and recommendation links also expose `metadata`, the precomputed display view shared with search:
 source identity, category, publication/update dates, reading statistics, and resolved discussions.
 Hacker News points and comment counts stay in the stored front matter as provenance and are not
 shown; the discussion link is the thread. When that link was not found, the comments URL stays,
-without a count. Other recorded counts, including Lobsters, stay visible. The default
-metadata partial uses this shared view; values must still be escaped normally.
+without a count. Other recorded counts, including Lobsters, stay visible. The shared metadata component uses this view and escapes display values.
 Source filter links use `metadata.source_query`; `metadata.source_slug` remains the stable index
 identifier. Source directory entries and `metadata.feed_sources` expose these as
 `query_value` and `slug`; both contain the canonical hostname. Names are presentation labels and
-optional manual search aliases, never generated source-link values. Pass these values through `facet_url('source')` so
+optional manual search aliases, never generated source-link values. Pass these values through the shared facet URL helper so
 quotes, backslashes, and URL characters remain correctly escaped.
 
 Confirmed subscription gates set `item.extra.subscription_required` and a validated
@@ -48,50 +47,44 @@ leaves author/social lists, tables of contents, code, later paragraphs, and ordi
 Resources are separate from topic tags. Reader excerpts, search text, and reading statistics omit
 that opening group; portable representations and feed content retain the links in their original
 paragraph; plain-text and reStructuredText exports also list their destinations under Resources.
-Stored Markdown and publisher metadata remain unchanged. The article template renders
-`item.resources` alongside `item.body_html`.
+Stored Markdown and publisher metadata remain unchanged. The article component renders resources alongside the sanitized body.
 
-Every page also embeds its typed model in `<script id="aggr-page">` (`src/site/client.rs`). The
-client mounts from that model over the rendered chrome and adopts the article's content region
-and static pages' `<main>` as they are, so the HTML stays complete without JavaScript and the
-components that mirror a partial must reproduce it exactly (see the parity fixtures in
-[client development](client.md)). Site generation requires no JavaScript runtime.
+Rendering never rewrites stored Markdown. During sync, changed extraction code or retained inputs
+automatically re-derive bodies from complete local HTML before source fetching begins. Missing or
+truncated companions preserve the current body. A disposable receipt keyed by the embedded
+implementation, locked dependencies, HTML, and article inputs skips unchanged conversions; it is
+never stored on the archive branch. See [refreshing and reprocessing](commands.md#refreshing-and-reprocessing).
+
+Every page embeds its typed model in `<script id="aggr-page">`. The client hydrates the same
+Svelte components used for server rendering, and navigation updates their data. Search uses the
+same row component as feeds. See [client development](client.md).
 
 Article contexts also expose `item.word_count` and `item.reading_minutes`. Both are derived from
 the visible Unicode text at build time, with reading time rounded up at 225 words per minute; an
-empty/title-only body reports zero for each. The default theme shows reading time beside
+empty/title-only body reports zero for each. The reader shows reading time beside
 publication, exposes the word count on hover, and emits `wordCount` plus an ISO 8601
 `timeRequired` duration in structured data.
 
 Every non-utility page advertises the site feeds: `page.feed_path` is the collection prefix (`""`
 at the root) and `page.feed_title` the title to label its Atom, RSS and JSON Feed alternates with;
 404 and offline pages carry neither. `site.language` is the `[site] language` BCP 47 tag that the
-base template writes to `<html lang>`, and `site.og_locale` is the same value in Open Graph form
+head component writes to `<html lang>`, and `site.og_locale` is the same value in Open Graph form
 (`en_GB`). `sources[].language` is the BCP 47 tag a publisher declares for its whole feed (RSS
-`<language>`, Atom `xml:lang`, JSON Feed `language`), canonicalised and recorded in the source
+`<language>`, Atom `xml:lang`, JSON Feed `language`), canonicalized and recorded in the source
 state, and `item.language` inherits it; both are absent when the feed declares none. The reader
 adds `lang` to the article element and the feed-row title only when that tag differs from
 `site.language`, so a single-language instance renders exactly as before.
 `sources[].feed_url` is the resolved feed endpoint when one is known, which the build
 also publishes as `sources.opml` for other readers alongside `llms.txt` and `aggr.json`.
 
-Use `url_for` for internal pages and assets so the same output works at `/`, under a nested
-mount, or from a file. It resolves the site-relative path from the page being rendered (for
-example `../../../browse/` on an article page), so documents carry no `<base>` element and
-fragment links such as footnotes stay on the current page. `site_path` is the same location
-relative to the site root, the form the page model carries so the client can resolve it against
-the page's `base`, and the one to join onto `site.base_url`; `item.body_html | rebase` points the site-relative media inside an
-article body at the page. Static asset names are content-hashed during the build. Public
-canonical and social URLs should use `site.base_url` only when it is available.
+Internal page and asset URLs are resolved relative to the rendered page, so output works at `/`,
+beneath a nested mount, or from a file. Documents carry no `<base>` element, preserving footnote
+fragments. The model's `base` lets the client resolve site-relative paths. Rust rebases local media
+inside article bodies before rendering. Public canonical and social URLs use the configured
+absolute site URL when available.
 
-```jinja
-<a href="{{ item.url | url_for }}">{{ item.title }}</a>
-<link rel="stylesheet" href="{{ 'assets/style.css' | url_for }}">
-```
-
-HTML templates escape values automatically. `item.body_html` is already sanitized and may be
-rendered with `|safe`; do not apply that filter to arbitrary source text or serve stored HTML
-without sanitizing it.
+Svelte escapes display values automatically. Only the separately sanitized article body is
+inserted as opaque HTML; never insert arbitrary source text or serve stored HTML without sanitizing it.
 
 A link shared into a chat or a social app unfurls from `og:`/`twitter:` metadata: the title, the
 article's own excerpt, and the lead image when the article has one, else its thumbnail, else the
@@ -110,30 +103,22 @@ optional object:
 | `width`, `height` | Intrinsic image dimensions in pixels. |
 | `alt` | Optional image description. |
 | `color` | Optional validated `#rrggbb` dominant color for a loading placeholder. |
-| `placeholder.hash` | Base64 ThumbHash generated from the oriented image; `data_url` is decoded from it, and the build caches it. The default theme does not emit it. |
+| `placeholder.hash` | Base64 ThumbHash generated from the oriented image; `data_url` is decoded from it, and the build caches it. The reader does not emit it. |
 | `placeholder.data_url` | Inline PNG decoded from the ThumbHash during the Rust build. |
 
-```jinja
-{% if item.preview %}
-<span class="preview-media"
-      style="--preview-color: {{ item.preview.color }}; --image-preview: url('{{ item.preview.placeholder.data_url }}')">
-  <img src="{{ item.preview.url | url_for }}"
-       width="{{ item.preview.width }}" height="{{ item.preview.height }}"
-       alt="{{ item.preview.alt or '' }}" loading="lazy" decoding="async">
-</span>
-{% endif %}
-```
+`Preview.svelte` renders the image, its dimensions, and its inline placeholder from this data.
 
 Reserve the thumbnail's space before it loads and let rows without images use their full width.
-The default theme displays an inline ThumbHash preview immediately, including before scripts run;
+The reader displays an inline ThumbHash preview immediately, including before scripts run;
 there is no placeholder network request or client decoder. The dominant color remains a fallback.
 It uses the same placeholders in lists, search, article media, and podcast covers. Preview
-URLs are content-addressed, lossless WebP assets.
+URLs are content-addressed assets: lossless WebP by default, or eligible progressive JPEGs when
+`site.media_image_format = "progressive-jpeg"`.
 
 ## Archived article images
 
 `item.body_html` already substitutes verified local article media when available. The portable
-stored Markdown still contains the publisher URL; the article template renders `body_html`
+stored Markdown still contains the publisher URL; the article component renders the sanitized body
 unchanged rather than performing its own URL substitution. A safe static image with a
 complete set of lossless renditions is emitted approximately as:
 
@@ -157,6 +142,11 @@ and `fetchpriority="high"`; subsequent images use native lazy loading. Preserve
 `--image-preview`, `--image-placeholder`, and loading attributes when styling or post-processing the generated
 body.
 
+With `site.media_image_format = "progressive-jpeg"`, eligible locally retained still images instead
+publish progressive JPEG masters and responsive copies, with `type="image/jpeg"` on the source.
+Conversion never changes archived originals or fetches remote resources. See
+[media configuration](sources.md#progressive-jpeg-publication) for eligibility and encoding defaults.
+
 Linked status badges keep compact intrinsic dimensions and never become article heroes or feed
 previews. Pending progressive images suppress visible linked alt text until load or failure, while
 screen-reader descriptions and readable error/no-script fallbacks remain available.
@@ -169,9 +159,9 @@ Preferences. Publisher-hosted fallback images and embedded audio/video are outsi
 
 ## Reader behavior
 
-The default theme uses plain links, a responsive header with visible navigation, system fonts, and a reading
+The reader uses plain links, a responsive header with visible navigation, system fonts, and a reading
 column of approximately 65 characters. Its warm light/dark palettes, focus styling, and code
-colors are defined in `static/style.css`. Code is highlighted during Rust rendering with `syntax-`
+colors are defined in `web/src/style.css`. Code is highlighted during Rust rendering with `syntax-`
 span classes and a small `.code-snippet[data-language]` label. Publisher language hints take
 precedence over conservative detection; a snippet whose language stays ambiguous carries no
 `data-language` attribute at all, so the label disappears rather than reading “Text”. Labels are
@@ -183,12 +173,11 @@ itself stays one layout box so its header and body columns line up, and a header
 for a source table that had none is hidden. Selecting article text mounts a
 `.selection-share` toolbar; see [the reader](reading.md#sharing-a-passage).
 
-The client and the templates share these relationships:
+The components and their behavior share these relationships:
 
-- `<div id="app">` wraps the header, the tab bar, `<main id="content">` and the footer; the
-  client replaces it with its own render of the same markup and keeps everything outside it (the
-  skip link, the announcer, the shortcut dialog, the scripts) static. The `#aggr-page` JSON in the
-  head is the model both the templates and the client render from.
+- `<div id="app">` wraps the header, the tab bar, `<main id="content">` and the footer. The
+  client hydrates these nodes in place. Navigation updates the shared component tree from the
+  next `#aggr-page` model and sanitized article body, retaining persistent chrome and playback.
 - Primary navigation links use `data-route` and `data-kinds` for destination and active state.
   `browse`, `preferences`, and aggr.toml are visible in the desktop header. Mobile navigation uses
   feed, browse, and preferences in a fixed, inset rounded bar with a selected-tab surface.
@@ -196,26 +185,25 @@ The client and the templates share these relationships:
   Search stays pinned below the header on every platform and does not move as the feed scrolls;
   keep its results outside the sticky toolbar.
   Category/source/tag feeds show their scope beside it. The brand returns to the main feed. Facet links use the
-  `facet_url` filter to open the main feed with a quoted search qualifier. Static archives remain at
+  facet URL helper to open the main feed with a quoted search qualifier. Static archives remain at
   `sources/<slug>/`, `categories/<slug>/`, and `tags/<slug>/`; `/browse/` combines the directories. See [client development and search](client.md) for syntax and ownership.
 - Article lists use `.rows .row`, with a `[data-row-open]` title link. `.is-selected` identifies the
   remembered keyboard cursor. Its bar is the 3px mark in the row bleed, beside the column. The sticky
   search field paints that gutter through its bottom border, so the mark disappears at that line.
-  `_item.html` and `Row.svelte` render the same row; search results reuse the component.
+  `Row.svelte` renders feed and search rows.
 - The client may divide one generated page into smaller `?feed-page=N` views; every row must
   remain in the HTML so no-JavaScript readers and crawlers see the complete static page. Article
   chronology and the pager come from the page model.
 - Search results may arrive in stages. Preserve a focused title by URL when adding results;
   typing a new query must not move focus or let a stale response replace the current results.
 
-Preferences use one typed schema in the head of `base.html` (`#aggr-preferences`), applied before
-the stylesheet so saved appearance never flashes. The client reuses that schema for its form,
-validation, sharing, and import/export. The base template
-must retain that bootstrap. Controls identify their setting with `data-preference`; changing one
+Preferences use one typed schema in the head (`#aggr-preferences`), applied by the blocking
+bootstrap before first paint. Stylesheets and preloads precede it. The client reuses the schema
+for its form, validation, sharing, and import/export. Controls identify their setting with `data-preference`; changing one
 persists only the allowlisted `aggr:<setting>` local-storage key.
 
 Site owners define initial values for every setting in `[preferences]`; the typed Rust schema
-in `src/config/preferences.rs` supplies `site.preferences` as browser JSON. Device values take
+in `crates/aggr-lib/src/config/preferences.rs` supplies `site.preferences` as browser JSON. Device values take
 precedence, and resetting preferences returns to the site's defaults. See
 [`config.default.toml`](../config.default.toml) for all choices.
 
@@ -270,12 +258,12 @@ search matches.
 
 The service worker requests fresh HTML and falls back to its last complete copy if the network
 fails or exceeds the bounded deadline. `updates.json` separates the application fingerprint (aggr version and
-effective template/static files) from the content fingerprint. Browsers check it every 15 seconds while
+the embedded renderer and assets) from the content fingerprint. Browsers check it every 15 seconds while
 visible, when returning to the app, and when reconnecting, including sites with PWA mode disabled.
 New content refreshes the feed and search index without reloading the document or showing an app
 update prompt, including while a separate application release awaits refresh. Returning to a feed
 also checks its displayed content version so stale navigation entries are replaced automatically.
-List selection and reading position are retained; an open article stays in place. Dev build events check immediately and queue another check if an earlier request is still in flight.
+List selection and reading position are retained; an open article stays in place. Development snapshot changes reload through a client injected only by the debug preview server.
 
 An application release shows a clickable, keyboard-accessible “Refresh to update” pill in browsers
 and installed apps on desktop and mobile. It reloads the same page, preserving its query, fragment,
@@ -439,7 +427,7 @@ If capture fails or the companion cannot fit, the viewer falls back to the publi
 Publisher embedding policies and HTTPS-Only settings can then prevent inline viewing; aggr
 does not bypass browser security. PDF links inside ordinary prose remain links. When preferred
 previews are absent, fetching can also rasterize the first page to a retained thumbnail.
-A PDF article without a published local document is excluded from the downloadable offline catalogue.
+A PDF article without a published local document is excluded from the downloadable offline catalog.
 See [PDF preservation](interoperability.md#pdf-preservation) for capture limits.
 
 ## Stable media loading
@@ -486,7 +474,9 @@ Shared metadata uses `consumption` to distinguish reading, listening, and watchi
 recording duration produces “10 min listen” or “10 min watch”; unknown media durations use “Listen”
 or “Watch”, never the read time of show notes or a transcript. Feed-provided durations are retained
 as `extra.duration_seconds`, and loaded native media can correct the article's displayed duration.
-The article header reserves space for that correction so it does not gain a metadata row during playback.
+Recording metadata uses its text's natural width, including unknown-duration labels. A newly
+discovered or corrected duration may wrap the metadata onto another row; the player's own geometry
+stays stable.
 The Rust fetch/build path also reads matching YouTube player and primary AudioObject/VideoObject
 metadata before playback. RSS durations share a strict parser for seconds, MM:SS, HH:MM:SS, and
 ISO 8601; byte lengths, active broadcasts, and unrelated recommended videos are never durations.

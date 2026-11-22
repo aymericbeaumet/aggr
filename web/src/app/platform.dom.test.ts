@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { installFeedChrome } from './platform';
+import { afterEach, describe, expect, it, testTools } from "../../test/browser";
+import { installFeedChrome, installKeyboardInset } from './platform';
 
-/** A stand-in observer: jsdom does not lay elements out, and it may not deliver resize records. */
+/** Deliver resize observations explicitly so the measurement sequence is deterministic. */
 let observer: { observed: Element[]; disconnected: boolean; fire: () => void } | null = null;
 
 function installFakeObserver(): void {
@@ -83,5 +83,61 @@ describe('installFeedChrome', () => {
     installFeedChrome(new AbortController().signal);
     expect(document.documentElement.style.getPropertyValue('--top-nav-offset')).toBe('44px');
     expect(document.documentElement.style.getPropertyValue('--feed-heading')).toBe('0px');
+  });
+});
+
+describe('keyboard inset', () => {
+  afterEach(() => {
+    document.documentElement.classList.remove('is-keyboard-open');
+    document.body.replaceChildren();
+    testTools.unstubAllGlobals();
+    testTools.restoreAllMocks();
+  });
+
+  it('distinguishes pinch zoom from the keyboard and restores tabs when editing ends', async () => {
+    const events = testTools.spyOn(document, 'addEventListener');
+    const viewport = Object.assign(new EventTarget(), { height: 400, scale: 2 });
+    testTools.stubGlobal('visualViewport', viewport);
+    testTools.stubGlobal('innerHeight', 800);
+    document.body.innerHTML = '<input type="search">';
+    const input = document.querySelector('input')!;
+    input.focus();
+    expect(document.activeElement).toBe(input);
+    installKeyboardInset();
+    try {
+      expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(false);
+      viewport.height = 200;
+      viewport.dispatchEvent(new Event('resize'));
+      expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(true);
+      input.blur();
+      await testTools.waitFor(() => expect(document.activeElement).not.toBe(input));
+      expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(false);
+    } finally {
+      for (const [name, listener, options] of events.mock.calls) document.removeEventListener(name, listener, options);
+    }
+  });
+
+  it('follows the focus destination before activeElement catches up', () => {
+    const events = testTools.spyOn(document, 'addEventListener');
+    const viewport = Object.assign(new EventTarget(), { height: 400, scale: 1 });
+    testTools.stubGlobal('visualViewport', viewport);
+    testTools.stubGlobal('innerHeight', 800);
+    document.body.innerHTML = '<input type="search"><textarea></textarea><button>Done</button>';
+    const input = document.querySelector('input')!;
+    input.focus();
+    installKeyboardInset();
+    try {
+      expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(true);
+      input.dispatchEvent(new FocusEvent('focusout', {
+        bubbles: true, relatedTarget: document.querySelector('textarea'),
+      }));
+      expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(true);
+      input.dispatchEvent(new FocusEvent('focusout', {
+        bubbles: true, relatedTarget: document.querySelector('button'),
+      }));
+      expect(document.documentElement.classList.contains('is-keyboard-open')).toBe(false);
+    } finally {
+      for (const [name, listener, options] of events.mock.calls) document.removeEventListener(name, listener, options);
+    }
   });
 });

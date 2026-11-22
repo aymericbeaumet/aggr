@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from "../../test/browser";
 import { installFrameFocus, resetFrameFocus } from './frame-focus';
 
 function page(): { main: HTMLElement; frame: HTMLIFrameElement } {

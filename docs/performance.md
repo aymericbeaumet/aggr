@@ -86,10 +86,9 @@ refuses as before. On a 3,000-item instance this took a release build from 239.6
 single 294.9 s pass, publishing 39 fewer media groups out of 12,210.
 
 `build_max_bytes` is what a host will accept for a published site, so only a publishing build
-measures it. A development snapshot (`aggr dev` without `--release`) is served from a local cache
+measures it. A development snapshot (`cargo run -- dev`) is served from a local cache
 and skips the check: when an archive is larger than the limit, measuring it costs a second complete
-build, which on a 3,000-item instance was 205 s followed by 319 s. `aggr dev --release` still
-applies the budget and prepares the complete published site.
+build, which on a 3,000-item instance was 205 s followed by 319 s. `aggr build` applies the budget and prepares the complete published site.
 
 Every stage that is CPU-bound runs on the machine's parallelism rather than a fixed slot count.
 Reading the archive (one file read and parse per item) and re-deriving stored bodies both run on the
@@ -99,7 +98,8 @@ half and leaves the rest to the build a reader is waiting for. Sizing both to th
 measured worse on an eight-core machine: the background sync and the rebuild oversubscribed it and
 the build phase grew from 167 s to 322 s.
 
-Re-deriving stored bodies (`--reprocess`) reads each retained HTML companion and converts it again.
+Automatic reprocessing compares retained inputs with disposable receipts and converts only changed
+items. A changed extraction fingerprint rechecks all retained HTML companions.
 The conversion is pure CPU per item and runs on the shared worker pool; applying the results stays
 on the calling thread in archive order, so the transaction and the written bytes never depend on
 scheduling. On a 3,318-item archive the conversion alone measured 48 s of single-threaded work.
@@ -117,21 +117,20 @@ deterministic; all workers join before errors propagate. The existing rendered-s
 Pagefind, article-response, extraction, and dev caches remain in use. Offline catalogs hash each
 shared asset once per build. Worker downloads reuse verified revisions across deployments.
 
-Shared template data is converted to MiniJinja values once per build. Article templates still
-receive the complete archive, but rendering every article no longer
-serializes that archive again. Each article is parsed and highlighted once by bounded workers. Its prepared HTML and plain text
+Shared display contexts are prepared once per build; each page serializes only its typed model.
+Each worker reuses an isolated embedded Svelte runtime. Each article is parsed and highlighted once by bounded workers. Its prepared HTML and plain text
 serve reading metrics, excerpts, every collection feed, portable representations, article image
 substitution, and search indexing. Shared immutable image/preview paths are written once per build;
 verified asset hashes are reused instead of rereading the same bytes for naming.
 
 Ordinary dev snapshots prepare archive metadata and static assets, then materialize pages, portable
 representations, media and search on demand. Feed pages read previews rather than all body images.
-The parsed Markdown and normalized body caches survive theme reloads, and shared template values
+The parsed Markdown and normalized body caches survive data snapshot reloads, and shared display values
 are prepared once per generation. Search indexing uses a separate lock so an index build does not
 block already available page and asset responses. Media bytes are read for the response, never
 copied into a permanent archive-sized memory map. Each generation has its own disposable directory;
 an in-flight request retains its generation until it finishes, and a failed preparation leaves the
-previous snapshot available. `dev --release` retains the complete publication build for verification.
+previous snapshot available. `aggr build` materializes the complete publication output for verification.
 
 On the cached instance used for the previous full-dev benchmark (3,540 stored items, 3,283 visible
 articles), request-driven preparation measured 29.65 seconds cold and 2.02 seconds with prepared
@@ -150,12 +149,13 @@ version, but never the application-release fingerprint.
 
 ## Caches on GitHub Actions
 
-`src/cache.rs` is the registry of every `.aggr/cache/build-v1` namespace; `Namespace::ci_cached`
+`crates/aggr-lib/src/cache.rs` is the registry of every `.aggr/cache/build-v1` namespace; `Namespace::ci_cached`
 decides which ones the reusable workflow carries between runners, and a unit test holds the
 workflow's `actions/cache` paths to that list. Only derived state about bytes the site already
 publishes qualifies, because it invalidates itself: `deployment-media-v1` (validated compressed
 publication copies), `validated-images-v2` (content-keyed receipts),
-`pagefind-v1` (index keyed by its input fingerprint), `feed-parsing` (parser-version receipts that
+`pagefind-v1` (index keyed by its input fingerprint), `prepared-markdown-v1` (validated prepared
+article text), `feed-parsing` (parser-version receipts that
 gate conditional GET), `budget-v1` (what a fitting build needed for everything but media, under the
 limit it was measured against), and the timestamped backoff markers in `discussions-v1`,
 `image-failures-v1`, `capture-retries-v1` and `recording-duration-v1`.
@@ -182,10 +182,14 @@ contents, and retained snapshots consume the repository's cache quota. Separatin
 copying it merely because a small backoff marker changed. The before/after fingerprints inspect paths and sizes; cache transfer and encoding should be measured separately.
 
 `articles-v1` holds raw original-page responses. It is private to the machine that fetched it and is
-never uploaded. `render-v1` is not cached on Actions either: the fingerprint folds each item's age
-band (1 h, 3 h, 24 h) into the generation, so any item under a day old changes it, and a full site
-of a 1,100-item instance is about 2.4 GB per entry. Uploading one per run exhausted the 10 GB
-repository cache quota for entries that almost never hit.
+never uploaded. `render-v1` contains only a receipt for the published output: its generation,
+relative file paths, sizes and SHA-1 digests. The output itself is reused when that inventory matches;
+missing, changed or unexpected files trigger a fresh staged build. Verification streams file contents
+through a fixed 64 KiB buffer, including large media, without keeping another site or loading whole
+files into memory. Older size-only receipts are cache misses.
+A successful build removes full render-cache copies left by older versions. Builds stage beside
+the destination so publication uses renames even when the OS cache is on another filesystem.
+Render receipts are not cached on Actions because runners do not retain the published directory.
 
 In addition to the byte caps described in [storage](storage.md), `aggr sync` sweeps the build
 cache at most once a day (`cache::sweep`, remembered in `.aggr/cache/build-v1/.last-sweep`; a dry
@@ -200,7 +204,7 @@ and no sweep failure ever fails the sync. The marker lives in the git-excluded c
 finds nothing new still leaves no trace in the repository.
 
 A warm run on Actions therefore still renders every page, but reuses unchanged image compression,
-skips cold image validation and Pagefind indexing, fetches feeds conditionally, and honours the image, capture and duration
+skips cold image validation and Pagefind indexing, fetches feeds conditionally, and honors the image, capture and duration
 backoffs. Expect rendering to dominate the build; the cold image validation that took about seven
 minutes on a 1,120-item instance disappears once the receipt cache restores. The first run after a
 cache eviction is cold again.
@@ -221,13 +225,18 @@ Search completion uses `search-catalog.json` (version, base, document count, and
 runtime and its filter files wait until an actual query needs them, so a reader who never searches
 downloads none of it. See [client development](client.md) for the search contract.
 
-Prefetching is bounded. A press or a hover fetches that page at once, and a page already in memory
-is parsed ahead of the tap and swapped in the same turn. The three tabs are fetched as soon as
-the reader starts. After paint, the reader warms the first three rows already on screen. An
-article's neighbours carry `rel="prefetch"` in the document. Guesses are at most sixteen per page,
-and none at all under Save-Data or on a 2G connection. Intent is not counted. Fetched pages stay
-in memory for five minutes, 24 at most. Guesses are parsed one per frame; a page the reader means
-to open is parsed as soon as it arrives.
+Prefetching follows pointer, touch or focus intent, with at most two speculative requests in
+flight and low network priority. There are no startup, idle, or viewport article downloads.
+Save-Data and 2G connections disable speculation. Requested navigation stays high priority,
+and its 15-second deadline includes the response body. Fetched pages stay in memory for five
+minutes, 24 at most; a prefetched page is parsed ahead of activation.
+
+Prepared Markdown is reusable across processes under `prepared-markdown-v1`. Keys cover normalized
+body bytes, rendering/highlighting implementations and locked dependencies. Checksummed, bounded
+receipts are disposable and never change the archive. Page metadata and media policy are applied
+to current inputs. Lazy dev coordinates cold work per article or output family; complete ready
+files can be served while another article is preparing. Cold requests share a machine-sized
+allowance across snapshot generations, reserving half the workers for background sync.
 
 ## Measuring changes
 
@@ -311,6 +320,11 @@ milliseconds were:
 Navigation benefits from removing frame waits. Startup and first-search measurements remain in a
 similar range; this does not establish an across-the-board speedup. The browser performance test
 writes individual samples to `target/browser-artifacts/client-performance.json`.
+Those historical runs used a simpler harness. The current test records samples and medians
+with images and PWA enabled, cold/warm/offline visits, and desktop and mobile CPU/network profiles.
+It records paint, readiness, layout shifts, long tasks, traffic, and observed event latency;
+the latter is a diagnostic sample rather than an INP score. Configure repetitions with
+`AGGR_PERFORMANCE_RUNS` (five by default, at most ten).
 
 ## Rust development builds
 
@@ -320,20 +334,31 @@ unoptimized development build. Warm asset validation still reads and SHA-256 has
 verified SHA-1 asset identities without a second byte pass.
 
 The profile emits line tables instead of full DWARF. Backtraces and profiles keep file and line
-information, while the debug information that dominated linking is gone: a one-line edit to
-`src/main.rs` rebuilds in about 6 s instead of about 19 s on an M-series laptop, which is what
-`cargo run -- dev` pays on every restart. Use `RUSTFLAGS="-g"` for a session that needs full
+information. Earlier measurements of the monolithic CLI found a one-line entry-point edit took
+about 6 s instead of about 19 s on an M-series laptop. These predate the library split and are
+not a current edit-loop baseline. Use `RUSTFLAGS="-g"` for a session that needs full
 variable inspection under a debugger.
 
 Keep the local `target/` directory between edits. Cargo enables incremental compilation for the
 application by default; changing compiler flags, profiles, or target directories can discard that
-benefit. `make timings` writes Cargo's HTML timing report under `target/cargo-timings/`. Compare a
+benefit. `mise run timings` writes Cargo's HTML timing report under `target/cargo-timings/`. Compare a
 cached no-op build separately from a representative source edit, and avoid concurrent source or
 embedded-asset writes while measuring. See [Cargo profiles](https://doc.rust-lang.org/cargo/reference/profiles.html).
 
-`make check` verifies formatting, then runs the frontend checks alongside Rust validation. Rust linting
+The contributor supervisor logs compilation and replacement preparation separately, including
+failed or superseded builds. Set `AGGR_DEV_TIMINGS_REPORT=target/dev-timings.jsonl` to retain
+ordered records. A superseded compilation is discarded before replacing the active worker.
+Previously visited pages and small assets remain available from a bounded proxy cache during
+worker handoff. Uncached page navigation waits for replacement readiness, with a 30-second
+deadline and at most 64 waiting requests. Aborted requests and shutdown release their slots.
+
+`mise run check` verifies formatting, then runs the frontend checks alongside Rust validation. Rust linting
 finishes before tests begin, avoiding competing Cargo processes and target-directory locks.
-Compiler parallelism remains under Cargo's control. Build, run, lint, and test Make targets use
+The CLI is a thin consumer of `crates/aggr-lib`. Executable frontend inputs share a bounded,
+content-addressed artifact cache across Cargo and frontend tests. Test-only frontend edits do
+not rebuild the production bundles. `mise run dependencies` explicitly repairs locked packages,
+including when Cargo considers the Rust artifacts fresh.
+Compiler parallelism remains under Cargo's control. Build, run, lint, and test mise tasks use
 `--locked` so verification cannot silently update dependency versions.
 
 CI preserves completed dependency builds even when later checks fail, including the native TLS

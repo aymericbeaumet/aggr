@@ -1,3 +1,4 @@
+import './style.css';
 import { boot } from './app/boot';
 
 // A prerendered page runs before anyone has seen it: writing session state or history there

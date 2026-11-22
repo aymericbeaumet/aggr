@@ -1,6 +1,6 @@
 /target
 /_site
 /.aggr
-/web/node_modules
-/web/.svelte-check
+/web/.generated
+/crates/aggr-lib/.generated
 !/mise.lock
