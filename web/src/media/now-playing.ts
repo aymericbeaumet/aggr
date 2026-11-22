@@ -273,6 +273,7 @@ function seatPicture(slot: Slot): void {
   const box = measured && usable(measured) ? measured : { left: 0, top: 0, width: 640, height: 360 };
   if (!slot.base) slot.base = { width: box.width, height: box.height };
   const { fit, host } = picture();
+  syncProviderPoster(slot.home, slot.node);
   if (slot.node.parentElement !== fit) fit.append(slot.node);
   paint(slot, box);
   slot.at = 'card';
@@ -739,14 +740,21 @@ function mediaKey(key: string): ((slot: Slot) => void) | null {
   }
 }
 
-function showVisual(home: Element, node: HTMLElement): void {
+function syncProviderPoster(home: Element | null, node: HTMLElement): void {
   if (!(home instanceof HTMLElement) || !(node instanceof HTMLIFrameElement)) return;
+  const pending = node.getAttribute('aria-busy') === 'true';
   const preview = home.querySelector<HTMLElement>('.video-preview');
-  if (preview) preview.hidden = true;
-  home.classList.add('is-loaded');
-  home.classList.remove('is-loading');
-  document.getElementById(PICTURE_ID)?.classList.remove('is-loading');
+  if (preview) preview.hidden = !pending;
+  home.classList.toggle('is-loading', pending);
+  home.classList.toggle('is-loaded', !pending);
+  if (pending) home.setAttribute('aria-busy', 'true');
+  else home.removeAttribute('aria-busy');
   home.dataset.videoMounted = 'true';
+}
+
+export function providerFrameLoaded(frame: HTMLIFrameElement): void {
+  frame.removeAttribute('aria-busy');
+  if (live?.node === frame) syncProviderPoster(live.home, frame);
 }
 
 function restore(slot: Slot): void {
@@ -799,7 +807,7 @@ function retire(slot: Slot, quiet = false): void {
 function promote(slot: Slot): void {
   if (slot.live) return;
   if (live && live !== slot) retire(live, true);
-  slot.home = slot.node.parentElement;
+  slot.home = slot.node.parentElement ?? slot.home;
   slot.anchor = slot.node.nextSibling;
   slot.live = true;
   slot.settled = false;
@@ -889,7 +897,7 @@ export function placeVisual(stage: HTMLElement): () => void {
     if (!(home instanceof HTMLElement) || !home.isConnected || !inView(home)) return;
     const box = contentBox(home);
     if (!usable(box)) return;
-    showVisual(home, slot.node);
+    syncProviderPoster(home, slot.node);
     glide(slot, box, 'card');
   };
 }
@@ -921,8 +929,8 @@ export function claimVisual(
     else if (child instanceof HTMLIFrameElement) child.removeAttribute('src');
     child.remove();
   }
+  syncProviderPoster(home, slot.node);
   if (inView(home)) {
-    showVisual(home, slot.node);
     const box = contentBox(home);
     if (usable(box)) glide(slot, box, 'card');
   }
@@ -949,7 +957,7 @@ export function connectVisual(
   playback: Playback,
   render: (state: PlaybackState) => void,
   signal: AbortSignal,
-  options: { controls: boolean },
+  options: { controls: boolean; home?: HTMLElement },
 ): { push: (state: PlaybackState) => void } {
   ensurePagehide();
   const media = node instanceof HTMLMediaElement ? node : null;
@@ -977,7 +985,7 @@ export function connectVisual(
     settled: false,
     resumed: false,
     savedAt: 0,
-    home: null,
+    home: options.home ?? null,
     anchor: null,
     base: null,
     at: 'card',

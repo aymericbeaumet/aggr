@@ -5,11 +5,11 @@ static-host agnostic. GitHub is the turnkey path, not a requirement.
 
 ## Installing the binary
 
-Install the v3.0.0 binary with
+Install the v3.0.1 binary with
 [mise's GitHub backend](https://mise.jdx.dev/dev-tools/backends/github.html):
 
 ```sh
-mise use -g github:aymericbeaumet/aggr@3.0.0
+mise use -g github:aymericbeaumet/aggr@3.0.1
 aggr --version
 ```
 

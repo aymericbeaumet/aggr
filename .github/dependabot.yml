@@ -11,6 +11,9 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    groups:
+      native-compiler:
+        patterns: ["oxc_*", "rolldown", "rolldown_*"]
     ignore:
       # The challenge-fallback transport tracks BoringSSL; its upgrades are validated by hand.
       - dependency-name: wreq

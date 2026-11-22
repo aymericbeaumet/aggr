@@ -1,6 +1,6 @@
 import { SPEEDS, type Playback, type PlaybackState } from './audio';
 import { installFrameFocus } from './frame-focus';
-import { claimVisual, connectVisual, visualPlaying, type Episode } from './now-playing';
+import { claimVisual, connectVisual, providerFrameLoaded, visualPlaying, type Episode } from './now-playing';
 import { duration, endsAt, timingHost, type Phase, type TimingState } from './timing';
 
 /**
@@ -374,12 +374,7 @@ export function enhanceVideoFacade(preview: HTMLAnchorElement, signal: AbortSign
   };
   // Coming back to this recording reuses the frame already playing. The frame stays in its seat,
   // so it is not a child of this card.
-  if (identity && claimVisual(player, episode, report, signal)) {
-    preview.hidden = true;
-    player.classList.add('is-loaded');
-    player.classList.remove('is-loading');
-    player.dataset.videoMounted = 'true';
-  }
+  if (identity) claimVisual(player, episode, report, signal);
 
   function activate(event: MouseEvent | KeyboardEvent): void {
     if (event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) return;
@@ -407,6 +402,7 @@ export function enhanceVideoFacade(preview: HTMLAnchorElement, signal: AbortSign
     frame.src = url.href;
     frame.title = title;
     frame.loading = 'eager';
+    frame.setAttribute('aria-busy', 'true');
     frame.allow = 'autoplay; encrypted-media; fullscreen; picture-in-picture';
     frame.allowFullscreen = true;
     frame.referrerPolicy = 'strict-origin-when-cross-origin';
@@ -424,27 +420,17 @@ export function enhanceVideoFacade(preview: HTMLAnchorElement, signal: AbortSign
     );
     bridge.push = connectVisual(frame, episode, opened.playback, report, signal, {
       controls: provider === 'youtube' || provider === 'vimeo',
+      home: player,
     }).push;
 
-    player.classList.add('is-loading');
-    player.setAttribute('aria-busy', 'true');
     // Twitch draws its own keys, including after this frame leaves the player for the picture.
     if (provider === 'twitch') frame.dataset.keys = 'player';
     // Hand the keyboard back after the click, and again if the provider focuses the frame late.
     installFrameFocus();
-    // Append before the loading state promotes, so the card is where the picture returns.
-    player.appendChild(frame);
-    opened.assume('loading');
-    // The frame leaves the card for the seat as soon as it is loading. The card's
-    // cover rule no longer matches it, so the seat keeps the poster in front.
-    document.getElementById('now-playing-picture')?.classList.add('is-loading');
     frame.addEventListener(
       'load',
       () => {
-        document.getElementById('now-playing-picture')?.classList.remove('is-loading');
-        player.classList.add('is-loaded');
-        player.removeAttribute('aria-busy');
-        preview.hidden = true;
+        providerFrameLoaded(frame);
         // Every load, including one the provider starts itself, has to be told we are listening.
         // A frame that reloaded otherwise stops reporting time and ignores the bar.
         opened.subscribe();
@@ -466,6 +452,8 @@ export function enhanceVideoFacade(preview: HTMLAnchorElement, signal: AbortSign
       },
       { signal: opened.signal },
     );
+    // Set the load listener before the only insertion, directly into the persistent seat.
+    opened.assume('loading');
     // Twitch refuses to render below 400×300. A narrow column gets a player laid out at that
     // size and scaled down to fit, rather than a player that widens the article or a refusal.
     if (provider === 'twitch') {

@@ -181,6 +181,38 @@ describe('visual now playing', () => {
     expect(target.querySelector('.now-playing')).toBeNull();
   });
 
+  it('keeps the poster when a pending provider returns from the dock and ignores a retired frame load', () => {
+    const target = dock();
+    const retired = player('youtube');
+    enhanceVideoFacade(retired.preview, new AbortController().signal);
+    retired.preview.click();
+    const oldFrame = fit()?.querySelector('iframe');
+    if (!oldFrame) throw new Error('missing first frame');
+
+    const next = player('vimeo', 'https://player.vimeo.com/video/77');
+    next.player.getBoundingClientRect = () => new DOMRect(0, -200, 320, 180);
+    enhanceVideoFacade(next.preview, new AbortController().signal);
+    next.preview.click();
+    flushSync();
+    const frame = fit()?.querySelector('iframe');
+    if (!frame) throw new Error('missing replacement frame');
+    expect(seat()?.dataset.at).toBe('dock');
+    oldFrame.dispatchEvent(new Event('load'));
+    expect(frame.getAttribute('aria-busy')).toBe('true');
+    rect(next.player);
+    window.dispatchEvent(new Event('scroll'));
+    flushSync();
+    expect(target.querySelector('.now-playing')).toBeNull();
+    expect(next.preview.hidden).toBe(false);
+    expect(next.player.getAttribute('aria-busy')).toBe('true');
+
+    frame.dispatchEvent(new Event('load'));
+    expect(frame.hasAttribute('aria-busy')).toBe(false);
+    expect(next.preview.hidden).toBe(true);
+    expect(next.player.hasAttribute('aria-busy')).toBe(false);
+    expect(retired.preview.hidden).toBe(false);
+  });
+
   it('keeps keyboard focus on the page when a provider frame starts', async () => {
     const main = document.createElement('main');
     main.id = 'content';
@@ -241,7 +273,11 @@ describe('visual now playing', () => {
     rect(again.player);
     enhanceVideoFacade(again.preview, new AbortController().signal);
     expect(fit()?.contains(frame as Node)).toBe(true);
+    expect(again.preview.hidden).toBe(false);
+    expect(again.player.getAttribute('aria-busy')).toBe('true');
+    frame?.dispatchEvent(new Event('load'));
     expect(again.preview.hidden).toBe(true);
+    expect(again.player.hasAttribute('aria-busy')).toBe(false);
     expect(document.querySelectorAll('iframe')).toHaveLength(1);
   });
 

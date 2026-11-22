@@ -139,22 +139,26 @@ async fn video_facade_contracts(client: &Client, fixture: &Fixture) -> Result<()
         )
         .await?;
         assert_eq!(client.execute("return {frames:document.querySelectorAll('iframe').length,providerRequests:performance.getEntriesByType('resource').filter(r=>/youtube|twitch|vimeo/.test(new URL(r.name).hostname)).length}",vec![]).await?,json!({"frames":0,"providerRequests":0}),"video providers must not receive requests before activation");
-        client.execute(r#"
-      const player=document.querySelector('.video-player'), append=player.appendChild;
-      player.appendChild=function(frame){
-        window.videoContract={url:frame.src,allow:frame.allow,sandbox:frame.getAttribute('sandbox'),referrer:frame.referrerPolicy,title:frame.title};
-        frame.removeAttribute('src');
-        return append.call(this,frame);
-      };
-    "#,vec![]).await?;
+        // Exercise the real iframe with its provider URL while keeping the fixture local.
+        client
+            .execute(
+                r#"
+          const policy = document.createElement('meta');
+          policy.httpEquiv = 'Content-Security-Policy';
+          policy.content = "frame-src 'none'";
+          document.head.append(policy);
+        "#,
+                vec![],
+            )
+            .await?;
         client
             .find(Locator::Css("[data-video-embed]"))
             .await?
             .click()
             .await?;
         let video = client.execute(r#"
-          const frame=document.querySelector('#now-playing-picture iframe'), url=new URL(window.videoContract.url);
-          return {...window.videoContract,host:url.hostname,parent:url.searchParams.get('parent'),autoplay:url.searchParams.get('autoplay'),rel:url.searchParams.get('rel'),dnt:url.searchParams.get('dnt'),h:url.searchParams.get('h'),frames:document.querySelectorAll('iframe').length,width:frame.clientWidth,height:frame.clientHeight,overflow:document.documentElement.scrollWidth>innerWidth};
+          const frame=document.querySelector('#now-playing-picture iframe'), url=new URL(frame.src);
+          return {allow:frame.allow,sandbox:frame.getAttribute('sandbox'),referrer:frame.referrerPolicy,title:frame.title,host:url.hostname,parent:url.searchParams.get('parent'),autoplay:url.searchParams.get('autoplay'),rel:url.searchParams.get('rel'),dnt:url.searchParams.get('dnt'),h:url.searchParams.get('h'),frames:document.querySelectorAll('iframe').length,width:frame.clientWidth,height:frame.clientHeight,overflow:document.documentElement.scrollWidth>innerWidth};
         "#,vec![]).await?;
         assert_eq!(video["host"], host, "{video}");
         assert_eq!(video["frames"], 1);
