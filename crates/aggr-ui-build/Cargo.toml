@@ -13,7 +13,7 @@ anyhow = "1.0.104"
 dunce = "1.0.5"
 hex = "0.4.3"
 lightningcss = { version = "=1.0.0-alpha.72", default-features = false }
-oxc_allocator = "=0.158.0"
+oxc_allocator = "=0.159.0"
 oxc_codegen = "=0.158.0"
 oxc_parser = "=0.158.0"
 oxc_semantic = "=0.158.0"
