@@ -24,7 +24,7 @@ printf '%s\n' "$@" > "$CHROME_FIXTURE/arguments"
 printf '<html><head><title>aggr-runtime-check</title></head><body></body></html>\n'
 BASH
 chmod +x "$chrome"
-mise() { printf '%s\n' "$fixture/pinned browser"; }
+mise() { [[ "$*" == "which chrome --tool=http:chrome-for-testing" ]] && printf '%s\n' "$chrome"; }
 timeout() { shift 2; "$@"; }
 install_chrome_dependencies() {
   touch "$fixture/installed"

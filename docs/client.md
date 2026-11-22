@@ -132,14 +132,13 @@ mise on supported desktop platforms. Point `AGGR_CHROME_BINARY` at the mise-inst
 ```sh
 mise exec -- chromedriver --port=9515 --allowed-ips=127.0.0.1
 # In another terminal:
-AGGR_CHROME_BINARY="$(mise where http:chrome-for-testing)/chrome-linux64/chrome" \
+AGGR_CHROME_BINARY="$(mise which chrome --tool=http:chrome-for-testing)" \
 AGGR_WEBDRIVER_URL=http://127.0.0.1:9515 mise exec -- cargo test --locked --test browser -- --ignored
 ```
 
-The example path is for Linux x64. On macOS, use
-`$(mise where http:chrome-for-testing)/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`
-on Apple silicon, or replace `arm64` with `x64` on Intel. On Windows x64, the path is
-`$(mise where http:chrome-for-testing)/chrome-win64/chrome.exe`. Set
+The example works on Linux x64 and ARM64. On macOS, use
+`mise which 'Google Chrome for Testing' --tool=http:chrome-for-testing` to locate the browser.
+On Windows x64, use `mise which chrome.exe --tool=http:chrome-for-testing`. Set
 `AGGR_BROWSER_TIMEOUT_SECS` (default 45) when a loaded machine needs longer waits. CI saves
 failure screenshots and logs under `target/browser-artifacts/`.
 

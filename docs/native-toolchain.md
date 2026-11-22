@@ -6,7 +6,7 @@ compiler runs inside QuickJS, and native Rolldown assembles the browser and serv
 
 ## Reproduce the development environment
 
-Install [mise](https://mise.jdx.dev/installing-mise.html) first; CI uses **2026.11.6** and the
+Install [mise](https://mise.jdx.dev/installing-mise.html) first; CI uses **2026.11.12** and the
 configuration enforces a minimum supported version. From a fresh checkout:
 
 ```sh
@@ -25,8 +25,9 @@ depending on a shell's existing Rust installation.
 The host still supplies its SDK, C/C++ compiler and native libraries: Xcode Command Line Tools
 on macOS, Visual Studio's C++ build tools and LLVM on Windows, and a C/C++ build environment plus
 libclang on Linux. See [native build requirements](interoperability.md#http-extraction-and-native-builds).
-Mise supplies CMake, Ninja and, on Windows x64, NASM. This pins project tools and dependency
-inputs; it does not promise identical binary bytes across different host SDKs or operating systems.
+Mise supplies CMake, Ninja and, on Windows x64, NASM. On Intel macOS, mise builds cargo-deny
+from its pinned crate and Cargo lockfile because upstream supplies no binary for that platform.
+The host SDK and operating system can affect the resulting binary.
 Linux CI first compiles and runs C/C++ programs, then loads libclang and creates an index through
 its public API. A working host SDK supplies the exact verified `LIBCLANG_PATH`; a missing or
 broken SDK triggers the native package installation and the same checks again. This avoids an
@@ -34,18 +35,20 @@ unnecessary package download when the runner already has working compiler suppor
 Browser jobs similarly require the mise-pinned Chrome to render a local page headlessly within
 a timeout before reusing its host libraries. A failed launch installs the browser archive's
 declared native dependencies and retries; checking its version alone is insufficient.
-Chrome for Testing and ChromeDriver are pinned together on Linux x64, macOS and Windows x64;
-Google does not publish the corresponding Linux or Windows ARM64 browser packages.
+Chrome for Testing and ChromeDriver are pinned together on Linux and macOS (x64 and ARM64)
+and Windows x64. Google does not publish a Windows ARM64 browser package.
 
 When updating a tool, change its exact version in `mise.toml` and refresh every supported
 platform before committing both files:
 
 ```sh
-mise lock --platform linux-x64,linux-arm64,macos-arm64,macos-x64,windows-x64,windows-arm64
+mise lock
 mise run setup
 mise run check
 ```
 
+The platform list in `mise.toml` covers the six supported build targets. CI runs
+`mise lock --check` offline to catch stale versions, missing artifact URLs and missing checksums.
 HTTP tools also require the new archive's SHA-256 in `mise.toml`. CI pins third-party actions
 to full commit hashes, and Dependabot proposes updates to those pins.
 `mise run workflow-check` uses pinned jactionlint with its `correctness` profile, the

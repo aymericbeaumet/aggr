@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aggr_ui_build::{BundleOptions, bundle};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use axum::Router;
 use axum::extract::State;
 use axum::http::{StatusCode, Uri, header};
@@ -159,26 +159,19 @@ async fn serve(State(assets): State<Arc<Assets>>, uri: Uri) -> Response {
     ([(header::CONTENT_TYPE, "text/html")], html).into_response()
 }
 
-fn tool(name: &str, override_name: &str, relative: &[&str]) -> Result<PathBuf> {
+fn tool(name: &str, override_name: &str, executable: &str) -> Result<PathBuf> {
     if let Some(path) = std::env::var_os(override_name) {
         return Ok(PathBuf::from(path));
     }
     let output = std::process::Command::new("mise")
-        .args(["where", name])
+        .args(["which", executable, "--tool", name])
         .output()
         .context("locating pinned browser tool")?;
     ensure!(
         output.status.success(),
         "install pinned {name} with mise run setup"
     );
-    let root = PathBuf::from(String::from_utf8(output.stdout)?.trim());
-    for candidate in relative {
-        let path = root.join(candidate);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-    bail!("pinned {name} binary missing below {}", root.display())
+    Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()))
 }
 
 async fn browser() -> Result<(Client, Option<tokio::process::Child>)> {
@@ -186,17 +179,7 @@ async fn browser() -> Result<(Client, Option<tokio::process::Child>)> {
     let endpoint = if let Ok(endpoint) = std::env::var("AGGR_WEBDRIVER_URL") {
         endpoint
     } else {
-        let binary = tool(
-            "http:chromedriver",
-            "AGGR_CHROMEDRIVER_BIN",
-            &[
-                "chromedriver-mac-arm64/chromedriver",
-                "chromedriver-mac-x64/chromedriver",
-                "chromedriver-linux64/chromedriver",
-                "chromedriver-win64/chromedriver.exe",
-                "chromedriver",
-            ],
-        )?;
+        let binary = tool("http:chromedriver", "AGGR_CHROMEDRIVER_BIN", "chromedriver")?;
         let reservation = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = reservation.local_addr()?.port();
         drop(reservation);
@@ -213,13 +196,11 @@ async fn browser() -> Result<(Client, Option<tokio::process::Child>)> {
     let chrome = tool(
         "http:chrome-for-testing",
         "AGGR_CHROME_BINARY",
-        &[
-            "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-            "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-            "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-            "chrome-linux64/chrome",
-            "chrome-win64/chrome.exe",
-        ],
+        if cfg!(target_os = "macos") {
+            "Google Chrome for Testing"
+        } else {
+            "chrome"
+        },
     )?;
     let capabilities = json!({"browserName":"chrome", "goog:chromeOptions":{"binary":chrome,"args":["--headless=new","--no-sandbox","--disable-dev-shm-usage","--disable-search-engine-choice-screen","--disable-background-networking","--disable-component-update","--no-first-run","--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost"]}}).as_object().context("browser capabilities")?.clone();
     let start = Instant::now();

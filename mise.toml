@@ -2,39 +2,48 @@ min_version = "2026.10.17"
 
 [settings]
 lockfile = true
+lockfile_platforms = ["linux-x64", "linux-arm64", "macos-arm64", "macos-x64", "windows-x64", "windows-arm64"]
+exec_auto_install = false
+
+[settings.cargo]
+# Build the Intel macOS audit tool from its published, locked Cargo sources.
+binstall = false
 
 [settings.task]
 # Setup provisions tools explicitly; CI installs only the subset each job needs.
 run_auto_install = false
 
 [tools]
-"github:jdx/jactionlint" = "2.5.0"
+"github:jdx/jactionlint" = "2.6.0"
 shellcheck = "0.11.0"
-"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
-cmake = "4.4.5"
+"aqua:EmbarkStudios/cargo-deny" = { version = "0.22.0", os = ["linux", "windows", "macos/arm64"] }
+"cargo:cargo-deny" = { version = "0.22.0", os = ["macos/x64"] }
+cmake = "4.5.1"
 ninja = "1.13.2"
-rust = { version = "1.99.1", profile = "default" }
+rust = { version = "1.100.0", profile = "default" }
 
 # Keep the browser and driver on the same checksum-pinned Chrome for Testing release.
 [tools."http:chromedriver"]
-version = "157.0.8103.50"
-os = ["linux/x64", "macos", "windows/x64"]
+version = "158.0.8127.36"
+os = ["linux/x64", "linux/arm64", "macos", "windows/x64"]
 
 [tools."http:chromedriver".platforms]
-linux-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux64/chromedriver-linux64.zip", checksum = "sha256:59185c80d24d93dbd3d3fcf4f91038f9f7c434db31a03afa747e032252889aed", bin_path = "chromedriver-linux64" }
-macos-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-arm64/chromedriver-mac-arm64.zip", checksum = "sha256:a248565ad9769b52fd55e04c6e82eb157ca414c2d6eae3238135ef2228024845", bin_path = "chromedriver-mac-arm64" }
-macos-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-x64/chromedriver-mac-x64.zip", checksum = "sha256:59df949c3e7c0383bb8f0609c00107e4444c8778ddc1d61362d8c118a05e7bae", bin_path = "chromedriver-mac-x64" }
-windows-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/win64/chromedriver-win64.zip", checksum = "sha256:408d7da374064d0b01f1918d898b983029294f49be8bb0c23729920390e61376", bin_path = "chromedriver-win64" }
+linux-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux-arm64/chromedriver-linux-arm64.zip", checksum = "sha256:cbb268390b87b79ad8543364bbf5cc851b1403a2ce76c2636dfc2fbe8e196b7d", bin_path = "chromedriver-linux-arm64" }
+linux-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux64/chromedriver-linux64.zip", checksum = "sha256:d20e70d69d68c5c983e2526452ed0779fd65dc4ade5d6741f1bb3d0d82754d3a", bin_path = "chromedriver-linux64" }
+macos-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-arm64/chromedriver-mac-arm64.zip", checksum = "sha256:e44347354ea6a7b666e4ef03803974e1344f78ce9c4466acd896ea6af53136e8", bin_path = "chromedriver-mac-arm64" }
+macos-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-x64/chromedriver-mac-x64.zip", checksum = "sha256:707e35dcfc37c73305ceea27b8a3dba357b3f663562790975962293ad37efe1d", bin_path = "chromedriver-mac-x64" }
+windows-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/win64/chromedriver-win64.zip", checksum = "sha256:ed65348ea2ffce89a0e747f5d20b31c521b59364269d6b2d3a6635872db53017", bin_path = "chromedriver-win64" }
 
 [tools."http:chrome-for-testing"]
-version = "157.0.8103.50"
-os = ["linux/x64", "macos", "windows/x64"]
+version = "158.0.8127.36"
+os = ["linux/x64", "linux/arm64", "macos", "windows/x64"]
 
 [tools."http:chrome-for-testing".platforms]
-linux-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux64/chrome-linux64.zip", checksum = "sha256:d17167bc092eb495a3b768c7467f27e35f625aa03834233a1663af67dcb668c9", bin_path = "chrome-linux64" }
-macos-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-arm64/chrome-mac-arm64.zip", checksum = "sha256:aceb0578a1cc3631358b164dbbef04bf8936f96c690fb78c3ac25b7655e795e8", bin_path = "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS" }
-macos-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-x64/chrome-mac-x64.zip", checksum = "sha256:7b1c12bee8024f1193b28754aa0d46b7eaa08394de51bef84fd65a6cf08d61dc", bin_path = "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS" }
-windows-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/win64/chrome-win64.zip", checksum = "sha256:36088dd9c76c992f6e745fc20f94aca873f69c3331ce25ea3df36835cc4af73f", bin_path = "chrome-win64" }
+linux-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux-arm64/chrome-linux-arm64.zip", checksum = "sha256:f811b64a50cbc73f94fda7b3f3b3bf62be5d9409b3207e6ead9b61e6706afffe", bin_path = "chrome-linux-arm64" }
+linux-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux64/chrome-linux64.zip", checksum = "sha256:dba9cc838e1ce269c33ea68170881127bd15d078fc3ca5891c90802819a4d7c7", bin_path = "chrome-linux64" }
+macos-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-arm64/chrome-mac-arm64.zip", checksum = "sha256:b86d3b393def1f87d369b022abff0a51acb015d6fcb79ddfd1c379c9d72fbbe2", bin_path = "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS" }
+macos-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-x64/chrome-mac-x64.zip", checksum = "sha256:1390e9b1386a1fd8ec2c4940b9ff59cbbda71b896b85182d7efbd73c58213802", bin_path = "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS" }
+windows-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/win64/chrome-win64.zip", checksum = "sha256:6a8ad290952cc612c7777ffb3eb62f345539a2a1a8d440cfac190c6d36b34d2c", bin_path = "chrome-win64" }
 
 # BoringSSL's x64 assembly build needs NASM on Windows.
 [tools."http:nasm"]
@@ -61,7 +70,7 @@ depends = ["check"]
 
 [tasks.setup]
 description = "Install only this project's pinned native tools"
-run = ["mise install --locked rust cmake ninja", "cargo run --locked -p aggr-tools -- setup"]
+run = ["mise install --locked rust cmake ninja", "mise exec rust cmake ninja -- cargo run --locked -p aggr-tools -- setup"]
 
 [tasks.build]
 description = "Build the CLI and embedded reader"

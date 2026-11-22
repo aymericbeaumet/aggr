@@ -24,8 +24,8 @@ install_chrome_dependencies() {
 
 main() (
   local browser_dir browser directory
-  browser_dir="$(mise where http:chrome-for-testing)/chrome-linux64"
-  browser="$browser_dir/chrome"
+  browser="$(mise which chrome --tool=http:chrome-for-testing)" || return 1
+  browser_dir=$(dirname "$browser")
   if [[ ! -x "$browser" ]]; then
     echo "Pinned Chrome executable is missing: $browser" >&2
     return 1
