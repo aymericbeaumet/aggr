@@ -397,7 +397,8 @@ Native OS libraries and compilers remain system prerequisites.
   document for that video id. An archived recording without a length is asked again once a day,
   after the link state is released.
 - Reserve media geometry before loading or player activation, including failure and reduced-motion
-  paths. Use validated dimensions or a stable fallback ratio; keep posters until players are ready.
+  paths. Use validated dimensions or a stable fallback ratio; keep posters until players are ready. An embedded video's loading state follows its iframe
+  through docking, scrolling, and navigation until that frame loads.
   Generate ThumbHashes from decoded local images and embed their validated tiny PNG previews in
   HTML; placeholders must not wait for JavaScript or a separate network request. The hash is the
   build's cached form, not output: no page or search document carries it. Archive every

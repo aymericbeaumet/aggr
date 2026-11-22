@@ -25,8 +25,8 @@ and [the Markdown file in Git](https://github.com/aymericbeaumet/aggr-instance/b
 With [mise](https://mise.jdx.dev/) and Git installed, try the reader without creating a repository.
 
 ```sh
-mise install github:aymericbeaumet/aggr@3.0.0
-mise exec github:aymericbeaumet/aggr@3.0.0 -- aggr dev --demo
+mise install github:aymericbeaumet/aggr@3.0.1
+mise exec github:aymericbeaumet/aggr@3.0.1 -- aggr dev --demo
 ```
 
 Open **http://127.0.0.1:7319**. The demo follows the two sources in the
@@ -36,7 +36,7 @@ To keep your own archive, create a project.
 
 ```sh
 mkdir reads && cd reads && git init
-mise use --path . github:aymericbeaumet/aggr@3.0.0
+mise use --path . github:aymericbeaumet/aggr@3.0.1
 mise exec -- aggr init
 # Edit aggr.toml to choose your sources.
 mise exec -- aggr build

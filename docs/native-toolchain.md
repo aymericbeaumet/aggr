@@ -82,6 +82,10 @@ compiles Svelte components and rune modules, transforms TypeScript, assembles th
 graph and extracts CSS. Browser, bootstrap, worker and isolated server-renderer artifacts form one
 complete UI bundle. The manifest resolves immutable asset URLs and eager dependencies.
 
+Upgrade Rolldown and Oxc together. The parser, transformer and code generator exchange Oxc types,
+so select the Oxc version used by the published Rolldown core. Dependabot groups the compiler crates
+to make it possible to test a compatible set in one PR.
+
 The official compiler and runtime dependencies are vendored with their licenses and checksums.
 Building the reader does not install packages or fetch remote assets. `aggr-tools` owns source
 watching, verification, browser tests and release preparation; mise invokes those Rust commands.
