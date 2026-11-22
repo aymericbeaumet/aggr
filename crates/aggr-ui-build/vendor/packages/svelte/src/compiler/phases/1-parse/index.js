@@ -11,6 +11,7 @@ import read_options from './read/options.js';
 import { is_reserved } from '../../../utils.js';
 import * as state from '../../state.js';
 import { is_whitespace } from './utils/whitespace.js';
+import { has_lf_line_breaks_only } from './acorn.js';
 
 const script_languages = create_tag_scanner('script', 'lang');
 
@@ -30,6 +31,12 @@ export class Parser {
 
 	/** */
 	index = 0;
+
+	/**
+	 * @readonly
+	 * @type {boolean}
+	 */
+	lf_only;
 
 	/** @type {AST.CSS.CSSComment[]} */
 	css_comments = [];
@@ -78,6 +85,7 @@ export class Parser {
 
 		this.loose = loose;
 		this.template = template.trimEnd();
+		this.lf_only = has_lf_line_breaks_only(this.template);
 
 		const match_lang = script_languages.exec(template);
 		script_languages.lastIndex = 0;
@@ -225,7 +233,6 @@ export class Parser {
 		const code = /** @type {number} */ (this.template.codePointAt(this.index));
 
 		if (isIdentifierStart(code, true)) {
-			let i = this.index;
 			end += code <= 0xffff ? 1 : 2;
 
 			while (end < this.template.length) {
