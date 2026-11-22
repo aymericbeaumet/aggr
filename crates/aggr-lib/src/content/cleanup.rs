@@ -414,7 +414,10 @@ fn hashtag_paragraph<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<Vec<Str
         match &child.data.borrow().value {
             NodeValue::Text(value) => text.push_str(value),
             NodeValue::SoftBreak | NodeValue::LineBreak => text.push(' '),
-            NodeValue::Paragraph | NodeValue::Link(_) | NodeValue::Emph | NodeValue::Strong => {}
+            NodeValue::Paragraph
+            | NodeValue::Link(_)
+            | NodeValue::Emph(_)
+            | NodeValue::Strong(_) => {}
             _ => return None,
         }
     }
@@ -618,7 +621,7 @@ fn boundary_paragraph_text<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<(
             NodeValue::Text(value) => text.push_str(value),
             NodeValue::SoftBreak | NodeValue::LineBreak => text.push(' '),
             NodeValue::Link(_) => linked = true,
-            NodeValue::Paragraph | NodeValue::Emph | NodeValue::Strong => {}
+            NodeValue::Paragraph | NodeValue::Emph(_) | NodeValue::Strong(_) => {}
             _ => return None,
         }
     }
@@ -713,7 +716,7 @@ fn navigation_shape<'a>(
                 between.push(' ');
                 true
             }
-            NodeValue::Emph | NodeValue::Strong => navigation_shape(child, links, between),
+            NodeValue::Emph(_) | NodeValue::Strong(_) => navigation_shape(child, links, between),
             _ => false,
         })
 }
@@ -1427,8 +1430,8 @@ fn is_inline_paragraph(markdown: &str) -> bool {
                 node.data.borrow().value,
                 NodeValue::Paragraph
                     | NodeValue::Text(_)
-                    | NodeValue::Emph
-                    | NodeValue::Strong
+                    | NodeValue::Emph(_)
+                    | NodeValue::Strong(_)
                     | NodeValue::Link(_)
                     | NodeValue::SoftBreak
                     | NodeValue::LineBreak

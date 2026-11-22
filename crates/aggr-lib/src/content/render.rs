@@ -2,8 +2,11 @@
 //! validated local images, inline video facades, heading anchors and table scroll regions,
 //! behind [`PreparedMarkdown`].
 
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+use comrak::adapters::{SyntaxHighlightMeta, SyntaxHighlighterAdapter};
 use scraper::{Html, Selector};
 use url::Url;
 
@@ -890,20 +893,20 @@ fn normalized_image_url(value: &str) -> String {
 
 struct CodeHighlighter;
 
-impl comrak::adapters::SyntaxHighlighterAdapter for CodeHighlighter {
+impl SyntaxHighlighterAdapter for CodeHighlighter {
     fn write_highlighted(
         &self,
         output: &mut dyn std::fmt::Write,
-        language: Option<&str>,
-        code: &str,
+        highlight: &SyntaxHighlightMeta<'_>,
     ) -> std::fmt::Result {
-        highlight::write(output, language, code)
+        highlight::write(output, Some(highlight.lang), highlight.code)
     }
 
     fn write_pre_tag(
         &self,
         output: &mut dyn std::fmt::Write,
-        attributes: std::collections::HashMap<&'static str, std::borrow::Cow<'_, str>>,
+        _highlight: &SyntaxHighlightMeta<'_>,
+        attributes: BTreeMap<&str, Cow<'_, str>>,
     ) -> std::fmt::Result {
         write_code_tag(output, "pre", attributes)
     }
@@ -911,7 +914,8 @@ impl comrak::adapters::SyntaxHighlighterAdapter for CodeHighlighter {
     fn write_code_tag(
         &self,
         output: &mut dyn std::fmt::Write,
-        attributes: std::collections::HashMap<&'static str, std::borrow::Cow<'_, str>>,
+        _highlight: &SyntaxHighlightMeta<'_>,
+        attributes: BTreeMap<&str, Cow<'_, str>>,
     ) -> std::fmt::Result {
         write_code_tag(output, "code", attributes)
     }
@@ -920,11 +924,9 @@ impl comrak::adapters::SyntaxHighlighterAdapter for CodeHighlighter {
 fn write_code_tag(
     output: &mut dyn std::fmt::Write,
     tag: &str,
-    attributes: std::collections::HashMap<&'static str, std::borrow::Cow<'_, str>>,
+    attributes: BTreeMap<&str, Cow<'_, str>>,
 ) -> std::fmt::Result {
     write!(output, "<{tag}")?;
-    let mut attributes = attributes.into_iter().collect::<Vec<_>>();
-    attributes.sort_by_key(|(name, _)| *name);
     for (name, value) in attributes {
         write!(output, " {name}=\"{}\"", escape_html(&value))?;
     }

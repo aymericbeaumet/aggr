@@ -36,9 +36,11 @@ confidence-threshold = 0.8
 ignore = false
 
 [advisories]
+unmaintained = "all"
 # The default RustSec database (https://github.com/rustsec/advisory-db). Each ignored advisory
 # explains why the current tree cannot drop it; delete the entry together with the fix.
 ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained with no patched version; feed-rs 3 exposes chrono timestamps on its public feed entries" },
   { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 is unmaintained but declared complete by its authors; syntect loads its bundled syntax and theme packs with it and has no bincode-free release" },
   { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained; pagefind pulls it through rust-patch-derive, at build time only" },
   { id = "RUSTSEC-2024-0320", reason = "yaml-rust is unmaintained; syntect and pagefind (through twelf/serde_yaml) still depend on it" },
@@ -57,20 +59,14 @@ skip = [
   { crate = "block-buffer@0.10", reason = "sha1/sha2 0.10 generation" },
   { crate = "crypto-common@0.1", reason = "sha1/sha2 0.10 generation" },
   { crate = "cpufeatures@0.2", reason = "sha1/sha2 0.10 generation" },
-  # htmd and markup5ever_rcdom keep html5ever 0.38 beside ammonia, scraper and dom_query's 0.40.
-  { crate = "html5ever@0.38", reason = "htmd and markup5ever_rcdom" },
-  { crate = "markup5ever@0.38", reason = "htmd and markup5ever_rcdom" },
-  { crate = "web_atoms@0.2", reason = "html5ever 0.38 generation" },
-  { crate = "string_cache@0.9", reason = "markup5ever 0.38 generation" },
-  { crate = "string_cache_codegen@0.6", reason = "markup5ever 0.38 generation" },
   # Lightning CSS keeps cssparser 0.37 and lol_html keeps 0.36 beside the HTML parsers' 0.38.
   { crate = "selectors@0.37", reason = "lol_html" },
   { crate = "cssparser@0.36", reason = "lol_html" },
   { crate = "cssparser@0.37", reason = "lightningcss and parcel_selectors" },
   { crate = "cssparser-macros@0.6", reason = "lol_html" },
   # Older CSS and HTML parsers, PDF fonts and Pagefind emoji data retain phf 0.13.
-  { crate = "phf@0.13", reason = "cssparser 0.36/0.37, htmd, hayro-font, emojis" },
-  { crate = "phf_codegen@0.13", reason = "cssparser 0.36/0.37 and markup5ever 0.38 generation" },
+  { crate = "phf@0.13", reason = "cssparser 0.36/0.37, hayro-font, emojis" },
+  { crate = "phf_codegen@0.13", reason = "selectors 0.37 via lol_html" },
   { crate = "phf_generator@0.13", reason = "phf_codegen 0.13" },
   { crate = "phf_shared@0.13", reason = "phf 0.13" },
   # hashbrown: indexmap 1 (serde_yaml via pagefind) and pagefind's own 0.16 beside 0.17.
@@ -87,9 +83,6 @@ skip = [
   { crate = "shlex@1", reason = "bindgen" },
   { crate = "itertools@0.13", reason = "bindgen" },
   { crate = "nom@7", reason = "cexpr (bindgen), pori, wax" },
-  # resvg keeps the older Fontations generation beside hayro's PDF rendering.
-  { crate = "read-fonts@0.41", reason = "harfrust and skrifa via usvg (resvg)" },
-  { crate = "skrifa@0.44", reason = "usvg (resvg)" },
   { crate = "fearless_simd@0.7", reason = "vello_common via hayro" },
   # Smaller pairs.
   { crate = "bit-set@0.8", reason = "fancy-regex via syntect" },

@@ -25,14 +25,14 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   first. Default pages may load publisher media; `--hermetic` requires local automatic resources
   and fails before publication when assets are missing.
 - The CLI and archive preparation are Rust. Svelte 5 components in `web/` own all reader markup,
-  shared by server rendering and browser hydration. Cargo calls the native Rolldown build library and
-  generates TypeScript from `crates/aggr-ui-model` into ignored `web/.generated/types/`. The binary
+  shared by server rendering and browser hydration. A Cargo source build runs the vendored Svelte
+  compiler inside QuickJS, bundles its output with native Rolldown, and generates TypeScript from `crates/aggr-ui-model` into ignored `web/.generated/types/`. The binary
   embeds the renderer and assets from `OUT_DIR`; never commit generated types or bundles. Published
   binaries render with bounded, isolated QuickJS runtimes and need no external JavaScript
   process. Rendering has no network or filesystem bindings. Every page works without JavaScript;
   sanitized article HTML appears once in the document, outside the embedded typed page model.
-  Source development uses the official Svelte compiler inside QuickJS and native Rolldown; never
-  introduce a Node/npm/Bun/Deno process or frontend package installation. `cargo run -- dev` and
+  Maintain the vendored compiler with `mise run vendor` as described in [native toolchain](docs/native-toolchain.md).
+  Keep Node/npm/Bun/Deno processes and frontend package installation out of builds and commands. `cargo run -- dev` and
   `mise run dev` supervise Rust workers and swap immutable UI bundles without restarting Rust for
   template edits. `dev --no-watch` previews embedded assets. The CLI requires a subcommand. There is one reader design,
   changed in this repository; `[site.params]` is rejected. Async Rust
@@ -69,8 +69,8 @@ composite GitHub Action (`action.yml`, install only) and a reusable workflow
   `CONTRIBUTING.md` for incoming contribution rights.
 - `VERSION` and `Cargo.toml` `version` must agree; releases are tags `vX.Y.Z`. A stable reusable
   workflow `@vX` selects the greatest published binary in its own major channel at run time;
-  binary releases do not move workflow tags. Keep `@v1` on v1 binaries and publish a new `@v2`
-  workflow contract for v2. Distribute binaries through GitHub Releases and mise using its
+  binary releases do not move workflow tags. For a new major, publish its binary release before
+  creating its new workflow tag at the same commit. Existing instances keep their major channel. Distribute binaries through GitHub Releases and mise using its
   `github:aymericbeaumet/aggr` backend, Homebrew's `aymericbeaumet/tap`, and crates.io's `aggr`
   package. Keep the release jobs and [distribution reference](docs/distribution.md) aligned.
   See [migration](docs/sources.md#upgrading-from-112-to-20).

@@ -2,6 +2,7 @@
 //! (image sources, code listings, figures, footnotes, sidenotes, YouTube descriptions) and the
 //! conversion itself.
 
+use htmd::element_handler::Context;
 use scraper::{Html, Selector};
 use url::Url;
 
@@ -1206,10 +1207,22 @@ fn description_chapter(text: &str, video_id: &str) -> String {
 
 fn markdown_link(
     handlers: &dyn htmd::element_handler::Handlers,
-    element: htmd::Element<'_>,
+    element: &htmd::Element<'_>,
 ) -> Option<htmd::element_handler::HandlerResult> {
     let mut result = handlers.fallback(element)?;
     if result.content.starts_with('[') {
+        // htmd encodes newlines in labels as entities, which turns a hard break into
+        // literal text. Recover the inline label from its children, keeping the escaped
+        // destination and title exactly as the converter produced them.
+        if result.content.starts_with("[ ") || result.content.contains("\\&#10;") {
+            let label = handlers.walk_children_content(element.node, Context::INLINE);
+            let encoded = label.replace('\r', "&#13;").replace('\n', "&#10;");
+            if result.content[1..].starts_with(&encoded) {
+                result
+                    .content
+                    .replace_range(1..1 + encoded.len(), label.trim_start_matches(' '));
+            }
+        }
         // An exclamation in an adjacent text node must not turn this link into an image.
         result.content.insert(0, MARKDOWN_LINK_START);
     }
@@ -1218,10 +1231,10 @@ fn markdown_link(
 
 fn markdown_heading(
     handlers: &dyn htmd::element_handler::Handlers,
-    element: htmd::Element<'_>,
+    element: &htmd::Element<'_>,
 ) -> Option<htmd::element_handler::HandlerResult> {
     let level = element.tag.strip_prefix('h')?.parse::<usize>().ok()?;
-    let content = handlers.walk_children(element.node).content;
+    let content = handlers.walk_children_content(element.node, Context::INLINE);
     let content = content.trim();
     // A heading with nothing to say would leave its `#` markers stranded in the prose.
     if content.is_empty() {
@@ -2724,7 +2737,10 @@ mod tests {
             "<p>Real text with <a href=\"https://example.com/\"><img src=\"https://example.com/i.png\" alt=\"\"></a> an image link and <a href=\"#top\">a real anchor</a>.</p>",
         );
         let markdown = to_markdown(html, None);
-        assert!(markdown.starts_with("### 1.Install"), "{markdown}");
+        assert!(
+            render_markdown(&markdown).contains(">1.Install</h3>"),
+            "{markdown}"
+        );
         assert!(
             !markdown.contains("bend") && !markdown.contains("×") && !markdown.contains("Blog"),
             "{markdown}"
@@ -3097,7 +3113,8 @@ List:       openbsd-tech
         );
         assert!(markdown.contains("### Chapters"), "{markdown}");
         assert!(
-            markdown.contains("[01:13:41](https://www.youtube.com/watch?v=abc123&t=4421)"),
+            render_markdown(&markdown)
+                .contains(r#"href="https://www.youtube.com/watch?v=abc123&amp;t=4421""#),
             "{markdown}"
         );
         assert!(!markdown.contains("\\-"), "{markdown}");
@@ -3641,6 +3658,12 @@ List:       openbsd-tech
             to_markdown(empty, Some(&base())),
             "[Only prose here.](https://example.com/card)\n"
         );
+        // A literal entity spelling beside a hard break remains literal in the link label.
+        let literal = r#"<p><a href="/one?x=1&amp;y=2">first<br><code>&amp;#10;</code></a></p>"#;
+        let rendered = render_markdown(&to_markdown(literal, Some(&base())));
+        assert!(rendered.contains("<code>&amp;#10;</code>"), "{rendered}");
+        assert!(rendered.contains("first<br"), "{rendered}");
+        assert!(rendered.contains("/one?x=1&amp;y=2"), "{rendered}");
         // Ordinary inline links are untouched, breaks and all.
         let inline =
             r##"<p><a href="/one">first<br>second</a> and <a href="/two"><em>two</em></a>.</p>"##;
@@ -3694,8 +3717,8 @@ List:       openbsd-tech
         assert_eq!(
             to_markdown(html, Some(&base())),
             concat!(
-                "An arbitrator found Uber liable.[^1] He ordered it to pay $40 million.[^1][^2]\n\n",
-                "[^1]: Najib, Shafiq (2026-09-17). [\"Uber ordered to pay $40M\"](https://abcnews.com/GMA/News/uber-ordered-pay-40m/story?id=136480407). *ABC News*. Retrieved 2026-09-18.\n\n",
+                "An arbitrator found Uber liable.[^1] He ordered it to pay \\$40 million.[^1][^2]\n\n",
+                "[^1]: Najib, Shafiq (2026-09-17). [\"Uber ordered to pay \\$40M\"](https://abcnews.com/GMA/News/uber-ordered-pay-40m/story?id=136480407). *ABC News*. Retrieved 2026-09-18.\n\n",
                 "[^2]: [\"California Civil Code section 2168\"](https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?lawCode=CIV). California Legislative Information.\n",
             )
         );

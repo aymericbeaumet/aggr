@@ -4,7 +4,7 @@ name: aggr
 #
 #   jobs:
 #     aggr:
-#       uses: aymericbeaumet/aggr/.github/workflows/aggr.yml@v2
+#       uses: aymericbeaumet/aggr/.github/workflows/aggr.yml@v3
 #
 # Fetches every source, appends new items to the data branch, renders the site, and deploys it to
 # GitHub Pages. The caller must grant `contents: write, pages: write, id-token: write`.
@@ -47,11 +47,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # `@v2` is the stable workflow contract. Its major-channel input resolves the greatest
-      # published v2.x.y binary at run time, independently of workflow changes.
-      - uses: aymericbeaumet/aggr@v2
+      # `@v3` is the stable workflow contract. Its major-channel input resolves the greatest
+      # published v3.x.y binary at run time, independently of workflow changes.
+      - uses: aymericbeaumet/aggr@v3
         with:
-          version: 2
+          version: 3
           token: ${{ github.token }}
 
       # Derived state about bytes the site already publishes is safe to carry between runners and

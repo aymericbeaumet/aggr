@@ -8,39 +8,51 @@ Give aggr a website URL. It finds the feed, saves each new item as Markdown in y
 repository, and publishes a static site you can search and read on your phone or computer.
 Keep the captured text after the original page disappears, inspect its history with Git, or
 take the Markdown into another tool. The reader needs no database or always-running application
-server; a scheduled job updates the archive and any static host can serve it.
+server. A scheduled job updates the archive and any static host can serve it.
 
 <p>
   <img alt="The aggr reader on a desktop browser: a numbered feed of articles with their source, category, age and reading time" src="docs/images/reader-desktop.png" width="61%">
   <img alt="The same reader on a phone: the same articles, with feed, browse and preferences tabs along the bottom" src="docs/images/reader-mobile.png" width="20%">
 </p>
 
+See how one article travels from publisher to archive. Mitchell Hashimoto’s *Ghostty Is Now Non-Profit*
+is available as [the original post](https://mitchellh.com/writing/ghostty-non-profit),
+[a page in the live reader](https://aggr.aymericbeaumet.com/items/mitchellh-com/2025-12-03-ghostty-is-now-non-profit/),
+and [the Markdown file in Git](https://github.com/aymericbeaumet/aggr-instance/blob/fe3238bc3893f17109bab9ff32ac711bc3d9c1a0/items/mitchellh-com/2025/12/2025-12-03-ghostty-is-now-non-profit.md?plain=1).
+
 ## Try locally
 
-With [mise](https://mise.jdx.dev/) and Git installed, create a small reader:
+With [mise](https://mise.jdx.dev/) and Git installed, try the reader without creating a repository.
 
 ```sh
-mise use -g github:aymericbeaumet/aggr@2.0.0
-mkdir reads && cd reads && git init
-aggr init
-aggr dev
+mise install github:aymericbeaumet/aggr@3.0.0
+mise exec github:aymericbeaumet/aggr@3.0.0 -- aggr dev --demo
 ```
 
-Open **http://127.0.0.1:7319**. `aggr init` writes a starter configuration; edit `aggr.toml` to
-choose your sources. `aggr dev` previews the reader without committing or pushing. Stop with
-Ctrl-C, then run `aggr build` to save articles on a local `aggr` branch and write the site to
-`_site/`. A build also pushes the archive when an `origin` remote is configured.
+Open **http://127.0.0.1:7319**. The demo follows the two sources in the
+[starter](examples/starter.toml) and keeps its files in the OS cache. Stop it with Ctrl-C.
 
-The mise command installs a prebuilt binary. [Installation](docs/hosting.md#installing-the-binary)
-also covers manual downloads, source builds, and platform requirements. You can
-[browse the hosted demo](https://aggr.aymericbeaumet.com) without installing anything.
+To keep your own archive, create a project.
+
+```sh
+mkdir reads && cd reads && git init
+mise use --path . github:aymericbeaumet/aggr@3.0.0
+mise exec -- aggr init
+# Edit aggr.toml to choose your sources.
+mise exec -- aggr build
+```
+
+The build saves articles on a local `aggr` branch and writes the reader to `_site/`. With an
+`origin` remote configured, it also pushes the archive. [Installation](docs/hosting.md#installing-the-binary)
+covers binary downloads, source builds, and platform requirements.
 
 ## Create your reader
 
 1. [Fork the working instance](https://github.com/aymericbeaumet/aggr-instance/fork), keeping
    **Copy the main branch only** selected to start without the demo's archive.
 2. Replace `aggr.toml` with the [starter](examples/starter.toml) and edit the title and sources.
-   A website URL is enough; aggr discovers the feed.
+   A website URL is enough for aggr to discover a feed. Set the workflow reference in
+   `.github/workflows/aggr.yml` to `aymericbeaumet/aggr/.github/workflows/aggr.yml@v3`.
 3. In **Settings → Pages → Build and deployment**, set **Source** to **GitHub Actions**.
 4. Open **Actions**, enable workflows, and run **aggr** on `main`. The site is
    `https://<you>.github.io/<repo>/` until you set a domain.
@@ -52,12 +64,11 @@ GitHub setup publishes the reader and its archive publicly. See [sources](docs/s
 [hosting](docs/hosting.md), and [build budgets](docs/build-budget.md).
 
 For the contributor preview with fast template reload and automatic Rust restarts, follow the
-mise setup in [contributing](CONTRIBUTING.md), then run `mise run dev` from this repository;
-see [client development](docs/client.md). The source build also supports `aggr dev --demo`,
-which uses an isolated OS cache. That flag is not available in the published v2.0.0 binary.
+mise setup in [contributing](CONTRIBUTING.md), then run `mise run dev` from this repository and
+see [client development](docs/client.md).
 
 Rust applications can use [`aggr-lib`](crates/aggr-lib/README.md), the library behind the CLI,
-as a path dependency from this checkout until its first crates.io publication.
+from a checkout or a published package. See [library setup](docs/library.md).
 
 ## How is it different?
 

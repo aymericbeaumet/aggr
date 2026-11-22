@@ -727,7 +727,8 @@ pub fn clean_archived_thread(markdown: &str, link: &str) -> String {
         markdown.get(start..end).map(|_| start..end)
     };
     let mut removed = Vec::new();
-    for post in blocks.split(|node| matches!(node.data.borrow().value, NodeValue::ThematicBreak)) {
+    for post in blocks.split(|node| matches!(node.data.borrow().value, NodeValue::ThematicBreak(_)))
+    {
         if let Some(paragraph) = post
             .iter()
             .rev()
@@ -760,7 +761,7 @@ pub fn clean_archived_thread(markdown: &str, link: &str) -> String {
         }
     }
     for node in &blocks {
-        let generated = matches!(node.data.borrow().value, NodeValue::ThematicBreak)
+        let generated = matches!(node.data.borrow().value, NodeValue::ThematicBreak(_))
             || thread_footer_paragraph(node);
         if generated && let Some(range) = source_range(node) {
             // Consume the blank lines after a removed block so spacing does not accumulate.
@@ -1393,10 +1394,11 @@ mod tests {
             "{markdown}"
         );
         assert!(markdown.contains("Content warning:"), "{markdown}");
-        assert!(markdown.contains("Spoilers & surprises"), "{markdown}");
+        let rendered = content::render_markdown(&markdown);
+        assert!(rendered.contains("Spoilers &amp; surprises"), "{rendered}");
         assert!(
-            markdown.contains("A useful & accurate description"),
-            "{markdown}"
+            rendered.contains("A useful &amp; accurate description"),
+            "{rendered}"
         );
         assert!(!markdown.contains("bad()"), "{markdown}");
         assert!(!markdown.contains("Other person's branch"), "{markdown}");

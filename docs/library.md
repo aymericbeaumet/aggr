@@ -5,8 +5,7 @@ workflows. Its Rust import name is `aggr_lib`. The root `aggr` package provides 
 logging, the Tokio runtime, and dispatch through the library. `aggr-ui-model` holds the shared
 Rust/TypeScript page contract. See the [library example](../crates/aggr-lib/README.md).
 
-The crates.io packages have not been published yet. To use the library now, check out this
-repository, complete the [mise source setup](native-toolchain.md#reproduce-the-development-environment),
+To use the library from source, check out this repository, complete the [mise source setup](native-toolchain.md#reproduce-the-development-environment),
 and add `aggr-lib` as a path dependency pointing to `crates/aggr-lib` in that checkout.
 
 Workspace builds compile the reader from `web/` with the native `aggr-ui-build` library. Published library
@@ -34,7 +33,7 @@ Actions secret named **`CARGO_REGISTRY_TOKEN`**, containing a crates.io token al
 
 For the initial publication, open **Actions → publish crates → Run workflow** and select the
 branch containing the library packages and this workflow. It publishes the versions checked into
-that ref: `aggr-ui-model` **0.1.0**, `aggr-ui-build` **0.1.0**, `aggr-lib` **2.0.0**, then `aggr` **2.0.0**. The workflow must first
+that ref in dependency order, starting with the model and UI compiler and ending with the library and CLI. The workflow must first
 exist on the repository's default branch for [manual runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
 to be available. Existing binary
 release tags do not need to be recreated. Future `vX.Y.Z` tags call the same publishing workflow

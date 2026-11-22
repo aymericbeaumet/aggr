@@ -1,7 +1,7 @@
 # Releases and installation
 
-The published `aggr` v2.0.0 CLI installs through mise or GitHub release downloads. This checkout
-adds the Homebrew and crates.io publication pipelines; neither channel has been published yet.
+Install a tagged CLI through mise or GitHub release downloads. For v3 and later, the release
+also triggers the Homebrew and crates.io publication pipelines.
 `aggr-lib` exposes the engine to Rust applications; `aggr-ui-model` is the shared reader contract
 and `aggr-ui-build` compiles its UI. The [crates workflow](../.github/workflows/publish.yml)
 publishes all four crates; see [library packaging](library.md).
@@ -20,8 +20,9 @@ publication jobs:
   archives for both architectures, verifies their release checksums, and depends on Git.
 
 mise uses the same GitHub release archives through `github:aymericbeaumet/aggr`; it needs no separate
-registry publication or token. Existing stable reusable workflow tags keep their major-channel
-contract; a binary release does not move those tags.
+registry publication or token. For the first release in a major channel, wait until all six archives
+and their checksums are public, then create the new workflow tag (for example, `v3`) at the same
+commit as the version tag. Later binary releases leave that workflow tag in place.
 
 ## Repository Actions secrets
 

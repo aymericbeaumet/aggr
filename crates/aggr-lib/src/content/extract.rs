@@ -1562,11 +1562,11 @@ mod tests {
             "{markdown}"
         );
         assert!(
-            compact.contains("| GPT-5.6 Sol | $3.41 | 2 | 0.727 | 3.4123 |"),
+            compact.contains("| GPT-5.6 Sol | \\$3.41 | 2 | 0.727 | 3.4123 |"),
             "{markdown}"
         );
         assert!(
-            compact.contains("| Claude Fable 5 | $5.00 | 1 | 0.699 | 5 |"),
+            compact.contains("| Claude Fable 5 | \\$5.00 | 1 | 0.699 | 5 |"),
             "{markdown}"
         );
         assert!(

@@ -22,7 +22,7 @@ permissions: { contents: write, pages: write, id-token: write }
 jobs:
   aggr:
     if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
-    uses: aymericbeaumet/aggr/.github/workflows/aggr.yml@v2
+    uses: aymericbeaumet/aggr/.github/workflows/aggr.yml@v3
 ";
 
 pub fn run(config_path: &Path, args: &InitArgs) -> Result<()> {
@@ -179,7 +179,10 @@ mod tests {
         assert!(workflow["on"].get("workflow_dispatch").is_some());
         assert_eq!(
             workflow["jobs"]["aggr"]["uses"],
-            "aymericbeaumet/aggr/.github/workflows/aggr.yml@v2"
+            format!(
+                "aymericbeaumet/aggr/.github/workflows/aggr.yml@v{}",
+                env!("CARGO_PKG_VERSION_MAJOR")
+            )
         );
         assert!(
             WORKFLOW.lines().count() <= 10,
