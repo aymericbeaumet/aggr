@@ -94,19 +94,8 @@ pub async fn publish(args: Vec<String>) -> Result<()> {
         args.iter().all(|arg| arg == "--allow-dirty"),
         "Publishing accepts only --allow-dirty"
     );
-    let output = without_credentials(
-        Command::new("cargo")
-            .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
-            .current_dir(crate::root()),
-    )
-    .output()
-    .context("Reading Cargo metadata")?;
-    ensure!(
-        output.status.success(),
-        "Reading Cargo metadata failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let metadata = serde_json::from_slice(&output.stdout).context("Reading Cargo metadata JSON")?;
+    let checkout = crate::root();
+    let metadata = crate::package::workspace_metadata(&checkout)?;
     let version = std::fs::read_to_string(crate::root().join("VERSION"))?;
     let reference = (std::env::var("GITHUB_REF_TYPE").as_deref() == Ok("tag"))
         .then(|| std::env::var("GITHUB_REF_NAME").context("Reading release tag"))
@@ -147,11 +136,10 @@ pub async fn publish(args: Vec<String>) -> Result<()> {
             || std::env::var_os("CARGO_REGISTRY_TOKEN").is_some(),
         "Add the CARGO_REGISTRY_TOKEN repository Actions secret to publish new crate versions"
     );
-    crate::package::run(args.clone()).await?;
-    let mut command = Command::new("cargo");
-    command
-        .args(["publish", "--locked", "--registry", "crates-io"])
-        .current_dir(crate::root());
+    let source = crate::package::PackageSource::new(&checkout, &args, &metadata)?;
+    crate::package::verify(&source, &args).await?;
+    let mut command = source.cargo();
+    command.args(["publish", "--locked", "--registry", "crates-io"]);
     for package in pending {
         command.args(["-p", &format!("{}@{}", package.name, package.version)]);
     }

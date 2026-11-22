@@ -23,9 +23,10 @@ Installed binaries run `aggr dev` with the native preview server. In a source ch
 Keep `VERSION`, the root CLI version, and `crates/aggr-lib/Cargo.toml` aligned. The model crate has
 its own version, as does the `aggr-ui-build` compiler library; dependencies must name published versions.
 
-Run `mise run package` from a clean checkout to prepare the reader and resources and verify all four
-crate archives, including compiling the extracted packages. The generated publication inputs live
-under the ignored `crates/aggr-lib/.generated/publish/`; they are not source assets.
+From a clean checkout, `mise run package` exports the committed sources to a temporary directory,
+prepares the reader and resources there, and compiles the four extracted crate archives. The
+finished `.crate` files are in Cargo’s `target/package/` directory. An explicit `--allow-dirty`
+run uses the working checkout and prepares its inputs under `crates/aggr-lib/.generated/publish/`.
 
 Publishing runs in [the publish crates workflow](../.github/workflows/publish.yml). Add a repository
 Actions secret named **`CARGO_REGISTRY_TOKEN`**, containing a crates.io token allowed to publish
